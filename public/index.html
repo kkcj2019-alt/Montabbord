@@ -2045,20 +2045,21 @@ function showImportAuthModal(backup, fname) {
   var overlay = document.createElement('div');
   overlay.id = 'importAuthModal';
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;';
-  var html = '<div style="background:#fff;border-radius:12px;padding:32px 36px;text-align:center;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3)">';
-  html += '<div style="font-size:48px;margin-bottom:12px">&#x1F512;</div>';
-  html += '<h2 style="margin:0 0 6px 0;font-size:18px">Authentification requise</h2>';
-  html += '<p style="color:var(--gray-500);margin:0 0 16px 0;font-size:13px">Fichier : <strong>' + escH(fname) + '</strong><br>Date : ' + backup._exportDate.substring(0, 10) + '</p>';
-  html += '<input type="password" id="importAuthCode" placeholder="Code confidentiel" style="width:100%;padding:10px 14px;border:1px solid var(--gray-300);border-radius:8px;font-size:15px;text-align:center;margin-bottom:8px;box-sizing:border-box" onkeydown="if(event.key===\'Enter\')confirmImportAuth()">';
-  html += '<p id="importAuthError" style="color:var(--danger);font-size:12px;margin:0 0 12px 0;display:none">Code incorrect</p>';
-  html += '<div style="display:flex;gap:10px;justify-content:center">';
-  html += '<button class="btn btn-outline" onclick="closeImportAuthModal()">Annuler</button>';
-  html += '<button class="btn btn-primary" onclick="confirmImportAuth()">Confirmer</button>';
+  var html = '<div style="background:#fff;border-radius:12px;padding:32px 36px;text-align:center;max-width:440px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3)">';
+  html += '<div style="font-size:48px;margin-bottom:12px">&#x1F4C1;</div>';
+  html += '<h2 style="margin:0 0 6px 0;font-size:18px">Importation de donn\u00e9es</h2>';
+  html += '<p style="color:var(--gray-500);margin:0 0 16px 0;font-size:13px">Fichier : <strong>' + escH(fname) + '</strong><br>Date d\'export : ' + (backup._exportDate ? backup._exportDate.substring(0, 10) : 'Inconnue') + '</p>';
+  html += '<p style="color:var(--gray-500);margin:0 0 12px 0;font-size:12px">Choisissez comment importer les donn\u00e9es :</p>';
+  html += '<div style="display:flex;gap:10px;justify-content:center;margin-bottom:12px">';
+  html += '<button class="btn btn-danger" onclick="confirmImportReplace()" style="padding:10px 20px">Remplacer tout</button>';
+  html += '<button class="btn btn-success" onclick="confirmImportMerge()" style="padding:10px 20px">Fusionner (ajouter)</button>';
+  html += '</div>';
+  html += '<p style="color:var(--gray-400);font-size:11px;margin:0 0 8px 0"><b>Remplacer</b> : \u00e9crase toutes les donn\u00e9es actuelles.<br><b>Fusionner</b> : ajoute les nouveaux enregistrements, ignore les doublons.</p>';
+  html += '<button class="btn btn-outline" onclick="closeImportAuthModal()" style="margin-top:8px">Annuler</button>';
   html += '</div></div>';
   overlay.innerHTML = html;
-  document.body.appendChild(overlay);
-  setTimeout(function() { var el = document.getElementById('importAuthCode'); if (el) el.focus(); }, 100);
   overlay._backup = backup;
+  document.body.appendChild(overlay);
 }
 
 function closeImportAuthModal() {
@@ -2066,29 +2067,106 @@ function closeImportAuthModal() {
   if (m) m.parentNode.removeChild(m);
 }
 
-function confirmImportAuth() {
-  var code = document.getElementById('importAuthCode').value;
-  var ENTERPRISE_PASS = 'MDB' + (DB.get('mdb_entreprise') || {}).telephone || 'ADMIN2024';
-  if (code !== ENTERPRISE_PASS) {
-    var errEl = document.getElementById('importAuthError');
-    if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Code incorrect. Contactez l\'administrateur.'; }
-    return;
-  }
+function doImportReplace() { confirmImportReplace(); }
+function doImportMerge() { confirmImportMerge(); }
+function confirmImportReplace() {
   var overlay = document.getElementById('importAuthModal');
   var backup = overlay ? overlay._backup : null;
-  closeImportAuthModal();
   if (!backup) return;
-  if (!window.confirm('Importer cette sauvegarde ?\nDate : ' + backup._exportDate + '\n\nToutes les donn\u00e9es actuelles seront remplac\u00e9es.')) return;
-  _receivingSnapshot = true;
+  closeImportAuthModal();
+  if (!window.confirm('\u00c9CRASER toutes les donn\u00e9es ?\n\nDate : ' + backup._exportDate + '\n\nATTENTION : toutes les donn\u00e9es actuelles seront remplac\u00e9es.')) return;
+  var countOps = 0;
   for (var i = 0; i < DATA_KEYS.length; i++) {
     if (backup[DATA_KEYS[i]] !== undefined && backup[DATA_KEYS[i]] !== null) {
-      DB.set(DATA_KEYS[i], backup[DATA_KEYS[i]]);
+      localStorage.setItem(DATA_KEYS[i], JSON.stringify(backup[DATA_KEYS[i]]));
+      markDirty(DATA_KEYS[i]);
+      if (DATA_KEYS[i] === 'mdb_operationsCaisse') countOps = backup[DATA_KEYS[i]].length;
     }
   }
-  _receivingSnapshot = false;
+  toast(countOps + ' op\u00e9rations restaur\u00e9es', 'success');
   pushToCloud();
   if (currentPage) navigateTo(currentPage);
-  toast('Sauvegarde import\u00e9e avec succ\u00e8s !', 'success');
+}
+function confirmImportMerge() {
+  var overlay = document.getElementById('importAuthModal');
+  var backup = overlay ? overlay._backup : null;
+  if (!backup) return;
+  closeImportAuthModal();
+    /* MERGE mode */
+    var summary = [];
+    for (var mk = 0; mk < DATA_KEYS.length; mk++) {
+      var key = DATA_KEYS[mk];
+      var incoming = backup[key];
+      if (incoming === undefined || incoming === null) continue;
+      var existing = DB.get(key);
+      var stats = {key: key, added: 0, updated: 0, skipped: 0};
+      if (Array.isArray(existing) && Array.isArray(incoming)) {
+        /* For operations: smart dedup by date+libelle+montant+sens+beneficiaire */
+        if (key === 'mdb_operationsCaisse') {
+          /* Build fingerprint map of existing ops */
+          var fpMap = {};
+          for (var ei = 0; ei < existing.length; ei++) {
+            var eo = existing[ei];
+            var fp = (eo.date || '') + '|' + (eo.libelle || '').toLowerCase() + '|' + (eo.montant || 0) + '|' + (eo.sens || '') + '|' + ((eo.beneficiaireNom || eo.beneficiaire || '') + '').toLowerCase();
+            fpMap[fp] = true;
+          }
+          for (var ni = 0; ni < incoming.length; ni++) {
+            var io = incoming[ni];
+            var ifp = (io.date || '') + '|' + (io.libelle || '').toLowerCase() + '|' + (io.montant || 0) + '|' + (io.sens || '') + '|' + ((io.beneficiaireNom || io.beneficiaire || '') + '').toLowerCase();
+            if (fpMap[ifp]) { stats.skipped++; } else {
+              io.id = DB.genId();
+              if (io.numeroPiece) io.numeroPiece = ''; /* Will be regenerated */
+              existing.push(io); stats.added++; fpMap[ifp] = true;
+            }
+          }
+        } else {
+          /* For other arrays: merge by ID */
+          var byId = {};
+          for (var ei2 = 0; ei2 < existing.length; ei2++) { if (existing[ei2].id) byId[existing[ei2].id] = existing[ei2]; }
+          for (var ni2 = 0; ni2 < incoming.length; ni2++) {
+            var item = incoming[ni2];
+            if (item.id) {
+              if (byId[item.id]) { byId[item.id] = item; stats.updated++; }
+              else { byId[item.id] = item; stats.added++; }
+            } else {
+              item.id = DB.genId(); existing.push(item); stats.added++;
+            }
+          }
+          var merged = [];
+          for (var mid in byId) { if (byId.hasOwnProperty(mid)) merged.push(byId[mid]); }
+          DB.set(key, merged); continue;
+        }
+        DB.set(key, existing);
+      } else {
+        /* Non-array data: keep existing, don't overwrite */
+        stats.skipped = 0;
+      }
+      if (stats.added > 0 || stats.updated > 0 || stats.skipped > 0) summary.push(stats);
+    }
+    pushToCloud();
+    var totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
+    for (var si = 0; si < summary.length; si++) {
+      totalAdded += summary[si].added; totalUpdated += summary[si].updated; totalSkipped += summary[si].skipped;
+    }
+    var detailHtml = '';
+    var keyLabels = {
+      'mdb_operationsCaisse':'Pi\u00e8ces de caisse', 'mdb_employes':'Employ\u00e9s', 'mdb_clients':'Clients',
+      'mdb_fournisseurs':'Fournisseurs', 'mdb_caisses':'Caisses', 'mdb_codesCaisse':'Codes caisse',
+      'mdb_acomptesPrets':'Acomptes/Pr\u00eats', 'mdb_factures':'Factures', 'mdb_reglements':'R\u00e8glements',
+      'mdb_prefinancement':'Pr\u00e9financements', 'mdb_stocks':'Stocks', 'mdb_users':'Utilisateurs'
+    };
+    for (var si2 = 0; si2 < summary.length; si2++) {
+      var s = summary[si2];
+      detailHtml += '<tr><td style="padding:4px 8px;font-size:12px">' + (keyLabels[s.key] || s.key) + '</td>';
+      detailHtml += '<td style="padding:4px 8px;text-align:center;font-size:12px;color:var(--success)">' + (s.added > 0 ? '+' + s.added : '') + '</td>';
+      detailHtml += '<td style="padding:4px 8px;text-align:center;font-size:12px;color:var(--primary)">' + (s.updated > 0 ? '\u21bb' + s.updated : '') + '</td>';
+      detailHtml += '<td style="padding:4px 8px;text-align:center;font-size:12px;color:var(--gray-400)">' + (s.skipped > 0 ? '\u2715' + s.skipped : '') + '</td></tr>';
+    }
+    toast('Fusion : ' + totalAdded + ' ajout\u00e9(s), ' + totalUpdated + ' mis \u00e0 jour, ' + totalSkipped + ' doublon(s) ignor\u00e9(s)', 'success');
+    openFormModal('Fusion termin\u00e9e',
+      '<p style="font-size:14px;margin-bottom:12px"><b style="color:var(--success)">' + totalAdded + ' ajout\u00e9(s)</b> | <b style="color:var(--primary)">' + totalUpdated + ' mis \u00e0 jour</b> | <b style="color:var(--gray-400)">' + totalSkipped + ' doublon(s) ignor\u00e9(s)</b></p>' +
+      '<div style="max-height:300px;overflow-y:auto"><table style="font-size:12px;width:100%"><thead><tr><th>Module</th><th style="text-align:center">Ajout\u00e9</th><th style="text-align:center">MAJ</th><th style="text-align:center">Ignor\u00e9</th></tr></thead><tbody>' + detailHtml + '</tbody></table></div>',
+      '<button class="btn btn-primary" onclick="closeModal();navigateTo(currentPage)">OK</button>');
 }
 
 function refreshData() {
@@ -9769,7 +9847,7 @@ function renderFournDettes(el) {
     for (var oi = 0; oi < ops.length; oi++) {
       var o = ops[oi];
       if (o.beneficiaireType !== 'fournisseur' || o.beneficiaireId !== fid) continue;
-      if (o.montantCharge && o.montantCharge > 0) lignes.push({type: 'Charge (caisse)', description: o.libelle || '-', date: o.date, montant: o.montantCharge, id: null});
+      if (o.montantCharge && o.montantCharge > 0) lignes.push({type: 'Achat (caisse)', description: o.libelle || '-', date: o.date, montant: o.montantCharge, id: null});
       lignes.push({type: 'Paiement (caisse)', description: o.libelle || '-', date: o.date, montant: o.montant || 0, id: null});
     }
     lignes.sort(function(a, b) { return (a.date || '').localeCompare(b.date || ''); });
@@ -9834,8 +9912,8 @@ function showExtraitFournisseur(fournisseurId) {
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left">Source</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left">Moyen</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left">N\u00b0 Trans</th>';
-  html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:right">F</th>';
-  html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:right">S</th>';
+  html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:right;color:var(--danger)">Achat</th>';
+  html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:right;color:var(--success)">Paiement</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:right;color:var(--purple)">S+F</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:right">Solde</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:center">Action</th>';
@@ -9906,7 +9984,7 @@ function printExtraitFournisseur(fournisseurId) {
   html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:left">Libell\u00e9</th>';
   html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:left">Remettant</th>';
   html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:left">Observations</th>';
-  html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:right">Charge</th>';
+  html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:right">Achat</th>';
   html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:right">Paiement</th>';
   html += '<th style="padding:8px;border:1px solid #d1d5db;text-align:right">Solde</th>';
   html += '</tr></thead><tbody>';
@@ -11027,6 +11105,8 @@ html += '</datalist></div>';
   html += '<div class="toolbar" style="margin-bottom:8px">';
   html += '<button class="btn btn-outline btn-sm" onclick="openImportCaisseModal()" style="margin-left:4px;color:var(--indigo);border-color:var(--indigo)">Importer</button>';
   html += '<button class="btn btn-outline btn-sm" onclick="showImportHistory()" style="margin-left:4px;color:var(--gray-500);border-color:var(--gray-400)">Hist. Import</button>';
+  html += '<button class="btn btn-outline btn-sm" onclick="findDuplicates()" style="margin-left:4px;color:var(--orange);border-color:var(--orange)" title="D\u00e9tecter les op\u00e9rations en double">\u2697 Doublons</button>';
+  html += '<button class="btn btn-outline btn-sm" onclick="openInterroComptes()" style="margin-left:4px;color:var(--green);border-color:var(--green)" title="Interroger les comptes par code">\u2211 Comptes</button>';
   html += '<button id="csToggleSpfBtn" class="btn btn-outline btn-sm" onclick="toggleSpfColumn()" style="margin-left:4px;color:var(--purple);border-color:var(--purple)">S+F</button>';
   html += '</div>';
    html += '<div class="table-wrap"><div class="table-responsive"><table style="font-size:12px"><thead><tr><th>Date</th><th style="width:90px">N\u00b0 Pi\u00e8ce</th><th style="width:50px">Code</th><th>Libell\u00e9</th><th style="text-align:right;color:var(--success);white-space:nowrap">Entr\u00e9e</th><th style="text-align:right;color:var(--danger);white-space:nowrap">Sortie</th><th style="text-align:right;color:#7c3aed;white-space:nowrap">Charge</th><th style="text-align:right;color:var(--warning);white-space:nowrap">Frais</th><th class="cs-col-spf" style="text-align:right;color:var(--purple);white-space:nowrap">S+F</th><th>B\u00e9n\u00e9ficiaire</th><th>Ex\u00e9cutant</th><th>Moyen</th><th>N\u00b0 Trans.</th><th>Remettant</th><th>Observations</th><th>Imp.</th><th style="text-align:right;font-weight:700;color:var(--primary);white-space:nowrap">Solde</th><th style="width:80px">Actions</th></tr></thead><tbody id="csOpsBody">';
@@ -14020,6 +14100,191 @@ function filterCaisseImprime() {
 }
 function filterCaisseBrouillon() {
   filterCaisseImprime();
+}
+function findDuplicates(caisseId) {
+  if (!caisseId) {
+    /* First call: show caisse selector */
+    var caisses = getCaisses();
+    var cOpts = '<option value="">Toutes les caisses</option>';
+    for (var ci = 0; ci < caisses.length; ci++) {
+      cOpts += '<option value="' + caisses[ci].id + '">' + escH(caisses[ci].nom) + '</option>';
+    }
+    var html = '<div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:12px">';
+    html += '<div style="flex:1"><label style="font-size:11px">Caisse</label><select id="dupCaisseSel" style="font-size:12px;padding:6px 10px;width:100%">' + cOpts + '</select></div>';
+    html += '<div><button class="btn btn-primary btn-sm" onclick="findDuplicates(document.getElementById(\'dupCaisseSel\').value)" style="padding:6px 16px">Rechercher</button></div>';
+    html += '</div>';
+    html += '<div id="dupResults"><p style="color:var(--gray-400);text-align:center;padding:20px">S\u00e9lectionnez une caisse et lancez la recherche</p></div>';
+    openFormModal('Doublons d\u00e9tect\u00e9s', html, '<button class="btn btn-ghost" onclick="closeModal()">Fermer</button>');
+    return;
+  }
+  var ops = getOperationsCaisse();
+  var fpMap = {};
+  var duplicates = [];
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i];
+    if (o.linkedOpId && o.libelle && o.libelle.indexOf('Frais') === 0) continue;
+    if (o.typeOp === 'transfert') continue; /* internal transfers are not duplicates */
+    if (o.caisseId !== caisseId) continue;
+    var fp = (o.date || '') + '|' + (o.libelle || '').toLowerCase().trim() + '|' + (Math.round((o.montant || 0) * 100) / 100) + '|' + (o.sens || '');
+    if (fpMap[fp]) {
+      duplicates.push({first: fpMap[fp], second: o, fp: fp});
+    } else {
+      fpMap[fp] = o;
+    }
+  }
+  var caisses = getCaisses();
+  function caisseName(id) { for (var ci2=0;ci2<caisses.length;ci2++) { if (caisses[ci2].id===id) return caisses[ci2].nom; } return id||'-'; }
+  var resultsHtml = '';
+  if (duplicates.length === 0) {
+    resultsHtml = '<p style="color:var(--gray-400);text-align:center;padding:20px">Aucun doublon d\u00e9tect\u00e9 pour cette caisse</p>';
+  } else {
+    resultsHtml = '<p style="font-size:13px;margin-bottom:8px"><b style="color:var(--danger)">' + duplicates.length + ' paire(s)</b> d\u00e9tect\u00e9e(s). Cliquez sur une carte pour voir l\'op\u00e9ration dans la caisse.</p>';
+    resultsHtml += '<div style="max-height:380px;overflow-y:auto">';
+    for (var di = 0; di < duplicates.length; di++) {
+      var d = duplicates[di];
+      var f = d.first, s = d.second;
+      resultsHtml += '<div style="border:1px solid var(--gray-300);border-radius:8px;margin-bottom:8px;overflow:hidden">';
+      resultsHtml += '<div style="background:#fff3cd;padding:6px 10px;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:space-between">';
+      resultsHtml += '<span>\u2697 #' + (di+1) + ' : ' + escH(f.libelle || '') + '</span>';
+      resultsHtml += '<div style="display:flex;gap:8px">';
+      resultsHtml += '<label style="cursor:pointer;font-weight:400;font-size:10px"><input type="checkbox" class="dup-check" data-id="' + f.id + '" style="margin-right:3px"> Suppr. Original</label>';
+      resultsHtml += '<label style="cursor:pointer;font-weight:400;font-size:10px"><input type="checkbox" class="dup-check" data-id="' + s.id + '" style="margin-right:3px"> Suppr. Suspect</label>';
+      resultsHtml += '</div>';
+      resultsHtml += '</div>';
+      resultsHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0">';
+      resultsHtml += '<div style="padding:8px 10px;font-size:10px;background:#f9fafb;border-right:1px solid var(--gray-200);cursor:pointer" onclick="closeModal();navigateToOpDate(\'' + f.date + '\',\'' + f.caisseId + '\')" title="Voir dans la caisse">';
+      resultsHtml += '<div style="font-weight:700;margin-bottom:2px;color:var(--green)">&#x25C9; Original</div>';
+      resultsHtml += '<div style="font-size:15px;font-weight:700;margin-bottom:3px;color:' + (f.sens==='entree'?'var(--success)':'var(--danger)') + '">' + fmtMoney(f.montant) + (f.frais>0?' <span style="font-size:10px;color:var(--warning)">+' + fmtMoney(f.frais) + ' frais</span>':'') + '</div>';
+      resultsHtml += '<div>Date: ' + escH(f.date||'') + ' | ' + (f.sens==='entree'?'<span style="color:var(--success)">Entr\u00e9e</span>':'<span style="color:var(--danger)">Sortie</span>') + '</div>';
+      resultsHtml += '<div>B\u00e9n\u00e9f: ' + escH(f.beneficiaireNom||'-') + '</div>';
+      resultsHtml += '<div>Pi\u00e8ce: ' + escH(f.numeroPiece||'-') + '</div>';
+      resultsHtml += '<div>Caisse: <b>' + escH(caisseName(f.caisseId)) + '</b></div>';
+      resultsHtml += '<div style="margin-top:2px">' + (f.brouillon?'<span class="badge badge-warning">Br</span>':'<span class="badge badge-success">OK</span>') + (f.imported?' <span class="badge badge-info">Imp</span>':'') + '</div>';
+      resultsHtml += '</div>';
+      resultsHtml += '<div style="padding:8px 10px;font-size:10px;background:#fff8f0;cursor:pointer" onclick="closeModal();navigateToOpDate(\'' + s.date + '\',\'' + s.caisseId + '\')" title="Voir dans la caisse">';
+      resultsHtml += '<div style="font-weight:700;margin-bottom:2px;color:var(--danger)">&#x25C9; Suspect</div>';
+      resultsHtml += '<div style="font-size:15px;font-weight:700;margin-bottom:3px;color:' + (s.sens==='entree'?'var(--success)':'var(--danger)') + '">' + fmtMoney(s.montant) + (s.frais>0?' <span style="font-size:10px;color:var(--warning)">+' + fmtMoney(s.frais) + ' frais</span>':'') + '</div>';
+      resultsHtml += '<div>Date: ' + escH(s.date||'') + ' | ' + (s.sens==='entree'?'<span style="color:var(--success)">Entr\u00e9e</span>':'<span style="color:var(--danger)">Sortie</span>') + '</div>';
+      resultsHtml += '<div>B\u00e9n\u00e9f: ' + escH(s.beneficiaireNom||'-') + '</div>';
+      resultsHtml += '<div>Pi\u00e8ce: ' + escH(s.numeroPiece||'-') + '</div>';
+      resultsHtml += '<div>Caisse: <b>' + escH(caisseName(s.caisseId)) + '</b></div>';
+      resultsHtml += '<div style="margin-top:2px">' + (s.brouillon?'<span class="badge badge-warning">Br</span>':'<span class="badge badge-success">OK</span>') + (s.imported?' <span class="badge badge-info">Imp</span>':'') + '</div>';
+      resultsHtml += '</div>';
+      resultsHtml += '</div></div>';
+    }
+    resultsHtml += '</div>';
+    resultsHtml += '<div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">';
+    resultsHtml += '<button class="btn btn-outline btn-sm" onclick="document.querySelectorAll(\'.dup-check\').forEach(function(c){c.checked=true})">Tout s\u00e9lectionner</button>';
+    resultsHtml += '<button class="btn btn-outline btn-sm" onclick="document.querySelectorAll(\'.dup-check\').forEach(function(c){c.checked=false})">Tout d\u00e9s\u00e9lectionner</button>';
+    resultsHtml += '<button class="btn btn-danger btn-sm" onclick="deleteSelectedDuplicates()">Supprimer la s\u00e9lection</button>';
+    resultsHtml += '</div>';
+  }
+  document.getElementById('dupResults').innerHTML = resultsHtml;
+}
+function navigateToOpDate(dateStr, caisseId) {
+  if (dateStr) {
+    window._csSelYear = dateStr.substring(0,4);
+    window._csSelMonth = dateStr.substring(5,7);
+  }
+  if (currentUser && caisseId) {
+    /* Try to set current user caisse for the view */
+    currentUser.caisseId = caisseId; /* temporarily */
+    _tresorerieTab = 'caisse';
+  }
+  navigateTo('tresorerie');
+  /* Reset search filter and re-render */
+  setTimeout(function() {
+    var searchEl = document.getElementById('csSearchTop');
+    if (searchEl) { searchEl.value = ''; filterCaisseOps(); }
+    /* Also refresh month/year selects if they exist */
+    var mSel = document.getElementById('csSelMonth');
+    var ySel = document.getElementById('csSelYear');
+    if (mSel) mSel.value = window._csSelMonth;
+    if (ySel) ySel.value = window._csSelYear;
+  }, 100);
+}
+function deleteSelectedDuplicates() {
+  var checks = document.querySelectorAll('.dup-check:checked');
+  if (checks.length === 0) { toast('Aucune op\u00e9ration s\u00e9lectionn\u00e9e', 'error'); return; }
+  if (!window.confirm('Supprimer d\u00e9finitivement ' + checks.length + ' op\u00e9ration(s) ?')) return;
+  var idsToDelete = [];
+  for (var i = 0; i < checks.length; i++) { idsToDelete.push(checks[i].getAttribute('data-id')); }
+  var ops = getOperationsCaisse();
+  var removed = 0;
+  for (var i = ops.length - 1; i >= 0; i--) {
+    if (idsToDelete.indexOf(ops[i].id) >= 0) { ops.splice(i, 1); removed++; }
+  }
+  DB.set('mdb_operationsCaisse', ops);
+  closeModal();
+  toast(removed + ' doublon(s) supprim\u00e9(s)', 'success');
+  renderTresorerie();
+}
+function openInterroComptes() {
+  var codes = getCodesCaisse();
+  var codesOpt = '';
+  for (var ci = 0; ci < codes.length; ci++) {
+    codesOpt += '<option value="' + codes[ci].id + '">' + escH(codes[ci].code + ' - ' + codes[ci].libelle) + '</option>';
+  }
+  var now = new Date();
+  var defYear = now.getFullYear();
+  var html = '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">';
+  html += '<div style="flex:1;min-width:200px"><label style="font-size:11px">Code *</label><select id="icCode" style="font-size:12px;padding:6px 10px;width:100%">' + codesOpt + '</select></div>';
+  html += '<div style="min-width:120px"><label style="font-size:11px">Du</label><input type="date" id="icFrom" value="' + defYear + '-01-01" style="font-size:12px;padding:6px 10px;width:100%"></div>';
+  html += '<div style="min-width:120px"><label style="font-size:11px">Au</label><input type="date" id="icTo" value="' + getToday() + '" style="font-size:12px;padding:6px 10px;width:100%"></div>';
+  html += '<div style="display:flex;align-items:flex-end"><button class="btn btn-primary btn-sm" onclick="runInterroComptes()" style="padding:6px 16px">Rechercher</button></div>';
+  html += '</div>';
+  html += '<div id="icResults" style="max-height:400px;overflow-y:auto"></div>';
+  openFormModal('Interrogation comptes \u2211', html, '<button class="btn btn-ghost" onclick="closeModal()">Fermer</button>');
+}
+function runInterroComptes() {
+  var codeId = document.getElementById('icCode').value;
+  var dateFrom = document.getElementById('icFrom').value;
+  var dateTo = document.getElementById('icTo').value;
+  if (!codeId) { toast('S\u00e9lectionnez un code', 'error'); return; }
+  var ops = getOperationsCaisse();
+  var codes = getCodesCaisse();
+  var codeInfo = null;
+  for (var ci = 0; ci < codes.length; ci++) { if (codes[ci].id === codeId) { codeInfo = codes[ci]; break; } }
+  if (!codeInfo) return;
+  var results = {}; /* keyed by beneficiaireNom (lowercased) */
+  var totalMontant = 0, totalCharge = 0, totalEntrees = 0, totalSorties = 0, totalCount = 0;
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i];
+    if (o.codeId !== codeId) continue;
+    if (o.date < dateFrom || o.date > dateTo) continue;
+    if (o.linkedOpId && o.libelle && o.libelle.indexOf('Frais') === 0) continue;
+    var key = (o.beneficiaireNom || o.beneficiaire || 'Sans nom').toLowerCase().trim();
+    if (!results[key]) results[key] = { name: o.beneficiaireNom || o.beneficiaire || 'Sans nom', type: o.beneficiaireType || '', paye: 0, achat: 0, count: 0 };
+    results[key].count++;
+    if (o.sens === 'entree') { results[key].paye += (o.montant || 0); totalEntrees += (o.montant || 0); }
+    else { results[key].paye += (o.montant || 0); results[key].achat += (o.montantCharge || 0); totalSorties += (o.montant || 0); totalCharge += (o.montantCharge || 0); }
+    totalMontant += (o.montant || 0);
+    totalCount++;
+  }
+  var html = '<p style="font-size:13px;margin-bottom:8px"><b>' + escH(codeInfo.code + ' - ' + codeInfo.libelle) + '</b> : ' + totalCount + ' op\u00e9ration(s) | Total: <b style="color:' + (totalMontant > 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(totalMontant) + '</b>' + (totalCharge > 0 ? ' | Achats: <b style="color:#7c3aed">' + fmtMoney(totalCharge) + '</b>' : '') + '</p>';
+  if (totalCount === 0) { html += '<p style="color:var(--gray-400)">Aucune op\u00e9ration trouv\u00e9e</p>'; }
+  else {
+    html += '<table style="font-size:11px;width:100%"><thead><tr style="background:var(--gray-50)">';
+    html += '<th style="padding:6px 8px;text-align:left">B\u00e9n\u00e9ficiaire</th><th style="padding:6px 8px;text-align:center">Type</th><th style="padding:6px 8px;text-align:center">Nb</th><th style="padding:6px 8px;text-align:right">Vers\u00e9</th><th style="padding:6px 8px;text-align:right">Achats</th>';
+    html += '</tr></thead><tbody>';
+    var sorted = [];
+    for (var k in results) { if (results.hasOwnProperty(k)) sorted.push(results[k]); }
+    sorted.sort(function(a,b) { return (b.paye + b.achat) - (a.paye + a.achat); });
+    for (var si = 0; si < sorted.length; si++) {
+      var r = sorted[si];
+      html += '<tr style="border-bottom:1px solid var(--gray-200)">';
+      html += '<td style="padding:5px 8px;font-weight:600">' + escH(r.name) + '</td>';
+      html += '<td style="padding:5px 8px;text-align:center;font-size:10px">' + (r.type === 'fournisseur' ? '<span style="color:var(--orange)">Fourn.</span>' : r.type === 'employe' ? '<span style="color:var(--blue)">Emp.</span>' : r.type === 'client' ? '<span style="color:var(--green)">Client</span>' : '<span style="color:var(--gray-400)">Libre</span>') + '</td>';
+      html += '<td style="padding:5px 8px;text-align:center">' + r.count + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:var(--danger)">' + fmtMoney(r.paye) + '</td>';
+      html += '<td style="padding:5px 8px;text-align:right;color:#7c3aed">' + fmtMoney(r.achat) + '</td>';
+      html += '</tr>';
+    }
+    html += '<tr style="font-weight:700;background:var(--gray-50);border-top:2px solid var(--gray-300)"><td style="padding:6px 8px">TOTAL</td><td></td><td style="text-align:center">' + totalCount + '</td>';
+    html += '<td style="text-align:right">' + fmtMoney(totalEntrees + totalSorties) + '</td><td style="text-align:right">' + fmtMoney(totalCharge) + '</td></tr>';
+    html += '</tbody></table>';
+  }
+  document.getElementById('icResults').innerHTML = html;
 }
 function printFilteredCaisse() {
   var rows = document.getElementById('csOpsBody').getElementsByTagName('tr');
