@@ -1948,6 +1948,67 @@ function removeDeletedOperations(items) {
   return result;
 }
 
+function cleanupOrphanTransfers() {
+  var ops = getOperationsCaisse() || [];
+  var transfers = [];
+  var keepSet = {};
+  for (var i = 0; i < ops.length; i++) {
+    var op = ops[i];
+    if (op && op.typeOp === 'transfert') transfers.push(op);
+    else keepSet[op.id] = true;
+  }
+  var used = {};
+  /* 1) Pair by transferId (new transfers) */
+  for (var ti = 0; ti < transfers.length; ti++) {
+    var t = transfers[ti];
+    if (used[t.id] || !t.transferId) continue;
+    for (var tj = 0; tj < transfers.length; tj++) {
+      var t2 = transfers[tj];
+      if (t2.id === t.id || used[t2.id] || t2.sens === t.sens) continue;
+      if (t2.transferId === t.transferId && t2.montant === t.montant && t2.date === t.date) {
+        used[t.id] = true; used[t2.id] = true; break;
+      }
+    }
+  }
+  /* 2) Pair legacy transfers (montant + date + caisse/libelle) */
+  for (var li = 0; li < transfers.length; li++) {
+    var a = transfers[li];
+    if (used[a.id]) continue;
+    for (var lj = 0; lj < transfers.length; lj++) {
+      var b = transfers[lj];
+      if (b.id === a.id || used[b.id] || b.sens === a.sens) continue;
+      if (a.montant !== b.montant || a.date !== b.date) continue;
+      var s = a.sens === 'sortie' ? a : b;
+      var e = a.sens === 'sortie' ? b : a;
+      if (e.sens !== 'entree') continue;
+      var pairOk = (e.caisseId && s.caisseDestId && e.caisseId === s.caisseDestId) ||
+                   (s.beneficiaireId && e.caisseId && s.beneficiaireId === e.caisseId) ||
+                   ((s.libelle || '').indexOf('Transfert vers ') === 0 && (e.libelle || '').indexOf('Transfert re\u00e7u de ') === 0);
+      if (!pairOk) continue;
+      used[a.id] = true; used[b.id] = true; break;
+    }
+  }
+  var removed = [];
+  for (var ui = 0; ui < transfers.length; ui++) {
+    var u = transfers[ui];
+    if (used[u.id]) keepSet[u.id] = true;
+    else removed.push(u);
+  }
+  if (removed.length) {
+    var final = [];
+    for (var fi = 0; fi < ops.length; fi++) {
+      if (removed.indexOf(ops[fi]) !== -1) continue;
+      final.push(ops[fi]);
+    }
+    rememberDeletedOperations(removed);
+    DB.set('mdb_operationsCaisse', final);
+    markDirty('mdb_operationsCaisse');
+    toast(removed.length + ' transfert(s) orphelin(s) supprim\u00e9(s)', 'success');
+    return true;
+  }
+  return false;
+}
+
 function loadCloudData(uid, callback) {
   if (!firebaseDb || !uid) { if (callback) callback(); return; }
   createFullBackup();
@@ -11270,6 +11331,12 @@ function renderCaisseIn(el) {
     window._dedupDone = true;
   }
 
+  /* Auto-cleanup: remove orphaned transfer entries (no matching counterpart) */
+  if (!window._orphanCleanDone) {
+    window._orphanCleanDone = true;
+    if (cleanupOrphanTransfers()) { allOps = getOperationsCaisse(); }
+  }
+
   /* ===== SELECTEUR MOIS/ANNEE ===== */
   var months = ['Janvier','F\u00e9vrier','Mars','Avril','Mai','Juin','Juillet','Ao\u00fbt','Septembre','Octobre','Novembre','D\u00e9cembre'];
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;background:var(--primary-light);border-radius:var(--radius)">';
@@ -11285,7 +11352,7 @@ function renderCaisseIn(el) {
   for (var yi = curYear - 2; yi <= curYear + 1; yi++) {
     html += '<option value="' + yi + '"' + ('' + yi === window._csSelYear ? ' selected' : '') + '>' + yi + '</option>';
   }
-  html += '<button id="csToggleSpfBtn" class="btn btn-outline btn-sm" onclick="toggleSpfColumn()" style="margin-left:4px;color:#0d9488;border-color:#0d9488">S+F</button>';
+  html += '<button id="csToggleSpfBtn" class="btn btn-outline btn-sm" onclick="toggleSpfColumn()" style="margin-left:4px;color:var(--purple);border-color:var(--purple)">S+F</button>';
   html += '</select>';
   if (!canSeeAll && allCaisses.length > 1) {
     html += '<button id="csSeeAllBtn" class="btn btn-outline btn-sm" onclick="toggleSeeAllCaisses()" style="margin-left:4px;color:var(--warning);border-color:var(--warning)" title="Voir les op\u00e9rations de toutes les caisses">&#x1F50D; Toutes caisses</button>';
@@ -11468,9 +11535,9 @@ html += '</datalist></div>';
   html += '<button class="btn btn-outline btn-sm" onclick="openBulkPrintModal()" style="margin-left:4px;color:var(--green);border-color:var(--green)">Imprimer par masse</button>';
   html += '<button class="btn btn-outline btn-sm" onclick="findDuplicates()" style="margin-left:4px;color:var(--orange);border-color:var(--orange)" title="D\u00e9tecter les op\u00e9rations en double">\u2697 Doublons</button>';
   html += '<button class="btn btn-outline btn-sm" onclick="openInterroComptes()" style="margin-left:4px;color:var(--green);border-color:var(--green)" title="Interroger les comptes par code">\u2211 Comptes</button>';
-  html += '<button id="csToggleSpfBtn" class="btn btn-outline btn-sm" onclick="toggleSpfColumn()" style="margin-left:4px;color:#0d9488;border-color:#0d9488">S+F</button>';
+  html += '<button id="csToggleSpfBtn" class="btn btn-outline btn-sm" onclick="toggleSpfColumn()" style="margin-left:4px;color:var(--purple);border-color:var(--purple)">S+F</button>';
   html += '</div>';
-   html += '<div class="table-wrap"><div class="table-responsive"><table style="font-size:12px"><thead><tr><th>Date</th><th style="width:90px">N\u00b0 Pi\u00e8ce</th><th style="width:50px">Code</th><th>Libell\u00e9</th><th style="text-align:right;color:var(--success);white-space:nowrap">Entr\u00e9e</th><th style="text-align:right;color:var(--danger);white-space:nowrap">Sortie</th><th style="text-align:right;color:#7c3aed;white-space:nowrap">Charge</th><th style="text-align:right;color:var(--warning);white-space:nowrap">Frais</th><th class="cs-col-spf" style="text-align:right;color:#0d9488;white-space:nowrap">S+F</th><th>B\u00e9n\u00e9ficiaire</th><th>Ex\u00e9cutant</th><th>Moyen</th><th>N\u00b0 Trans.</th><th>Remettant</th><th>Observations</th><th>Imp.</th><th style="text-align:right;font-weight:700;color:var(--primary);white-space:nowrap">Solde</th><th style="width:80px">Actions</th></tr></thead><tbody id="csOpsBody">';
+   html += '<div class="table-wrap"><div class="table-responsive"><table style="font-size:12px"><thead><tr><th>Date</th><th style="width:90px">N\u00b0 Pi\u00e8ce</th><th style="width:50px">Code</th><th>Libell\u00e9</th><th style="text-align:right;color:var(--success);white-space:nowrap">Entr\u00e9e</th><th style="text-align:right;color:var(--danger);white-space:nowrap">Sortie</th><th style="text-align:right;color:#7c3aed;white-space:nowrap">Charge</th><th style="text-align:right;color:var(--warning);white-space:nowrap">Frais</th><th class="cs-col-spf" style="text-align:right;color:var(--purple);white-space:nowrap">S+F</th><th>B\u00e9n\u00e9ficiaire</th><th>Ex\u00e9cutant</th><th>Moyen</th><th>N\u00b0 Trans.</th><th>Remettant</th><th>Observations</th><th>Imp.</th><th style="text-align:right;font-weight:700;color:var(--primary);white-space:nowrap">Solde</th><th style="width:80px">Actions</th></tr></thead><tbody id="csOpsBody">';
   ops.sort(function(a, b) { var da = (a.date || '') + ' ' + (a.heure || '00:00'); var db = (b.date || '') + ' ' + (b.heure || '00:00'); return da.localeCompare(db); });
   /* Pre-compute progressive solde (oldest to newest) */
   var runningSolde = soldeBefore;
@@ -11513,7 +11580,7 @@ html += '</datalist></div>';
     html += '<td class="text-right fw-600" style="color:' + (isTransfert ? 'var(--warning)' : 'var(--danger)') + ';white-space:nowrap">' + (sortieVal > 0 ? '- ' + fmtMoneyNoDevise(sortieVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoneyNoDevise(o.montantCharge) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--warning);white-space:nowrap">' + ((o.frais && o.frais > 0) ? fmtMoneyNoDevise(o.frais) : '') + '</td>';
-    html += '<td class="text-right fw-600 cs-col-spf-td" style="color:#0d9488;white-space:nowrap">' + ((sortieVal + (o.frais || 0)) > 0 ? fmtMoneyNoDevise(sortieVal + (o.frais || 0)) : '') + '</td>';
+    html += '<td class="text-right fw-600 cs-col-spf-td" style="color:var(--purple);white-space:nowrap">' + ((sortieVal + (o.frais || 0)) > 0 ? fmtMoneyNoDevise(sortieVal + (o.frais || 0)) : '') + '</td>';
     html += '<td style="font-size:11px">';
     if (o.beneficiaireType === 'fournisseur' && o.beneficiaireId) {
       html += '<a href="#" onclick="event.preventDefault();showBenefAccount(\'fournisseur\',\'' + o.beneficiaireId + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer">' + escH(o.beneficiaireNom || '-') + '</a>';
@@ -13367,14 +13434,19 @@ function saveCaisse(id) {
       }
       var _oldOp = null;
       for (var _ri2 = 0; _ri2 < ops.length; _ri2++) { if (ops[_ri2].id === editId) { _oldOp = ops[_ri2]; break; } }
-      if (_oldOp && _oldOp.sens === 'sortie') {
+      if (_oldOp && _oldOp.typeOp === 'transfert') {
         for (var _ri3 = 0; _ri3 < ops.length; _ri3++) {
           var _o2 = ops[_ri3];
-          if (_o2.id !== editId && _o2.typeOp === 'transfert' && _o2.sens === 'entree'
-              && _o2.caisseId === _oldOp.caisseDestId && _o2.caisseSourceId === _oldOp.caisseId
-              && _o2.date === _oldOp.date && _o2.montant === _oldOp.montant) {
-            _removeIds.push(_o2.id);
+          if (_o2.id === editId || _o2.sens === _oldOp.sens || _o2.typeOp !== 'transfert') continue;
+          var _linked = false;
+          if (_oldOp.transferId && _o2.transferId === _oldOp.transferId && _o2.montant === _oldOp.montant && _o2.date === _oldOp.date) _linked = true;
+          else if (_o2.montant === _oldOp.montant && _o2.date === _oldOp.date) {
+            var _s2 = _oldOp.sens === 'sortie' ? _oldOp : _o2;
+            var _e2 = _oldOp.sens === 'sortie' ? _o2 : _oldOp;
+            if ((_e2.caisseId && _s2.caisseDestId && _e2.caisseId === _s2.caisseDestId) ||
+                (_s2.beneficiaireId && _e2.caisseId && _s2.beneficiaireId === _e2.caisseId)) _linked = true;
           }
+          if (_linked) _removeIds.push(_o2.id);
         }
       }
       var _filtered = [];
@@ -13391,9 +13463,10 @@ function saveCaisse(id) {
     var txDate = fullDate || getToday();
     var txHeure = heure || ((new Date().getHours() < 10 ? '0' : '') + new Date().getHours() + ':' + (new Date().getMinutes() < 10 ? '0' : '') + new Date().getMinutes());
     var npSource = generatePieceNumber(caisseId, txDate);
-    ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais});
+    var txId = DB.genId();
+    ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais, transferId:txId});
     var npDest = generatePieceNumber(destCaisseId, txDate);
-    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0});
+    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0, transferId:txId});
     DB.set('mdb_operationsCaisse', ops);
     if (feedback) { feedback.innerHTML = '<span style="color:var(--success)">Transfert OK \u2192 ' + escH(destNom) + '</span>'; setTimeout(function(){ feedback.innerHTML=''; }, 3000); }
     toast('Transfert effectu\u00e9 : ' + sourceNom + ' \u2192 ' + destNom);
@@ -13570,16 +13643,22 @@ function deleteCaisse(id) {
     }
     DB.set('mdb_acomptesPrets', newApList);
   }
-  /* If deleting a sent transfer, also remove the corresponding received transfer */
+  /* If deleting a transfer, also remove the counterpart operation (sortie <-> entree) */
   var opToDelete = null;
   for (var di4 = 0; di4 < ops.length; di4++) { if (ops[di4].id === id) { opToDelete = ops[di4]; break; } }
   var linkedTransferIds = [id, linkedFeeId];
-  if (opToDelete && opToDelete.typeOp === 'transfert' && opToDelete.sens === 'sortie') {
+  if (opToDelete && opToDelete.typeOp === 'transfert') {
     for (var di5 = 0; di5 < ops.length; di5++) {
       var o = ops[di5];
-      if (o.id !== id && o.typeOp === 'transfert' && o.sens === 'entree' && o.caisseId === opToDelete.caisseDestId && o.caisseSourceId === opToDelete.caisseId && o.date === opToDelete.date && o.montant === opToDelete.montant) {
-        linkedTransferIds.push(o.id);
-      }
+      if (o.id === id || o.id === linkedFeeId || o.sens === opToDelete.sens || o.typeOp !== 'transfert') continue;
+      var s = opToDelete.sens === 'sortie' ? opToDelete : o;
+      var e = opToDelete.sens === 'sortie' ? o : opToDelete;
+      var linked = false;
+      if (opToDelete.transferId && o.transferId === opToDelete.transferId && o.montant === opToDelete.montant && o.date === opToDelete.date) linked = true;
+      else if (o.montant === opToDelete.montant && o.date === opToDelete.date &&
+               ((e.caisseId && s.caisseDestId && e.caisseId === s.caisseDestId) ||
+                (s.beneficiaireId && e.caisseId && s.beneficiaireId === e.caisseId))) linked = true;
+      if (linked) linkedTransferIds.push(o.id);
     }
   }
   var r = [];
