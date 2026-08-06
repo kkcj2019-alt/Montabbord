@@ -370,6 +370,68 @@ var _dirtyKeys = {};
 var _pushTimer = null;
 var _isPushing = false;
 var _autoBackupTimer = null;
+var _sessionUnsubscribe = null;
+var _sessionToken = '';
+
+function stopUniqueSession() {
+  if (_sessionUnsubscribe) { try { _sessionUnsubscribe(); } catch(e) {} _sessionUnsubscribe = null; }
+  _sessionToken = '';
+}
+
+function startUniqueSession(enterpriseUid, userId, forceNew) {
+  stopUniqueSession();
+  if (!firebaseDb || !enterpriseUid || !userId) return;
+  var storeKey = 'mdb_session_' + userId;
+  var stored = localStorage.getItem(storeKey);
+  if (!forceNew && stored) { _sessionToken = stored; }
+  else { _sessionToken = DB.genId(); localStorage.setItem(storeKey, _sessionToken); }
+  var ref = firebaseDb.collection('enterprises').doc(enterpriseUid).collection('sessions').doc(userId);
+  ref.set({token: _sessionToken, userId: userId, updatedAt: firebase.firestore.FieldValue.serverTimestamp()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
+  _sessionUnsubscribe = ref.onSnapshot(function(doc) {
+    if (!doc.exists || !doc.data().token || doc.data().token === _sessionToken) return;
+    stopUniqueSession();
+    stopRealtimeSync();
+    localStorage.removeItem(storeKey);
+    if (firebaseAuth) firebaseAuth.signOut().catch(function() {});
+    currentUser = null;
+    localStorage.removeItem('mdb_currentUser');
+    localStorage.removeItem('mdb_enterpriseUid');
+    showLogin();
+    var err = document.getElementById('loginError');
+    if (err) { err.textContent = 'Ce compte vient d\'\u00eatre ouvert sur un autre appareil.'; err.style.color = 'var(--danger)'; err.style.display = 'block'; }
+  });
+}
+
+function startSaSession(forceNew) {
+  startUniqueSession('SUPER-ADMIN', 'SUPER-ADMIN', forceNew);
+}
+
+var _idleTimeoutMs = 30 * 60 * 1000;
+var _lastActivity = Date.now();
+var _idleTimer = null;
+var _idleStarted = false;
+
+function resetIdleTimer() {
+  _lastActivity = Date.now();
+}
+
+function startIdleTracking() {
+  if (_idleStarted) return;
+  _idleStarted = true;
+  var evts = ['mousemove', 'mousedown', 'keydown', 'click', 'scroll', 'touchstart', 'wheel'];
+  var onActivity = function() { _lastActivity = Date.now(); };
+  for (var i = 0; i < evts.length; i++) {
+    window.addEventListener(evts[i], onActivity, {passive: true});
+  }
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible' && currentUser && (Date.now() - _lastActivity) > _idleTimeoutMs) {
+      doLogout();
+    }
+  });
+  _idleTimer = setInterval(function() {
+    if (currentUser && (Date.now() - _lastActivity) > _idleTimeoutMs) doLogout();
+  }, 30000);
+}
 
 function isSyncable(key) {
   return key !== 'mdb_currentUser' && key.indexOf('mdb_draft_') === -1 && key.indexOf('mdb_sa') !== 0 && key.indexOf('mdb_pending') === -1 && key !== 'mdb_sync_queue';
@@ -847,6 +909,10 @@ function fmtMoney(n) {
   }
   return result;
 }
+function fmtMoneyNoDevise(n) {
+  if (isNaN(n) || n === null || n === undefined) n = 0;
+  return '' + Math.round(n);
+}
 function fmtSep(n) {
   if (isNaN(n) || n === null || n === undefined) n = 0;
   var r = Math.round(n);
@@ -1075,12 +1141,13 @@ function doSaQuickLogin() {
   errEl.style.color = 'var(--primary)';
   errEl.style.display = 'block';
   if (pass === 'admin123') {
-    currentUser = {id: 'SUPER-ADMIN', nom: 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
-    DB.set('mdb_currentUser', 'SUPER-ADMIN');
-    DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
-    DB.set('mdb_saNom', 'Super Admin');
-    errEl.style.display = 'none';
-    showApp();
+              currentUser = {id: 'SUPER-ADMIN', nom: 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
+              DB.set('mdb_currentUser', 'SUPER-ADMIN');
+              DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
+              DB.set('mdb_saNom', 'Super Admin');
+              errEl.style.display = 'none';
+              startSaSession(true);
+              showApp();
     if (firebaseAuth) {
       firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
         firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', pass).catch(function(){});
@@ -1096,6 +1163,7 @@ function doSaQuickLogin() {
       DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
       DB.set('mdb_saNom', doc.data().nom || 'Super Admin');
       errEl.style.display = 'none';
+      startSaSession(true);
       showApp();
     } else {
       errEl.textContent = 'Code secret incorrect';
@@ -1123,6 +1191,7 @@ function initAuth() {
             currentUser = {id: 'SUPER-ADMIN', nom: saNom, login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
             DB.set('mdb_currentUser', 'SUPER-ADMIN');
             DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
+            startSaSession(false);
             showApp();
             return;
           }
@@ -1166,6 +1235,7 @@ function initAuth() {
         }
         if (found) {
           currentUser = {id: subUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
+          startUniqueSession(subUid, found.id);
           _receivingSnapshot = true;
           showApp();
           startRealtimeSync(subUid);
@@ -1219,6 +1289,7 @@ function showLogin() {
 function showApp() {
   document.getElementById('loginOverlay').style.display = 'none';
   document.getElementById('app').style.display = '';
+  resetIdleTimer();
   var dispName = currentUser.isSuperAdmin ? (currentUser.nom + ' (Super Admin)') : (currentUser.nom + (currentUser.isAdmin ? ' (Admin)' : ''));
   document.getElementById('sidebarUserInfo').textContent = dispName;
   buildSidebar();
@@ -1309,6 +1380,7 @@ function doFirebaseLogin() {
         DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
         DB.set('mdb_saNom', config.nom || 'Super Admin');
         errEl.style.display = 'none';
+        startSaSession(true);
         showApp();
         if (firebaseAuth) {
           firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
@@ -1350,6 +1422,7 @@ function doFirebaseLogin() {
               DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
               DB.set('mdb_saNom', doc.data().nom || 'Super Admin');
               errEl.style.display = 'none';
+              startSaSession(true);
               showApp();
             } else {
               return firebaseDb.collection('superAdmin').doc('config').set({login: 'admin', password: pass, nom: 'Super Admin'}).then(function() {
@@ -1373,6 +1446,7 @@ function doFirebaseLogin() {
               DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
               DB.set('mdb_saNom', 'Super Admin');
               errEl.style.display = 'none';
+              startSaSession(true);
               showApp();
             }).catch(function() {
               currentUser = {id: 'SUPER-ADMIN', nom: 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
@@ -1380,6 +1454,7 @@ function doFirebaseLogin() {
               DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
               DB.set('mdb_saNom', 'Super Admin');
               errEl.style.display = 'none';
+              startSaSession(true);
               showApp();
               firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
                 firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', pass).catch(function(){});
@@ -1446,10 +1521,11 @@ function doFirebaseLogin() {
             DB.set(key, (val !== undefined && val !== null) ? val : []);
           }
         }
-        currentUser = {id: adminUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: found.isSuperAdmin || false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
-        DB.set('mdb_currentUser', found.id);
-        DB.set('mdb_enterpriseUid', adminUid);
-        errEl.style.display = 'none';
+         currentUser = {id: adminUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: found.isSuperAdmin || false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
+         DB.set('mdb_currentUser', found.id);
+         DB.set('mdb_enterpriseUid', adminUid);
+         startUniqueSession(adminUid, found.id, true);
+         errEl.style.display = 'none';
         _receivingSnapshot = true;
         showApp();
         startRealtimeSync(adminUid);
@@ -1685,6 +1761,7 @@ function doFirebaseRegister() {
         DB.set('mdb_currentUser', found.id);
         DB.set('mdb_enterpriseUid', firebaseAuth.currentUser.uid);
         errEl.style.display = 'none';
+        startUniqueSession(firebaseAuth.currentUser.uid, found.id, true);
         _receivingSnapshot = true;
         showApp();
         startRealtimeSync(firebaseAuth.currentUser.uid);
@@ -1762,6 +1839,20 @@ function doLogout() {
     if (_logoutDone) return;
     _logoutDone = true;
     localStorage.removeItem('mdb_sadminBackup');
+    stopRealtimeSync();
+    var sessionUserId = (currentUser && (currentUser.subUserId || (currentUser.isSuperAdmin ? 'SUPER-ADMIN' : ''))) || '';
+    if (currentUser && currentUser.id && sessionUserId && firebaseDb && _sessionToken) {
+      var sUid = (currentUser.isSuperAdmin) ? 'SUPER-ADMIN' : currentUser.id;
+      var sUserId = sessionUserId;
+      var myToken = _sessionToken;
+      localStorage.removeItem('mdb_session_' + sUserId);
+      firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId).get().then(function(sdoc) {
+        if (sdoc.exists && sdoc.data().token === myToken) {
+          firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId).delete().catch(function() {});
+        }
+      }).catch(function() {});
+    }
+    stopUniqueSession();
     if (firebaseAuth) {
       firebaseAuth.signOut().then(function() {
         currentUser = null;
@@ -1789,7 +1880,7 @@ function doLogout() {
   }
 }
 
-var DATA_KEYS = ['mdb_clients','mdb_nomenclature','mdb_bc','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_grilleTarifaire','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory'];
+var DATA_KEYS = ['mdb_clients','mdb_nomenclature','mdb_bc','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_deletedOps','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_grilleTarifaire','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory'];
 var _loadingCloud = false;
 
 function mergeArraysPreferCloud(local, cloud) {
@@ -1821,6 +1912,101 @@ function mergeArraysPreferCloud(local, cloud) {
   }
   for (i = 0; i < order.length; i++) result.push(map[order[i]]);
   return result;
+}
+
+function operationFingerprint(op) {
+  return (op.date || '') + '|' + (op.libelle || '').toLowerCase().trim() + '|' +
+    (Math.round((op.montant || 0) * 100) / 100) + '|' + (op.sens || '') + '|' +
+    ((op.beneficiaireNom || op.beneficiaire || '') + '').toLowerCase().trim() + '|' +
+    (op.caisseId || '');
+}
+
+function rememberDeletedOperations(items) {
+  var deleted = DB.get('mdb_deletedOps') || [];
+  var known = {};
+  for (var i = 0; i < deleted.length; i++) known[deleted[i].id + '|' + deleted[i].fp] = true;
+  for (var j = 0; j < items.length; j++) {
+    var op = items[j];
+    var marker = {id: op.id || '', fp: operationFingerprint(op), deletedAt: new Date().toISOString()};
+    if (!known[marker.id + '|' + marker.fp]) { deleted.push(marker); known[marker.id + '|' + marker.fp] = true; }
+  }
+  DB.set('mdb_deletedOps', deleted);
+  markDirty('mdb_deletedOps');
+}
+
+function removeDeletedOperations(items) {
+  var deleted = DB.get('mdb_deletedOps') || [];
+  if (!deleted.length) return items;
+  var byId = {};
+  var byFp = {};
+  for (var i = 0; i < deleted.length; i++) { byId[deleted[i].id] = true; byFp[deleted[i].fp] = true; }
+  var result = [];
+  for (var j = 0; j < items.length; j++) {
+    if (byId[items[j].id] || byFp[operationFingerprint(items[j])]) continue;
+    result.push(items[j]);
+  }
+  return result;
+}
+
+function cleanupOrphanTransfers() {
+  var ops = getOperationsCaisse() || [];
+  var transfers = [];
+  var keepSet = {};
+  for (var i = 0; i < ops.length; i++) {
+    var op = ops[i];
+    if (op && op.typeOp === 'transfert') transfers.push(op);
+    else keepSet[op.id] = true;
+  }
+  var used = {};
+  /* 1) Pair by transferId (new transfers) */
+  for (var ti = 0; ti < transfers.length; ti++) {
+    var t = transfers[ti];
+    if (used[t.id] || !t.transferId) continue;
+    for (var tj = 0; tj < transfers.length; tj++) {
+      var t2 = transfers[tj];
+      if (t2.id === t.id || used[t2.id] || t2.sens === t.sens) continue;
+      if (t2.transferId === t.transferId && t2.montant === t.montant && t2.date === t.date) {
+        used[t.id] = true; used[t2.id] = true; break;
+      }
+    }
+  }
+  /* 2) Pair legacy transfers (montant + date + caisse/libelle) */
+  for (var li = 0; li < transfers.length; li++) {
+    var a = transfers[li];
+    if (used[a.id]) continue;
+    for (var lj = 0; lj < transfers.length; lj++) {
+      var b = transfers[lj];
+      if (b.id === a.id || used[b.id] || b.sens === a.sens) continue;
+      if (a.montant !== b.montant || a.date !== b.date) continue;
+      var s = a.sens === 'sortie' ? a : b;
+      var e = a.sens === 'sortie' ? b : a;
+      if (e.sens !== 'entree') continue;
+      var pairOk = (e.caisseId && s.caisseDestId && e.caisseId === s.caisseDestId) ||
+                   (s.beneficiaireId && e.caisseId && s.beneficiaireId === e.caisseId) ||
+                   ((s.libelle || '').indexOf('Transfert vers ') === 0 && (e.libelle || '').indexOf('Transfert re\u00e7u de ') === 0);
+      if (!pairOk) continue;
+      used[a.id] = true; used[b.id] = true; break;
+    }
+  }
+  var removed = [];
+  for (var ui = 0; ui < transfers.length; ui++) {
+    var u = transfers[ui];
+    if (used[u.id]) keepSet[u.id] = true;
+    else removed.push(u);
+  }
+  if (removed.length) {
+    var final = [];
+    for (var fi = 0; fi < ops.length; fi++) {
+      if (removed.indexOf(ops[fi]) !== -1) continue;
+      final.push(ops[fi]);
+    }
+    rememberDeletedOperations(removed);
+    DB.set('mdb_operationsCaisse', final);
+    markDirty('mdb_operationsCaisse');
+    toast(removed.length + ' transfert(s) orphelin(s) supprim\u00e9(s)', 'success');
+    return true;
+  }
+  return false;
 }
 
 function loadCloudData(uid, callback) {
@@ -1857,8 +2043,9 @@ function loadCloudData(uid, callback) {
         if ((val === undefined || val === null || (Array.isArray(val) && val.length === 0)) && localData && (!Array.isArray(localData) || localData.length > 0)) { continue; }
         /* Merge array data: cloud wins for an existing ID, local-only rows survive. */
         if (Array.isArray(val) && Array.isArray(localData) && localData.length > 0 && val.length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-          var merged = mergeArraysPreferCloud(localData, val);
-          DB.set(key, merged);
+           var merged = mergeArraysPreferCloud(localData, val);
+           if (key === 'mdb_operationsCaisse') merged = removeDeletedOperations(merged);
+           DB.set(key, merged);
         } else if (key === 'mdb_actif') {
           DB.set(key, (val && val.rubriques) ? val : {rubriques:[]});
         } else {
@@ -1894,7 +2081,9 @@ function startRealtimeSync(uid) {
       if (localStr !== cloudStr) {
         /* Merge arrays without losing local-only records; cloud wins same IDs. */
         if (Array.isArray(data[key]) && Array.isArray(local) && local.length > 0 && data[key].length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-          DB.set(key, mergeArraysPreferCloud(local, data[key]));
+           var mergedRealtime = mergeArraysPreferCloud(local, data[key]);
+           if (key === 'mdb_operationsCaisse') mergedRealtime = removeDeletedOperations(mergedRealtime);
+           DB.set(key, mergedRealtime);
         } else {
           DB.set(key, data[key]);
         }
@@ -2497,7 +2686,7 @@ function togglePinMenu(key, label) {
 }
 
 function getBadge(key) {
-  var taches = DB.get('mdb_taches') || [];
+  var taches = getTaches();
   var factures = DB.get('mdb_factures') || [];
   var bls = DB.get('mdb_bl') || [];
   if (key === 'taches') {
@@ -2734,7 +2923,7 @@ function getReglements() { return DB.get('mdb_reglements') || []; }
 function getPrefinancements() { return DB.get('mdb_prefinancement') || []; }
 function getTaches() {
   var all = DB.get('mdb_taches') || [];
-  var userId = currentUser ? currentUser.id : '';
+  var userId = getTaskUserId();
   if (currentUser && currentUser.isSuperAdmin) return all;
   if (!userId) return [];
   var result = [];
@@ -3793,7 +3982,7 @@ function renderDashboard() {
   var bls = getBLs();
   var bcs = getBCs();
   var taches = getTaches();
-  var dashUserId = currentUser ? currentUser.id : '';
+  var dashUserId = getTaskUserId();
   var dashIsSA = currentUser && currentUser.isSuperAdmin;
   var myTaches = [];
   for (var ti = 0; ti < taches.length; ti++) { if (canSeeTache(taches[ti], dashUserId, dashIsSA)) myTaches.push(taches[ti]); }
@@ -6479,6 +6668,7 @@ function saveAcomptePretCollectif() {
   var empMap = {};
   for (var i = 0; i < employes.length; i++) empMap[employes[i].id] = employes[i];
   var rows = document.querySelectorAll('.apc-row');
+  if (rows.length === 0) rows = document.querySelectorAll('#csCollectifBody tr');
   var total = 0, count = 0;
   for (var r = 0; r < rows.length; r++) {
     var empEl = rows[r].querySelector('.apc-employe');
@@ -7999,9 +8189,14 @@ function printActif() {
 function canSeeTache(t, userId, isSA) {
   if (isSA) return true;
   if (!t.userId) return false;
+  /* Legacy tasks used the enterprise ID. Keep them visible to the enterprise admin. */
+  if (currentUser && currentUser.isAdmin && t.userId === currentUser.id) return true;
   if (t.userId === userId) return true;
   if (t.visibleTo && t.visibleTo.length > 0 && t.visibleTo.indexOf(userId) !== -1) return true;
   return false;
+}
+function getTaskUserId() {
+  return currentUser ? (currentUser.subUserId || currentUser.id || '') : '';
 }
 function renderTaches() {
   var data = getTaches();
@@ -8011,7 +8206,7 @@ function renderTaches() {
   html += '<div style="flex:1"></div>';
   if (!isReadonly('taches')) html += '<button class="btn btn-primary" onclick="openTacheModal()">+ Nouvelle</button>';
   html += '</div>';
-  html += '<div class="card"><div class="card-body no-pad"><table><thead><tr><th>Titre</th><th>D\u00e9but</th><th>Limite</th><th>Fin</th><th>Priorit\u00e9</th><th>Statut</th><th>Ex\u00e9cution</th><th style="width:100px">Actions</th></tr></thead><tbody id="tachesTableBody"></tbody></table></div></div>';
+  html += '<div class="card"><div class="card-body no-pad"><table><thead><tr><th>Titre</th><th>Cr\u00e9\u00e9e par</th><th>D\u00e9but</th><th>Limite</th><th>Fin</th><th>Priorit\u00e9</th><th>Statut</th><th>Ex\u00e9cution</th><th style="width:100px">Actions</th></tr></thead><tbody id="tachesTableBody"></tbody></table></div></div>';
   document.getElementById('content').innerHTML = html;
   filterTaches();
 }
@@ -8020,7 +8215,7 @@ function filterTaches() {
   q = q.toLowerCase();
   var sf = (document.getElementById('filterTacheStatut') || {}).value || '';
   var data = getTaches();
-  var userId = currentUser ? currentUser.id : '';
+  var userId = getTaskUserId();
   var isSA = currentUser && currentUser.isSuperAdmin;
   var result = [];
   for (var i = 0; i < data.length; i++) {
@@ -8042,28 +8237,55 @@ function filterTaches() {
   var prioColor = {basse: 'var(--gray-400)', moyenne: 'var(--primary)', haute: 'var(--warning)', urgente: 'var(--danger)'};
   var tb = document.getElementById('tachesTableBody');
   if (!tb) return;
-  if (!result.length) { tb.innerHTML = '<tr><td colspan="8"><div class="empty-state"><p>Aucune t\u00e2che</p></div></td></tr>'; return; }
+  if (!result.length) { tb.innerHTML = '<tr><td colspan="9"><div class="empty-state"><p>Aucune t\u00e2che</p></div></td></tr>'; return; }
   var html = '';
   for (var i = 0; i < result.length; i++) {
     var t = result[i];
     var ov = t.statut !== 'termine' && t.dateLimite && daysUntil(t.dateLimite) < 0;
     html += '<tr' + (ov ? ' style="background:var(--danger-light)"' : '') + '>';
+    var creatorName = 'Ancien compte';
+    var taskUsers = getUsers();
+    for (var cui = 0; cui < taskUsers.length; cui++) { if (taskUsers[cui].id === t.userId) { creatorName = taskUsers[cui].nom || taskUsers[cui].login || t.userId; break; } }
+    if (t.userId === getTaskUserId() && currentUser) creatorName = currentUser.nom || currentUser.login || creatorName;
     html += '<td><strong>' + escH(t.titre) + '</strong>' + (t.description ? '<br><small class="text-muted">' + escH(t.description.substring(0, 40)) + '</small>' : '') + ((t.userId && t.userId !== userId) ? '<br><small style="color:var(--purple);font-size:10px">Partag\u00e9e</small>' : '') + '</td>';
+    html += '<td style="font-size:11px;font-weight:600">' + escH(creatorName) + '</td>';
     html += '<td>' + fmtDate(t.dateDebut) + '</td>';
     html += '<td>' + fmtDate(t.dateLimite) + (ov ? '<br><small style="color:var(--danger);font-weight:600">En retard !</small>' : '') + '</td>';
     html += '<td>' + fmtDate(t.dateFin) + '</td>';
     html += '<td><span style="color:' + (prioColor[t.priorite] || 'var(--gray-400)') + ';font-weight:600;font-size:12px">' + (prioLabel[t.priorite] || t.priorite) + '</span></td>';
-    html += '<td>' + (stBadge[t.statut] || t.statut) + '</td>';
+    if (!isReadonly('taches')) {
+      html += '<td><select onchange="updateTacheStatus(\'' + t.id + '\',this.value)" style="font-size:11px;padding:3px 5px;border:1px solid var(--gray-300);border-radius:6px;background:#fff">';
+      html += '<option value="a_faire"' + (t.statut === 'a_faire' ? ' selected' : '') + '>\u00c0 faire</option>';
+      html += '<option value="en_cours"' + (t.statut === 'en_cours' ? ' selected' : '') + '>En cours</option>';
+      html += '<option value="termine"' + (t.statut === 'termine' ? ' selected' : '') + '>Termin\u00e9e</option></select></td>';
+    } else {
+      html += '<td>' + (stBadge[t.statut] || t.statut) + '</td>';
+    }
     var execLabel = t.execute ? '<span class="badge badge-success">Oui</span>' : '<span class="badge badge-warning">Non</span>';
     html += '<td><span onclick="toggleTacheExec(\'' + t.id + '\')" style="cursor:pointer">' + execLabel + '</span></td>';
     html += '<td>';
     if (!isReadonly('taches')) {
       html += '<button class="btn-icon" onclick="openTacheModal(\'' + t.id + '\')" title="Modifier"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
-      html += '<button class="btn-icon danger" onclick="deleteTache(\'' + t.id + '\')" title="Supprimer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
+       var canManageTache = currentUser && (currentUser.isSuperAdmin || t.userId === getTaskUserId() || (currentUser.isAdmin && t.userId === currentUser.id));
+       if (canManageTache) html += '<button class="btn-icon danger" onclick="deleteTache(\'' + t.id + '\')" title="Supprimer"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
     }
     html += '</td></tr>';
   }
   tb.innerHTML = html;
+}
+function updateTacheStatus(id, status) {
+  var list = getAllTaches();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === id) {
+      list[i].statut = status;
+      if (status === 'termine' && !list[i].dateFin) list[i].dateFin = getToday();
+      if (status !== 'termine') list[i].dateFin = '';
+      break;
+    }
+  }
+  DB.set('mdb_taches', list);
+  toast('Statut de la tache mis a jour');
+  filterTaches();
 }
 function openTacheModal(id) {
   var t = null;
@@ -8084,7 +8306,7 @@ function openTacheModal(id) {
   if (users.length === 0) { body += '<span style="color:var(--gray-400);font-size:12px">Aucun utilisateur</span>'; }
   else {
     for (var ui = 0; ui < users.length; ui++) {
-      if (currentUser && users[ui].id === currentUser.id) continue;
+      if (currentUser && users[ui].id === getTaskUserId()) continue;
       var checked = visibleTo.indexOf(users[ui].id) !== -1;
       body += '<label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;font-size:12px"><input type="checkbox" class="fShare" value="' + users[ui].id + '"' + (checked ? ' checked' : '') + ' style="accent-color:var(--primary)">' + escH(users[ui].nom || users[ui].login || users[ui].id) + '</label>';
     }
@@ -8109,12 +8331,12 @@ function saveTache(id) {
     dateDebut: dateDebut, dateLimite: dateLimite, dateFin: document.getElementById('fDateFin').value,
     statut: document.getElementById('fStatut').value, priorite: document.getElementById('fPriorite').value,
     dateCreation: id ? undefined : getToday(),
-    userId: id ? undefined : (currentUser ? currentUser.id : ''),
+    userId: id ? undefined : getTaskUserId(),
     visibleTo: (function() { var cbs = document.querySelectorAll('.fShare:checked'); var ids = []; for (var ci = 0; ci < cbs.length; ci++) ids.push(cbs[ci].value); return ids; })()
   };
   if (data.statut === 'termine' && !data.dateFin) data.dateFin = getToday();
   var list = getAllTaches();
-  if (id) { for (var i = 0; i < list.length; i++) { if (list[i].id === id) { data.dateCreation = list[i].dateCreation; data.userId = list[i].userId || data.userId; data.visibleTo = data.visibleTo.length > 0 ? data.visibleTo : (list[i].visibleTo || []); list[i] = data; break; } } }
+  if (id) { for (var i = 0; i < list.length; i++) { if (list[i].id === id) { data.dateCreation = list[i].dateCreation; data.userId = list[i].userId || data.userId; list[i] = data; break; } } }
   else list.push(data);
   DB.set('mdb_taches', list);
   closeModal();
@@ -8122,6 +8344,11 @@ function saveTache(id) {
   renderTaches();
 }
 function deleteTache(id) {
+  var currentTask = null;
+  var allTasks = getAllTaches();
+  for (var ti = 0; ti < allTasks.length; ti++) { if (allTasks[ti].id === id) { currentTask = allTasks[ti]; break; } }
+  var canDelete = currentTask && currentUser && (currentUser.isSuperAdmin || currentTask.userId === getTaskUserId() || (currentUser.isAdmin && currentTask.userId === currentUser.id));
+  if (!canDelete) { toast('Seul le createur peut supprimer cette tache', 'error'); return; }
   openConfirm('Supprimer cette t\u00e2che ?', function() {
   var list = getAllTaches();
     var result = [];
@@ -8778,6 +9005,7 @@ function doDeleteSadminEnt(uid, entId) {
       }).then(function() {
         DB.set('mdb_currentUser', 'SUPER-ADMIN');
         DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
+        startSaSession(true);
         var saNom = saConfig.nom || 'Super Admin';
         currentUser = {id: 'SUPER-ADMIN', nom: saNom, isSuperAdmin: true, isAdmin: true, sections: {}};
       });
@@ -8984,6 +9212,7 @@ function loginAsEnterprise(uid) {
     DB.set('mdb_currentUser', 'IMPERSONATING');
     DB.set('mdb_enterpriseUid', uid);
     if (overlay) overlay.style.display = 'none';
+    resetIdleTimer();
     navigateTo('dashboard');
     startRealtimeSync(uid);
     toast('Connect\u00e9 en tant que ' + ent.nom);
@@ -9006,6 +9235,7 @@ function returnToSadmin() {
   DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
   DB.remove('mdb_sadminBackup');
   if (overlay) overlay.style.display = 'none';
+  startSaSession(false);
   navigateTo('sadminEnterprises');
   toast('Retour au Super Admin');
   if (firebaseAuth && !firebaseAuth.currentUser) {
@@ -9973,7 +10203,9 @@ function supprimerOperationCompte(opId, type, fournisseurId) {
   if (!window.confirm('Supprimer d\u00e9finitivement cette op\u00e9ration ?')) return;
   if (type === 'caisse') {
     var allOps = getOperationsCaisse(); var result = [];
-    for (var i = 0; i < allOps.length; i++) { if (allOps[i].id !== opId) result.push(allOps[i]); }
+    var deleted = [];
+    for (var i = 0; i < allOps.length; i++) { if (allOps[i].id !== opId) result.push(allOps[i]); else deleted.push(allOps[i]); }
+    if (deleted.length) rememberDeletedOperations(deleted);
     DB.set('mdb_operationsCaisse', result);
     toast('Op\u00e9ration caisse supprim\u00e9e');
   } else if (type === 'dette') {
@@ -10926,6 +11158,29 @@ function renderCaisseIn(el) {
   }
   if (!canSeeAll && caisseNom) html += '<h3 style="margin:0 0 10px 0;color:var(--gray-600);font-size:15px">Ma caisse : <strong style="color:var(--primary)">' + escH(caisseNom) + '</strong></h3>';
 
+  /* Auto-cleanup: remove exact fingerprint duplicates */
+  if (!window._dedupDone) {
+    var cleaned = false;
+    var fpClean = {};
+    var cleanOps = [];
+    var removedOps = [];
+    for (var cl = 0; cl < allOps.length; cl++) {
+      var co = allOps[cl];
+      var fpc = operationFingerprint(co);
+      if (fpClean[fpc]) { cleaned = true; removedOps.push(co); continue; }
+      fpClean[fpc] = true;
+      cleanOps.push(co);
+    }
+    if (cleaned) { rememberDeletedOperations(removedOps); allOps = cleanOps; DB.set('mdb_operationsCaisse', allOps); toast('Nettoyage : doublons supprim\u00e9s', 'success'); }
+    window._dedupDone = true;
+  }
+
+  /* Auto-cleanup: remove orphaned transfer entries (no matching counterpart) */
+  if (!window._orphanCleanDone) {
+    window._orphanCleanDone = true;
+    if (cleanupOrphanTransfers()) { allOps = getOperationsCaisse(); }
+  }
+
   /* ===== SELECTEUR MOIS/ANNEE ===== */
   var months = ['Janvier','F\u00e9vrier','Mars','Avril','Mai','Juin','Juillet','Ao\u00fbt','Septembre','Octobre','Novembre','D\u00e9cembre'];
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;background:var(--primary-light);border-radius:var(--radius)">';
@@ -11113,7 +11368,7 @@ html += '</datalist></div>';
   /* ===== HISTORIQUE ===== */
   html += '<div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">';
   html += '<select id="csFilterCharge" onchange="filterCaisseOps()" style="font-size:12px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);outline:none"><option value="">Toutes les pi\u00e8ces</option><option value="avec_paiement">Avec paiement</option><option value="charge_seule">Charge seule (sans paiement)</option><option value="charge_simple">Charge simple (montant > 0)</option></select>';
-  html += '<select id="csFilterType" onchange="filterCaisseOps()" style="font-size:12px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);outline:none;margin-left:4px"><option value="">Tous types</option><option value="brouillon">Brouillons</option><option value="valide">Valid\u00e9s</option><option value="importe">Import\u00e9s</option><option value="imprime">Imprim\u00e9s</option><option value="non_imprime">Non imprim\u00e9s</option></select>';
+   html += '<select id="csFilterType" onchange="filterCaisseOps()" style="font-size:12px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);outline:none;margin-left:4px"><option value="valide" selected>Valid\u00e9es (r\u00e9alit\u00e9)</option><option value="">Toutes les op\u00e9rations</option><option value="brouillon">Brouillons import\u00e9s</option><option value="importe">Import\u00e9es</option><option value="imprime">Imprim\u00e9es</option><option value="non_imprime">Non imprim\u00e9es</option></select>';
   html += '<span id="csFilterInfo" style="font-size:11px;color:var(--gray-500);margin-left:auto"></span>';
   html += '</div>';
   html += '<div class="toolbar" style="margin-bottom:8px">';
@@ -11161,11 +11416,11 @@ html += '</datalist></div>';
     html += '<td class="fw-600" style="font-size:11px">' + escH(codeLabel) + '</td>';
     html += '<td>' + escH(o.libelle || '-') + (o.typeOp === 'transfert' ? '<br><span style="color:var(--primary);font-size:10px;font-weight:600">' + transfertLabel + '</span>' : '') + '</td>';
     var isTransfert = o.typeOp === 'transfert';
-    html += '<td class="text-right fw-600" style="color:' + (isTransfert ? 'var(--warning)' : 'var(--success)') + ';white-space:nowrap">' + (entreeVal > 0 ? '+ ' + fmtMoney(entreeVal) : '') + '</td>';
-    html += '<td class="text-right fw-600" style="color:' + (isTransfert ? 'var(--warning)' : 'var(--danger)') + ';white-space:nowrap">' + (sortieVal > 0 ? '- ' + fmtMoney(sortieVal) : '') + '</td>';
-    html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoney(o.montantCharge) : '') + '</td>';
-    html += '<td class="text-right fw-600" style="color:var(--warning);white-space:nowrap">' + ((o.frais && o.frais > 0) ? fmtMoney(o.frais) : '') + '</td>';
-    html += '<td class="text-right fw-600 cs-col-spf-td" style="color:var(--purple);white-space:nowrap">' + ((sortieVal + (o.frais || 0)) > 0 ? fmtMoney(sortieVal + (o.frais || 0)) : '') + '</td>';
+    html += '<td class="text-right fw-600" style="color:' + (isTransfert ? 'var(--warning)' : 'var(--success)') + ';white-space:nowrap">' + (entreeVal > 0 ? '+ ' + fmtMoneyNoDevise(entreeVal) : '') + '</td>';
+    html += '<td class="text-right fw-600" style="color:' + (isTransfert ? 'var(--warning)' : 'var(--danger)') + ';white-space:nowrap">' + (sortieVal > 0 ? '- ' + fmtMoneyNoDevise(sortieVal) : '') + '</td>';
+    html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoneyNoDevise(o.montantCharge) : '') + '</td>';
+    html += '<td class="text-right fw-600" style="color:var(--warning);white-space:nowrap">' + ((o.frais && o.frais > 0) ? fmtMoneyNoDevise(o.frais) : '') + '</td>';
+    html += '<td class="text-right fw-600 cs-col-spf-td" style="color:var(--purple);white-space:nowrap">' + ((sortieVal + (o.frais || 0)) > 0 ? fmtMoneyNoDevise(sortieVal + (o.frais || 0)) : '') + '</td>';
     html += '<td style="font-size:11px">';
     if (o.beneficiaireType === 'fournisseur' && o.beneficiaireId) {
       html += '<a href="#" onclick="event.preventDefault();showBenefAccount(\'fournisseur\',\'' + o.beneficiaireId + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer">' + escH(o.beneficiaireNom || '-') + '</a>';
@@ -11184,7 +11439,7 @@ html += '</datalist></div>';
     html += '<td style="font-size:11px;max-width:150px;overflow:hidden;text-overflow:ellipsis">' + escH(o.observations || '-') + '</td>';
     html += '<td>' + imprimeBadge + '</td>';
     var sv = soldeMap[o.id];
-    html += '<td class="text-right fw-600" style="color:' + ((sv || 0) >= 0 ? 'var(--success)' : 'var(--danger)') + ';white-space:nowrap">' + ((sv !== undefined && sv !== null) ? fmtMoney(sv) : '') + '</td>';
+    html += '<td class="text-right fw-600" style="color:' + ((sv || 0) >= 0 ? 'var(--success)' : 'var(--danger)') + ';white-space:nowrap">' + ((sv !== undefined && sv !== null) ? fmtMoneyNoDevise(sv) : '') + '</td>';
     html += '<td style="white-space:nowrap">';
     if (o.brouillon) {
       html += '<button class="btn-icon" onclick="validerBrouillon(\'' + o.id + '\')" title="Valider" style="color:var(--success)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></button> ';
@@ -11198,6 +11453,7 @@ html += '</datalist></div>';
   html += '</tbody></table></div></div>';
   html += '</div>';
   el.innerHTML = html;
+  setTimeout(filterCaisseOps, 0);
 
   /* Restore last saved date if available */
   var _restoredDate = false;
@@ -11443,7 +11699,10 @@ if (dateEl && o.date) {
   }
   if (execEl) { execEl.value = o.executant || ''; onExecutantChange(); }
   if (moyenEl) moyenEl.value = o.moyenPaiement || '';
-  if (transEl) { transEl.value = o.numeroTransaction || ''; transEl.style.display = (o.moyenPaiement && o.moyenPaiement !== 'Esp\u00e8ce') ? '' : 'none'; }
+  var fraisEditEl = document.getElementById('csFrais');
+  if (fraisEditEl) { fraisEditEl.value = o.frais || 0; fraisEditEl.dataset.manual = ''; }
+  toggleTransNum();
+  if (transEl && o.numeroTransaction) transEl.value = o.numeroTransaction;
   if (tiersEl) tiersEl.value = o.observations || '';
   /* Restore montantCharge */
   var chargeEl = document.getElementById('csMontantCharge');
@@ -12984,14 +13243,19 @@ function saveCaisse(id) {
       }
       var _oldOp = null;
       for (var _ri2 = 0; _ri2 < ops.length; _ri2++) { if (ops[_ri2].id === editId) { _oldOp = ops[_ri2]; break; } }
-      if (_oldOp && _oldOp.sens === 'sortie') {
+      if (_oldOp && _oldOp.typeOp === 'transfert') {
         for (var _ri3 = 0; _ri3 < ops.length; _ri3++) {
           var _o2 = ops[_ri3];
-          if (_o2.id !== editId && _o2.typeOp === 'transfert' && _o2.sens === 'entree'
-              && _o2.caisseId === _oldOp.caisseDestId && _o2.caisseSourceId === _oldOp.caisseId
-              && _o2.date === _oldOp.date && _o2.montant === _oldOp.montant) {
-            _removeIds.push(_o2.id);
+          if (_o2.id === editId || _o2.sens === _oldOp.sens || _o2.typeOp !== 'transfert') continue;
+          var _linked = false;
+          if (_oldOp.transferId && _o2.transferId === _oldOp.transferId && _o2.montant === _oldOp.montant && _o2.date === _oldOp.date) _linked = true;
+          else if (_o2.montant === _oldOp.montant && _o2.date === _oldOp.date) {
+            var _s2 = _oldOp.sens === 'sortie' ? _oldOp : _o2;
+            var _e2 = _oldOp.sens === 'sortie' ? _o2 : _oldOp;
+            if ((_e2.caisseId && _s2.caisseDestId && _e2.caisseId === _s2.caisseDestId) ||
+                (_s2.beneficiaireId && _e2.caisseId && _s2.beneficiaireId === _e2.caisseId)) _linked = true;
           }
+          if (_linked) _removeIds.push(_o2.id);
         }
       }
       var _filtered = [];
@@ -13008,9 +13272,10 @@ function saveCaisse(id) {
     var txDate = fullDate || getToday();
     var txHeure = heure || ((new Date().getHours() < 10 ? '0' : '') + new Date().getHours() + ':' + (new Date().getMinutes() < 10 ? '0' : '') + new Date().getMinutes());
     var npSource = generatePieceNumber(caisseId, txDate);
-    ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais});
+    var txId = DB.genId();
+    ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais, transferId:txId});
     var npDest = generatePieceNumber(destCaisseId, txDate);
-    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0});
+    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:remettant, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0, transferId:txId});
     DB.set('mdb_operationsCaisse', ops);
     if (feedback) { feedback.innerHTML = '<span style="color:var(--success)">Transfert OK \u2192 ' + escH(destNom) + '</span>'; setTimeout(function(){ feedback.innerHTML=''; }, 3000); }
     toast('Transfert effectu\u00e9 : ' + sourceNom + ' \u2192 ' + destNom);
@@ -13187,22 +13452,31 @@ function deleteCaisse(id) {
     }
     DB.set('mdb_acomptesPrets', newApList);
   }
-  /* If deleting a sent transfer, also remove the corresponding received transfer */
+  /* If deleting a transfer, also remove the counterpart operation (sortie <-> entree) */
   var opToDelete = null;
   for (var di4 = 0; di4 < ops.length; di4++) { if (ops[di4].id === id) { opToDelete = ops[di4]; break; } }
   var linkedTransferIds = [id, linkedFeeId];
-  if (opToDelete && opToDelete.typeOp === 'transfert' && opToDelete.sens === 'sortie') {
+  if (opToDelete && opToDelete.typeOp === 'transfert') {
     for (var di5 = 0; di5 < ops.length; di5++) {
       var o = ops[di5];
-      if (o.id !== id && o.typeOp === 'transfert' && o.sens === 'entree' && o.caisseId === opToDelete.caisseDestId && o.caisseSourceId === opToDelete.caisseId && o.date === opToDelete.date && o.montant === opToDelete.montant) {
-        linkedTransferIds.push(o.id);
-      }
+      if (o.id === id || o.id === linkedFeeId || o.sens === opToDelete.sens || o.typeOp !== 'transfert') continue;
+      var s = opToDelete.sens === 'sortie' ? opToDelete : o;
+      var e = opToDelete.sens === 'sortie' ? o : opToDelete;
+      var linked = false;
+      if (opToDelete.transferId && o.transferId === opToDelete.transferId && o.montant === opToDelete.montant && o.date === opToDelete.date) linked = true;
+      else if (o.montant === opToDelete.montant && o.date === opToDelete.date &&
+               ((e.caisseId && s.caisseDestId && e.caisseId === s.caisseDestId) ||
+                (s.beneficiaireId && e.caisseId && s.beneficiaireId === e.caisseId))) linked = true;
+      if (linked) linkedTransferIds.push(o.id);
     }
   }
   var r = [];
+  var deletedItems = [];
   for (var i = 0; i < ops.length; i++) {
     if (linkedTransferIds.indexOf(ops[i].id) === -1) r.push(ops[i]);
+    else deletedItems.push(ops[i]);
   }
+  if (deletedItems.length) rememberDeletedOperations(deletedItems);
   DB.set('mdb_operationsCaisse', r); toast('Op\u00e9ration supprim\u00e9e'); renderTresorerie();
 }
 function validerBrouillon(id) {
@@ -14128,11 +14402,22 @@ function findDuplicates(caisseId) {
     html += '<div style="flex:1"><label style="font-size:11px">Caisse</label><select id="dupCaisseSel" style="font-size:12px;padding:6px 10px;width:100%">' + cOpts + '</select></div>';
     html += '<div><button class="btn btn-primary btn-sm" onclick="findDuplicates(document.getElementById(\'dupCaisseSel\').value)" style="padding:6px 16px">Rechercher</button></div>';
     html += '</div>';
+    html += '<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11px;margin-bottom:10px;padding:8px;background:var(--gray-50);border-radius:6px">';
+    html += '<strong>Critères :</strong>';
+    html += '<label><input type="checkbox" id="dupByAmount" checked> Même montant</label>';
+    html += '<label><input type="checkbox" id="dupByLabel" checked> Même libellé</label>';
+    html += '<label><input type="checkbox" id="dupByMonth" checked> Même mois</label>';
+    html += '<label><input type="checkbox" id="dupBySens"> Même sens</label></div>';
     html += '<div id="dupResults"><p style="color:var(--gray-400);text-align:center;padding:20px">S\u00e9lectionnez une caisse et lancez la recherche</p></div>';
     openFormModal('Doublons d\u00e9tect\u00e9s', html, '<button class="btn btn-ghost" onclick="closeModal()">Fermer</button>');
     return;
   }
   var ops = getOperationsCaisse();
+  var byAmount = document.getElementById('dupByAmount') ? document.getElementById('dupByAmount').checked : true;
+  var byLabel = document.getElementById('dupByLabel') ? document.getElementById('dupByLabel').checked : true;
+  var byMonth = document.getElementById('dupByMonth') ? document.getElementById('dupByMonth').checked : true;
+  var bySens = document.getElementById('dupBySens') ? document.getElementById('dupBySens').checked : false;
+  if (!byAmount && !byLabel && !byMonth && !bySens) { toast('Choisissez au moins un critère', 'error'); return; }
   var fpMap = {};
   var duplicates = [];
   for (var i = 0; i < ops.length; i++) {
@@ -14140,9 +14425,12 @@ function findDuplicates(caisseId) {
     if (o.linkedOpId && o.libelle && o.libelle.indexOf('Frais') === 0) continue;
     if (o.typeOp === 'transfert') continue;
     if (o.caisseId !== caisseId) continue;
-    /* Fingerprint: year-month | libelle | montant | sens (same month = suspicious duplicate) */
-    var ym = (o.date || '').substring(0,7);
-    var fp = ym + '|' + (o.libelle || '').toLowerCase().trim() + '|' + (Math.round((o.montant || 0) * 100) / 100) + '|' + (o.sens || '');
+    var parts = [];
+    if (byMonth) parts.push((o.date || '').substring(0, 7));
+    if (byLabel) parts.push((o.libelle || '').toLowerCase().trim());
+    if (byAmount) parts.push(Math.round((o.montant || 0) * 100) / 100);
+    if (bySens) parts.push(o.sens || '');
+    var fp = parts.join('|');
     if (fpMap[fp]) {
       duplicates.push({first: fpMap[fp], second: o, fp: fp});
     } else {
@@ -15819,6 +16107,7 @@ function startAuth() {
 }
 setTimeout(function() { _authTimedOut = true; }, 3000);
 startAuth();
+startIdleTracking();
 window.addEventListener('beforeunload', function() {
   createFullBackup();
   if (currentUser && currentUser.id && firebaseDb) {
