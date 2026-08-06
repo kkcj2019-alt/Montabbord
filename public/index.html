@@ -370,6 +370,33 @@ var _dirtyKeys = {};
 var _pushTimer = null;
 var _isPushing = false;
 var _autoBackupTimer = null;
+var _sessionUnsubscribe = null;
+var _sessionToken = '';
+
+function stopUniqueSession() {
+  if (_sessionUnsubscribe) { try { _sessionUnsubscribe(); } catch(e) {} _sessionUnsubscribe = null; }
+  _sessionToken = '';
+}
+
+function startUniqueSession(enterpriseUid, userId) {
+  stopUniqueSession();
+  if (!firebaseDb || !enterpriseUid || !userId) return;
+  _sessionToken = DB.genId();
+  var ref = firebaseDb.collection('enterprises').doc(enterpriseUid).collection('sessions').doc(userId);
+  ref.set({token: _sessionToken, userId: userId, updatedAt: firebase.firestore.FieldValue.serverTimestamp()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
+  _sessionUnsubscribe = ref.onSnapshot(function(doc) {
+    if (!doc.exists || !doc.data().token || doc.data().token === _sessionToken) return;
+    stopUniqueSession();
+    stopRealtimeSync();
+    if (firebaseAuth) firebaseAuth.signOut().catch(function() {});
+    currentUser = null;
+    localStorage.removeItem('mdb_currentUser');
+    localStorage.removeItem('mdb_enterpriseUid');
+    showLogin();
+    var err = document.getElementById('loginError');
+    if (err) { err.textContent = 'Ce compte vient d\'\u00eatre ouvert sur un autre appareil.'; err.style.color = 'var(--danger)'; err.style.display = 'block'; }
+  });
+}
 
 function isSyncable(key) {
   return key !== 'mdb_currentUser' && key.indexOf('mdb_draft_') === -1 && key.indexOf('mdb_sa') !== 0 && key.indexOf('mdb_pending') === -1 && key !== 'mdb_sync_queue';
@@ -1166,6 +1193,7 @@ function initAuth() {
         }
         if (found) {
           currentUser = {id: subUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
+          startUniqueSession(subUid, found.id);
           _receivingSnapshot = true;
           showApp();
           startRealtimeSync(subUid);
@@ -1446,10 +1474,11 @@ function doFirebaseLogin() {
             DB.set(key, (val !== undefined && val !== null) ? val : []);
           }
         }
-        currentUser = {id: adminUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: found.isSuperAdmin || false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
-        DB.set('mdb_currentUser', found.id);
-        DB.set('mdb_enterpriseUid', adminUid);
-        errEl.style.display = 'none';
+         currentUser = {id: adminUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: found.isSuperAdmin || false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
+         DB.set('mdb_currentUser', found.id);
+         DB.set('mdb_enterpriseUid', adminUid);
+         startUniqueSession(adminUid, found.id);
+         errEl.style.display = 'none';
         _receivingSnapshot = true;
         showApp();
         startRealtimeSync(adminUid);
@@ -1762,6 +1791,18 @@ function doLogout() {
     if (_logoutDone) return;
     _logoutDone = true;
     localStorage.removeItem('mdb_sadminBackup');
+    stopRealtimeSync();
+    if (currentUser && currentUser.id && currentUser.subUserId && !currentUser.isSuperAdmin && firebaseDb && _sessionToken) {
+      var sUid = currentUser.id;
+      var sUserId = currentUser.subUserId;
+      var myToken = _sessionToken;
+      firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId).get().then(function(sdoc) {
+        if (sdoc.exists && sdoc.data().token === myToken) {
+          firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId).delete().catch(function() {});
+        }
+      }).catch(function() {});
+    }
+    stopUniqueSession();
     if (firebaseAuth) {
       firebaseAuth.signOut().then(function() {
         currentUser = null;
