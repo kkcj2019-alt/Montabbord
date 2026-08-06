@@ -1789,7 +1789,7 @@ function doLogout() {
   }
 }
 
-var DATA_KEYS = ['mdb_clients','mdb_nomenclature','mdb_bc','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_grilleTarifaire','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory'];
+var DATA_KEYS = ['mdb_clients','mdb_nomenclature','mdb_bc','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_deletedOps','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_grilleTarifaire','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory'];
 var _loadingCloud = false;
 
 function mergeArraysPreferCloud(local, cloud) {
@@ -1820,6 +1820,40 @@ function mergeArraysPreferCloud(local, cloud) {
     }
   }
   for (i = 0; i < order.length; i++) result.push(map[order[i]]);
+  return result;
+}
+
+function operationFingerprint(op) {
+  return (op.date || '') + '|' + (op.libelle || '').toLowerCase().trim() + '|' +
+    (Math.round((op.montant || 0) * 100) / 100) + '|' + (op.sens || '') + '|' +
+    ((op.beneficiaireNom || op.beneficiaire || '') + '').toLowerCase().trim() + '|' +
+    (op.caisseId || '');
+}
+
+function rememberDeletedOperations(items) {
+  var deleted = DB.get('mdb_deletedOps') || [];
+  var known = {};
+  for (var i = 0; i < deleted.length; i++) known[deleted[i].id + '|' + deleted[i].fp] = true;
+  for (var j = 0; j < items.length; j++) {
+    var op = items[j];
+    var marker = {id: op.id || '', fp: operationFingerprint(op), deletedAt: new Date().toISOString()};
+    if (!known[marker.id + '|' + marker.fp]) { deleted.push(marker); known[marker.id + '|' + marker.fp] = true; }
+  }
+  DB.set('mdb_deletedOps', deleted);
+  markDirty('mdb_deletedOps');
+}
+
+function removeDeletedOperations(items) {
+  var deleted = DB.get('mdb_deletedOps') || [];
+  if (!deleted.length) return items;
+  var byId = {};
+  var byFp = {};
+  for (var i = 0; i < deleted.length; i++) { byId[deleted[i].id] = true; byFp[deleted[i].fp] = true; }
+  var result = [];
+  for (var j = 0; j < items.length; j++) {
+    if (byId[items[j].id] || byFp[operationFingerprint(items[j])]) continue;
+    result.push(items[j]);
+  }
   return result;
 }
 
@@ -1858,8 +1892,9 @@ function loadCloudData(uid, callback) {
         if ((val === undefined || val === null || (Array.isArray(val) && val.length === 0)) && localData && (!Array.isArray(localData) || localData.length > 0)) { continue; }
         /* Merge array data: cloud wins for an existing ID, local-only rows survive. */
         if (Array.isArray(val) && Array.isArray(localData) && localData.length > 0 && val.length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-          var merged = mergeArraysPreferCloud(localData, val);
-          DB.set(key, merged);
+           var merged = mergeArraysPreferCloud(localData, val);
+           if (key === 'mdb_operationsCaisse') merged = removeDeletedOperations(merged);
+           DB.set(key, merged);
         } else if (key === 'mdb_actif') {
           DB.set(key, (val && val.rubriques) ? val : {rubriques:[]});
         } else {
@@ -1895,7 +1930,9 @@ function startRealtimeSync(uid) {
       if (localStr !== cloudStr) {
         /* Merge arrays without losing local-only records; cloud wins same IDs. */
         if (Array.isArray(data[key]) && Array.isArray(local) && local.length > 0 && data[key].length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-          DB.set(key, mergeArraysPreferCloud(local, data[key]));
+           var mergedRealtime = mergeArraysPreferCloud(local, data[key]);
+           if (key === 'mdb_operationsCaisse') mergedRealtime = removeDeletedOperations(mergedRealtime);
+           DB.set(key, mergedRealtime);
         } else {
           DB.set(key, data[key]);
         }
@@ -10127,7 +10164,9 @@ function supprimerOperationCompte(opId, type, fournisseurId) {
   if (!window.confirm('Supprimer d\u00e9finitivement cette op\u00e9ration ?')) return;
   if (type === 'caisse') {
     var allOps = getOperationsCaisse(); var result = [];
-    for (var i = 0; i < allOps.length; i++) { if (allOps[i].id !== opId) result.push(allOps[i]); }
+    var deleted = [];
+    for (var i = 0; i < allOps.length; i++) { if (allOps[i].id !== opId) result.push(allOps[i]); else deleted.push(allOps[i]); }
+    if (deleted.length) rememberDeletedOperations(deleted);
     DB.set('mdb_operationsCaisse', result);
     toast('Op\u00e9ration caisse supprim\u00e9e');
   } else if (type === 'dette') {
@@ -11085,14 +11124,15 @@ function renderCaisseIn(el) {
     var cleaned = false;
     var fpClean = {};
     var cleanOps = [];
+    var removedOps = [];
     for (var cl = 0; cl < allOps.length; cl++) {
       var co = allOps[cl];
-      var fpc = (co.date || '') + '|' + (co.libelle || '').toLowerCase().trim() + '|' + (Math.round((co.montant || 0) * 100) / 100) + '|' + (co.sens || '') + '|' + ((co.beneficiaireNom || co.beneficiaire || '') + '').toLowerCase().trim();
-      if (fpClean[fpc]) { cleaned = true; continue; }
+      var fpc = operationFingerprint(co);
+      if (fpClean[fpc]) { cleaned = true; removedOps.push(co); continue; }
       fpClean[fpc] = true;
       cleanOps.push(co);
     }
-    if (cleaned) { allOps = cleanOps; DB.set('mdb_operationsCaisse', allOps); toast('Nettoyage : doublons supprim\u00e9s', 'success'); }
+    if (cleaned) { rememberDeletedOperations(removedOps); allOps = cleanOps; DB.set('mdb_operationsCaisse', allOps); toast('Nettoyage : doublons supprim\u00e9s', 'success'); }
     window._dedupDone = true;
   }
 
@@ -13408,9 +13448,12 @@ function deleteCaisse(id) {
     }
   }
   var r = [];
+  var deletedItems = [];
   for (var i = 0; i < ops.length; i++) {
     if (linkedTransferIds.indexOf(ops[i].id) === -1) r.push(ops[i]);
+    else deletedItems.push(ops[i]);
   }
+  if (deletedItems.length) rememberDeletedOperations(deletedItems);
   DB.set('mdb_operationsCaisse', r); toast('Op\u00e9ration supprim\u00e9e'); renderTresorerie();
 }
 function validerBrouillonDirect(id) {
