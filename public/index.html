@@ -1792,21 +1792,34 @@ function doLogout() {
 var DATA_KEYS = ['mdb_clients','mdb_nomenclature','mdb_bc','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_grilleTarifaire','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory'];
 var _loadingCloud = false;
 
-function mergeArraysById(local, cloud) {
-  if (!Array.isArray(local) || local.length === 0) return cloud;
-  if (!Array.isArray(cloud) || cloud.length === 0) return local;
+function mergeArraysPreferCloud(local, cloud) {
+  if (!Array.isArray(local) || local.length === 0) return Array.isArray(cloud) ? cloud.slice() : cloud;
+  if (!Array.isArray(cloud) || cloud.length === 0) return local.slice();
   var map = {};
-  var i;
-  for (i = 0; i < cloud.length; i++) {
-    if (cloud[i] && cloud[i].id) map[cloud[i].id] = cloud[i];
-  }
-  for (i = 0; i < local.length; i++) {
-    if (local[i] && local[i].id) map[local[i].id] = local[i];
-  }
+  var order = [];
+  var seen = {};
   var result = [];
-  for (var id in map) {
-    if (map.hasOwnProperty(id)) result.push(map[id]);
+  var i;
+  for (i = 0; i < local.length; i++) {
+    var localItem = local[i];
+    if (localItem && localItem.id) {
+      if (!seen[localItem.id]) { seen[localItem.id] = true; order.push(localItem.id); }
+      map[localItem.id] = localItem;
+    } else {
+      result.push(localItem);
+    }
   }
+  /* Same ID means the same record: use the latest shared cloud version. */
+  for (i = 0; i < cloud.length; i++) {
+    var cloudItem = cloud[i];
+    if (cloudItem && cloudItem.id) {
+      if (!seen[cloudItem.id]) { seen[cloudItem.id] = true; order.push(cloudItem.id); }
+      map[cloudItem.id] = cloudItem;
+    } else {
+      result.push(cloudItem);
+    }
+  }
+  for (i = 0; i < order.length; i++) result.push(map[order[i]]);
   return result;
 }
 
@@ -1843,23 +1856,9 @@ function loadCloudData(uid, callback) {
         /* Pr\u00e9vention perte de donn\u00e9es : ne pas remplacer des donn\u00e9es locales non vides par du cloud vide */
         var localData = DB.get(key);
         if ((val === undefined || val === null || (Array.isArray(val) && val.length === 0)) && localData && (!Array.isArray(localData) || localData.length > 0)) { continue; }
-        /* Merge array data (operations) instead of replace */
+        /* Merge array data: cloud wins for an existing ID, local-only rows survive. */
         if (Array.isArray(val) && Array.isArray(localData) && localData.length > 0 && val.length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-          var merged = localData.slice();
-          var localIds = {};
-          var localFps = {};
-          for (var li = 0; li < localData.length; li++) {
-            if (localData[li].id) localIds[localData[li].id] = true;
-            var fp = (localData[li].date || '') + '|' + (localData[li].libelle || '').toLowerCase().trim() + '|' + (Math.round((localData[li].montant || 0) * 100) / 100) + '|' + (localData[li].sens || '') + '|' + ((localData[li].beneficiaireNom || localData[li].beneficiaire || '') + '').toLowerCase().trim();
-            localFps[fp] = true;
-          }
-          for (var ci = 0; ci < val.length; ci++) {
-            if (!val[ci].id || localIds[val[ci].id]) continue;
-            var cfp = (val[ci].date || '') + '|' + (val[ci].libelle || '').toLowerCase().trim() + '|' + (Math.round((val[ci].montant || 0) * 100) / 100) + '|' + (val[ci].sens || '') + '|' + ((val[ci].beneficiaireNom || val[ci].beneficiaire || '') + '').toLowerCase().trim();
-            if (localFps[cfp]) continue;
-            merged.push(val[ci]);
-            localFps[cfp] = true;
-          }
+          var merged = mergeArraysPreferCloud(localData, val);
           DB.set(key, merged);
         } else if (key === 'mdb_actif') {
           DB.set(key, (val && val.rubriques) ? val : {rubriques:[]});
@@ -1868,7 +1867,6 @@ function loadCloudData(uid, callback) {
         }
       }
     }
-    _dirtyKeys = {};
     finish();
   }).catch(function(e) {
     console.warn('Cloud load error:', e);
@@ -1895,25 +1893,9 @@ function startRealtimeSync(uid) {
       var cloudStr = JSON.stringify(data[key]);
       var localStr = JSON.stringify(local);
       if (localStr !== cloudStr) {
-        /* Merge array data instead of replacing */
+        /* Merge arrays without losing local-only records; cloud wins same IDs. */
         if (Array.isArray(data[key]) && Array.isArray(local) && local.length > 0 && data[key].length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-          var merged = local.slice();
-          var localIds = {};
-          var localFps = {};
-          for (var li = 0; li < local.length; li++) {
-            if (local[li].id) localIds[local[li].id] = true;
-            var fp = (local[li].date || '') + '|' + (local[li].libelle || '').toLowerCase().trim() + '|' + (Math.round((local[li].montant || 0) * 100) / 100) + '|' + (local[li].sens || '') + '|' + ((local[li].beneficiaireNom || local[li].beneficiaire || '') + '').toLowerCase().trim();
-            localFps[fp] = true;
-          }
-          for (var ci = 0; ci < data[key].length; ci++) {
-            if (!data[key][ci].id || localIds[data[key][ci].id]) continue;
-            var cfp = (data[key][ci].date || '') + '|' + (data[key][ci].libelle || '').toLowerCase().trim() + '|' + (Math.round((data[key][ci].montant || 0) * 100) / 100) + '|' + (data[key][ci].sens || '') + '|' + ((data[key][ci].beneficiaireNom || data[key][ci].beneficiaire || '') + '').toLowerCase().trim();
-            if (localFps[cfp]) continue;
-            merged.push(data[key][ci]);
-            localIds[data[key][ci].id] = true;
-            localFps[cfp] = true;
-          }
-          DB.set(key, merged);
+          DB.set(key, mergeArraysPreferCloud(local, data[key]));
         } else {
           DB.set(key, data[key]);
         }
