@@ -1756,53 +1756,129 @@ function switchPtTab(tab) {
 function loadPointageMontage() {
   var ams = getArticlesMontage();
   if (ams.length === 0) { document.getElementById('pt-montage-container').innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Aucun article de montage défini. Allez dans Données de Salaire > Articles Montage.</div>'; return; }
-  var workers = getPersonnel().filter(function(p){ return p.rendement === true && p.status !== 'inactif'; });
-  if (workers.length === 0) { document.getElementById('pt-montage-container').innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Aucun employé avec Rendement coché. Cochez "Rendement" dans la fiche employé.</div>'; return; }
   var mois = document.getElementById('pt-mois').value;
   if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('pt-mois').value = mois; }
   var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
   var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
-  var jours = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
-  var curArt = document.getElementById('pt-montage-article') ? document.getElementById('pt-montage-article').value : (ams.length > 0 ? ams[0].code : '');
-  if (!curArt || !ams.some(function(a){ return a.code === curArt; })) curArt = ams[0].code;
+  var today = new Date().toISOString().slice(0,10);
+  if (today.indexOf(mois) !== 0) today = mois + '-01';
 
   var html = '<h3 style="font-size:.9rem;margin-bottom:.5rem">Production Montage - ' + mois + '</h3>';
-  html += '<div style="display:flex;gap:1rem;margin-bottom:.8rem;align-items:center;flex-wrap:wrap">';
-  html += '<div class="form-group" style="margin:0;min-width:200px"><label style="margin:0;font-size:.7rem">Article</label><select id="pt-montage-article" onchange="loadPointageMontage()" style="padding:4px 8px;font-weight:700">';
-  ams.forEach(function(a){ html += '<option value="' + escH(a.code) + '"' + (a.code === curArt ? ' selected' : '') + '>' + escH(a.code) + ' - ' + escH(a.designation) + ' (' + fmtF(a.prix) + ')</option>'; });
-  html += '</select></div>';
-  html += '<button class="btn" style="padding:4px 12px;font-size:.7rem" onclick="savePointageMontage()">Enregistrer</button>';
-  html += '<span style="font-size:.7rem;color:var(--dim)">Saisissez la quantité, Entrée ou 2 chiffres = case suivante</span>';
-  html += '</div>';
 
-  /* Tableau croisé: travailleurs (lignes) x jours (colonnes) */
-  html += '<div style="overflow-x:auto;max-height:70vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px">';
-  html += '<table style="min-width:' + (daysInMonth * 38 + 150) + 'px;margin-top:0;font-size:.68rem;border-collapse:collapse">';
-  html += '<thead><tr><th style="position:sticky;left:0;background:#f1f5f9;z-index:2;min-width:130px">Employé</th>';
-  for (var d = 1; d <= daysInMonth; d++) {
-    var dow = (new Date(year, mIdx, d).getDay() + 6) % 7;
-    var isDim = new Date(year, mIdx, d).getDay() === 0;
-    html += '<th style="text-align:center;min-width:34px;font-size:.6rem;padding:2px;' + (isDim ? 'background:#fff7ed' : '') + '">' + d + '<br>' + jours[dow] + '</th>';
-  }
-  html += '<th style="text-align:center;min-width:50px">Total</th></tr></thead><tbody>';
+  /* ---- ÉTAPE 1 : Sélection ---- */
+  html += '<div class="card" style="padding:1rem;margin-bottom:1rem;background:#f8fafc">';
+  html += '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.8rem">';
+  html += '<div class="form-group" style="margin:0;max-width:150px"><label style="margin:0;font-size:.68rem">Jour</label><input type="date" id="pt-montage-day" value="' + today + '" min="' + mois + '-01" max="' + mois + '-' + daysInMonth + '" style="padding:6px"></div>';
+  html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Articles</label><div style="display:flex;gap:8px;flex-wrap:wrap;padding-top:4px">';
+  ams.forEach(function(a,i){
+    html += '<label style="display:flex;align-items:center;gap:3px;font-size:.72rem;cursor:pointer;padding:4px 8px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '"' + (i===0?' checked':'') + ' style="width:14px;height:14px"> ' + escH(a.code) + '</label>';
+  });
+  html += '</div></div>';
+  html += '<button class="btn" style="padding:6px 16px" onclick="ptMontStart()">Commencer</button></div></div>';
 
-  for (var w = 0; w < workers.length; w++) {
-    var wk = workers[w];
+  /* ---- ÉTAPE 2 : Grille de saisie ---- */
+  html += '<div id="pt-montage-grid" style="margin-bottom:1rem"></div>';
+
+  /* ---- ÉTAPE 3 : État par travailleur ---- */
+  html += '<div class="tab-pills" style="margin-bottom:.5rem"><button class="active" onclick="ptMontShowEtat()">État par travailleur</button></div>';
+  html += '<div id="pt-montage-etat" style="margin-bottom:1rem"></div>';
+
+  document.getElementById('pt-montage-container').innerHTML = html;
+  ptMontShowEtat();
+}
+function ptMontStart() {
+  var day = document.getElementById('pt-montage-day').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!day) { toast('Sélectionnez un jour', 'error'); return; }
+  var selectedArts = [];
+  document.querySelectorAll('.pt-montage-art:checked').forEach(function(cb){ selectedArts.push(cb.value); });
+  if (selectedArts.length === 0) { toast('Sélectionnez au moins un article', 'error'); return; }
+
+  /* Travailleurs en rendement ET présents ce jour (pointage horaire) */
+  var workers = getPersonnel().filter(function(p){ return p.rendement === true && p.status !== 'inactif'; });
+  var ptData = getPointageData();
+  var presentWorkers = [];
+  workers.forEach(function(w){
+    var rec = ptData.find(function(p){ return p.employee_id === w.id && p.date === day; });
+    if (rec) {
+      var hJ = parseHeure(rec.h_j_manual || '');
+      var hN = parseHeure(rec.h_n_manual || '');
+      if (rec.present === true || hJ > 0 || hN > 0) presentWorkers.push(w);
+    }
+  });
+
+  if (presentWorkers.length === 0) { toast('Aucun travailleur en rendement présent ce jour. Pointez d\'abord les heures.', 'error'); return; }
+
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.date === day; });
+  var grid = document.getElementById('pt-montage-grid');
+  var html = '<div class="card" style="padding:1rem;border:2px solid #7c3aed;border-radius:8px">';
+  html += '<div style="font-weight:800;font-size:.8rem;margin-bottom:.8rem;color:#7c3aed">Journée du ' + day + ' — ' + presentWorkers.length + ' travailleur(s)</div>';
+  html += '<div style="overflow-x:auto"><table style="margin-top:0;font-size:.72rem"><thead><tr><th style="min-width:130px">Employé</th>';
+  selectedArts.forEach(function(art){
+    var am = ams.find(function(a){ return a.code === art; });
+    html += '<th style="text-align:center;min-width:70px">' + escH(art) + '<br><small>' + (am ? fmt(am.prix) : '') + ' F</small></th>';
+  });
+  html += '<th style="text-align:center">Total F</th></tr></thead><tbody>';
+  presentWorkers.forEach(function(wk){
+    html += '<tr><td style="font-weight:700;white-space:nowrap">' + escH(wk.matricule) + ' - ' + escH(wk.nom) + '</td>';
     var rowTotal = 0;
-    html += '<tr>';
-    html += '<td style="position:sticky;left:0;background:#fff;z-index:1;font-weight:700;font-size:.7rem;white-space:nowrap;border-right:2px solid var(--border)">' + escH(wk.matricule) + ' - ' + escH(wk.nom) + '</td>';
+    selectedArts.forEach(function(art){
+      var rec = ptMont.find(function(p){ return p.employee_id === wk.id && p.article_code === art; });
+      var qte = rec ? (rec.quantite || 0) : 0;
+      var am2 = ams.find(function(a){ return a.code === art; });
+      if (qte > 0 && am2) rowTotal += qte * am2.prix;
+      html += '<td style="text-align:center;padding:2px"><input type="text" inputmode="numeric" data-emp="' + wk.id + '" data-date="' + day + '" data-article="' + escH(art) + '" value="' + (qte || '') + '" oninput="ptMontAutoAdvance(this)" onkeydown="ptMontKeyNav(event,this)" onfocus="this.select()" style="width:50px;padding:3px;text-align:center;font-size:.7rem;border:1px solid var(--border);border-radius:4px;' + (qte>0?'background:#f5f3ff;font-weight:700':'') + '"></td>';
+    });
+    html += '<td style="text-align:right;font-weight:700;color:#7c3aed">' + (rowTotal > 0 ? fmt(rowTotal) : '') + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div style="margin-top:.8rem;display:flex;gap:.5rem"><button class="btn" onclick="ptMontValidate(\'' + day + '\')">Valider la journée</button><button class="btn btn-sec" onclick="loadPointageMontage()">Annuler</button></div>';
+  html += '</div>';
+  grid.innerHTML = html;
+}
+function ptMontValidate(day) {
+  savePointageMontage();
+  toast('Journée du ' + day + ' enregistrée', 'success');
+  loadPointageMontage();
+}
+function ptMontShowEtat() {
+  var mois = document.getElementById('pt-mois').value;
+  if (!mois) return;
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var workers = getPersonnel().filter(function(p){ return p.rendement === true; });
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.date.indexOf(mois) === 0; });
+  var etat = document.getElementById('pt-montage-etat');
+  var html = '<div class="card" style="padding:1rem">';
+  html += '<div style="display:flex;gap:1rem;margin-bottom:.8rem;align-items:center">';
+  html += '<div class="form-group" style="margin:0;min-width:200px"><label style="margin:0;font-size:.68rem">Travailleur</label><select id="pt-montage-etat-emp" onchange="ptMontShowEtat()"><option value="">Tous</option>';
+  workers.forEach(function(w){ html += '<option value="' + w.id + '">' + escH(w.matricule) + ' - ' + escH(w.nom) + '</option>'; });
+  html += '</select></div></div>';
+
+  var selEmp = document.getElementById('pt-montage-etat-emp') ? document.getElementById('pt-montage-etat-emp').value : '';
+  var filtered = selEmp ? workers.filter(function(w){ return w.id === selEmp; }) : workers;
+  if (filtered.length === 0) { html += '<div style="color:var(--dim);padding:1rem">Aucun travailleur en rendement</div></div>'; etat.innerHTML = html; return; }
+
+  html += '<div style="overflow-x:auto;max-height:60vh;overflow-y:auto"><table style="margin-top:0;font-size:.68rem">';
+  html += '<thead><tr><th style="position:sticky;top:0;background:#f1f5f9;z-index:2;min-width:130px">Employé</th>';
+  for (var d = 1; d <= daysInMonth; d++) html += '<th style="text-align:center;min-width:36px;font-size:.6rem;padding:2px;position:sticky;top:0;background:#f1f5f9;z-index:2">' + d + '</th>';
+  html += '<th style="text-align:center;min-width:60px;position:sticky;top:0;background:#f1f5f9;z-index:2">Total</th></tr></thead><tbody>';
+
+  filtered.forEach(function(wk){
+    html += '<tr><td style="font-weight:700;font-size:.68rem;white-space:nowrap">' + escH(wk.nom) + '</td>';
+    var total = 0;
     for (var d2 = 1; d2 <= daysInMonth; d2++) {
       var dk = mois + '-' + (d2 < 10 ? '0' : '') + d2;
-      var ptMont = getPointageMontage();
-      var rec = ptMont.find(function(p){ return p.employee_id === wk.id && p.article_code === curArt && p.date === dk; });
-      var qte = rec ? (rec.quantite || 0) : 0;
-      if (qte > 0) rowTotal += qte;
-      html += '<td style="text-align:center;padding:1px"><input type="text" inputmode="numeric" data-emp="' + wk.id + '" data-date="' + dk + '" data-article="' + escH(curArt) + '" value="' + (qte || '') + '" oninput="ptMontAutoAdvance(this)" onkeydown="ptMontKeyNav(event,this)" onfocus="this.select()" style="width:36px;padding:2px;text-align:center;font-size:.65rem;border:1px solid var(--border);border-radius:3px;' + (qte > 0 ? 'background:#f5f3ff;font-weight:700' : '') + '"></td>';
+      var qte = ptMont.filter(function(p){ return p.employee_id === wk.id && p.date === dk; }).reduce(function(s,p){ return s + (p.quantite||0); }, 0);
+      total += qte;
+      html += '<td style="text-align:center;' + (qte>0?'font-weight:700;background:#f5f3ff':'') + '">' + (qte>0?qte:'') + '</td>';
     }
-    html += '<td style="text-align:center;font-weight:700;font-size:.68rem;color:#7c3aed">' + (rowTotal > 0 ? rowTotal : '') + '</td></tr>';
-  }
-  html += '</tbody></table></div>';
-  document.getElementById('pt-montage-container').innerHTML = html;
+    html += '<td style="text-align:center;font-weight:700;color:#7c3aed">' + (total>0?total:'') + '</td></tr>';
+  });
+  html += '</tbody></table></div></div>';
+  etat.innerHTML = html;
 }
 /* Auto-advance: 1 chiffre → pause 800ms, 2 chiffres → immédiat, Entrée → immédiat */
 function ptMontAutoAdvance(input) {
@@ -1841,17 +1917,21 @@ function advanceMontageCell(input) {
 }
 /* ==================== POINTAGE MONTAGE SAVE ==================== */
 function savePointageMontage() {
-  var mois = document.getElementById('pt-mois').value;
-  if (!mois) return;
-  var inputs = document.querySelectorAll('#pt-montage-container input[data-emp]');
-  var allPts = getPointageMontage().filter(function(p){ return p.date.indexOf(mois) !== 0; });
+  var inputs = document.querySelectorAll('#pt-montage-grid input[data-emp]');
+  if (inputs.length === 0) return;
+  var allPts = getPointageMontage();
   inputs.forEach(function(inp){
     var v = parseInt(inp.value) || 0;
     if (v <= 0) return;
-    allPts.push({ id: DB.id(), employee_id: inp.getAttribute('data-emp'), date: inp.getAttribute('data-date'), article_code: inp.getAttribute('data-article'), quantite: v });
+    var empId = inp.getAttribute('data-emp');
+    var date = inp.getAttribute('data-date');
+    var art = inp.getAttribute('data-article');
+    /* Mettre à jour ou ajouter */
+    var idx = allPts.findIndex(function(p){ return p.employee_id === empId && p.date === date && p.article_code === art; });
+    if (idx !== -1) allPts[idx].quantite = v;
+    else allPts.push({ id: DB.id(), employee_id: empId, date: date, article_code: art, quantite: v });
   });
   setPointageMontage(allPts);
-  toast('Pointage montage enregistré', 'success');
 }
 function calcMontageMensuel(empId, mois) {
   var ams = getArticlesMontage();
