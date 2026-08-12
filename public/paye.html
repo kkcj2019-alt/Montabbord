@@ -1440,8 +1440,8 @@ function openEmpModal(id) {
   if (histEl) histEl.innerHTML = '';
   switchEmpTab('infos');
   document.getElementById('modal-emp').classList.add('open');
-  /* Charger les dropdowns après affichage pour qu'ils se rendent correctement */
-  setTimeout(function(){ loadCategories(); loadOrg(); updateEmpTypeFields(); }, 50);
+  /* Charger les dropdowns après affichage */
+  setTimeout(function(){ loadCategories(); loadOrg(); updateEmpTypeFields(); }, 100);
   if (id) editPersonnel(id);
 }
 function closeEmpModal() { document.getElementById('modal-emp').classList.remove('open'); }
@@ -3146,86 +3146,93 @@ function exportDecl() {
 
 /* ==================== CONGES ==================== */
 function loadConges() {
-  /* Remplir le dropdown employés */
-  var sel = document.getElementById('conge-emp');
-  if (sel) {
-    var person = getPersonnelActifs().filter(function(p){ return p.en_paie !== false && empCategorie(p) !== 'externe'; });
-    sel.innerHTML = '<option value="">Sélectionner...</option>' + person.map(function(p){ return '<option value="' + p.id + '">' + escH(p.matricule) + ' - ' + escH(p.nom) + '</option>'; }).join('');
+  renderCongeTable();
+}
+/* Calcule les périodes de congé auto (tous les 12 mois depuis date_entree) */
+function getCongePeriodes(emp) {
+  if (!emp || !emp.date_entree) return [];
+  var periods = [];
+  var sd = new Date(emp.date_entree + 'T00:00:00');
+  var now = new Date();
+  var cur = new Date(sd);
+  var num = 1;
+  while (cur <= now) {
+    var start = cur.getFullYear() + '-' + ((cur.getMonth()+1) < 10 ? '0' : '') + (cur.getMonth()+1);
+    var end = new Date(cur);
+    end.setMonth(end.getMonth() + 11);
+    var endStr = end.getFullYear() + '-' + ((end.getMonth()+1) < 10 ? '0' : '') + (end.getMonth()+1);
+    var sal = getSalaireAuMois(emp, endStr);
+    var congeDu = Math.round(sal / 12 * 12);
+    periods.push({ num: num, debut: start, fin: endStr, conge_du: congeDu });
+    cur.setMonth(cur.getMonth() + 12);
+    num++;
   }
-  renderCongeRecords();
+  return periods;
 }
-function addCongeRecord(e) {
-  e.preventDefault();
-  var empId = document.getElementById('conge-emp').value;
-  var debut = document.getElementById('conge-debut').value;
-  var fin = document.getElementById('conge-fin').value;
-  var jours = parseInt(document.getElementById('conge-jours').value) || 0;
-  var start = document.getElementById('conge-start').value;
-  var comm = document.getElementById('conge-comm').value.trim();
-  if (!empId || !debut || !fin) { toast('Employé et période requis', 'error'); return; }
-  var recs = getCongeRecords();
-  recs.push({ id: DB.id(), employee_id: empId, debut_periode: debut, fin_periode: fin, duree_jours: jours, debut_conge: start, commentaire: comm, paiements: [] });
-  setCongeRecords(recs);
-  document.getElementById('conge-debut').value = ''; document.getElementById('conge-fin').value = '';
-  document.getElementById('conge-jours').value = '0'; document.getElementById('conge-start').value = '';
-  document.getElementById('conge-comm').value = '';
-  renderCongeRecords(); toast('Période de congé ajoutée', 'success');
+function getCongePeriodePaye(empId, debut, fin) {
+  var recs = getCongeRecords().filter(function(r){ return r.employee_id === empId && r.debut_periode === debut && r.fin_periode === fin; });
+  var total = 0;
+  recs.forEach(function(r){ if (r.paiements) r.paiements.forEach(function(p){ total += p.montant || 0; }); });
+  return total;
 }
-function renderCongeRecords() {
-  var recs = getCongeRecords();
-  var person = getPersonnel();
+function renderCongeTable() {
+  var person = getPersonnelActifs().filter(function(p){ return p.en_paie !== false && empCategorie(p) !== 'externe'; });
   var container = document.getElementById('conge-records-list');
-  if (recs.length === 0) { container.innerHTML = '<div style="color:var(--dim);padding:1rem;text-align:center">Aucun congé enregistré</div>'; return; }
-  recs.sort(function(a,b){ return (a.debut_periode||'').localeCompare(b.debut_periode||''); });
-  var html = '';
-  recs.forEach(function(r, ri){
-    var emp = person.find(function(p){ return p.id === r.employee_id; });
-    var empName = emp ? escH(emp.matricule + ' - ' + escH(emp.nom)) : r.employee_id;
-    var sal = emp ? getSalaireAuMois(emp, r.fin_periode || r.debut_periode) : 0;
-    var congeDu = Math.round(sal / 12 * 12); // 12 mois = 1 mois de salaire
-    var totalPaye = (r.paiements||[]).reduce(function(s,p){ return s + (p.montant||0); }, 0);
-    var solde = congeDu - totalPaye;
-    html += '<div class="card" style="padding:.8rem;margin-bottom:.5rem;border-left:4px solid ' + (solde <= 0 ? 'var(--green)' : 'var(--orange)') + '">';
-    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem;flex-wrap:wrap">';
-    html += '<div><strong>' + empName + '</strong> — Période : ' + escH(r.debut_periode) + ' → ' + escH(r.fin_periode) + (r.duree_jours > 0 ? ' (' + r.duree_jours + ' jours)' : '') + (r.debut_conge ? ' | Début : ' + r.debut_conge : '') + (r.commentaire ? ' | ' + escH(r.commentaire) : '') + '</div>';
-    html += '<div style="font-weight:700;font-size:.8rem">Dû : ' + fmt(congeDu) + ' F | Payé : ' + fmt(totalPaye) + ' F | <span style="color:' + (solde <= 0 ? 'var(--green)' : 'var(--danger)') + '">Solde : ' + fmt(solde) + ' F</span></div></div>';
-    html += '<div style="display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:.4rem">';
-    html += '<input type="number" id="conge-pmt-' + ri + '" min="0" placeholder="Montant" style="max-width:100px;padding:3px 6px;font-size:.7rem;border:1px solid var(--border);border-radius:4px">';
-    html += '<input type="month" id="conge-pmois-' + ri + '" style="max-width:130px;padding:3px 6px;font-size:.7rem;border:1px solid var(--border);border-radius:4px">';
-    html += '<input type="text" id="conge-pcomm-' + ri + '" placeholder="Commentaire" style="flex:1;min-width:120px;padding:3px 6px;font-size:.7rem;border:1px solid var(--border);border-radius:4px">';
-    html += '<button class="btn" style="padding:3px 10px;font-size:.7rem" onclick="addCongePaiement(' + ri + ')">Payer</button>';
-    html += '<button class="btn btn-red" style="padding:3px 8px;font-size:.65rem" onclick="delCongeRecord(' + ri + ')">Suppr</button></div>';
-    /* Historique des paiements */
-    if (r.paiements && r.paiements.length > 0) {
-      html += '<div style="font-size:.68rem;color:var(--dim);margin-top:4px">Paiements : ';
-      r.paiements.forEach(function(p, pi){
-        html += '<span style="background:#f0fdf4;padding:2px 6px;border-radius:4px;margin:2px">' + escH(p.mois) + ' : ' + fmt(p.montant||0) + ' F' + (p.commentaire ? ' (' + escH(p.commentaire) + ')' : '') + ' <a href="#" onclick="event.preventDefault();removeCongePaiement(' + ri + ',' + pi + ')" style="color:var(--danger)">x</a></span>';
-      });
-      html += '</div>';
-    }
-    html += '</div>';
+  var html = '<div class="card" style="padding:0;overflow-x:auto"><table style="font-size:.7rem"><thead><tr><th>Employé</th><th>Entrée</th><th>Congé</th><th>Période</th><th style="text-align:right">Salaire Base</th><th style="text-align:right">Congé Dû</th><th style="text-align:right">Déjà Payé</th><th style="text-align:right">Solde</th></tr></thead><tbody>';
+  var hasData = false;
+  person.forEach(function(emp){
+    var periods = getCongePeriodes(emp);
+    if (periods.length === 0) return;
+    hasData = true;
+    periods.forEach(function(per, pi){
+      var paye = getCongePeriodePaye(emp.id, per.debut, per.fin);
+      var solde = per.conge_du - paye;
+      html += '<tr>';
+      if (pi === 0) html += '<td rowspan="' + periods.length + '" style="font-weight:700;white-space:nowrap">' + escH(emp.matricule) + ' - ' + escH(emp.nom) + '</td><td rowspan="' + periods.length + '">' + fmtDate(emp.date_entree) + '</td>';
+      html += '<td style="font-weight:700">Congé ' + per.num + '</td>';
+      html += '<td>' + escH(per.debut) + ' → ' + escH(per.fin) + '</td>';
+      html += '<td style="text-align:right">' + fmt(getSalaireAuMois(emp, per.fin)) + '</td>';
+      html += '<td style="text-align:right;font-weight:700;color:var(--green)">' + fmt(per.conge_du) + '</td>';
+      html += '<td style="text-align:right">' + (paye > 0 ? fmt(paye) : '') + '</td>';
+      html += '<td style="text-align:right;font-weight:700;color:' + (solde <= 0 ? 'var(--green)' : 'var(--danger)') + '">' + (solde > 0 ? fmt(solde) : 'Soldé') + '</td></tr>';
+    });
   });
+  html += '</tbody></table></div>';
+  if (!hasData) html = '<div style="color:var(--dim);padding:1rem;text-align:center">Aucun employé</div>';
+
+  /* Formulaire de paiement rapide */
+  html += '<div class="card" style="padding:1rem;margin-top:.5rem;background:#f8fafc"><form onsubmit="addCongePaiementQuick(event)" style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:flex-end">';
+  html += '<div class="form-group" style="margin:0;min-width:180px"><label style="font-size:.65rem">Employé</label><select id="conge-q-emp" required style="padding:4px">' + person.map(function(p){ return '<option value="' + p.id + '">' + escH(p.matricule) + ' - ' + escH(p.nom) + '</option>'; }).join('') + '</select></div>';
+  html += '<div class="form-group" style="margin:0;max-width:130px"><label style="font-size:.65rem">Montant</label><input type="number" id="conge-q-montant" min="0" required style="padding:4px"></div>';
+  html += '<div class="form-group" style="margin:0;max-width:130px"><label style="font-size:.65rem">Mois de paie</label><input type="month" id="conge-q-mois" style="padding:4px"></div>';
+  html += '<div class="form-group" style="margin:0;flex:1;min-width:150px"><label style="font-size:.65rem">Commentaire</label><input type="text" id="conge-q-comm" style="padding:4px" placeholder="ex: 1ère tranche"></div>';
+  html += '<button class="btn" style="padding:4px 10px;font-size:.7rem">Payer</button></form></div>';
   container.innerHTML = html;
 }
-function addCongePaiement(ri) {
-  var montant = parseFloat(document.getElementById('conge-pmt-' + ri).value) || 0;
-  var mois = document.getElementById('conge-pmois-' + ri).value;
-  var comm = document.getElementById('conge-pcomm-' + ri).value.trim();
-  if (!montant || !mois) { toast('Montant et mois requis', 'error'); return; }
+function addCongePaiementQuick(e) {
+  e.preventDefault();
+  var empId = document.getElementById('conge-q-emp').value;
+  var montant = parseFloat(document.getElementById('conge-q-montant').value) || 0;
+  var mois = document.getElementById('conge-q-mois').value;
+  var comm = document.getElementById('conge-q-comm').value.trim();
+  if (!empId || !montant || !mois) { toast('Remplissez tous les champs', 'error'); return; }
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  var periods = getCongePeriodes(emp);
+  /* Trouver la période active la plus récente avec solde > 0 */
+  var target = null;
+  for (var i = periods.length - 1; i >= 0; i--) {
+    var solde = periods[i].conge_du - getCongePeriodePaye(empId, periods[i].debut, periods[i].fin);
+    if (solde > 0) { target = periods[i]; break; }
+  }
+  if (!target) { toast('Tous les congés sont soldés pour cet employé', 'error'); return; }
   var recs = getCongeRecords();
-  if (!recs[ri].paiements) recs[ri].paiements = [];
-  recs[ri].paiements.push({ mois: mois, montant: montant, commentaire: comm });
+  var existing = recs.find(function(r){ return r.employee_id === empId && r.debut_periode === target.debut; });
+  if (!existing) { existing = { id: DB.id(), employee_id: empId, debut_periode: target.debut, fin_periode: target.fin, duree_jours: 0, commentaire: '', paiements: [] }; recs.push(existing); }
+  if (!existing.paiements) existing.paiements = [];
+  existing.paiements.push({ mois: mois, montant: montant, commentaire: comm });
   setCongeRecords(recs);
-  renderCongeRecords(); toast('Paiement enregistré', 'success');
-}
-function removeCongePaiement(ri, pi) {
-  var recs = getCongeRecords();
-  if (recs[ri] && recs[ri].paiements) recs[ri].paiements.splice(pi, 1);
-  setCongeRecords(recs);
-  renderCongeRecords();
-}
-function delCongeRecord(ri) {
-  var recs = getCongeRecords(); recs.splice(ri, 1); setCongeRecords(recs); renderCongeRecords();
+  document.getElementById('conge-q-montant').value = ''; document.getElementById('conge-q-comm').value = '';
+  renderCongeTable(); toast('Paiement enregistré sur Congé ' + target.num, 'success');
 }
 function switchCongeTab(tab) {
   document.querySelectorAll('#conges .tab-pills button').forEach(function(b){ b.classList.remove('active'); });
@@ -3239,13 +3246,14 @@ function loadGratif() {
   var personnel = getPersonnelActifs().filter(function(p){ return p.en_paie !== false; });
   var year = new Date().getFullYear();
   var moisNoms = ['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Aoû','Sep','Oct','Nov','Déc'];
-  var titulaires = [], journaliers = [];
+  var titulaires = [], journaliers = [], externes = [];
   personnel.forEach(function(emp){
     var cat = empCategorie(emp);
     var moisSal = [];
     for (var m = 1; m <= 12; m++) {
       var sal = getSalaireAuMois(emp, year + '-' + (m < 10 ? '0' : '') + m);
       if (cat === 'journalier') sal = Math.min(sal, 75000);
+      if (cat === 'externe') sal = 0;
       moisSal.push(sal);
     }
     var sum = moisSal.reduce(function(a,b){ return a+b; }, 0);
@@ -3254,6 +3262,7 @@ function loadGratif() {
     var verse = getGratif(emp.id, year + '-12');
     var rec = { emp: emp, moisSal: moisSal, moy: moy, calc: calc, verse: verse };
     if (cat === 'journalier') journaliers.push(rec);
+    else if (cat === 'externe') externes.push(rec);
     else titulaires.push(rec);
   });
 
@@ -3275,6 +3284,7 @@ function loadGratif() {
   }
   renderGroup('Titulaires', titulaires);
   renderGroup('Journaliers (plafond 75 000 F)', journaliers);
+  renderGroup('Prestataires externes', externes);
   document.getElementById('gratif-tables').innerHTML = html || '<div style="color:var(--dim);padding:1rem">Aucun employé</div>';
 }
 function setGratifUI2(empId, mois, val) {
