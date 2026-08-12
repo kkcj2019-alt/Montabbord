@@ -681,13 +681,24 @@ function startRealtimeSync() {
   payeSnapshotUnsub = firebaseDbP.collection('enterprises').doc(uid).onSnapshot(function(doc) {
     if (!doc.exists) return;
     var data = doc.data();
+    var prevPaye = JSON.stringify(getPayeData() || {});
+    var prevEmps = JSON.stringify(DB.getMain('mdb_employes') || []);
     if (data.mdb_employes) DB.setMain('mdb_employes', data.mdb_employes);
     if (data.mdb_acomptesPrets) DB.setMain('mdb_acomptesPrets', data.mdb_acomptesPrets);
     if (data.mdb_entreprise && data.mdb_entreprise.nom) DB.setMain('mdb_entreprise', data.mdb_entreprise);
     if (data[PAYE_KEY] && typeof data[PAYE_KEY] === 'object' && !Array.isArray(data[PAYE_KEY])) DB.setMain(PAYE_KEY, data[PAYE_KEY]);
     syncFromMain();
+    var payeChanged = JSON.stringify(getPayeData() || {}) !== prevPaye;
+    var empsChanged = JSON.stringify(DB.getMain('mdb_employes') || []) !== prevEmps;
+    /* Écho de notre propre écriture (rien de neuf) : ne pas re-rendre, sinon le curseur saute */
+    if (!payeChanged && !empsChanged) return;
     var sec = localStorage.getItem('paye_currentSection');
-    if (sec) showSection(sec);
+    if (!sec) return;
+    /* Pendant la saisie d'une case du pointage, ne pas détruire le focus */
+    var ptc = document.getElementById('pt-container');
+    var ae = document.activeElement;
+    if (sec === 'pointage' && ptc && ae && ptc.contains(ae)) return;
+    showSection(sec);
   }, function(e) { console.warn('[Paye] Realtime sync error:', e); });
 }
 
@@ -1424,7 +1435,7 @@ function fillEmpSelects() {
   var empList = document.getElementById('pt-emp-list');
   if (empList && selected !== 'Toutes les fonctions') {
     empList.innerHTML = ptFiltered.map(function(p){
-      return '<button class="btn-sec" style="padding:4px 10px;font-size:.7rem;white-space:nowrap" onclick="document.getElementById(\'pt-select-emp\').value=\'' + p.id + '\';if(ptCurrentTab===\'montage\')loadPointageMontage();else loadPointage()">' + escH(p.nom) + ' ' + escH(p.prenoms||'') + '</button>';
+      return '<button class="btn-sec" style="padding:4px 10px;font-size:.7rem;white-space:nowrap" title="' + escH(p.matricule) + ' - ' + escH(p.nom) + ' ' + escH(p.prenoms||'') + '" onclick="document.getElementById(\'pt-select-emp\').value=\'' + p.id + '\';if(ptCurrentTab===\'montage\')loadPointageMontage();else loadPointage()">' + escH(p.nom) + '</button>';
     }).join('');
   } else if (empList) {
     empList.innerHTML = '';
@@ -1706,12 +1717,13 @@ function loadPointage() {
     html += '<button class="btn btn-sec" style="padding:4px 12px" onclick="clearPointageMois()">Effacer le mois</button>';
     html += '</div>';
   }
-  html += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:1rem">Mode : <strong>' + (isForfait ? 'Forfait (173,33 h)' : 'Journalier') + '</strong> — Format : <strong>' + (fmtH ? 'Heure:minute (7h30)' : 'Décimal (7.5)') + '</strong>. Heures suppl. CI : 40h/sem normales, 41-46h = +15%, 47h+ = +50%, Nuit = +75%, Dimanche jour = +75%, Dimanche nuit = +100%.</div>';
+  html += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:1rem">Mode : <strong>' + (isForfait ? 'Forfait (173,33 h)' : 'Journalier') + '</strong> — Format : <strong>' + (fmtH ? 'Heure:minute (7h30)' : 'Décimal (7.5)') + '</strong>. Heures suppl. CI : 40h/sem normales, 41-46h = +15%, 47h+ = +50%, Nuit = +75%, Dimanche jour = +75%, Dimanche nuit = +100%.' + (showObs ? ' <span style="color:#16a34a;font-weight:700">R</span> (colonne Obs) = jour de rendement (montage pointé) : vous pouvez y ajouter des heures en plus si besoin.' : '') + '</div>';
   html += '<div style="margin-bottom:1rem;padding:.6rem .9rem;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;font-size:.78rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="font-weight:700">Prime du mois (FCFA)</label><input type="number" id="pt-prime" min="0" step="500" value="' + getPrimeMois(empId, mois) + '" onchange="setPrimeMoisUI(this)" style="max-width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:6px"></div>';
-  /* Précharger les données montage pour afficher "R" */
+  /* Précharger les données montage pour afficher "R" dans la colonne Obs */
   var ptMontageData = getPointageMontage().filter(function(p){ return p.employee_id === empId && p.date.indexOf(mois) === 0; });
   var montageDays = {};
   ptMontageData.forEach(function(p){ montageDays[p.date] = true; });
+  var showObs = Object.keys(montageDays).length > 0;
   /* ---------- ONGLETS SEMAINES ---------- */
   var jours = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
   var firstDow = (new Date(year, mIdx, 1).getDay() + 6) % 7;
@@ -1739,7 +1751,7 @@ function loadPointage() {
     var wk = weeks[w2];
     var disp = w2 === 0 ? '' : 'none';
     html += '<div class="pt-week" id="pt-week-' + w2 + '" style="display:' + disp + '">';
-    html += '<table style="min-width:500px;margin-top:0"><thead><tr><th style="width:50px">Date</th><th>Jour</th>' + (isJ ? '<th style="width:70px">Présent</th>' : '') + '<th style="width:120px">H. Jour</th><th style="width:120px">H. Nuit</th><th style="width:90px">Total</th></tr></thead><tbody>';
+    html += '<table style="min-width:500px;margin-top:0"><thead><tr><th style="width:50px">Date</th><th>Jour</th>' + (showObs ? '<th style="width:45px" title="Rendement (montage)">Obs</th>' : '') + (isJ ? '<th style="width:70px">Présent</th>' : '') + '<th style="width:120px">H. Jour</th><th style="width:120px">H. Nuit</th><th style="width:90px">Total</th></tr></thead><tbody>';
     for (var di = 0; di < wk.days.length; di++) {
       var day = wk.days[di];
       var rec = pts.find(function(p){ return p.employee_id === empId && p.date === day.dk; }) || {};
@@ -1750,25 +1762,21 @@ function loadPointage() {
       var dispJ = rawJ;
       var dispN = rawN;
       var present = rec.present === true;
-      if (tJ > 0 || tN > 0) { mJours++; wk.wkPres++; }
-      if (present || tJ > 0 || tN > 0) mPres++;
       wk.wkHJ += tJ; wk.wkHN += tN; mHJ += tJ; mHN += tN;
       html += '<tr' + (isDim ? ' style="background:#fff7ed"' : '') + '>';
       html += '<td>' + day.d + '</td><td>' + jours[day.dow] + (isDim ? ' <span class="pill pill-red">Dim</span>' : '') + '</td>';
-      if (isJ) html += '<td style="text-align:center"><input type="checkbox" data-date="' + day.dk + '" data-field="present"' + (present ? ' checked' : '') + ' onchange="savePointage()" style="width:16px;height:16px"></td>';
       var hasMontage = montageDays[day.dk] === true;
-      if (hasMontage && tJ === 0 && tN === 0 && !present) {
-        mPres++; wk.wkPres++;
-        if (isJ) html += '<td style="text-align:center"><span style="color:#16a34a;font-weight:700">R</span></td>';
-        html += '<td style="text-align:center;font-weight:700;color:#16a34a;font-size:.8rem">R</td>';
-      } else {
-        html += '<td><input type="text" data-date="' + day.dk + '" data-field="h_j_manual" value="' + escH(dispJ) + '" onchange="savePointage()" onblur="ptBlurFormat(this);savePointage()" onkeydown="ptKeyNav(event)" placeholder="" style="max-width:110px;text-align:center;font-weight:700"></td>';
-      }
+      var hasHours = tJ > 0 || tN > 0;
+      if (hasHours) mJours++;
+      if (hasHours || hasMontage || present) { mPres++; wk.wkPres++; }
+      if (showObs) html += '<td style="text-align:center"><span style="color:#16a34a;font-weight:700;font-size:.75rem">' + (hasMontage ? 'R' : '') + '</span></td>';
+      if (isJ) html += '<td style="text-align:center"><input type="checkbox" data-date="' + day.dk + '" data-field="present"' + (present ? ' checked' : '') + ' onchange="savePointage()" style="width:16px;height:16px"></td>';
+      html += '<td><input type="text" data-date="' + day.dk + '" data-field="h_j_manual" value="' + escH(dispJ) + '" onchange="savePointage()" onblur="ptBlurFormat(this);savePointage()" onkeydown="ptKeyNav(event)" placeholder="" style="max-width:110px;text-align:center;font-weight:700"></td>';
       html += '<td><input type="text" data-date="' + day.dk + '" data-field="h_n_manual" value="' + escH(dispN) + '" onchange="savePointage()" onblur="ptBlurFormat(this);savePointage()" onkeydown="ptKeyNav(event)" placeholder="" style="max-width:110px;text-align:center;font-weight:700"></td>';
       html += '<td style="text-align:center;font-weight:700;color:' + ((tJ + tN) > 8 ? 'var(--danger)' : 'var(--green)') + '">' + ((tJ + tN) > 0 ? (tJ + tN).toFixed(1) + 'h' : '-') + '</td>';
       html += '</tr>';
     }
-    html += '<tr style="background:#f8fafc;font-weight:800;border-top:1px solid var(--border)"><td colspan="' + (isJ ? 3 : 2) + '" style="text-align:right;font-size:.75rem;color:var(--dim)">Sous-total ' + wk.label + ' (' + wk.wkPres + 'j)</td>' + (isJ ? '<td></td>' : '') + '<td style="text-align:center">' + wk.wkHJ.toFixed(1) + 'h</td><td style="text-align:center">' + wk.wkHN.toFixed(1) + 'h</td><td style="text-align:center">' + (wk.wkHJ + wk.wkHN).toFixed(1) + 'h</td></tr>';
+    html += '<tr style="background:#f8fafc;font-weight:800;border-top:1px solid var(--border)"><td colspan="' + (2 + (showObs ? 1 : 0) + (isJ ? 1 : 0)) + '" style="text-align:right;font-size:.75rem;color:var(--dim)">Sous-total ' + wk.label + ' (' + wk.wkPres + 'j)</td><td style="text-align:center">' + wk.wkHJ.toFixed(1) + 'h</td><td style="text-align:center">' + wk.wkHN.toFixed(1) + 'h</td><td style="text-align:center">' + (wk.wkHJ + wk.wkHN).toFixed(1) + 'h</td></tr>';
     html += '</tbody></table></div>';
   }
   /* RECAP */
@@ -1916,17 +1924,22 @@ function loadPointageMontage() {
   html += '<div class="card" style="padding:1rem;margin-bottom:1rem;background:#f8fafc">';
   html += '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.8rem">';
   html += '<div class="form-group" style="margin:0;max-width:150px"><label style="margin:0;font-size:.68rem">Jour</label><input type="date" id="pt-montage-day" value="' + today + '" min="' + mois + '-01" max="' + mois + '-' + daysInMonth + '" style="padding:6px"></div>';
-  html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Articles</label><div style="display:flex;gap:8px;flex-wrap:wrap;padding-top:4px">';
+  html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Articles <a href="#" onclick="event.preventDefault();document.querySelectorAll(\'.pt-montage-art\').forEach(function(c){c.checked=true});ptMontSelCount();return false" style="font-size:.6rem;color:var(--blue)">(tout cocher)</a></label>';
+  html += '<input type="text" id="pt-montage-art-search" placeholder="Rechercher un article (auto-complétion)... (ex : PAL80, tablette, 120)" oninput="ptMontFilterArts(this.value)" style="width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:.72rem;margin-bottom:4px;box-sizing:border-box">';
+  html += '<div id="pt-montage-arts" style="display:flex;gap:6px;flex-wrap:wrap;padding-top:2px;max-height:96px;overflow-y:auto">';
   ams.forEach(function(a,i){
-    html += '<label style="display:flex;align-items:center;gap:3px;font-size:.72rem;cursor:pointer;padding:4px 8px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '" style="width:14px;height:14px"> ' + escH(a.code) + '</label>';
+    var lbl = (escH(a.code) + ' ' + escH(a.designation || '')).trim();
+    html += '<label data-search="' + lbl.toLowerCase() + '" style="display:flex;align-items:center;gap:3px;font-size:.7rem;cursor:pointer;padding:3px 7px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '" style="width:13px;height:13px"> ' + escH(a.code) + '</label>';
   });
-  html += '</div></div>';
+  html += '</div><div style="font-size:.6rem;color:var(--dim);padding-top:2px"><span id="pt-montage-art-count"></span></div></div>';
   /* Travailleurs en rendement : sélection manuelle */
   var rendWorkers = getPersonnel().filter(function(p){ return p.rendement === true && p.status !== 'inactif'; });
   if (rendWorkers.length > 0) {
-    html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Travailleurs <a href="#" onclick="event.preventDefault();document.querySelectorAll(\'.pt-montage-emp\').forEach(function(c){c.checked=true});return false" style="font-size:.6rem;color:var(--blue)">(tout cocher)</a></label><div style="display:flex;gap:6px;flex-wrap:wrap;padding-top:4px;max-height:120px;overflow-y:auto">';
+    html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Travailleurs <a href="#" onclick="event.preventDefault();document.querySelectorAll(\'.pt-montage-emp\').forEach(function(c){c.checked=true});ptMontSelCount();return false" style="font-size:.6rem;color:var(--blue)">(tout cocher)</a> <span id="pt-montage-emp-count" style="font-size:.6rem;color:var(--dim)"></span></label>';
+    html += '<input type="text" id="pt-montage-emp-search" placeholder="Rechercher un travailleur (auto-complétion)... (ex : matricule, nom)" oninput="ptMontFilterEmps(this.value)" style="width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:.72rem;margin-bottom:4px;box-sizing:border-box">';
+    html += '<div id="pt-montage-emps" style="display:flex;gap:5px;flex-wrap:wrap;padding-top:2px;max-height:120px;overflow-y:auto">';
     rendWorkers.forEach(function(w){
-      html += '<label style="display:flex;align-items:center;gap:3px;font-size:.7rem;cursor:pointer;padding:3px 6px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-emp" value="' + w.id + '" checked style="width:14px;height:14px"> ' + escH(w.nom) + '</label>';
+      html += '<label data-search="' + (escH(w.matricule||'') + ' ' + escH(w.nom) + ' ' + escH(w.prenoms||'')).toLowerCase() + '" style="display:flex;align-items:center;gap:3px;font-size:.68rem;cursor:pointer;padding:2px 6px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-emp" value="' + w.id + '" checked style="width:13px;height:13px"> ' + escH(w.nom) + '</label>';
     });
     html += '</div></div>';
   }
@@ -1941,6 +1954,38 @@ function loadPointageMontage() {
 
   document.getElementById('pt-montage-container').innerHTML = html;
   ptMontShowEtat();
+  ptMontSelCount();
+}
+/* Filtre (auto-complétion) des articles à cocher dans le Montage */
+function ptMontFilterArts(q) {
+  q = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.pt-montage-art').forEach(function(cb) {
+    var lbl = cb.closest('label');
+    if (!lbl) return;
+    lbl.style.display = (!q || (lbl.getAttribute('data-search') || '').indexOf(q) !== -1) ? '' : 'none';
+  });
+  ptMontSelCount();
+}
+/* Filtre (auto-complétion) des travailleurs à cocher dans le Montage */
+function ptMontFilterEmps(q) {
+  q = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.pt-montage-emp').forEach(function(cb) {
+    var lbl = cb.closest('label');
+    if (!lbl) return;
+    lbl.style.display = (!q || (lbl.getAttribute('data-search') || '').indexOf(q) !== -1) ? '' : 'none';
+  });
+  ptMontSelCount();
+}
+/* Compteur de sélections (articles / travailleurs) dans le Montage */
+function ptMontSelCount() {
+  var na = document.querySelectorAll('.pt-montage-art:checked').length;
+  var ta = document.querySelectorAll('.pt-montage-art').length;
+  var ca = document.getElementById('pt-montage-art-count');
+  if (ca) ca.textContent = na + '/' + ta + ' article(s) sélectionné(s)';
+  var ne = document.querySelectorAll('.pt-montage-emp:checked').length;
+  var te = document.querySelectorAll('.pt-montage-emp').length;
+  var ce = document.getElementById('pt-montage-emp-count');
+  if (ce) ce.textContent = '(' + ne + '/' + te + ' coché(s))';
 }
 function ptMontStart() {
   var day = document.getElementById('pt-montage-day').value;
@@ -2076,11 +2121,12 @@ function ptMontShowEtat() {
       for (var d2 = 1; d2 <= daysInMonth; d2++) {
         var dk = mois + '-' + (d2 < 10 ? '0' : '') + d2;
         var dayEntries = ptMont.filter(function(p){ return p.employee_id === wk.id && p.date === dk; });
-        var cellText = '';
+        var cellText = '', cellHtml = '';
         if (dayEntries.length > 0) {
           cellText = dayEntries.map(function(pe){ return escH(pe.article_code) + '=' + (pe.quantite||0); }).join(' ');
+          cellHtml = dayEntries.map(function(pe){ return '<div style="line-height:1.25;white-space:nowrap">' + escH(pe.article_code) + '=<b>' + (pe.quantite||0) + '</b></div>'; }).join('');
         }
-        html += '<td style="text-align:center;font-size:.6rem;padding:1px;' + (cellText?'background:#f5f3ff;font-weight:600':'color:var(--dim)') + '" title="' + escH(cellText) + '">' + (cellText || '') + '</td>';
+        html += '<td style="text-align:center;font-size:.55rem;padding:1px 2px;' + (cellText?'background:#f5f3ff':'color:var(--dim)') + '" title="' + escH(cellText) + '">' + (cellHtml || '') + '</td>';
       }
       html += '</tr>';
     });
@@ -2183,6 +2229,9 @@ function ptMontKeyNav(e, input) {
 }
 function advanceMontageCell(input) {
   clearTimeout(input._ptTimer);
+  /* Si l'onglet Montage n'est plus visible, ne pas déplacer le curseur */
+  var mc = document.getElementById('pt-montage-container');
+  if (mc && mc.style.display === 'none') return;
   var td = input.parentNode;
   var nextTd = td.nextElementSibling;
   if (nextTd) {
