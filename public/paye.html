@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Traitement Salaire - Module Paie</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="firebase-sdk/firebase-app-compat.js"></script>
 <script src="firebase-sdk/firebase-auth-compat.js"></script>
 <script src="firebase-sdk/firebase-firestore-compat.js"></script>
@@ -470,6 +472,7 @@ table.lp-table th{font-size:.54rem;position:sticky;top:0;z-index:3}
 <div style="display:flex;gap:.5rem;flex-wrap:wrap">
 <button class="btn btn-sec" onclick="printPersonnel()">Imprimer</button>
 <button class="btn btn-sec" onclick="exportPersonnel()">Export CSV</button>
+<button class="btn btn-sec" onclick="openImportPersonnel()">📥 Importer Personnel</button>
 <button class="btn" onclick="openEmpModal()">+ Nouvel Employé</button>
 </div>
 </div>
@@ -2253,6 +2256,427 @@ function exportPersonnel() {
   a.href = URL.createObjectURL(blob);
   a.download = 'liste_personnel.csv';
   a.click();
+}
+
+/* ==================== IMPORT PERSONNEL ==================== */
+var _importPersData = [];
+var _importPersCols = {};
+
+function openImportPersonnel() {
+  _importPersData = [];
+  _importPersCols = {};
+  var overlay = document.createElement('div');
+  overlay.id = 'import-pers-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  var modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--surface);border-radius:12px;width:95vw;max-width:1100px;max-height:90vh;overflow:auto;padding:1.2rem;box-shadow:0 20px 60px rgba(0,0,0,.3)';
+  modal.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem"><h2 style="font-size:1rem;margin:0">Importer Personnel (Excel / PDF)</h2><button class="btn btn-sec" onclick="closeImportPersonnel()" style="padding:4px 10px">✕ Fermer</button></div>' +
+    '<div id="import-pers-dropzone" style="border:2px dashed var(--border);border-radius:10px;padding:2rem;text-align:center;margin-bottom:1rem;cursor:pointer;transition:border-color .2s" ondragover="event.preventDefault();this.style.borderColor=\'var(--orange)\'" ondragleave="this.style.borderColor=\'var(--border)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';handleImportPersonnelFile(event.dataTransfer.files)" onclick="document.getElementById(\'import-pers-fileinput\').click()">' +
+    '<div style="font-size:2rem;margin-bottom:.5rem">📄</div>' +
+    '<div style="font-size:.85rem;font-weight:600">Glissez un fichier Excel (.xlsx) ou PDF ici</div>' +
+    '<div style="font-size:.7rem;color:var(--dim);margin-top:.3rem">ou cliquez pour sélectionner un fichier</div>' +
+    '<input type="file" id="import-pers-fileinput" accept=".xlsx,.xls,.csv,.pdf" style="display:none" onchange="handleImportPersonnelFile(this.files)">' +
+    '</div>' +
+    '<div id="import-pers-content"></div>';
+  overlay.appendChild(modal);
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) closeImportPersonnel(); });
+  document.body.appendChild(overlay);
+}
+
+function closeImportPersonnel() {
+  var o = document.getElementById('import-pers-overlay');
+  if (o) o.remove();
+}
+
+function handleImportPersonnelFile(files) {
+  if (!files || !files.length) return;
+  var file = files[0];
+  var name = file.name.toLowerCase();
+  if (name.match(/\.pdf$/)) {
+    handleImportPersonnelPDF(file);
+  } else {
+    handleImportPersonnelExcel(file);
+  }
+}
+
+function handleImportPersonnelExcel(file) {
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var wb = XLSX.read(e.target.result, {type: 'array'});
+      var ws = wb.Sheets[wb.SheetNames[0]];
+      var rows = XLSX.utils.sheet_to_json(ws, {header: 1, defval: ''});
+      parseImportPersonnelRows(rows, file.name);
+    } catch(err) { console.error(err); toast('Erreur lecture Excel: ' + err.message, 'error'); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function handleImportPersonnelPDF(file) {
+  if (typeof pdfjsLib === 'undefined') { toast('pdf.js non chargé', 'error'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      pdfjsLib.getDocument(new Uint8Array(e.target.result)).promise.then(function(pdf) {
+        var allText = [];
+        var pending = [];
+        for (var i = 1; i <= pdf.numPages; i++) {
+          pending.push(pdf.getPage(i).then(function(page) {
+            return page.getTextContent().then(function(tc) {
+              var lines = {};
+              tc.items.forEach(function(item) {
+                var y = Math.round(item.transform[5]);
+                if (!lines[y]) lines[y] = '';
+                lines[y] += item.str + ' ';
+              });
+              var sorted = Object.keys(lines).sort(function(a,b){ return b-a; });
+              sorted.forEach(function(y){ allText.push(lines[y].trim()); });
+            });
+          }));
+        }
+        Promise.all(pending).then(function() {
+          var rows = allText.map(function(line){ return line.split(/\s{2,}/); });
+          parseImportPersonnelRows(rows, file.name);
+        });
+      });
+    } catch(err) { console.error(err); toast('Erreur lecture PDF: ' + err.message, 'error'); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function parseImportPersonnelRows(rows, fileName) {
+  if (!rows || rows.length < 2) { toast('Fichier vide ou sans données', 'error'); return; }
+  var headerIdx = 0;
+  var header = rows[0].map(function(h){ return String(h).toLowerCase().trim(); });
+  for (var i = 0; i < Math.min(rows.length, 10); i++) {
+    var candidate = rows[i].map(function(h){ return String(h).toLowerCase().trim(); });
+    var matches = 0;
+    var keywords = ['nom','prénom','prenom','prenom','matricule','salaire','cnps','banque','enfant','fonction','date','sexe','genre','email','téléphone','telephone','cmu','nbre','nombre'];
+    candidate.forEach(function(c){ keywords.forEach(function(k){ if (c.indexOf(k) >= 0) matches++; }); });
+    if (matches >= 2) { header = candidate; headerIdx = i; break; }
+  }
+  _importPersCols = detectPersonnelColumns(header);
+  _importPersData = [];
+  for (var j = headerIdx + 1; j < rows.length; j++) {
+    var row = rows[j];
+    if (!row || row.length < 2) continue;
+    var allEmpty = true;
+    row.forEach(function(c){ if (String(c).trim()) allEmpty = false; });
+    if (allEmpty) continue;
+    var emp = mapPersonnelRow(row, _importPersCols);
+    emp._rowIdx = j;
+    emp._matches = findMatchingEmployees(emp);
+    _importPersData.push(emp);
+  }
+  renderImportPersonnelPreview(fileName);
+}
+
+function detectPersonnelColumns(header) {
+  var cols = {};
+  var map = {
+    nom: ['nom','surname','last name','name','employee name','employe'],
+    prenoms: ['prénom','prenom','pre nom','first name','prénoms','prénoms','second name','middle name'],
+    matricule: ['matricule','mat','réf','ref','id','identifiant','code emp'],
+    date_naissance: ['naissance','birth','date naiss','né','nee','date_n'],
+    sexe: ['sexe','genre','sex','gender','m'],
+    fonction: ['fonction','poste','job','position','titre','grade'],
+    service: ['service','département','departement','dept','department','srv'],
+    categorie: ['catégorie','categorie','cat','classe','grade cat'],
+    date_entree: ['date début','date debut','date entrée','date entree','embauche','recrutement','debut','start date','date début'],
+    date_sortie: ['date fin','date sortie','fin','departure','end date','date_sortie'],
+    salaire_base: ['salaire','base','salaire base','s basic','montant','net','brut','paie','salary','gratification'],
+    cnps: ['cnps','num cnps','n° cnps','sécurité','securité','assurance'],
+    banque: ['banque','bank','bank name','nom banque'],
+    numero_banque: ['num banque','compte','rib','iban','numéro','numero','account','swift','code banque'],
+    nombre_enfants: ['enfant','enfants','nb enfant','nombre enfant','nbre enfant','children','kids','nbre en'],
+    cumu: ['cmu','cumu','couverture','mutuelle','mutualité','health'],
+    numero_cmu: ['num cmu','n° cmu','num cumu','n° cumu','numéro cmu'],
+    adresse: ['adresse','address','domicile','lieu'],
+    telephone: ['téléphone','telephone','tel','phone','mobile','contact','gsm'],
+    email: ['email','e-mail','mail','courriel'],
+    etat_civil: ['état civil','etat civil','situation','married','célibataire','married','marié','divorcé','veuf'],
+    salaire_net: ['net à payer','net','net paie','net payable','salaire net'],
+    nombre_jours: ['jour','jours','nb jour','nombre jour','working days']
+  };
+  header.forEach(function(h, i) {
+    var hl = h.toLowerCase().trim();
+    Object.keys(map).forEach(function(key) {
+      map[key].forEach(function(alias) {
+        if (hl === alias || hl.indexOf(alias) >= 0) {
+          if (!cols[key]) cols[key] = i;
+        }
+      });
+    });
+  });
+  return cols;
+}
+
+function mapPersonnelRow(row, cols) {
+  function g(key) {
+    var idx = cols[key];
+    if (idx === undefined || idx === null) return '';
+    return String(row[idx] || '').trim();
+  }
+  function parseNum(v) {
+    if (!v) return 0;
+    v = String(v).replace(/[^\d.,\-]/g, '').replace(',', '.');
+    return parseFloat(v) || 0;
+  }
+  var nom = g('nom');
+  var prenoms = g('prenoms');
+  if (!nom && prenoms && prenoms.indexOf(' ') >= 0) {
+    var parts = prenoms.split(/\s+/);
+    nom = parts[0]; prenoms = parts.slice(1).join(' ');
+  }
+  return {
+    nom: nom.toUpperCase(),
+    prenoms: prenoms,
+    matricule: g('matricule'),
+    date_naissance: normalizeDate(g('date_naissance')),
+    sexe: parseSexe(g('sexe')),
+    fonction: g('fonction'),
+    service: g('service'),
+    categorie: g('categorie'),
+    date_entree: normalizeDate(g('date_entree')),
+    date_sortie: normalizeDate(g('date_sortie')),
+    salaire_base: parseNum(g('salaire_base')),
+    cnps: g('cnps'),
+    banque: g('banque'),
+    numero_banque: g('numero_banque'),
+    nombre_enfants: parseNum(g('nombre_enfants')),
+    cumu: parseBool(g('cumu')),
+    numero_cmu: g('numero_cmu'),
+    adresse: g('adresse'),
+    telephone: g('telephone'),
+    email: g('email'),
+    etat_civil: g('etat_civil'),
+    _raw: row
+  };
+}
+
+function normalizeDate(v) {
+  if (!v) return '';
+  if (typeof v === 'number') {
+    var d = new Date((v - 25569) * 86400 * 1000);
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  }
+  v = String(v).trim();
+  if (v.match(/^\d{4}-\d{2}-\d{2}/)) return v.substring(0, 10);
+  var m;
+  if ((m = v.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/))) return m[3] + '-' + m[2].padStart(2,'0') + '-' + m[1].padStart(2,'0');
+  if ((m = v.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})/))) {
+    var yr = parseInt(m[3]) < 50 ? 2000 + parseInt(m[3]) : 1900 + parseInt(m[3]);
+    return yr + '-' + m[2].padStart(2,'0') + '-' + m[1].padStart(2,'0');
+  }
+  return v;
+}
+
+function parseSexe(v) {
+  v = v.toLowerCase();
+  if (v === 'm' || v === 'homme' || v === 'male' || v === 'masculin') return 'M';
+  if (v === 'f' || v === 'femme' || v === 'female' || v === 'féminin' || v === 'feminin') return 'F';
+  return '';
+}
+
+function parseBool(v) {
+  v = v.toLowerCase();
+  return v === 'oui' || v === 'yes' || v === 'true' || v === '1' || v === 'x' || v === '✓' || v === 'coché' || v === 'c';
+}
+
+function findMatchingEmployees(emp) {
+  if (!emp.nom) return [];
+  var list = getPersonnel();
+  var matches = [];
+  var searchNom = emp.nom.toUpperCase().trim();
+  var searchPrenoms = emp.prenoms.toUpperCase().trim();
+  list.forEach(function(p) {
+    var pNom = (p.nom || '').toUpperCase().trim();
+    var pPrenoms = (p.prenoms || '').toUpperCase().trim();
+    var score = 0;
+    if (pNom === searchNom) score += 10;
+    else if (pNom.indexOf(searchNom) >= 0 || searchNom.indexOf(pNom) >= 0) score += 6;
+    else if (similar(pNom, searchNom) > 0.7) score += 4;
+    if (score > 0 && searchPrenoms && pPrenoms) {
+      if (pPrenoms === searchPrenoms) score += 10;
+      else if (pPrenoms.indexOf(searchPrenoms) >= 0 || searchPrenoms.indexOf(pPrenoms) >= 0) score += 5;
+      else if (similar(pPrenoms, searchPrenoms) > 0.6) score += 3;
+    }
+    if (emp.matricule && p.matricule && String(p.matricule).trim() === String(emp.matricule).trim()) score += 20;
+    if (score >= 6) matches.push({emp: p, score: score});
+  });
+  matches.sort(function(a,b){ return b.score - a.score; });
+  return matches.slice(0, 5);
+}
+
+function similar(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  if (a === b) return 1;
+  var longer = a.length > b.length ? a : b;
+  var shorter = a.length > b.length ? b : a;
+  if (longer.length === 0) return 1;
+  var matchCount = 0;
+  var usedShorter = {};
+  for (var i = 0; i < longer.length; i++) {
+    for (var j = 0; j < shorter.length; j++) {
+      if (!usedShorter[j] && longer[i] === shorter[j]) { matchCount++; usedShorter[j] = true; break; }
+    }
+  }
+  return (2 * matchCount) / (longer.length + shorter.length);
+}
+
+function renderImportPersonnelPreview(fileName) {
+  var c = document.getElementById('import-pers-content');
+  if (!c) return;
+  var total = _importPersData.length;
+  var matched = _importPersData.filter(function(e){ return e._matches.length > 0; }).length;
+  var unmatched = total - matched;
+  var colsDetected = Object.keys(_importPersCols).length;
+  var html = '<div style="display:flex;gap:1rem;align-items:center;margin-bottom:.8rem;flex-wrap:wrap">';
+  html += '<div style="padding:.4rem .8rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:.75rem"><strong>' + fileName + '</strong></div>';
+  html += '<div style="font-size:.75rem;color:var(--dim)">' + total + ' ligne(s) détectée(s)</div>';
+  html += '<div style="font-size:.75rem;color:var(--green)">✓ ' + matched + ' correspondance(s)</div>';
+  if (unmatched > 0) html += '<div style="font-size:.75rem;color:var(--danger)">✗ ' + unmatched + ' non matché(s)</div>';
+  html += '<div style="font-size:.75rem;color:var(--dim)">' + colsDetected + ' colonne(s) détectée(s)</div>';
+  html += '</div>';
+  html += '<div style="font-size:.7rem;color:var(--dim);margin-bottom:.6rem;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:.5rem .8rem">🔍 Vérifiez les correspondances : <strong> Nom trouvé = modification</strong> | <strong> Nom absent = nouvel employé</strong> | Changez la sélection avec le menu déroulant.</div>';
+  html += '<div style="overflow-x:auto"><table style="font-size:.65rem;width:100%;border-collapse:collapse"><thead><tr>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left;position:sticky;top:0;background:var(--surface)">Action</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Nom (fichier)</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Prénoms</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Matricule</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Fonction</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Service</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:right">Salaire</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">CNPS</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Banque</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">N° Compte</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:center">Enfants</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:center">CMU</th>';
+  html += '<th style="padding:6px;border-bottom:2px solid var(--border);text-align:left">Observation</th>';
+  html += '</tr></thead><tbody>';
+  _importPersData.forEach(function(emp, idx) {
+    var action = emp._matches.length > 0 ? 'update' : 'create';
+    var bgColor = action === 'update' ? '#f0fdf4' : '#fffbeb';
+    html += '<tr style="background:' + bgColor + '">';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">';
+    if (emp._matches.length > 0) {
+      html += '<select id="imp-action-' + idx + '" style="font-size:.6rem;padding:2px;border:1px solid var(--green);border-radius:4px" onchange="toggleImpNewFields(' + idx + ')">';
+      html += '<option value="update:' + emp._matches[0].emp.id + '"> Modifier: ' + escH(emp._matches[0].emp.nom) + ' ' + escH(emp._matches[0].emp.prenoms || '') + '</option>';
+      html += '<option value="create"> + Nouvel employé</option>';
+      emp._matches.forEach(function(m, mi) {
+        if (mi > 0) html += '<option value="update:' + m.emp.id + '"> Modifier: ' + escH(m.emp.nom) + ' ' + escH(m.emp.prenoms || '') + '</option>';
+      });
+      html += '</select>';
+    } else {
+      html += '<span style="font-size:.6rem;color:var(--orange)">Nouveau</span>';
+    }
+    html += '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border);font-weight:600">' + escH(emp.nom) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.prenoms) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.matricule) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.fonction) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.service) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border);text-align:right">' + (emp.salaire_base > 0 ? fmt(emp.salaire_base) : '—') + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.cnps) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.banque) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border)">' + escH(emp.numero_banque) + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border);text-align:center">' + (emp.nombre_enfants || '—') + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border);text-align:center">' + (emp.cumu ? '✓' : '—') + '</td>';
+    html += '<td style="padding:4px;border-bottom:1px solid var(--border);font-size:.6rem;color:var(--dim)">';
+    if (emp._matches.length > 0) html += 'Correspondance (' + emp._matches[0].score + ')';
+    else html += 'Aucune correspondance';
+    html += '</td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div style="display:flex;gap:.8rem;margin-top:1rem;justify-content:flex-end">';
+  html += '<button class="btn btn-sec" onclick="closeImportPersonnel()">Annuler</button>';
+  html += '<button class="btn" onclick="executeImportPersonnel()">📥 Appliquer (' + total + ' lignes)</button>';
+  html += '</div>';
+  c.innerHTML = html;
+}
+
+function toggleImpNewFields(idx) {
+  var sel = document.getElementById('imp-action-' + idx);
+  if (!sel) return;
+  var row = sel.closest('tr');
+  if (!row) return;
+  row.style.background = sel.value.indexOf('update') === 0 ? '#f0fdf4' : '#fffbeb';
+}
+
+function executeImportPersonnel() {
+  if (!_importPersData.length) return;
+  var existing = getPersonnel();
+  var newCount = 0, updateCount = 0, skipCount = 0;
+  _importPersData.forEach(function(emp, idx) {
+    var sel = document.getElementById('imp-action-' + idx);
+    var action = sel ? sel.value : 'skip';
+    if (action === 'skip' || action.indexOf('skip') === 0) { skipCount++; return; }
+    if (action.indexOf('update:') === 0) {
+      var empId = action.split(':')[1];
+      var target = existing.find(function(e){ return e.id === empId; });
+      if (!target) { skipCount++; return; }
+      if (emp.nom) target.nom = emp.nom;
+      if (emp.prenoms) target.prenoms = emp.prenoms;
+      if (emp.matricule) target.matricule = emp.matricule;
+      if (emp.date_naissance) target.date_naissance = emp.date_naissance;
+      if (emp.sexe) target.sexe = emp.sexe;
+      if (emp.fonction) target.fonction = emp.fonction;
+      if (emp.service) target.service = emp.service;
+      if (emp.categorie) target.categorie_id = emp.categorie;
+      if (emp.date_entree) target.date_entree = emp.date_entree;
+      if (emp.date_sortie) target.date_sortie = emp.date_sortie;
+      if (emp.salaire_base > 0) target.salaire_base = emp.salaire_base;
+      if (emp.cnps) target.cnps = emp.cnps;
+      if (emp.banque) target.banque = emp.banque;
+      if (emp.numero_banque) target.numero_banque = emp.numero_banque;
+      if (emp.nombre_enfants > 0) target.nombre_enfants = emp.nombre_enfants;
+      if (emp.cumu) target.cumu = emp.cumu;
+      if (emp.numero_cmu) target.numero_cmu = emp.numero_cmu;
+      if (emp.adresse) target.adresse = emp.adresse;
+      if (emp.telephone) target.telephone = emp.telephone;
+      if (emp.email) target.email = emp.email;
+      if (emp.etat_civil) target.etat_civil = emp.etat_civil;
+      updateCount++;
+    } else {
+      var newEmp = {
+        id: DB.id(),
+        matricule: emp.matricule || 'IMP-' + String(Date.now()).slice(-4) + idx,
+        nom: emp.nom || '',
+        prenoms: emp.prenoms || '',
+        date_naissance: emp.date_naissance || '',
+        sexe: emp.sexe || '',
+        fonction: emp.fonction || '',
+        service: emp.service || '',
+        categorie_id: emp.categorie || '',
+        date_entree: emp.date_entree || new Date().toISOString().substring(0,10),
+        date_sortie: emp.date_sortie || '',
+        salaire_base: emp.salaire_base || 0,
+        cnps: emp.cnps || '',
+        banque: emp.banque || '',
+        numero_banque: emp.numero_banque || '',
+        nombre_enfants: emp.nombre_enfants || 0,
+        cumu: emp.cumu || false,
+        numero_cmu: emp.numero_cmu || '',
+        adresse: emp.adresse || '',
+        telephone: emp.telephone || '',
+        email: emp.email || '',
+        etat_civil: emp.etat_civil || '',
+        en_paie: true,
+        type_employe: emp.salaire_base > 0 ? 'titulaire' : 'journalier',
+        status: 'actif',
+        created_at: new Date().toISOString()
+      };
+      existing.push(newEmp);
+      newCount++;
+    }
+  });
+  DB.setMain('mdb_employes', existing);
+  closeImportPersonnel();
+  loadPersonnel();
+  toast(updateCount + ' mis à jour, ' + newCount + ' créé(s)' + (skipCount > 0 ? ', ' + skipCount + ' ignoré(s)' : ''), 'success');
+  _importPersData = [];
 }
 function fillEmpSelects() {
   var list = getPersonnel();
