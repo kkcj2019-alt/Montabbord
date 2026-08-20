@@ -1,0 +1,3944 @@
+
+/* ==================== LOCAL STORAGE DB + CLOUD SYNC ==================== */
+var PAYE_KEY = 'mdb_paye'; /* Données paye synchronisées dans le cloud via l'app principale */
+var firebaseAppP = null, firebaseDbP = null;
+var FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBayjllPQ199Ve_hiERosXY5qxgCewVCMg",
+  authDomain: "montabbord.firebaseapp.com",
+  projectId: "montabbord",
+  storageBucket: "montabbord.firebasestorage.app",
+  messagingSenderId: "686589891075",
+  appId: "1:686589891075:web:1a4e65a8f93243f045f436"
+};
+function initFirebaseP() {
+  try {
+    if (typeof firebase === 'undefined' || !firebase.initializeApp) { setTimeout(initFirebaseP, 300); return; }
+    if (!firebaseAppP) {
+      firebaseAppP = firebase.initializeApp(FIREBASE_CONFIG, 'payeApp');
+      firebaseDbP = firebaseAppP.firestore();
+      /* Si Firebase était encore en chargement au premier passage, reprendre la synchro. */
+      setTimeout(function(){ pullPayeCloud(); startRealtimeSync(); }, 50);
+    }
+  } catch(e) { console.warn('Firebase paye init:', e); }
+}
+initFirebaseP();
+
+function getEnterpriseUid() {
+  try { return localStorage.getItem('mdb_enterpriseUid') || localStorage.getItem('mdb_currentUser') || ''; } catch(e) { return ''; }
+}
+
+var DB = {
+  get: function(k) { try { return JSON.parse(localStorage.getItem('paye_' + k)); } catch(e) { return null; } },
+  set: function(k, v) { localStorage.setItem('paye_' + k, JSON.stringify(v)); },
+  getMain: function(k) { try { return JSON.parse(localStorage.getItem(k)); } catch(e) { return null; } },
+  setMain: function(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
+  id: function() { return Date.now() + '_' + Math.random().toString(36).substr(2,6); }
+};
+
+/* ============ SYNCHRONISATION CLOUD (disponible sur TOUT ordinateur) ============ */
+/* Le module Paye lit/écrit directement dans le même document Firestore
+   que l'app principale (enterprises/{uid}) => données partagées partout. */
+
+function getPayeData() {
+  var p = DB.getMain(PAYE_KEY);
+  /* mdb_paye est toujours un objet de sections, jamais une liste. */
+  if (Array.isArray(p)) return {};
+  if (p && typeof p === 'object') return p;
+  return {};
+}
+var payeBootstrapping = true;
+function setPayeData(obj) {
+  DB.setMain(PAYE_KEY, obj);
+  if (!payeBootstrapping) pushPayeCloud();
+}
+function getPayeSection(section, def) {
+  var p = getPayeData();
+  return p[section] !== undefined ? p[section] : def;
+}
+function setPayeSection(section, val) {
+  var p = getPayeData();
+  p[section] = val;
+  setPayeData(p);
+}
+function getFormatHeures() {
+  var f = getPayeSection('format_heures', null);
+  return (f === 'hhmm' || f === 'decimal') ? f : 'decimal';
+}
+function setFormatHeures(v) { setPayeSection('format_heures', v); }
+function pushPayeCloud() {
+  var uid = getEnterpriseUid();
+  if (!uid || !firebaseDbP) return;
+  var payload = {};
+  var p = getPayeData();
+  if (p && Object.keys(p).length > 0) payload[PAYE_KEY] = p;
+  var emps = DB.getMain('mdb_employes');
+  if (emps) payload.mdb_employes = emps;
+  var aps = DB.getMain('mdb_acomptesPrets');
+  if (aps) payload.mdb_acomptesPrets = aps;
+  var ent = DB.getMain('mdb_entreprise');
+  if (ent && ent.nom) payload.mdb_entreprise = ent;
+  if (Object.keys(payload).length === 0) return;
+  firebaseDbP.collection('enterprises').doc(uid).set(payload, {merge:true}).then(function() {
+    console.log('[Paye] Sync cloud OK');
+  }).catch(function(e) { console.warn('[Paye] Sync cloud error:', e); });
+}
+function pullPayeCloud() {
+  var uid = getEnterpriseUid();
+  if (!uid || !firebaseDbP) { payeBootstrapping = false; pushPayeCloud(); return; }
+  firebaseDbP.collection('enterprises').doc(uid).get().then(function(doc) {
+    if (!doc.exists) { payeBootstrapping = false; pushPayeCloud(); return; }
+    var data = doc.data();
+    var hasPaye = data[PAYE_KEY] && typeof data[PAYE_KEY] === 'object' && !Array.isArray(data[PAYE_KEY]);
+    applyCloudSnapshot(data);
+    payeBootstrapping = false;
+    /* Si l'ancien document n'avait pas encore mdb_paye, publier la config locale. */
+    if (!hasPaye) pushPayeCloud();
+  }).catch(function(e) { payeBootstrapping = false; pushPayeCloud(); console.warn('[Paye] Pull cloud error:', e); });
+}
+function applyCloudSnapshot(data) {
+  if (data[PAYE_KEY] && typeof data[PAYE_KEY] === 'object' && !Array.isArray(data[PAYE_KEY])) DB.setMain(PAYE_KEY, data[PAYE_KEY]);
+  if (data.mdb_employes) DB.setMain('mdb_employes', data.mdb_employes);
+  if (data.mdb_acomptesPrets) DB.setMain('mdb_acomptesPrets', data.mdb_acomptesPrets);
+  if (data.mdb_entreprise && data.mdb_entreprise.nom) DB.setMain('mdb_entreprise', data.mdb_entreprise);
+}
+/* Écoute en temps réel : les modifications depuis l'app principale se propagent ici (vice-versa) */
+var payeSnapshotUnsub = null;
+function startRealtimeSync() {
+  if (payeSnapshotUnsub) { try { payeSnapshotUnsub(); } catch(e) {} payeSnapshotUnsub = null; }
+  var uid = getEnterpriseUid();
+  if (!uid || !firebaseDbP) return;
+  payeSnapshotUnsub = firebaseDbP.collection('enterprises').doc(uid).onSnapshot(function(doc) {
+    if (!doc.exists) return;
+    var data = doc.data();
+    var prevPaye = JSON.stringify(getPayeData() || {});
+    var prevEmps = JSON.stringify(DB.getMain('mdb_employes') || []);
+    if (data.mdb_employes) DB.setMain('mdb_employes', data.mdb_employes);
+    if (data.mdb_acomptesPrets) DB.setMain('mdb_acomptesPrets', data.mdb_acomptesPrets);
+    if (data.mdb_entreprise && data.mdb_entreprise.nom) DB.setMain('mdb_entreprise', data.mdb_entreprise);
+    if (data[PAYE_KEY] && typeof data[PAYE_KEY] === 'object' && !Array.isArray(data[PAYE_KEY])) DB.setMain(PAYE_KEY, data[PAYE_KEY]);
+    syncFromMain();
+    var payeChanged = JSON.stringify(getPayeData() || {}) !== prevPaye;
+    var empsChanged = JSON.stringify(DB.getMain('mdb_employes') || []) !== prevEmps;
+    /* Écho de notre propre écriture (rien de neuf) : ne pas re-rendre, sinon le curseur saute */
+    if (!payeChanged && !empsChanged) return;
+    var sec = localStorage.getItem('paye_currentSection');
+    if (!sec) return;
+    /* Pendant la saisie d'une case du pointage, ne pas détruire le focus */
+    var ptc = document.getElementById('pt-container');
+    var ae = document.activeElement;
+    if (sec === 'pointage' && ptc && ae && ptc.contains(ae)) return;
+    showSection(sec);
+  }, function(e) { console.warn('[Paye] Realtime sync error:', e); });
+}
+
+function initData() {
+  if (!getPayeSection('categories', null)) setPayeSection('categories', [
+    {code:'1A',libelle:'Cadre/Ingénieur',salaire_min:172143},
+    {code:'2A',libelle:'Cadre/Ingénieur',salaire_min:208136},
+    {code:'3A',libelle:'Cadre/Ingénieur',salaire_min:245548},
+    {code:'1 MO',libelle:'Ouvrier',salaire_min:75000},
+    {code:'2MS',libelle:'Ouvrier',salaire_min:75711},
+    {code:'4A',libelle:'Ouvrier',salaire_min:77846},
+    {code:'6B',libelle:'Ouvrier',salaire_min:99200},
+    {code:'M1',libelle:'Agent Maîtrise',salaire_min:132979},
+    {code:'A',libelle:'Chauffeur',salaire_min:78276}
+  ]);
+  if (!getPayeSection('pointage', null)) setPayeSection('pointage', []);
+  if (!getPayeSection('primesMois', null)) setPayeSection('primesMois', {});
+  if (!getPayeSection('primesPanier', null)) setPayeSection('primesPanier', {});
+  if (!getPayeSection('externJours', null)) setPayeSection('externJours', {});
+  if (!getPayeSection('congePaie', null)) setPayeSection('congePaie', {});
+  if (!getPayeSection('gratif', null)) setPayeSection('gratif', {});
+  var fh = getPayeSection('format_heures', null);
+  if (fh === null || fh === undefined) setPayeSection('format_heures', 'decimal');
+  if (!getPayeSection('services', null)) setPayeSection('services', ['ADMIN','PRODUCTION','AUTRES']);
+  if (!getPayeSection('fonctions', null)) setPayeSection('fonctions', ['Comptable','Monteur','Chauffeur','Agent de production','Magasinier']);
+  if (!getPayeSection('societe', null)) setPayeSection('societe', {nom:'MA SOCIETE',sigle:'',adresse:'ABIDJAN, CI',cnps:'',ncc:''});
+  loadTaxRules();
+  syncFromMain();
+}
+
+/* ==================== HELPERS DONNEES PARTAGEES ==================== */
+/* Employés : source unique = mdb_employes (partagé avec l'app principale) */
+function getPersonnel() { return DB.getMain('mdb_employes') || []; }
+function setPersonnel(v) { DB.setMain('mdb_employes', v); pushPayeCloud(); }
+/* Employé visible pour un mois donné : actif OU sorti APRÈS la fin du mois */
+function empVisibleMois(emp, mois) {
+  if (!emp) return false;
+  if (emp.status !== 'inactif' && !emp.date_sortie) return true;
+  var ds = emp.date_sortie || '';
+  if (ds && mois && ds.substring(0, 7) < mois) return false;
+  return true;
+}
+/* Employés actifs à la date du jour (pour sélecteurs) */
+function getPersonnelActifs() {
+  var now = new Date();
+  var mois = now.getFullYear() + '-' + (now.getMonth() < 9 ? '0' : '') + (now.getMonth() + 1);
+  return getPersonnel().filter(function(p) { return empVisibleMois(p, mois); });
+}
+/* Catégories / pointage / services / fonctions / société : dans mdb_paye (cloud) */
+function getCategories() { return getPayeSection('categories', []); }
+function setCategories(v) { setPayeSection('categories', v); }
+function getPointageData() { var v = getPayeSection('pointage', []); return Array.isArray(v) ? v : []; }
+function setPointageData(v) { setPayeSection('pointage', v); }
+
+
+/* ==================== PRIMES SPECIALES CENTRALISÉES ==================== */
+/* Structure: getPayeSection('primesSpec') = [
+     { id, type, label, num, montant, dept, employes: ['emp1', 'emp2', ...] }
+   ]
+   employes = liste des emp.id qui bénéficient de la prime
+*/
+function getPrimesSpec() { return getPayeSection('primesSpec', []); }
+function setPrimesSpec(v) { setPayeSection('primesSpec', v); }
+
+/* Retourne le montant total des primes spéciales pour un employé et un type donné */
+function getIndSpecForEmp(empId, type) {
+  var primes = getPrimesSpec();
+  var total = 0;
+  primes.forEach(function(p) {
+    if ((type ? p.type === type : true) && p.employes && p.employes.indexOf(empId) !== -1) {
+      total += parseFloat(p.montant) || 0;
+    }
+  });
+  return total;
+}
+
+/* Retourne toutes les primes actives pour un employé (pour le bulletin) */
+function getPrimesSpecEmp(empId) {
+  var primes = getPrimesSpec();
+  return primes.filter(function(p) { return p.employes && p.employes.indexOf(empId) !== -1; });
+}
+
+var _currentPrimeId = null; // ID de la prime en cours d'attribution
+
+function loadPrimesSpec() {
+  var container = document.getElementById('primes-list-container');
+  if (!container) return;
+  var primes = getPrimesSpec();
+  if (!primes.length) {
+    container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Aucune prime configurée. Cliquez sur "+ Nouvelle Prime" pour commencer.</div>';
+    return;
+  }
+  var LABELS = {
+    ind_representation: 'Prime de représentation',
+    ind_deplacement: 'Prime de déplacement',
+    ind_salissure: 'Prime de salissure',
+    ind_tenue: 'Prime de tenue',
+    ind_caisse: 'Prime de caisse',
+    ind_responsabilite: 'Prime de responsabilité',
+    ind_fonction: 'Prime de fonction',
+    custom: 'Prime personnalisée'
+  };
+  var colors = {
+    ind_representation: '#3b82f6',
+    ind_deplacement: '#8b5cf6',
+    ind_salissure: '#f59e0b',
+    ind_tenue: '#10b981',
+    ind_caisse: '#ef4444',
+    ind_responsabilite: '#0ea5e9',
+    ind_fonction: '#6366f1',
+    custom: '#64748b'
+  };
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.8rem">';
+  primes.forEach(function(p) {
+    var color = colors[p.type] || '#64748b';
+    var label = p.type === 'custom' ? (p.label || 'Prime personnalisée') : (LABELS[p.type] || p.type);
+    var empCount = (p.employes || []).length;
+    h += '<div style="border:1px solid var(--border);border-radius:10px;padding:.9rem;border-left:4px solid ' + color + '">';
+    h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.4rem">';
+    h += '<div style="font-weight:700;font-size:.85rem">' + escH(label) + '</div>';
+    h += '<div style="display:flex;gap:4px">';
+    h += '<button class="btn-sec" onclick="editPrimeConfig('' + p.id + '')" style="font-size:.65rem;padding:2px 6px">✏️</button>';
+    h += '<button class="btn btn-red" onclick="deletePrimeConfig('' + p.id + '')" style="font-size:.65rem;padding:2px 6px">✕</button>';
+    h += '</div></div>';
+    h += '<div style="font-size:.78rem;color:var(--dim)">N° ' + escH(p.num||'—') + ' · <strong>' + fmtF(p.montant) + ' FCFA/mois</strong></div>';
+    if (p.dept) h += '<div style="font-size:.72rem;color:#64748b;margin-top:2px">Dept: ' + escH(p.dept) + '</div>';
+    h += '<div style="margin-top:.6rem;display:flex;justify-content:space-between;align-items:center">';
+    h += '<span style="font-size:.72rem;background:' + color + '22;color:' + color + ';padding:2px 8px;border-radius:20px">' + empCount + ' employé' + (empCount!==1?'s':'') + '</span>';
+    h += '<button class="btn" onclick="openPrimeAttrib('' + p.id + '')" style="font-size:.72rem;padding:3px 10px">Attribuer / Modifier</button>';
+    h += '</div></div>';
+  });
+  h += '</div>';
+  container.innerHTML = h;
+}
+
+function openPrimeModal(id) {
+  document.getElementById('prime-edit-id').value = id || '';
+  document.getElementById('prime-modal-title').textContent = id ? 'Modifier la prime' : 'Nouvelle prime';
+  document.getElementById('prime-type').value = '';
+  document.getElementById('prime-label').value = '';
+  document.getElementById('prime-num').value = '';
+  document.getElementById('prime-montant').value = '';
+  document.getElementById('prime-label-group').style.display = 'none';
+  // Charger les départements dans le select
+  var deptSel = document.getElementById('prime-dept-default');
+  deptSel.innerHTML = '<option value="">Tous les employés (titulaires)</option>';
+  getServices().forEach(function(s) {
+    deptSel.innerHTML += '<option value="' + escH(s) + '">' + escH(s) + '</option>';
+  });
+  if (id) {
+    var p = getPrimesSpec().find(function(x){ return x.id === id; });
+    if (p) {
+      document.getElementById('prime-type').value = p.type;
+      document.getElementById('prime-label').value = p.label || '';
+      document.getElementById('prime-num').value = p.num || '';
+      document.getElementById('prime-montant').value = p.montant || '';
+      document.getElementById('prime-dept-default').value = p.dept || '';
+      document.getElementById('prime-label-group').style.display = p.type === 'custom' ? '' : 'none';
+    }
+  }
+  document.getElementById('modal-prime').style.display = 'flex';
+}
+
+function closePrimeModal() { document.getElementById('modal-prime').style.display = 'none'; }
+
+function onPrimeTypeChange() {
+  var t = document.getElementById('prime-type').value;
+  document.getElementById('prime-label-group').style.display = (t === 'custom') ? '' : 'none';
+  // Auto-numérotation
+  var NUMS = { ind_representation:'30',ind_deplacement:'31',ind_salissure:'32',ind_tenue:'33',ind_caisse:'34',ind_responsabilite:'35',ind_fonction:'36' };
+  if (NUMS[t]) document.getElementById('prime-num').value = NUMS[t];
+}
+
+function savePrimeConfig(e) {
+  e.preventDefault();
+  var id = document.getElementById('prime-edit-id').value || DB.id();
+  var type = document.getElementById('prime-type').value;
+  var LABELS = { ind_representation:'Prime de représentation', ind_deplacement:'Prime de déplacement', ind_salissure:'Prime de salissure', ind_tenue:'Prime de tenue', ind_caisse:'Prime de caisse', ind_responsabilite:'Prime de responsabilité', ind_fonction:'Prime de fonction' };
+  var label = type === 'custom' ? (document.getElementById('prime-label').value || 'Prime') : (LABELS[type] || type);
+  var primes = getPrimesSpec();
+  var existing = primes.find(function(x){ return x.id === id; });
+  var dept = document.getElementById('prime-dept-default').value;
+
+  if (existing) {
+    existing.type = type; existing.label = label;
+    existing.num = document.getElementById('prime-num').value;
+    existing.montant = parseFloat(document.getElementById('prime-montant').value)||0;
+    existing.dept = dept;
+  } else {
+    // Auto-attribuer les employés du département par défaut
+    var empList = getPersonnelActifs().filter(function(p){ return empCategorie(p) !== 'externe'; });
+    var assigned = empList
+      .filter(function(p){ return !dept || p.service === dept; })
+      .map(function(p){ return p.id; });
+    primes.push({ id: id, type: type, label: label, num: document.getElementById('prime-num').value, montant: parseFloat(document.getElementById('prime-montant').value)||0, dept: dept, employes: assigned });
+  }
+  setPrimesSpec(primes);
+  closePrimeModal();
+  loadPrimesSpec();
+  toast('Prime enregistrée', 'success');
+}
+
+function editPrimeConfig(id) { openPrimeModal(id); }
+
+function deletePrimeConfig(id) {
+  if (!confirm('Supprimer cette prime ?')) return;
+  setPrimesSpec(getPrimesSpec().filter(function(x){ return x.id !== id; }));
+  loadPrimesSpec();
+  document.getElementById('prime-detail-card').style.display = 'none';
+  toast('Prime supprimée', 'success');
+}
+
+function openPrimeAttrib(id) {
+  var p = getPrimesSpec().find(function(x){ return x.id === id; });
+  if (!p) return;
+  _currentPrimeId = id;
+  var LABELS = { ind_representation:'Prime de représentation', ind_deplacement:'Prime de déplacement', ind_salissure:'Prime de salissure', ind_tenue:'Prime de tenue', ind_caisse:'Prime de caisse', ind_responsabilite:'Prime de responsabilité', ind_fonction:'Prime de fonction', custom:'Prime personnalisée' };
+  var label = p.type === 'custom' ? (p.label||'Prime') : (LABELS[p.type]||p.type);
+  document.getElementById('prime-detail-title').textContent = label + ' — ' + fmtF(p.montant) + ' FCFA/mois';
+  // Charger départements dans le filtre
+  var deptSel = document.getElementById('prime-dept-filter');
+  deptSel.innerHTML = '<option value="">Tous les départements</option>';
+  getServices().forEach(function(s) { deptSel.innerHTML += '<option value="' + escH(s) + '">' + escH(s) + '</option>'; });
+  document.getElementById('prime-detail-card').style.display = '';
+  renderPrimeEmpGrid(p);
+  document.getElementById('prime-detail-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderPrimeEmpGrid(p) {
+  var deptFilter = (document.getElementById('prime-dept-filter')||{}).value || '';
+  var empList = getPersonnelActifs().filter(function(emp){ return empCategorie(emp) !== 'externe'; });
+  if (deptFilter) empList = empList.filter(function(emp){ return emp.service === deptFilter; });
+  var assigned = p.employes || [];
+  var grid = document.getElementById('prime-emp-grid');
+  if (!grid) return;
+  var h = '';
+  // Grouper par service
+  var groups = {};
+  empList.forEach(function(emp) {
+    var svc = emp.service || 'Sans département';
+    if (!groups[svc]) groups[svc] = [];
+    groups[svc].push(emp);
+  });
+  Object.keys(groups).sort().forEach(function(svc) {
+    h += '<div style="grid-column:1/-1;font-size:.72rem;font-weight:700;color:var(--dim);border-bottom:1px solid var(--border);padding-bottom:3px;margin-top:.4rem">' + escH(svc) + '</div>';
+    groups[svc].forEach(function(emp) {
+      var isChecked = assigned.indexOf(emp.id) !== -1;
+      h += '<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:.78rem;' + (isChecked ? 'background:#f0fdf4;border-color:#86efac' : '') + '">';
+      h += '<input type="checkbox" class="prime-emp-cb" data-empid="' + emp.id + '"' + (isChecked ? ' checked' : '') + ' style="width:15px;height:15px" onchange="onPrimeEmpChange(this)">';
+      h += '<span><strong>' + escH(emp.nom) + '</strong> ' + escH(emp.prenoms||'') + '</span>';
+      h += '</label>';
+    });
+  });
+  if (!h) h = '<div style="color:var(--dim);font-size:.8rem">Aucun employé dans ce département.</div>';
+  grid.innerHTML = h;
+}
+
+function onPrimeEmpChange(cb) {
+  var lbl = cb.closest('label');
+  if (cb.checked) lbl.style.background = '#f0fdf4', lbl.style.borderColor = '#86efac';
+  else lbl.style.background = '', lbl.style.borderColor = '';
+}
+
+function filterPrimeEmployees() {
+  if (!_currentPrimeId) return;
+  var p = getPrimesSpec().find(function(x){ return x.id === _currentPrimeId; });
+  if (p) renderPrimeEmpGrid(p);
+}
+
+function toggleAllPrimeEmps(state) {
+  document.querySelectorAll('.prime-emp-cb').forEach(function(cb) {
+    cb.checked = state;
+    onPrimeEmpChange(cb);
+  });
+}
+
+function savePrimeAttribution() {
+  if (!_currentPrimeId) return;
+  var primes = getPrimesSpec();
+  var p = primes.find(function(x){ return x.id === _currentPrimeId; });
+  if (!p) return;
+  var checked = [];
+  document.querySelectorAll('.prime-emp-cb:checked').forEach(function(cb) { checked.push(cb.dataset.empid); });
+  // Fusionner avec les employés d'autres départements non affichés
+  var deptFilter = (document.getElementById('prime-dept-filter')||{}).value || '';
+  if (deptFilter) {
+    // Garder les assignés hors du filtre
+    var empIds = getPersonnelActifs().filter(function(e){ return e.service === deptFilter; }).map(function(e){ return e.id; });
+    var keep = (p.employes||[]).filter(function(id){ return empIds.indexOf(id) === -1; });
+    p.employes = keep.concat(checked);
+  } else {
+    p.employes = checked;
+  }
+  setPrimesSpec(primes);
+  loadPrimesSpec();
+  // Mettre à jour la carte
+  var count = p.employes.length;
+  toast(count + ' employé' + (count!==1?'s':'') + ' assigné' + (count!==1?'s':''), 'success');
+  // Rerender
+  var pp = getPrimesSpec().find(function(x){ return x.id === _currentPrimeId; });
+  if (pp) renderPrimeEmpGrid(pp);
+}
+
+
+/* ===== Prime de Panier ===== */
+function getPanierData() { return getPayeSection('primesPanier', {}) || {}; }
+function setPanierData(v) { setPayeSection('primesPanier', v); }
+function getPanierJours(empId, mois) {
+  var d = getPanierData();
+  var key = empId + '|' + mois;
+  return Array.isArray(d[key]) ? d[key] : [];
+}
+function setPanierJours(empId, mois, jours) {
+  var d = getPanierData();
+  d[empId + '|' + mois] = jours;
+  setPanierData(d);
+}
+function getPanierTotal(empId, mois) {
+  var jours = getPanierJours(empId, mois);
+  return jours.length * (TAX_RULES.panier_montant || 1500);
+}
+/* ===== Indemnités spéciales (exonérées ITS dans limite 10%) ===== */
+function getIndSpec(empId) {
+  var emps = getPersonnel();
+  var emp = emps.find(function(e){ return e.id === empId; });
+  if (!emp) return 0;
+  return (parseFloat(emp.ind_representation)||0)
+    + (parseFloat(emp.ind_deplacement)||0)
+    + (parseFloat(emp.ind_salissure)||0)
+    + (parseFloat(emp.ind_tenue)||0)
+    + (parseFloat(emp.ind_caisse)||0)
+    + (parseFloat(emp.ind_responsabilite)||0)
+    + (parseFloat(emp.ind_fonction)||0);
+}
+
+/* Prime mensuelle par employé : clé "empId|YYYY-MM" */
+function getPrimeMois(empId, mois) { var m = getPayeSection('primesMois', {}) || {}; return parseFloat(m[empId + '|' + mois]) || 0; }
+function setPrimeMois(empId, mois, val) { var m = getPayeSection('primesMois', {}) || {}; m[empId + '|' + mois] = parseFloat(val) || 0; setPayeSection('primesMois', m); }
+function getExternJours(empId, mois) { var m = getPayeSection('externJours', {}) || {}; return parseInt(m[empId + '|' + mois]) || 0; }
+function setExternJours(empId, mois, val) { var m = getPayeSection('externJours', {}) || {}; m[empId + '|' + mois] = parseInt(val) || 0; setPayeSection('externJours', m); }
+/* Congé payé : modèle par périodes avec paiements multiples */
+function getCongeRecords() { return getPayeSection('congeRecords', []); }
+function setCongeRecords(v) { setPayeSection('congeRecords', v); }
+function getCongePaie(empId, mois) {
+  var recs = getCongeRecords().filter(function(r){ return r.employee_id === empId; });
+  var total = 0;
+  recs.forEach(function(r){
+    if (r.paiements) r.paiements.forEach(function(p){ if (p.mois === mois) total += p.montant || 0; });
+  });
+  return total;
+}
+function getCongeRecord(empId, mois) {
+  var recs = getCongeRecords().filter(function(r){ return r.employee_id === empId; });
+  var comm = '', peri = '';
+  recs.forEach(function(r){
+    if (r.paiements) r.paiements.forEach(function(p){ if (p.mois === mois && (p.commentaire||'')) comm += (comm?' | ':'') + p.commentaire; });
+  });
+  /* Trouver la dernière période active */
+  for (var i = recs.length - 1; i >= 0; i--) {
+    if (recs[i].debut_conge) { peri = recs[i].debut_conge; break; }
+  }
+  return { montant: getCongePaie(empId, mois), periode: peri || '', commentaire: comm };
+}
+function getCongePaidTotal(empId) {
+  var recs = getCongeRecords().filter(function(r){ return r.employee_id === empId; });
+  var total = 0;
+  recs.forEach(function(r){ if (r.paiements) r.paiements.forEach(function(p){ total += p.montant || 0; }); });
+  return total;
+}
+function getCongeAccrued(emp, mois) {
+  if (!emp || !emp.date_entree || !mois) return 0;
+  var base = (getSalaireAuMois(emp, mois) / 12);
+  var sy = parseInt(emp.date_entree.slice(0, 4)), sm = parseInt(emp.date_entree.slice(5, 7));
+  var ey = parseInt(mois.slice(0, 4)), em = parseInt(mois.slice(5, 7));
+  var months = (ey - sy) * 12 + (em - sm) + 1;
+  if (months < 0) months = 0;
+  return Math.round(base * months);
+}
+function getCongeBalance(emp, mois) { return getCongeAccrued(emp, mois) - getCongePaidTotal(emp.id); }
+function _congeRec(v) { return (v && typeof v === 'object') ? v : { montant: 0 }; }
+/* Gratification : montant vers\u00e9 au mois (d\u00e9clench\u00e9 g\u00e9n\u00e9ralement en d\u00e9cembre), champ modifiable */
+function getGratif(empId, mois) { var m = getPayeSection('gratif', {}) || {}; return parseFloat(m[empId + '|' + mois]) || 0; }
+function setGratif(empId, mois, val) { var m = getPayeSection('gratif', {}) || {}; m[empId + '|' + mois] = parseFloat(val) || 0; setPayeSection('gratif', m); }
+/* Suggestion gratification = moyenne des bruts de janvier \u00e0 d\u00e9cembre de l'ann\u00e9e (mois 12 uniquement) */
+function calcGratifSugg(emp, mois) {
+  if (!mois || mois.slice(5, 7) !== '12') return 0;
+  var year = mois.slice(0, 4), sum = 0;
+  for (var m = 1; m <= 12; m++) {
+    sum += getSalaireAuMois(emp, year + '-' + (m < 10 ? '0' : '') + m);
+  }
+  return Math.round((sum / 12) * 0.75);
+}
+function getServices() { return getPayeSection('services', []); }
+function setServices(v) { setPayeSection('services', v); }
+function getFonctions() { return getPayeSection('fonctions', []); }
+function setFonctions(v) { setPayeSection('fonctions', v); }
+function getSocieteP() { return getPayeSection('societe', {}); }
+function setSocieteP(v) { setPayeSection('societe', v); }
+/* Acomptes/Prêts : source unique = mdb_acomptesPrets (partagé) */
+function getAPList() { return DB.getMain('mdb_acomptesPrets') || []; }
+function setAPList(v) { DB.setMain('mdb_acomptesPrets', v); pushPayeCloud(); }
+
+/* ==================== HISTORIQUE DES SALAIRES ==================== */
+/* salaire_history = [{montant, dateEffet (YYYY-MM)}] trié par dateEffet croissant.
+   Le salaire applicable pour un mois = dernière entrée dont dateEffet <= mois. */
+function getSalaireAuMois(emp, mois) {
+  if (!emp) return 0;
+  var hist = emp.salaire_history;
+  if (!hist || hist.length === 0) return parseFloat(emp.salaire_base) || 0;
+  var applicable = null;
+  for (var i = 0; i < hist.length; i++) {
+    if (!hist[i].dateEffet || hist[i].dateEffet <= mois) applicable = hist[i];
+    else break;
+  }
+  if (applicable) return parseFloat(applicable.montant) || 0;
+  /* Aucune entrée applicable avant ce mois : on remonte à la plus ancienne */
+  return parseFloat(hist[0].montant) || 0;
+}
+/* Enregistre un salaire avec date d'effet (met à jour l'historique sans impacter les mois antérieurs) */
+function setSalaireAvecEffet(emp, montant, moisEffet) {
+  var m = moisEffet || new Date().toISOString().slice(0, 7);
+  if (!emp.salaire_history) emp.salaire_history = [];
+  /* Si une entrée existe déjà pour ce mois, on la remplace */
+  var idx = emp.salaire_history.findIndex(function(h){ return h.dateEffet === m; });
+  if (idx !== -1) emp.salaire_history[idx] = { montant: montant, dateEffet: m };
+  else emp.salaire_history.push({ montant: montant, dateEffet: m });
+  emp.salaire_history.sort(function(a, b) { return (a.dateEffet || '').localeCompare(b.dateEffet || ''); });
+  /* Le salaire "courant" = dernière entrée */
+  emp.salaire_base = emp.salaire_history[emp.salaire_history.length - 1].montant;
+}
+/* Historique lisible d'un employé (dateEffet -> montant) */
+function getSalaireHistorique(emp) {
+  if (!emp || !emp.salaire_history || emp.salaire_history.length === 0) {
+    return [{ montant: parseFloat(emp ? emp.salaire_base : 0) || 0, dateEffet: 'Depuis toujours' }];
+  }
+  var h = emp.salaire_history.slice().sort(function(a, b) { return (a.dateEffet || '').localeCompare(b.dateEffet || ''); });
+  return h;
+}
+
+/* ==================== SYNCHRONISATION INTER-MODULES ==================== */
+function syncFromMain() {
+  /* 1. Société : lire mdb_entreprise (priorité), sinon mdb_paye.societe */
+  var ent = DB.getMain('mdb_entreprise');
+  var soc = getSocieteP() || {};
+  if (ent && ent.nom) {
+    soc.nom = ent.nom || soc.nom;
+    soc.sigle = ent.sigle || soc.sigle;
+    soc.adresse = ent.adresse || soc.adresse;
+    soc.telephone = ent.telephone || soc.telephone;
+    soc.ncc = ent.nui || ent.ncc || soc.ncc;
+    soc.cnps = ent.cnps || soc.cnps;
+    soc.forme_juridique = ent.formeJuridique || soc.forme_juridique;
+    setSocieteP(soc);
+  }
+
+  /* 2. Employés : source unique = mdb_employes (fusion des champs enrichis) */
+  var mainEmps = DB.getMain('mdb_employes') || [];
+  if (mainEmps.length > 0) {
+    mainEmps.forEach(function(me) {
+      if (!me.salaire_base) me.salaire_base = 0;
+      if (!me.type_contrat) me.type_contrat = 'CDI';
+      if (!me.nb_parts) me.nb_parts = 1;
+      if (me.situation_matrimoniale === undefined) me.situation_matrimoniale = 'celibataire';
+      if (!me.enfants) me.enfants = 0;
+      if (!me.enfants_infirmes) me.enfants_infirmes = 0;
+      if (!me.status) me.status = 'actif';
+      if (!me.assurance_mensuelle) me.assurance_mensuelle = 0;
+      if (!me.duree_contrat) me.duree_contrat = 0;
+      if (me.en_paie === undefined) me.en_paie = me.type_contrat !== 'Externe';
+    });
+    DB.setMain('mdb_employes', mainEmps);
+  }
+}
+
+/* Convertit un acompte/prêt du format principal vers le format paye */
+function normalizeAP(a) {
+  return {
+    id: a.id || DB.id(),
+    employee_id: a.employeId || a.employee_id || '',
+    type: a.type === 'pret' ? 'pret' : 'acompte',
+    montant: parseFloat(a.montant) || 0,
+    mensualite: parseFloat(a.montantMensuel || a.mensualite) || 0,
+    dureeMois: parseInt(a.dureeMois) || 0,
+    moisDeduction: a.moisDeduction || '',
+    rembourse: parseFloat(a.montantRembourse) || 0,
+    date: a.date || (a.moisDeduction ? a.moisDeduction + '-01' : new Date().toISOString().slice(0,10)),
+    statut: a.statut === 'rembourse' ? 'termine' : 'actif',
+    motif: a.motif || '',
+    numeroPiece: a.numeroPiece || '',
+    provenance: a.provenance || '',
+    executant: a.executant || '',
+    moyen: a.moyen || '',
+    remettant: a.remettant || '',
+    notes: a.notes || '',
+    caisseId: a.caisseId || '',
+    caisseOpId: a.caisseOpId || '',
+    preleve: a.preleve || false,
+    moisPreleve: a.moisPreleve || ''
+  };
+}
+function fmtMoisAP(m) {
+  if (!m) return '-';
+  var months = ['Jan','F\u00e9v','Mar','Avr','Mai','Juin','Juil','Ao\u00fb','Sep','Oct','Nov','D\u00e9c'];
+  if (m.length >= 7) { var y = m.substring(0, 4); var mm = parseInt(m.substring(5, 7), 10); if (mm >= 1 && mm <= 12) return months[mm - 1] + ' ' + y; }
+  return m;
+}
+
+/* Sauvegarde un acompte/prêt dans le format principal pour que la caisse/RH le voie */
+function pushAPToMain(ap) {
+  var mainAP = DB.getMain('mdb_acomptesPrets') || [];
+  var idx = mainAP.findIndex(function(a){ return a.id === ap.id; });
+  var record = {
+    id: ap.id, type: ap.type, employeId: ap.employee_id,
+    employeNom: (getPersonnel().find(function(p){ return p.id === ap.employee_id; }) || {}).nom || '',
+    montant: ap.montant, montantRembourse: ap.rembourse || 0,
+    dureeMois: ap.dureeMois || 0, montantMensuel: ap.mensualite || 0,
+    moisDeduction: ap.moisDeduction || ap.date.substring(0,7),
+    motif: ap.motif || '', notes: '', statut: ap.statut === 'termine' ? 'rembourse' : 'en_cours',
+    preleve: false, numeroPiece: ap.numeroPiece || ''
+  };
+  if (idx !== -1) mainAP[idx] = record; else mainAP.push(record);
+  DB.setMain('mdb_acomptesPrets', mainAP);
+}
+
+/* Récupère les acomptes/prêts pour un employé et un mois donné (déduction) */
+function getAPForMonth(empId, mois) {
+  var list = (getAPList() || []).map(normalizeAP);
+  var mAcc = 0, mPret = 0;
+  list.forEach(function(a) {
+    if (a.employee_id !== empId) return;
+    if (a.type === 'acompte') {
+      if (a.date && a.date.indexOf(mois) === 0) mAcc += a.montant || 0;
+    } else if (a.type === 'pret' && a.statut !== 'termine') {
+      var moisDed = a.moisDeduction || (a.date || '').substring(0,7);
+      if (moisDed && moisDed <= mois) {
+        var rest = (a.montant || 0) - (a.rembourse || 0);
+        mPret += Math.min(a.mensualite || 0, rest);
+      }
+    }
+  });
+  return { acomptes: mAcc, prets: mPret };
+}
+
+/* ==================== HELPERS ==================== */
+function fmt(n) { if (isNaN(n)) n = 0; return new Intl.NumberFormat('fr-FR').format(Math.floor(n)); }
+function fmtF(n) { return fmt(n) + ' F'; }
+function toast(msg, type) {
+  var c = document.getElementById('toast-container');
+  var t = document.createElement('div');
+  t.className = 'toast ' + (type || '');
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(function() { t.remove(); }, 3500);
+}
+function escH(s) { if (s === null || s === undefined) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function calcAge(d) { if (!d) return 0; var b = new Date(d), n = new Date(); var a = n.getFullYear()-b.getFullYear(); var m = n.getMonth()-b.getMonth(); if (m<0||(m===0&&n.getDate()<b.getDate())) a--; return a; }
+function calcAnciennete(d) {
+  if (!d) return '-';
+  var s = new Date(d), n = new Date();
+  var y = n.getFullYear()-s.getFullYear(), m = n.getMonth()-s.getMonth();
+  if (m<0) { y--; m += 12; }
+  return (y > 0 ? y + ' an' + (y>1?'s':'') : '') + (m > 0 ? (y>0?', ':'') + m + ' mois' : '') || '0 mois';
+}
+function fmtDate(d) { if (!d) return '-'; var p = String(d).split('-'); if (p.length === 3) return p[2] + '/' + p[1] + '/' + p[0]; return d; }
+function typeContratLabel(p) { return p.type_contrat === 'Externe' ? 'Prestataire externe' : (p.type_contrat || '-'); }
+function dateFinContrat(p) {
+  if (!p.date_entree) return '-';
+  if (p.type_contrat === 'CDI') return '<span style="font-size:.7rem;color:var(--dim)">N/A (CDI)</span>';
+  var duree = parseInt(p.duree_contrat) || 0;
+  if (duree <= 0) return '-';
+  var dt = new Date(p.date_entree + 'T00:00:00');
+  dt.setMonth(dt.getMonth() + duree);
+  return fmtDate(dt.getFullYear() + '-' + (dt.getMonth() < 9 ? '0' : '') + (dt.getMonth() + 1) + '-' + (dt.getDate() < 10 ? '0' : '') + dt.getDate());
+}
+
+/* ==================== NAVIGATION ==================== */
+function showSection(id) {
+  document.querySelectorAll('section').forEach(function(s) { s.classList.remove('active'); });
+  document.querySelectorAll('nav button').forEach(function(b) { b.classList.remove('active'); });
+  var sec = document.getElementById(id);
+  if (sec) sec.classList.add('active');
+  var btn = Array.from(document.querySelectorAll('nav button')).find(function(b) { return b.getAttribute('onclick') && b.getAttribute('onclick').indexOf(id) !== -1; });
+  if (btn) btn.classList.add('active');
+  localStorage.setItem('paye_currentSection', id);
+  if (id === 'paie') initPaie();
+  if (id === 'personnel') loadPersonnel();
+  if (id === 'avantages') loadAvantages();
+  if (id === 'pointage') loadPointage();
+  if (id === 'acomptes_prets') loadAP();
+  if (id === 'livre_paie') loadLivrePaie();
+  if (id === 'declarations') loadDeclaration();
+  if (id === 'conges') loadConges();
+  if (id === 'dashboard') loadDashboard();
+  if (id === 'societe') loadSocieteForm();
+  if (id === 'categories') loadCategories();
+  if (id === 'ecritures') loadEcritures();
+  if (id === 'stc') fillEmpSelects();
+  if (id === 'documents') loadDocs();
+  if (id === 'actualites') loadActualites();
+  if (id === 'explication') loadExplication();
+  if (window.innerWidth <= 768) togglePaieSidebar(true);
+}
+function togglePaieSidebar(forceClose) {
+  var aside = document.querySelector('aside');
+  var overlay = document.getElementById('paie-mobile-overlay');
+  if (!aside) return;
+  if (forceClose) { aside.classList.remove('open'); if (overlay) overlay.classList.remove('open'); return; }
+  aside.classList.toggle('open');
+  if (overlay) overlay.classList.toggle('open');
+}
+/* Initialise le mois de paie à mois en cours + employé par défaut */
+function initPaie() {
+  var pm = document.getElementById('paie-mois');
+  if (pm && !pm.value) {
+    var now = new Date();
+    pm.value = now.getFullYear() + '-' + (now.getMonth() < 9 ? '0' : '') + (now.getMonth() + 1);
+  }
+  fillEmpSelects();
+  fillEmpSelectsMois(pm ? pm.value : '');
+  var ps = document.getElementById('paie-select-emp');
+  if (ps && ps.options && ps.options.length > 1) ps.selectedIndex = 1;
+  generateBulletin();
+}
+/* ==================== EXPLICATION DU CALCUL ==================== */
+function loadExplication() {
+  var tbody = document.getElementById('explication-tbody');
+  if (!tbody) return;
+  var rows = [
+    ['11', 'Salaire catégoriel', 'salaire mensuel applicable × (heures pointées / 173,33)', 'Tous'],
+    ['21', 'Prime d\'ancienneté', 'salaire × 1% × nombre d\'années d\'ancienneté (à partir de 2 ans)', 'Titulaire'],
+    ['22', 'Prime de transport', 'forfait transport (30 000 FCFA) proratisé = 30 000 × (jours ouvrés présents / jours ouvrés du mois)', 'Titulaire'],
+    ['22.1', 'H. Supplémentaires', 'heures sup. majorées au taux horaire × majoration (15/50/75/100%) selon convention', 'Journalier'],
+    ['23.1', 'H. Nuit', 'heures nuit × taux horaire × 75%', 'Journalier'],
+    ['25', 'Prime du mois', 'montant saisi dans l\'écran Pointage (prime mensuelle)', 'Tous'],
+    ['24', 'Indemnité de Congés', 'montant du congé payé ce mois (saisi), déduit du brut congé acquis = salaire/12 × mois d\'ancienneté', 'Titulaire'],
+    ['26', 'Gratification', 'montant saisi (suggéré en décembre = moyenne des bruts janv–déc ÷ 1), modifiable', 'Tous'],
+    ['41-45', 'Avantages en nature', 'valeur de l\'avantage (logement/nourriture/utilités/voiture). Tous imposables sauf fraction non imposable.', 'Titulaire'],
+    ['61', 'CNPS, retraite', 'base retraite = min(brut social, plafond) × 6,3% (part salariale)', 'Titulaire'],
+    ['62', 'CNPS, accident', 'base ATPF × 3% (part salariale)', 'Titulaire'],
+    ['63', 'CNPS, prestations familiales', 'base ATPF × 5,75% (part salariale)', 'Titulaire'],
+    ['51', 'Impôt brut (ITS)', 'impôt sur le revenu calculé sur le brut fiscal selon tranches (barème mensuel)', 'Titulaire'],
+    ['52', 'Réduction charges familiales (RICF)', 'abattement selon nombre de parts (1 + conjoint + enfants + infirmes)', 'Titulaire'],
+    ['CNPS assur.', '', 'assurance maladie = montant saisi sur l\'employé (part salariale)', 'Titulaire'],
+    ['', 'CMU', 'part salariale = 500 FCFA × effectif (1 + conjoint + enfants + infirmes)', 'Titulaire'],
+    ['81', 'Avance / Acompte', 'montant saisi dans l\'écran Acomptes & Prêts', 'Tous'],
+    ['82', 'Prêt(s)', 'montant saisi dans l\'écran Acomptes & Prêts', 'Tous'],
+    ['99', 'Arrondi', 'brut net arrondi au cent de millésimaire inférieur (modulo 100)', 'Tous'],
+    ['NET', 'Net à payer', 'brut total - toutes les retenues (CNPS + ITS - RICF + CMU + acomptes + prêts + assurance + avantages + arrondi)', 'Tous']
+  ];
+  var html = '';
+  rows.forEach(function(r) {
+    html += '<tr><td style="font-weight:700">' + escH(r[0]) + '</td><td>' + escH(r[1]) + '</td><td style="font-family:monospace;font-size:.72rem">' + escH(r[2]) + '</td><td>' + escH(r[3]) + '</td></tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+/* ==================== SOCIETE ==================== */
+function loadSocieteForm() {
+  /* Informations société = lecture seule depuis mdb_entreprise (centralisé Administration) */
+  var ent = DB.getMain('mdb_entreprise') || {};
+  var soc = getSocieteP() || {};
+  if (ent.nom) {
+    soc.nom = ent.nom; soc.adresse = ent.adresse; soc.telephone = ent.telephone;
+    soc.ncc = ent.nui || ent.ncc; soc.cnps = ent.cnps;
+    setSocieteP(soc);
+  }
+  var lim = getPayeSection('limits', {}) || {};
+  if (lim.retraite) document.getElementById('config-cnps-retraite').value = lim.retraite;
+  if (lim.atpf) document.getElementById('config-cnps-atpf').value = lim.atpf;
+}
+function saveSociete(e) {
+  e.preventDefault();
+  var f = e.target, d = {};
+  for (var i = 0; i < f.elements.length; i++) { var el = f.elements[i]; if (el.name) d[el.name] = el.value; }
+  setSocieteP(d);
+  /* Synchroniser vers l'app principale (module Commercial/Trésorerie) */
+  var ent = DB.getMain('mdb_entreprise') || {};
+  ent.nom = d.nom || ent.nom;
+  ent.sigle = d.sigle || ent.sigle;
+  ent.adresse = d.adresse || ent.adresse;
+  ent.telephone = d.telephone || ent.telephone;
+  ent.nui = d.ncc || ent.nui;
+  ent.cnps = d.cnps || ent.cnps;
+  ent.formeJuridique = d.forme_juridique || ent.formeJuridique;
+  DB.setMain('mdb_entreprise', ent);
+  toast('Société enregistrée et synchronisée', 'success');
+}
+function saveLimits() {
+  setPayeSection('limits', { retraite: parseFloat(document.getElementById('config-cnps-retraite').value)||3375000, atpf: parseFloat(document.getElementById('config-cnps-atpf').value)||75000 });
+  toast('Plafonds enregistrés', 'success');
+}
+
+/* ==================== CATEGORIES / ORG ==================== */
+function switchCatTab(tab) {
+  var primeTabBtn = document.getElementById('cat-tab-primes');
+  if (primeTabBtn) primeTabBtn.classList.toggle('active', tab === 'primes');
+  var primeTabDiv = document.getElementById('tab-primes');
+  if (primeTabDiv) { primeTabDiv.style.display = tab === 'primes' ? '' : 'none'; if (tab === 'primes') loadPrimesSpec(); }
+  if (tab === 'primes') {
+    document.querySelectorAll('#categories .tab-pills button').forEach(function(b){ if (!b.id || b.id !== 'cat-tab-primes') b.classList.remove('active'); });
+    return;
+  }
+  _switchCatTab_orig(tab);
+}
+function _switchCatTab_orig(tab) {
+  document.querySelectorAll('#categories .tab-pills button').forEach(function(b){ b.classList.remove('active'); });
+  document.querySelector('#categories .tab-pills button:nth-child(' + (tab==='grille'?1:tab==='taxes'?2:tab==='org'?3:4) + ')').classList.add('active');
+  document.getElementById('tab-grille').style.display = tab==='grille' ? '' : 'none';
+  document.getElementById('tab-taxes').style.display = tab==='taxes' ? '' : 'none';
+  document.getElementById('tab-org').style.display = tab==='org' ? '' : 'none';
+  document.getElementById('tab-montage').style.display = tab==='montage' ? '' : 'none';
+  if (tab === 'grille') loadCategories();
+  if (tab === 'taxes') loadItsScale();
+  if (tab === 'org') loadOrg();
+  if (tab === 'montage') loadArticlesMontage();
+}
+}
+function loadCategories() {
+  var cats = getCategories();
+  var tbody = document.getElementById('cat-tbody');
+  tbody.innerHTML = '';
+  cats.forEach(function(c, i) {
+    tbody.innerHTML += '<tr><td class="fw-700">' + escH(c.code) + '</td><td>' + escH(c.libelle) + '</td><td style="text-align:right;font-weight:700">' + fmtF(c.salaire_min) + '</td><td><button class="btn btn-red" onclick="delCategorie(' + i + ')">X</button></td></tr>';
+  });
+  var sel = document.getElementById('emp-categorie');
+  if (sel) { sel.innerHTML = '<option value="">Sélectionner...</option>' + cats.map(function(c){ return '<option value="' + c.code + '" data-sal="' + c.salaire_min + '">' + escH(c.code) + ' - ' + escH(c.libelle) + '</option>'; }).join(''); }
+}
+function addCategorie(e) {
+  e.preventDefault();
+  var cats = getCategories();
+  cats.push({ code: e.target.code.value, libelle: e.target.libelle.value, salaire_min: parseFloat(e.target.salaire_min.value)||0 });
+  setCategories(cats);
+  e.target.reset();
+  loadCategories();
+  toast('Catégorie ajoutée', 'success');
+}
+function delCategorie(i) { var c = getCategories(); c.splice(i,1); setCategories(c); loadCategories(); }
+function loadOrg() {
+  var svcs = getServices(), fncs = getFonctions();
+  document.getElementById('svc-tbody').innerHTML = svcs.map(function(s,i){ return '<tr><td>' + escH(s) + '</td><td style="white-space:nowrap"><button class="btn-sec" style="padding:2px 6px;font-size:.7rem" onclick="editOrgItem(\'services\',' + i + ')">Modifier</button> <button class="btn btn-red" style="padding:2px 6px;font-size:.7rem" onclick="delOrg(\'services\',' + i + ')">X</button></td></tr>'; }).join('');
+  var fncNames = fncs.map(function(f){ return typeof f === 'object' ? f.nom : f; });
+
+  /* Construire la table fonctions groupée par département */
+  var fncBySvc = {};
+  fncs.forEach(function(f, idx) {
+    var n = typeof f === 'object' ? f.nom : f;
+    var s = typeof f === 'object' ? (f.service || 'Sans département') : 'Sans département';
+    if (!fncBySvc[s]) fncBySvc[s] = [];
+    fncBySvc[s].push({ nom: n, idx: idx });
+  });
+  var fncHtml = '';
+  for (var svcName in fncBySvc) {
+    fncHtml += '<tr style="background:#f1f5f9"><td colspan="3" style="font-weight:700;font-size:.72rem;padding:4px 8px">' + escH(svcName) + ' (' + fncBySvc[svcName].length + ')</td></tr>';
+    fncBySvc[svcName].forEach(function(f) { fncHtml += '<tr data-idx="' + f.idx + '"><td style="padding-left:16px">' + escH(f.nom) + '</td><td></td><td style="white-space:nowrap"><button class="btn-sec" style="padding:2px 6px;font-size:.7rem" onclick="editOrgItem(\'fonctions\',' + f.idx + ')">Modifier</button> <button class="btn btn-red" style="padding:2px 6px;font-size:.7rem" onclick="delOrg(\'fonctions\',' + f.idx + ')">X</button></td></tr>'; });
+  }
+  document.getElementById('fnc-tbody').innerHTML = fncHtml || '<tr><td colspan="2" style="color:var(--dim)">Aucune fonction</td></tr>';
+
+  /* Remplir le dropdown département pour le formulaire fonction */
+  var fncSvc = document.getElementById('fnc-service');
+  if (fncSvc) fncSvc.innerHTML = '<option value="">Département</option>' + svcs.map(function(s){ return '<option value="' + escH(s) + '">' + escH(s) + '</option>'; }).join('');
+
+  /* Remplir dropdowns du modal */
+  var s1 = document.getElementById('emp-service');
+  if (s1) s1.innerHTML = '<option value="">Sélectionner...</option>' + svcs.map(function(s){ return '<option value="' + escH(s) + '">' + escH(s) + '</option>'; }).join('');
+  var s2 = document.getElementById('emp-fonction');
+  if (s2) s2.innerHTML = '<option value="">Sélectionner...</option>' + fncNames.map(function(s){ return '<option value="' + escH(s) + '">' + escH(s) + '</option>'; }).join('');
+  var gf = document.getElementById('global-fmt-heures');
+  if (gf) gf.value = getFormatHeures();
+}
+function getFonctionNames() {
+  return getFonctions().map(function(f){ return typeof f === 'object' ? f.nom : f; });
+}
+function getFonctionService(fnName) {
+  var fncs = getFonctions();
+  for (var i = 0; i < fncs.length; i++) {
+    var fn = fncs[i];
+    if ((typeof fn === 'object' ? fn.nom : fn) === fnName) return typeof fn === 'object' ? (fn.service || '') : '';
+  }
+  return '';
+}
+function addOrg(e, type) {
+  e.preventDefault();
+  var name = type === 'services' ? document.getElementById('svc-name').value.trim() : document.getElementById('fnc-name').value.trim();
+  if (!name) return;
+  if (type === 'services') { var arr = getServices(); arr.push(name); setServices(arr); }
+  else {
+    var svc = document.getElementById('fnc-service');
+    var arr2 = getFonctions();
+    arr2.push({ nom: name, service: svc ? svc.value : '' });
+    setFonctions(arr2);
+  }
+  loadOrg();
+  toast('Ajouté', 'success');
+}
+function autoFillService() {
+  var fnEl = document.getElementById('emp-fonction');
+  var svcEl = document.getElementById('emp-service');
+  if (!fnEl || !svcEl) return;
+  var svc = getFonctionService(fnEl.value);
+  if (svc) svcEl.value = svc;
+}
+/* ==================== ARTICLES MONTAGE ==================== */
+function getArticlesMontage() { return getPayeSection('articlesMontage', []); }
+function setArticlesMontage(v) { setPayeSection('articlesMontage', v); }
+function getMontageConfig() { return getPayeSection('montageConfig', { seuil: 0, prime: 0 }); }
+function setMontageConfig(v) { setPayeSection('montageConfig', v); }
+function getPointageMontage() { var v = getPayeSection('pointageMontage', []); return Array.isArray(v) ? v : []; }
+function setPointageMontage(v) { setPayeSection('pointageMontage', v); }
+function loadArticlesMontage() {
+  var ams = getArticlesMontage();
+  var tbody = document.getElementById('am-tbody');
+  tbody.innerHTML = '';
+  ams.forEach(function(a,i){
+    tbody.innerHTML += '<tr data-am-idx="' + i + '"><td class="fw-700">' + escH(a.code) + '</td><td>' + escH(a.designation) + '</td><td style="text-align:right;font-weight:700">' + fmtF(a.prix) + '</td><td style="text-align:center">' + (a.compte_prime ? '\u2713' : '-') + '</td><td style="white-space:nowrap"><button class="btn-sec" style="padding:2px 6px;font-size:.7rem" onclick="editArticleMontage(' + i + ')">Modifier</button> <button class="btn btn-red" style="padding:2px 6px;font-size:.7rem" onclick="delArticleMontage(' + i + ')">X</button></td></tr>';
+  });
+  var cfg = getMontageConfig();
+  var sEl = document.getElementById('am-seuil');
+  var pEl = document.getElementById('am-prime');
+  if (sEl) sEl.value = cfg.seuil || 0;
+  if (pEl) pEl.value = cfg.prime || 0;
+}
+function addArticleMontage(e) {
+  e.preventDefault();
+  var code = document.getElementById('am-code').value.trim();
+  var des = document.getElementById('am-designation').value.trim();
+  var prix = parseFloat(document.getElementById('am-prix').value) || 0;
+  var comptePrime = document.getElementById('am-prime-check') ? document.getElementById('am-prime-check').checked : true;
+  if (!code || !des || !prix) return;
+  var ams = getArticlesMontage();
+  ams.push({ code: code, designation: des, prix: prix, compte_prime: comptePrime });
+  setArticlesMontage(ams);
+  document.getElementById('am-code').value = '';
+  document.getElementById('am-designation').value = '';
+  document.getElementById('am-prix').value = '';
+  loadArticlesMontage();
+  toast('Article montage ajouté', 'success');
+}
+function delArticleMontage(i) {
+  var ams = getArticlesMontage(); ams.splice(i,1); setArticlesMontage(ams); loadArticlesMontage();
+}
+function editArticleMontage(i) {
+  var ams = getArticlesMontage();
+  var a = ams[i];
+  var row = document.querySelector('#am-tbody tr[data-am-idx="' + i + '"]');
+  if (!row) return;
+  row.innerHTML = '<td><input type="text" id="edit-am-code" value="' + escH(a.code) + '" style="width:80px;padding:2px 4px;font-size:.7rem;border:1px solid var(--border);border-radius:4px"></td>' +
+    '<td><input type="text" id="edit-am-des" value="' + escH(a.designation) + '" style="width:140px;padding:2px 4px;font-size:.7rem;border:1px solid var(--border);border-radius:4px"></td>' +
+    '<td><input type="number" id="edit-am-prix" value="' + a.prix + '" style="width:80px;padding:2px 4px;font-size:.7rem;border:1px solid var(--border);border-radius:4px"></td>' +
+    '<td style="text-align:center"><input type="checkbox" id="edit-am-cprime"' + (a.compte_prime !== false ? ' checked' : '') + '></td>' +
+    '<td style="white-space:nowrap"><button class="btn" style="padding:2px 8px;font-size:.7rem" onclick="saveEditArticleMontage(' + i + ')">OK</button> <button class="btn-sec" style="padding:2px 8px;font-size:.7rem" onclick="loadArticlesMontage()">Annuler</button></td>';
+  document.getElementById('edit-am-code').focus();
+}
+function saveEditArticleMontage(i) {
+  var ams = getArticlesMontage();
+  var code = document.getElementById('edit-am-code').value.trim();
+  var des = document.getElementById('edit-am-des').value.trim();
+  var prix = parseFloat(document.getElementById('edit-am-prix').value) || 0;
+  var cp = document.getElementById('edit-am-cprime').checked;
+  if (!code || !des) { loadArticlesMontage(); return; }
+  ams[i] = { code: code, designation: des, prix: prix, compte_prime: cp };
+  setArticlesMontage(ams); loadArticlesMontage();
+  toast('Article modifié', 'success');
+}
+function saveMontageConfig() {
+  var sEl = document.getElementById('am-seuil');
+  var pEl = document.getElementById('am-prime');
+  setMontageConfig({ seuil: parseFloat(sEl ? sEl.value : 0) || 0, prime: parseFloat(pEl ? pEl.value : 0) || 0 });
+}
+function delOrg(type, i) {
+  if (type === 'services') { var arr = getServices(); arr.splice(i,1); setServices(arr); }
+  else { var arr2 = getFonctions(); arr2.splice(i,1); setFonctions(arr2); }
+  loadOrg();
+}
+function editOrgItem(type, i) {
+  if (type === 'services') {
+    var arr = getServices();
+    var newName = prompt('Modifier le département :', arr[i]);
+    if (newName && newName.trim()) { arr[i] = newName.trim(); setServices(arr); loadOrg(); }
+  } else {
+    /* Fonctions : remplacer la ligne par un formulaire inline */
+    var arr2 = getFonctions();
+    var f = arr2[i];
+    var oldName = typeof f === 'object' ? f.nom : f;
+    var oldSvc = typeof f === 'object' ? (f.service || '') : '';
+    var svcs = getServices();
+    var svcOpts = svcs.map(function(s){ return '<option value="' + escH(s) + '"' + (s === oldSvc ? ' selected' : '') + '>' + escH(s) + '</option>'; }).join('');
+    var row = document.querySelector('#fnc-tbody tr[data-idx="' + i + '"]');
+    if (!row) return;
+    row.innerHTML = '<td style="padding-left:16px"><input type="text" id="edit-fn-name" value="' + escH(oldName) + '" style="width:120px;padding:2px 4px;font-size:.7rem;border:1px solid var(--border);border-radius:4px"></td>' +
+      '<td><select id="edit-fn-svc" style="padding:2px 4px;font-size:.7rem;border:1px solid var(--border);border-radius:4px">' + svcOpts + '</select></td>' +
+      '<td style="white-space:nowrap"><button class="btn" style="padding:2px 8px;font-size:.7rem" onclick="saveEditFonction(' + i + ')">OK</button> <button class="btn-sec" style="padding:2px 8px;font-size:.7rem" onclick="loadOrg()">Annuler</button></td>';
+    document.getElementById('edit-fn-name').focus();
+  }
+}
+function saveEditFonction(i) {
+  var arr = getFonctions();
+  var nn = document.getElementById('edit-fn-name').value.trim();
+  var ns = document.getElementById('edit-fn-svc').value;
+  if (!nn) { loadOrg(); return; }
+  arr[i] = { nom: nn, service: ns };
+  setFonctions(arr); loadOrg();
+  toast('Fonction enregistrée', 'success');
+}
+
+/* ==================== PERSONNEL ==================== */
+function loadPersonnel() {
+  loadPersFilters();
+  var list = getPersonnel();
+  var q = (document.getElementById('pers-search').value || '').toLowerCase();
+  var f = document.getElementById('pers-filter').value;
+  var fFonction = document.getElementById('pers-fonction') ? document.getElementById('pers-fonction').value : '';
+  var fService = document.getElementById('pers-service') ? document.getElementById('pers-service').value : '';
+  var maskSal = document.getElementById('pers-mask-salaire') ? document.getElementById('pers-mask-salaire').checked : false;
+  if (q) list = list.filter(function(p){ return (p.nom + ' ' + (p.prenoms||'') + ' ' + p.matricule + ' ' + (p.fonction||'') + ' ' + (p.service||'')).toLowerCase().indexOf(q) !== -1; });
+  if (fFonction) list = list.filter(function(p){ return (p.fonction || '') === fFonction; });
+  if (fService) list = list.filter(function(p){ return (p.service || '') === fService; });
+  var cats = getCategories();
+  var container = document.getElementById('pers-container');
+  var html = '';
+  var groups = [];
+  if (f === 'journalier') groups = [['journalier', 'Journaliers']];
+  else if (f === 'externe') groups = [['externe', 'Prestataires externes']];
+  else if (f === 'titulaire') groups = [['titulaire', 'Titulaires']];
+  else groups = [['titulaire', 'Titulaires'], ['journalier', 'Journaliers'], ['externe', 'Prestataires externes']];
+  groups.forEach(function(g) {
+    var members = list.filter(function(p){ return empCategorie(p) === g[0]; });
+    if (members.length === 0) return;
+    html += '<div style="padding:.6rem 1rem;background:#f1f5f9;font-weight:800;font-size:.78rem;border-bottom:1px solid var(--border)">' + g[1] + ' (' + members.length + ')</div>';
+    html += '<table><thead><tr><th>Matricule</th><th>Nom & Pr\u00e9noms</th><th>D\u00e9partement</th><th>Fonction</th><th>Cat\u00e9gorie</th><th>Date D\u00e9but</th><th>Date Fin</th><th>Type Contrat</th>' + (maskSal ? '' : '<th style="text-align:right">Salaire Base</th>') + '<th>Anciennet\u00e9</th><th style="width:90px">Actions</th></tr></thead><tbody>';
+    members.forEach(function(p) {
+      var cat = cats.find(function(c){ return c.code === p.categorie_id; });
+      var dateFin = dateFinContrat(p);
+      html += '<tr><td class="fw-700">' + escH(p.matricule) + '</td><td><strong>' + escH(p.nom) + ' ' + escH(p.prenoms) + '</strong></td><td>' + escH(p.service || '-') + '</td><td>' + escH(p.fonction || '-') + '</td><td>' + escH(cat ? cat.libelle : (p.categorie_id || '-')) + '</td><td>' + (p.date_entree ? fmtDate(p.date_entree) : '-') + '</td><td>' + dateFin + '</td><td>' + typeContratLabel(p) + '</td>' + (maskSal ? '' : '<td style="text-align:right;font-weight:700">' + fmtF(p.salaire_base) + '</td>') + '<td>' + calcAnciennete(p.date_entree) + '</td><td style="white-space:nowrap"><button class="btn-sec" style="padding:3px 8px;margin-right:4px" onclick="editPersonnel(\'' + p.id + '\')">Modifier</button><button class="btn btn-red" style="padding:3px 8px" onclick="delPersonnel(\'' + p.id + '\')">X</button></td></tr>';
+    });
+    html += '</tbody></table>';
+  });
+  if (!html) html = '<div style="text-align:center;color:var(--dim);padding:1.5rem">Aucun employ\u00e9</div>';
+  container.innerHTML = html;
+  fillEmpSelects();
+}
+function loadPersFilters() {
+  var svcs = (getServices() || []).slice().sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+  var fncs = getFonctionNames().slice().sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+  var fEl = document.getElementById('pers-fonction');
+  if (fEl) { var cur = fEl.value; fEl.innerHTML = '<option value="">Toutes fonctions</option>' + fncs.map(function(k){ return '<option value="' + escH(k) + '">' + escH(k) + '</option>'; }).join(''); if (cur) fEl.value = cur; }
+  var sEl = document.getElementById('pers-service');
+  if (sEl) { var curS = sEl.value; sEl.innerHTML = '<option value="">Tous départements</option>' + svcs.map(function(k){ return '<option value="' + escH(k) + '">' + escH(k) + '</option>'; }).join(''); if (curS) sEl.value = curS; }
+}
+function printPersonnel() {
+  var w = window.open('', '_blank', 'width=1000,height=800');
+  var soc = DB.getMain('mdb_entreprise') || {};
+  var maskSal = document.getElementById('pers-mask-salaire') ? document.getElementById('pers-mask-salaire').checked : false;
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Liste du Personnel</title>';
+  h += '<style>body{font-family:sans-serif;padding:20px;color:#1e293b;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #000;padding:4px 6px;text-align:left}th{background:#f1f5f9;text-transform:uppercase;font-size:9px}.grouptitle{margin:14px 0 4px;padding:5px 8px;background:#f1f5f9;font-weight:800;font-size:11px}@media print{body{padding:10px}}</style></head><body>';
+  h += '<h2 style="margin:0;font-size:15px">' + escH(soc.nom || 'MA SOCIETE') + '</h2><div style="font-size:10px;color:#555">Liste du Personnel - ' + new Date().toLocaleDateString('fr-FR') + '</div>';
+  var list = getPersonnel();
+  var groups = [['titulaire', 'Titulaires'], ['journalier', 'Journaliers'], ['externe', 'Prestataires externes']];
+  groups.forEach(function(g) {
+    var members = list.filter(function(p){ return empCategorie(p) === g[0]; });
+    if (members.length === 0) return;
+    h += '<div class="grouptitle">' + g[1] + ' (' + members.length + ')</div>';
+    h += '<table><thead><tr><th>Matricule</th><th>Nom & Pr\u00e9noms</th><th>D\u00e9partement</th><th>Fonction</th><th>Cat\u00e9gorie</th><th>Date D\u00e9but</th><th>Date Fin</th><th>Type</th>' + (maskSal ? '' : '<th style="text-align:right">Salaire Base</th>') + '<th>Anciennet\u00e9</th></tr></thead><tbody>';
+    var cats = getCategories();
+    members.forEach(function(p) {
+      var cat = cats.find(function(c){ return c.code === p.categorie_id; });
+      var dateFin = dateFinContrat(p).replace(/<[^>]*>/g, '');
+      h += '<tr><td>' + escH(p.matricule) + '</td><td>' + escH(p.nom + ' ' + (p.prenoms||'')) + '</td><td>' + escH(p.service || '-') + '</td><td>' + escH(p.fonction || '-') + '</td><td>' + escH(cat ? cat.libelle : (p.categorie_id || '-')) + '</td><td>' + (p.date_entree ? fmtDate(p.date_entree) : '-') + '</td><td>' + dateFin + '</td><td>' + typeContratLabel(p) + '</td>' + (maskSal ? '' : '<td style="text-align:right">' + fmtF(p.salaire_base) + '</td>') + '<td>' + calcAnciennete(p.date_entree) + '</td></tr>';
+    });
+    h += '</tbody></table>';
+  });
+  h += '</body></html>';
+  w.document.write(h);
+  w.document.close();
+  setTimeout(function() { w.print(); }, 300);
+}
+function exportPersonnel() {
+  var maskSal = document.getElementById('pers-mask-salaire') ? document.getElementById('pers-mask-salaire').checked : false;
+  var rows = [];
+  var header = ['Matricule', 'Nom & Pr\u00e9noms', 'D\u00e9partement', 'Fonction', 'Cat\u00e9gorie', 'Date D\u00e9but', 'Date Fin', 'Type Contrat'];
+  if (!maskSal) header.push('Salaire Base');
+  header.push('Anciennet\u00e9');
+  rows.push(header);
+  var list = getPersonnel();
+  var cats = getCategories();
+  list.forEach(function(p) {
+    var cat = cats.find(function(c){ return c.code === p.categorie_id; });
+    var dateFin = dateFinContrat(p).replace(/<[^>]*>/g, '');
+    var r = [p.matricule, p.nom + ' ' + (p.prenoms||''), p.service || '', p.fonction || '', cat ? cat.libelle : (p.categorie_id || ''), p.date_entree || '', dateFin, typeContratLabel(p)];
+    if (!maskSal) r.push(p.salaire_base || 0);
+    r.push(calcAnciennete(p.date_entree));
+    rows.push(r);
+  });
+  var csv = rows.map(function(r){ return r.join(';'); }).join('\n');
+  var blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'liste_personnel.csv';
+  a.click();
+}
+function fillEmpSelects() {
+  var list = getPersonnel();
+  /* Fonction filter for pointage */
+  var ff = document.getElementById('pt-fonction-filter');
+  /* Sauvegarder la fonction sélectionnée avant de repeupler */
+  var savedFonction = ff ? ff.value : 'Toutes les fonctions';
+  if (ff) {
+    var fonctions = ['Toutes les fonctions'];
+    var orgFncs = getFonctionNames();
+    for (var fi = 0; fi < orgFncs.length; fi++) { if (fonctions.indexOf(orgFncs[fi]) === -1) fonctions.push(orgFncs[fi]); }
+    list.forEach(function(p) { if (p.fonction && fonctions.indexOf(p.fonction) === -1) fonctions.push(p.fonction); });
+    ff.innerHTML = fonctions.map(function(f){ return '<option value="' + escH(f) + '">' + escH(f) + '</option>'; }).join('');
+    /* Restaurer la sélection */
+    if (fonctions.indexOf(savedFonction) !== -1) ff.value = savedFonction;
+    else ff.value = 'Toutes les fonctions';
+  }
+  /* pt-select-emp : filtré par fonction sélectionnée ET rendement si onglet montage */
+  var selected = savedFonction !== 'Toutes les fonctions' ? savedFonction : (ff ? ff.value : 'Toutes les fonctions');
+  var ptFiltered = list.filter(function(p) {
+    if (!selected || selected === 'Toutes les fonctions') return true;
+    return p.fonction === selected;
+  });
+  if (ptCurrentTab === 'montage') ptFiltered = ptFiltered.filter(function(p){ return p.rendement === true; });
+  var ptOpts = ptFiltered.map(function(p){
+    return '<option value="' + p.id + '">' + escH(p.matricule) + ' - ' + escH(p.nom) + ' ' + escH(p.prenoms || '') + ' (' + escH(p.fonction || '-') + ')</option>';
+  }).join('');
+  var ptEl = document.getElementById('pt-select-emp');
+  if (ptEl) { var cur = ptEl.value; ptEl.innerHTML = '<option value="">Sélectionner...</option>' + ptOpts; if (cur && ptFiltered.some(function(p){ return p.id === cur; })) ptEl.value = cur; }
+  /* Liste directe des employés (épinglés) */
+  var empList = document.getElementById('pt-emp-list');
+  if (empList && selected !== 'Toutes les fonctions') {
+    empList.innerHTML = ptFiltered.map(function(p){
+      return '<button class="btn-sec" style="padding:4px 10px;font-size:.7rem;white-space:nowrap" title="' + escH(p.matricule) + ' - ' + escH(p.nom) + ' ' + escH(p.prenoms||'') + '" onclick="document.getElementById(\'pt-select-emp\').value=\'' + p.id + '\';if(ptCurrentTab===\'montage\')loadPointageMontage();else loadPointage()">' + escH(p.nom) + '</button>';
+    }).join('');
+  } else if (empList) {
+    empList.innerHTML = '';
+  }
+  /* paie-select-emp & stc-select-emp : liste complète (non filtrée par fonction) */
+  var fullOpts = list.map(function(p){ return '<option value="' + p.id + '">' + escH(p.matricule) + ' - ' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>'; }).join('');
+  ['paie-select-emp','stc-select-emp'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) { var cur = el.value; el.innerHTML = '<option value="">Sélectionner...</option>' + fullOpts; if (cur && list.some(function(p){ return p.id === cur; })) el.value = cur; }
+  });
+}
+/* Sélecteur filtré par mois (bulletin) : un employé sorti fin juin reste visible pour juin */
+function fillEmpSelectsMois(mois) {
+  var list = getPersonnel().filter(function(p){ return empVisibleMois(p, mois) && (p.en_paie !== false || empCategorie(p) === 'externe'); });
+  var opts = list.map(function(p){ return '<option value="' + p.id + '">' + escH(p.matricule) + ' - ' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>'; }).join('');
+  var el = document.getElementById('paie-select-emp');
+  if (el) { var cur = el.value; el.innerHTML = '<option value="">Sélectionner...</option>' + opts; if (cur && list.some(function(p){ return p.id === cur; })) el.value = cur; }
+}
+function openEmpModal(id) {
+  document.getElementById('form-personnel').reset();
+  document.getElementById('emp-modal-title').textContent = id ? 'Modifier Employ\u00e9' : 'Nouvel Employ\u00e9';
+  document.getElementById('form-personnel').elements['id'].value = '';
+  var histEl = document.getElementById('salaire-hist-list');
+  if (histEl) histEl.innerHTML = '';
+  document.getElementById('modal-emp').classList.add('open');
+  if (id) switchEmpTab('contrat'); else switchEmpTab('infos');
+  /* Charger les listes, puis remplir les valeurs si édition */
+  loadCategories(); loadOrg(); updateEmpTypeFields();
+  if (id) {
+    setTimeout(function(){ editPersonnel(id); }, 200);
+  }
+}
+function closeEmpModal() { document.getElementById('modal-emp').classList.remove('open'); }
+function switchEmpTab(tab) {
+  document.querySelectorAll('#form-personnel .tab-pills button').forEach(function(b){ b.classList.remove('active'); });
+  var idx = tab === 'infos' ? 1 : tab === 'contrat' ? 2 : 3;
+  document.querySelector('#form-personnel .tab-pills button:nth-child(' + idx + ')').classList.add('active');
+  document.getElementById('tab-emp-infos').style.display = tab === 'infos' ? '' : 'none';
+  document.getElementById('tab-emp-contrat').style.display = tab === 'contrat' ? '' : 'none';
+  document.getElementById('tab-emp-docs').style.display = tab === 'docs' ? '' : 'none';
+}
+function editPersonnel(id) {
+  var list = getPersonnel();
+  var p = list.find(function(x){ return x.id === id; });
+  if (!p) return;
+  /* Ce chemin est utilisé directement par le bouton Modifier de la liste. */
+  document.getElementById('modal-emp').classList.add('open');
+  switchEmpTab('contrat');
+  loadCategories();
+  loadOrg();
+  document.getElementById('emp-modal-title').textContent = 'Modifier Employ\u00e9 - ' + p.matricule;
+  var f = document.getElementById('form-personnel');
+  for (var k in p) { if (f.elements[k] && f.elements[k].type !== 'checkbox') f.elements[k].value = p[k]; }
+  var epEl = f.elements['en_paie'];
+  if (epEl) epEl.value = p.en_paie ? 'oui' : 'non';
+  var rendEl = f.elements['rendement'];
+  if (rendEl) rendEl.checked = p.rendement === true;
+  updateEmpTypeFields();
+  autoFillService();
+  var histEl = document.getElementById('salaire-hist-list');
+  if (histEl) {
+    var hist = getSalaireHistorique(p);
+    histEl.innerHTML = hist.map(function(h) { return '<div style="padding:2px 0;border-bottom:1px dashed var(--border)"><strong>' + fmtF(h.montant) + '</strong> depuis ' + escH(h.dateEffet) + '</div>'; }).join('');
+  }
+  document.getElementById('modal-emp').classList.add('open');
+}
+function delPersonnel(id) {
+  if (!confirm('Supprimer cet employé ?')) return;
+  var list = getPersonnel();
+  setPersonnel(list.filter(function(x){ return x.id !== id; }));
+  loadPersonnel();
+  toast('Employé supprimé', 'success');
+}
+function savePersonnel(e) {
+  e.preventDefault();
+  var f = e.target;
+  var effetMois = f.elements['salaire_effet_mois'] ? f.elements['salaire_effet_mois'].value : '';
+  var salBase = parseFloat(f.elements['salaire_base'].value)||0;
+  var d = { id: f.elements['id'].value || DB.id(), matricule: f.elements['matricule'].value, nom: f.elements['nom'].value, prenoms: f.elements['prenoms'].value, sexe: f.elements['sexe'].value, date_naissance: f.elements['date_naissance'].value, telephone: f.elements['telephone'].value, date_entree: f.elements['date_entree'].value, type_contrat: f.elements['type_contrat'].value, duree_contrat: parseInt(f.elements['duree_contrat'].value)||0, service: f.elements['service'].value, fonction: f.elements['fonction'].value, categorie_id: f.elements['categorie_id'].value, salaire_base: salBase, situation_matrimoniale: f.elements['situation_matrimoniale'].value, enfants: parseInt(f.elements['enfants'].value)||0, enfants_infirmes: parseInt(f.elements['enfants_infirmes'].value)||0, nb_parts: parseFloat(f.elements['nb_parts'].value)||1, num_cnps: f.elements['num_cnps'].value, num_cmu: f.elements['num_cmu'].value, num_cni: f.elements['num_cni'].value, num_extrait: f.elements['num_extrait'].value, num_assurance: f.elements['num_assurance'].value, assurance_mensuelle: parseFloat(f.elements['assurance_mensuelle'].value)||0,
+    ind_representation: parseFloat(f.elements['ind_representation'] ? f.elements['ind_representation'].value : 0)||0,
+    ind_deplacement: parseFloat(f.elements['ind_deplacement'] ? f.elements['ind_deplacement'].value : 0)||0,
+    ind_salissure: parseFloat(f.elements['ind_salissure'] ? f.elements['ind_salissure'].value : 0)||0,
+    ind_tenue: parseFloat(f.elements['ind_tenue'] ? f.elements['ind_tenue'].value : 0)||0,
+    ind_caisse: parseFloat(f.elements['ind_caisse'] ? f.elements['ind_caisse'].value : 0)||0,
+    ind_responsabilite: parseFloat(f.elements['ind_responsabilite'] ? f.elements['ind_responsabilite'].value : 0)||0,
+    ind_fonction: parseFloat(f.elements['ind_fonction'] ? f.elements['ind_fonction'].value : 0)||0,
+    status: f.elements['status'].value, en_paie: f.elements['en_paie'].value !== 'non', rendement: f.elements['rendement'] ? f.elements['rendement'].checked : false, mode_pointage: f.elements['mode_pointage'] ? f.elements['mode_pointage'].value : 'journalier', format_heures: f.elements['format_heures'] ? f.elements['format_heures'].value : 'decimal', taux_journalier: f.elements['type_contrat'].value === 'Journalier' ? salBase : (parseFloat(f.elements['taux_journalier'] ? f.elements['taux_journalier'].value : 0)||0), montant_forfaitaire: f.elements['type_contrat'].value === 'Externe' ? salBase : 0 };
+  var list = getPersonnel();
+  var idx = list.findIndex(function(x){ return x.id === d.id; });
+  if (idx !== -1) {
+    var ancien = list[idx];
+    /* Historique des salaires : conserver les anciens salaires, ajouter le nouveau avec sa date d'effet */
+    if (effetMois) {
+      if (!ancien.salaire_history) {
+        ancien.salaire_history = [{ montant: parseFloat(ancien.salaire_base)||0, dateEffet: '0000-00' }];
+      }
+      var hidx = ancien.salaire_history.findIndex(function(h){ return h.dateEffet === effetMois; });
+      if (hidx !== -1) ancien.salaire_history[hidx] = { montant: salBase, dateEffet: effetMois };
+      else ancien.salaire_history.push({ montant: salBase, dateEffet: effetMois });
+      ancien.salaire_history.sort(function(a, b) { return (a.dateEffet||'').localeCompare(b.dateEffet||''); });
+      ancien.salaire_base = salBase;
+      /* Garder l'historique, ne pas écraser les autres champs d'historique */
+      d.salaire_history = ancien.salaire_history;
+    } else if (ancien.salaire_history && ancien.salaire_history.length > 0) {
+      /* Pas de nouvelle date d'effet : on met à jour la dernière entrée */
+      d.salaire_history = ancien.salaire_history.slice();
+      d.salaire_history[d.salaire_history.length - 1].montant = salBase;
+    }
+    list[idx] = d;
+  } else {
+    if (effetMois) d.salaire_history = [{ montant: salBase, dateEffet: effetMois }];
+    list.push(d);
+  }
+  setPersonnel(list);
+  closeEmpModal();
+  loadPersonnel();
+  toast('Employé enregistré', 'success');
+}
+function autoSalaire(sel) {
+  var opt = sel.selectedOptions[0];
+  var salEl = document.getElementById('form-personnel').elements['salaire_base'];
+  if (opt && opt.dataset.sal) salEl.value = opt.dataset.sal;
+  var hint = document.getElementById('salaire-base-hint');
+  var tc = document.getElementById('type_contrat');
+  var tcv = tc ? tc.value : 'CDI';
+  if (hint && opt && opt.dataset.sal) {
+    var sal = parseFloat(opt.dataset.sal) || 0;
+    if (tcv === 'Journalier') {
+      hint.innerHTML = 'Taux journalier = ' + fmt(sal) + ' F/jour &nbsp;|&nbsp; Taux horaire = ' + fmt(Math.round(sal / 8)) + ' F/h &nbsp;(salaire jour / 8h)';
+    } else {
+      hint.innerHTML = 'Salaire mensuel = ' + fmt(sal) + ' F &nbsp;|&nbsp; Taux horaire = ' + fmt(Math.round(sal / 173.33)) + ' F/h &nbsp;|&nbsp; Taux journalier ≈ ' + fmt(Math.round(sal / 22)) + ' F/jour';
+    }
+  }
+}
+/* Adapte le formulaire selon le type de contrat : Journalier -> taux journalier, Externe -> forfaitaire */
+function updateEmpTypeFields() {
+  var t = document.getElementById('type_contrat');
+  var tc = t ? t.value : 'CDI';
+  var lbl = document.getElementById('salaire-base-label');
+  var hint = document.getElementById('salaire-base-hint');
+  var mp = document.getElementById('mode_pointage');
+  var dg = document.getElementById('duree-contrat-group');
+  if (lbl) lbl.textContent = tc === 'Journalier' ? 'Taux journalier (FCFA / jour)' : (tc === 'Externe' ? 'Montant forfaitaire (FCFA / mois)' : 'Salaire de Base (FCFA)');
+  if (hint) hint.textContent = tc === 'Journalier' ? 'Le salaire du mois = taux journalier \u00d7 nombre de jours point\u00e9s. Aucun CNPS ni imp\u00f4t.' : (tc === 'Externe' ? 'Montant fixe vers\u00e9 au prestataire externe. Aucun CNPS ni imp\u00f4t.' : '');
+  if (dg) dg.style.display = (tc === 'CDI' || tc === 'Externe') ? 'none' : '';
+  if (mp) {
+    if (tc === 'Journalier') { mp.value = 'journalier'; }
+    else if (tc === 'Externe') { mp.value = 'forfait'; }
+  }
+  autoSalaire(document.getElementById('emp-categorie'));
+}
+function calcParts() {
+  var f = document.getElementById('form-personnel');
+  var sit = f.elements['situation_matrimoniale'].value;
+  var kids = parseInt(f.elements['enfants'].value)||0, dKids = parseInt(f.elements['enfants_infirmes'].value)||0;
+  var total = kids + dKids;
+  var base = 1, bonus = 0;
+  if (sit === 'marie') base = 2;
+  else if (sit === 'veuf' && total > 0) base = 2;
+  else if ((sit === 'celibataire' || sit === 'divorce') && total > 0) bonus = 0.5;
+  var parts = base + bonus + (kids * 0.5) + (dKids * 1.0);
+  f.elements['nb_parts'].value = Math.min(5, parts);
+}
+
+/* ==================== AVANTAGES EN NATURE ==================== */
+function loadAvantages() {
+  var personnel = getPersonnelActifs();
+  var tbody = document.getElementById('avantages-tbody');
+  tbody.innerHTML = '';
+  personnel.forEach(function(emp) {
+    tbody.innerHTML += '<tr><td><strong>' + escH(emp.nom) + ' ' + escH(emp.prenoms || '') + '</strong><div style="font-size:.68rem;color:var(--dim)">' + escH(emp.matricule) + ' | ' + fmtF(emp.salaire_base) + '</div></td>' +
+      '<td style="text-align:center"><input type="checkbox" ' + (emp.avantage_logement ? 'checked' : '') + ' onchange="setAvantage(\'' + emp.id + '\',\'avantage_logement\',this.checked)" style="width:18px;height:18px"></td>' +
+      '<td style="text-align:center"><input type="checkbox" ' + (emp.avantage_nourriture ? 'checked' : '') + ' onchange="setAvantage(\'' + emp.id + '\',\'avantage_nourriture\',this.checked)" style="width:18px;height:18px"></td>' +
+      '<td style="text-align:center"><input type="checkbox" ' + (emp.avantage_utilites ? 'checked' : '') + ' onchange="setAvantage(\'' + emp.id + '\',\'avantage_utilites\',this.checked)" style="width:18px;height:18px"></td>' +
+      '<td style="text-align:center"><input type="number" value="' + (emp.avantage_vehicule || 0) + '" min="0" style="width:60px;text-align:center" onchange="setAvantage(\'' + emp.id + '\',\'avantage_vehicule\',parseInt(this.value)||0)"></td>' +
+      '<td><button class="btn-sec" style="padding:3px 8px" onclick="openAvantageConfig(\'' + emp.id + '\')">Config</button></td></tr>';
+  });
+  if (personnel.length === 0) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1.5rem;color:var(--dim)">Aucun employ\u00e9 actif</td></tr>';
+}
+function setAvantage(empId, field, value) {
+  var list = getPersonnel();
+  var idx = list.findIndex(function(p){ return p.id === empId; });
+  if (idx === -1) return;
+  list[idx][field] = value;
+  if (field === 'avantage_vehicule') { list[idx].avantage_vehicule = value; }
+  setPersonnel(list);
+  toast('Avantage mis \u00e0 jour');
+}
+function openAvantageConfig(empId) {
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  if (!emp) return;
+  var modal = document.getElementById('modal-avantages');
+  var html = '<div class="modal-header"><h3>Avantages en nature - ' + escH(emp.nom) + ' ' + escH(emp.prenoms || '') + '</h3><button class="modal-close" onclick="closeAvantageConfig()">×</button></div>';
+  html += '<div class="form-group"><label>Mode de calcul</label><select id="av-mode" onchange="toggleAvantageModes(this.value)"><option value="auto">Auto (bar\u00e8me l\u00e9gal)</option><option value="manual">Manuel (valeurs libres)</option></select></div>';
+  html += '<div id="av-manual-block" style="display:none">';
+  html += '<div class="grid-2">';
+  html += '<div class="form-group"><label>Logement - valeur totale</label><input type="number" id="av-log-valeur" value="' + (emp.avantage_logement === true ? (emp.log_valeur || '') : '') + '"></div>';
+  html += '<div class="form-group"><label>Logement - part imposable</label><input type="number" id="av-log-imp" value="' + (emp.log_imposable || '') + '"></div>';
+  html += '<div class="form-group"><label>Nourriture - valeur totale</label><input type="number" id="av-nour-valeur" value="' + (emp.avantage_nourriture === true ? (emp.nour_valeur || '') : '') + '"></div>';
+  html += '<div class="form-group"><label>Nourriture - part imposable</label><input type="number" id="av-nour-imp" value="' + (emp.nour_imposable || '') + '"></div>';
+  html += '<div class="form-group"><label>V\u00e9hicule - valeur totale</label><input type="number" id="av-veh-valeur" value="' + (emp.veh_valeur || '') + '"></div>';
+  html += '<div class="form-group"><label>V\u00e9hicule - part imposable</label><input type="number" id="av-veh-imp" value="' + (emp.veh_imposable || '') + '"></div>';
+  html += '<div class="form-group"><label>Eau/Élec - valeur totale</label><input type="number" id="av-util-valeur" value="' + (emp.util_valeur || '') + '"></div>';
+  html += '<div class="form-group"><label>Eau/Élec - part imposable</label><input type="number" id="av-util-imp" value="' + (emp.util_imposable || '') + '"></div>';
+  html += '</div></div>';
+  html += '<div style="margin-top:1rem;display:flex;gap:.5rem"><button class="btn" onclick="saveAvantageConfig(\'' + emp.id + '\')">Enregistrer</button><button class="btn btn-sec" onclick="closeAvantageConfig()">Annuler</button></div>';
+  modal.innerHTML = html;
+  modal.style.display = 'flex';
+}
+function toggleAvantageModes(mode) {
+  document.getElementById('av-manual-block').style.display = mode === 'manual' ? '' : 'none';
+}
+function saveAvantageConfig(empId) {
+  var list = getPersonnel();
+  var idx = list.findIndex(function(p){ return p.id === empId; });
+  if (idx === -1) return;
+  var mode = document.getElementById('av-mode').value;
+  list[idx].avantage_mode = mode;
+  if (mode === 'manual') {
+    list[idx].log_valeur = parseFloat(document.getElementById('av-log-valeur').value) || 0;
+    list[idx].log_imposable = parseFloat(document.getElementById('av-log-imp').value) || 0;
+    list[idx].nour_valeur = parseFloat(document.getElementById('av-nour-valeur').value) || 0;
+    list[idx].nour_imposable = parseFloat(document.getElementById('av-nour-imp').value) || 0;
+    list[idx].veh_valeur = parseFloat(document.getElementById('av-veh-valeur').value) || 0;
+    list[idx].veh_imposable = parseFloat(document.getElementById('av-veh-imp').value) || 0;
+    list[idx].util_valeur = parseFloat(document.getElementById('av-util-valeur').value) || 0;
+    list[idx].util_imposable = parseFloat(document.getElementById('av-util-imp').value) || 0;
+  }
+  setPersonnel(list);
+  closeAvantageConfig();
+  toast('Configuration enregistr\u00e9e');
+}
+function closeAvantageConfig() { document.getElementById('modal-avantages').style.display = 'none'; }
+
+/* ==================== POINTAGE (CALENDRIER - SAISIE DIRECTE DES HEURES) ==================== */
+/* Convertit "7h30", "7:30", "7.5", "7,5" en nombre décimal (7.5) */
+function parseHeure(val) {
+  if (val === null || val === undefined || val === '') return 0;
+  val = String(val).trim().replace(',', '.');
+  var m = val.match(/^(\d+)[hH:](\d+)$/);
+  if (m) return parseInt(m[1]) + parseInt(m[2]) / 60;
+  var n = parseFloat(val);
+  return isNaN(n) ? 0 : n;
+}
+function loadPointage() {
+  try {
+    fillEmpSelects();
+    var empId = document.getElementById('pt-select-emp').value;
+    var mois = document.getElementById('pt-mois').value;
+    if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('pt-mois').value = mois; }
+    var container = document.getElementById('pt-container');
+    if (!empId) { container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Sélectionnez un employé et un mois</div>'; return; }
+    var list = getPersonnel();
+    if (!Array.isArray(list)) { container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--danger)">Aucune donnée personnel disponible</div>'; return; }
+    var emp = list.find(function(p){ return p.id === empId; });
+    if (!emp) { container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Employé introuvable</div>'; return; }
+  var pts = getPointageData();
+  var isForfait = emp.mode_pointage === 'forfait';
+  var fmtH = getFormatHeures() === 'hhmm';
+  var fhSel = document.getElementById('pt-fmt-heures');
+  if (fhSel) fhSel.value = getFormatHeures();
+  var isJ = empCategorie(emp) === 'journalier';
+  var isExt = empCategorie(emp) === 'externe';
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var html = '<h3 style="font-size:.9rem;margin-bottom:.5rem">Pointage : <span style="color:var(--orange)">' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '</span> - ' + mois + '</h3>';
+  if (isExt) {
+    var mfExt = parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0;
+    var jExt = getExternJours(empId, mois);
+    var mfExtPaye = (jExt > 0 && jExt < 30) ? Math.round(mfExt * jExt / 30) : mfExt;
+    html += '<div style="padding:1.2rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-bottom:1rem">';
+    html += '<div style="font-weight:800;color:#15803d;font-size:.9rem">\u2713 Prestataire externe : paiement au forfait avec prorata</div>';
+    html += '<div style="font-size:.78rem;color:#166534;margin-top:4px">Indiquez le nombre de jours travaill\u00e9s dans le mois : le montant est calcul\u00e9 au prorata (forfait \u00f7 30 jours \u00d7 jours travaill\u00e9s).</div>';
+    html += '<div style="display:flex;gap:1rem;margin-top:.8rem;flex-wrap:wrap;align-items:flex-end">';
+    html += '<div class="form-group" style="max-width:140px"><label>Jours travaill\u00e9s (mois)</label><input type="number" id="pt-jours-extern" min="0" max="31" value="' + jExt + '" onchange="setExternJoursUI(this)" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-weight:700"></div>';
+    html += '<div style="font-size:.8rem;padding-bottom:6px">Forfait mensuel : <strong>' + fmt(mfExt) + ' F</strong> &rarr; Montant du mois : <strong style="color:#15803d">' + fmt(mfExtPaye) + ' F</strong></div>';
+    html += '</div>';
+    html += '<div style="font-size:.75rem;color:#166534;margin-top:.8rem">La prime \u00e9ventuelle du mois est ajout\u00e9e au bulletin.</div>';
+    html += '</div>';
+    container.innerHTML = html;
+    return;
+  }
+  if (isForfait) {
+    html += '<div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:.6rem .9rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:.78rem;color:#166534">';
+    html += '<strong>Forfait 173,33 h/mois :</strong> <span>pointer 8h sur tous les jours ouvrables du mois, plafonn\u00e9 \u00e0 173,33 h.</span>';
+    html += '<button class="btn" style="padding:4px 12px" onclick="autoFillForfait()">Remplir auto (173,33 h)</button>';
+    html += '<button class="btn btn-sec" style="padding:4px 12px" onclick="clearPointageMois()">Effacer le mois</button>';
+    html += '</div>';
+  }
+  html += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:1rem">Mode : <strong>' + (isForfait ? 'Forfait (173,33 h)' : 'Journalier') + '</strong> — Format : <strong>' + (fmtH ? 'Heure:minute (7h30)' : 'Décimal (7.5)') + '</strong>. Heures suppl. CI : 40h/sem normales, 41-46h = +15%, 47h+ = +50%, Nuit = +75%, Dimanche jour = +75%, Dimanche nuit = +100%.' + (showObs ? ' <span style="color:#16a34a;font-weight:700">R</span> (colonne Obs) = jour de rendement (montage pointé) : vous pouvez y ajouter des heures en plus si besoin.' : '') + '</div>';
+  html += '<div style="margin-bottom:1rem;padding:.6rem .9rem;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;font-size:.78rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><label style="font-weight:700">Prime du mois (FCFA)</label><input type="number" id="pt-prime" min="0" step="500" value="' + getPrimeMois(empId, mois) + '" onchange="setPrimeMoisUI(this)" style="max-width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:6px"></div>';
+  /* Précharger les données montage pour afficher "R" dans la colonne Obs */
+  var ptMontageData = getPointageMontage().filter(function(p){ return p.employee_id === empId && p.date.indexOf(mois) === 0; });
+  var montageDays = {};
+  ptMontageData.forEach(function(p){ montageDays[p.date] = true; });
+  var showObs = Object.keys(montageDays).length > 0;
+  /* ---------- ONGLETS SEMAINES ---------- */
+  var jours = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+  var firstDow = (new Date(year, mIdx, 1).getDay() + 6) % 7;
+  var weeks = [];
+  var curWeek = null;
+  var mHJ = 0, mHN = 0, mJours = 0, mPres = 0;
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dk = mois + '-' + (d < 10 ? '0' : '') + d;
+    var dow = (new Date(year, mIdx, d).getDay() + 6) % 7;
+    var week = Math.floor((d + firstDow - 1) / 7);
+    if (!curWeek || curWeek.week !== week) {
+      curWeek = { week: week, days: [], wkHJ: 0, wkHN: 0, wkPres: 0, wkHS15: 0, wkHS50: 0, wkHS75: 0, wkHS100: 0, wkNormal: 0, label: 'Semaine ' + (week + 1) };
+      weeks.push(curWeek);
+    }
+    curWeek.days.push({ d: d, dk: dk, dow: dow });
+  }
+  html += '<div style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:1rem">';
+  html += '<div style="display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto"><button class="btn-sec" style="border:none;border-radius:0;padding:6px 12px;font-weight:800" onclick="togglePtWeek(\'all\')">Toutes</button><button class="btn-sec" style="border:none;border-radius:0;padding:6px 12px" onclick="togglePtRecap()">Récap</button>';
+  for (var w = 0; w < weeks.length; w++) {
+    html += '<button class="btn-sec pt-wk-btn" style="border:none;border-radius:0;padding:6px 12px' + (w === 0 ? ';background:#0f172a;color:#fff' : '') + '" onclick="togglePtWeek(' + w + ',this)">' + weeks[w].label + '</button>';
+  }
+  html += '</div>';
+  html += '<div id="pt-weekly-body" style="overflow-x:auto">';
+  for (var w2 = 0; w2 < weeks.length; w2++) {
+    var wk = weeks[w2];
+    var disp = w2 === 0 ? '' : 'none';
+    html += '<div class="pt-week" id="pt-week-' + w2 + '" style="display:' + disp + '">';
+    html += '<table style="min-width:500px;margin-top:0"><thead><tr><th style="width:50px">Date</th><th>Jour</th>' + (showObs ? '<th style="width:45px" title="Rendement (montage)">Obs</th>' : '') + (isJ ? '<th style="width:70px">Présent</th>' : '') + '<th style="width:120px">H. Jour</th><th style="width:120px">H. Nuit</th><th style="width:90px">Total</th></tr></thead><tbody>';
+    for (var di = 0; di < wk.days.length; di++) {
+      var day = wk.days[di];
+      var rec = pts.find(function(p){ return p.employee_id === empId && p.date === day.dk; }) || {};
+      var isDim = new Date(year, mIdx, day.d).getDay() === 0;
+      var rawJ = rec.h_j_manual !== undefined && rec.h_j_manual !== '' ? rec.h_j_manual : '';
+      var rawN = rec.h_n_manual !== undefined && rec.h_n_manual !== '' ? rec.h_n_manual : '';
+      var tJ = parseHeure(rawJ), tN = parseHeure(rawN);
+      var dispJ = rawJ;
+      var dispN = rawN;
+      var present = rec.present === true;
+      wk.wkHJ += tJ; wk.wkHN += tN; mHJ += tJ; mHN += tN;
+      html += '<tr' + (isDim ? ' style="background:#fff7ed"' : '') + '>';
+      html += '<td>' + day.d + '</td><td>' + jours[day.dow] + (isDim ? ' <span class="pill pill-red">Dim</span>' : '') + '</td>';
+      var hasMontage = montageDays[day.dk] === true;
+      var hasHours = tJ > 0 || tN > 0;
+      if (hasHours) mJours++;
+      if (hasHours || hasMontage || present) { mPres++; wk.wkPres++; }
+      if (showObs) html += '<td style="text-align:center"><span style="color:#16a34a;font-weight:700;font-size:.75rem">' + (hasMontage ? 'R' : '') + '</span></td>';
+      if (isJ) html += '<td style="text-align:center"><input type="checkbox" data-date="' + day.dk + '" data-field="present"' + (present ? ' checked' : '') + ' onchange="savePointage()" style="width:16px;height:16px"></td>';
+      html += '<td><input type="text" data-date="' + day.dk + '" data-field="h_j_manual" value="' + escH(dispJ) + '" onchange="savePointage()" onblur="ptBlurFormat(this);savePointage()" onkeydown="ptKeyNav(event)" placeholder="" style="max-width:110px;text-align:center;font-weight:700"></td>';
+      html += '<td><input type="text" data-date="' + day.dk + '" data-field="h_n_manual" value="' + escH(dispN) + '" onchange="savePointage()" onblur="ptBlurFormat(this);savePointage()" onkeydown="ptKeyNav(event)" placeholder="" style="max-width:110px;text-align:center;font-weight:700"></td>';
+      html += '<td style="text-align:center;font-weight:700;color:' + ((tJ + tN) > 8 ? 'var(--danger)' : 'var(--green)') + '">' + ((tJ + tN) > 0 ? (tJ + tN).toFixed(1) + 'h' : '-') + '</td>';
+      html += '</tr>';
+    }
+    html += '<tr style="background:#f8fafc;font-weight:800;border-top:1px solid var(--border)"><td colspan="' + (2 + (showObs ? 1 : 0) + (isJ ? 1 : 0)) + '" style="text-align:right;font-size:.75rem;color:var(--dim)">Sous-total ' + wk.label + ' (' + wk.wkPres + 'j)</td><td style="text-align:center">' + wk.wkHJ.toFixed(1) + 'h</td><td style="text-align:center">' + wk.wkHN.toFixed(1) + 'h</td><td style="text-align:center">' + (wk.wkHJ + wk.wkHN).toFixed(1) + 'h</td></tr>';
+    html += '</tbody></table></div>';
+  }
+  /* RECAP */
+  html += '<div class="pt-week" id="pt-week-recap" style="display:none"><table style="min-width:500px;margin-top:0"><thead><tr><th style="width:50px">Semaine</th><th style="text-align:center">Jours</th><th style="text-align:center">H. Jour</th><th style="text-align:center">H. Nuit</th><th style="text-align:center">Total</th></tr></thead><tbody>';
+  for (var w3 = 0; w3 < weeks.length; w3++) {
+    html += '<tr style="cursor:pointer" onclick="togglePtWeek(' + w3 + ')"><td style="font-weight:700">' + weeks[w3].label + '</td><td style="text-align:center">' + weeks[w3].wkPres + '</td><td style="text-align:center">' + weeks[w3].wkHJ.toFixed(1) + 'h</td><td style="text-align:center">' + weeks[w3].wkHN.toFixed(1) + 'h</td><td style="text-align:center;font-weight:700">' + (weeks[w3].wkHJ + weeks[w3].wkHN).toFixed(1) + 'h</td></tr>';
+  }
+  html += '<tr style="background:#f8fafc;font-weight:800;border-top:2px solid #000"><td style="text-align:right">TOTAUX (' + (isJ ? mPres + ' jours présents' : mJours + ' jours travaillés') + ')</td><td></td><td style="text-align:center">' + mHJ.toFixed(1) + 'h</td><td style="text-align:center">' + mHN.toFixed(1) + 'h</td><td style="text-align:center">' + (mHJ + mHN).toFixed(1) + 'h</td></tr>';
+  html += '</tbody></table></div>';
+  html += '</div></div>';
+  /* Résumé Heures Supplémentaires */
+  if (!isExt) {
+    var hsStats = getMonthStats(emp, mois);
+    var hs15 = hsStats.hs15 || 0, hs50 = hsStats.hs50 || 0, hs75 = hsStats.hs75 || 0, hs100 = hsStats.hs100 || 0;
+    html += '<div style="margin-top:.5rem;padding:.5rem 1rem;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:.68rem">';
+    html += '<strong>Heures Supplémentaires :</strong> ';
+    if (hs15 > 0) html += '<span>+15% : ' + hs15.toFixed(1) + 'h</span> &nbsp; ';
+    if (hs50 > 0) html += '<span>+50% : ' + hs50.toFixed(1) + 'h</span> &nbsp; ';
+    if (hs75 > 0) html += '<span style="color:#7c3aed">+75% (nuit/dim jour) : ' + hs75.toFixed(1) + 'h</span> &nbsp; ';
+    if (hs100 > 0) html += '<span style="color:#dc2626">+100% (dim nuit) : ' + hs100.toFixed(1) + 'h</span> &nbsp; ';
+    if (hs15 === 0 && hs50 === 0 && hs75 === 0 && hs100 === 0) html += '<span style="color:var(--dim)">Aucune</span>';
+    html += '<div style="font-size:.6rem;color:var(--dim);margin-top:2px">Rouge dans Total = >8h/jour (potentiellement HS). HS calculées automatiquement selon : 40h/sem base, 41-46h +15%, 47h+ +50%, nuit +75%, dim jour +75%, dim nuit +100%</div>';
+    html += '</div>';
+  }
+  container.innerHTML = html;
+   } catch (err) {
+    var container2 = document.getElementById('pt-container');
+    if (container2) container2.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--danger)">Une erreur est survenue lors du chargement du pointage : ' + escH(err && err.message ? err.message : err) + '</div>';
+   }
+ }
+function exportPointageCSV() {
+   var empId = document.getElementById('pt-select-emp').value;
+   var mois = document.getElementById('pt-mois').value;
+   if (!empId || !mois) { toast('Sélectionnez un employé et un mois', 'error'); return; }
+   var list = getPersonnel();
+   var emp = list.find(function(p){ return p.id === empId; });
+   var pts = getPointageData().filter(function(p){ return p.employee_id === empId && p.date.indexOf(mois) === 0; });
+   var fmtH = getFormatHeures() === 'hhmm';
+   var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+   var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+   var jours = ['Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi','Dimanche'];
+   var csv = [];
+   csv.push(['Employé', emp ? emp.nom + ' ' + emp.prenoms : '']);
+   csv.push(['Matricule', emp ? emp.matricule : '']);
+   csv.push(['Mois', mois]);
+   csv.push(['Format heures', fmtH ? 'hh:mm (7h30)' : 'décimal (7.5)']);
+   csv.push([]);
+   csv.push(['Date','Jour','Présent','H. Jour','H. Nuit','Total (h)']);
+   var mHJ = 0, mHN = 0;
+   for (var d = 1; d <= daysInMonth; d++) {
+     var dk = mois + '-' + (d < 10 ? '0' : '') + d;
+     var dow = (new Date(year, mIdx, d).getDay() + 6) % 7;
+     var rec = pts.find(function(p){ return p.date === dk; }) || {};
+     var isJ = empCategorie(emp) === 'journalier';
+     var present = rec.present === true;
+     var rawJ = rec.h_j_manual !== undefined && rec.h_j_manual !== '' ? rec.h_j_manual : '';
+     var rawN = rec.h_n_manual !== undefined && rec.h_n_manual !== '' ? rec.h_n_manual : '';
+     var tJ = parseHeure(rawJ), tN = parseHeure(rawN);
+     mHJ += tJ; mHN += tN;
+     csv.push([dk, jours[dow], present ? 'Oui' : '', rawJ, rawN, (tJ + tN).toFixed(1)]);
+   }
+   csv.push([]);
+   csv.push(['TOTAL', '', '', mHJ.toFixed(1), mHN.toFixed(1), (mHJ + mHN).toFixed(1)]);
+   var blob = new Blob([csv.map(function(r){ return r.map(escCsv).join(';'); }).join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+   var url = URL.createObjectURL(blob);
+   var a = document.createElement('a');
+   a.href = url;
+   a.download = ('pointage_' + (emp ? emp.nom.replace(/\s+/g,'_') : empId) + '_' + mois + '.csv');
+   a.style.display = 'none';
+   document.body.appendChild(a);
+   a.click();
+   setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+   toast('Pointage exporté en CSV', 'success');
+ }
+function escCsv(v) {
+   var s = String(v == null ? '' : v);
+   if (s.indexOf(';') !== -1 || s.indexOf('"') !== -1 || s.indexOf('\n') !== -1 || s.indexOf('\r') !== -1) {
+     s = '"' + s.replace(/"/g, '""') + '"';
+   }
+   return s;
+ }
+function togglePtWeek(wk, btn) {
+  var weekEls = document.querySelectorAll('.pt-week');
+  for (var i = 0; i < weekEls.length; i++) weekEls[i].style.display = 'none';
+  var btns = document.querySelectorAll('.pt-wk-btn');
+  for (var j = 0; j < btns.length; j++) { btns[j].style.background = ''; btns[j].style.color = ''; }
+  if (wk === 'all') {
+    for (var k = 0; k < weekEls.length; k++) { if (!weekEls[k].id || weekEls[k].id === 'pt-week-recap') continue; weekEls[k].style.display = ''; }
+    for (var l = 0; l < btns.length; l++) { btns[l].style.background = '#0f172a'; btns[l].style.color = '#fff'; }
+    var recapEl = document.getElementById('pt-week-recap');
+    if (recapEl) recapEl.style.display = 'none';
+  } else {
+    var el = document.getElementById('pt-week-' + wk);
+    if (el) el.style.display = '';
+    if (btn) { btn.style.background = '#0f172a'; btn.style.color = '#fff'; }
+  }
+}
+function togglePtRecap() {
+  var weekEls = document.querySelectorAll('.pt-week');
+  var showing = false;
+  for (var i = 0; i < weekEls.length; i++) {
+    if (weekEls[i].id === 'pt-week-recap') { showing = weekEls[i].style.display !== 'none'; continue; }
+  }
+  var recapEl = document.getElementById('pt-week-recap');
+  if (recapEl) recapEl.style.display = showing ? 'none' : '';
+  if (!showing) {
+    for (var j = 0; j < weekEls.length; j++) { if (weekEls[j].id !== 'pt-week-recap') weekEls[j].style.display = 'none'; }
+  } else {
+    for (var k = 0; k < weekEls.length; k++) { if (weekEls[k].id !== 'pt-week-recap') weekEls[k].style.display = ''; }
+  }
+}
+function ptBlurFormat(input) {
+  if (!input || !input.value) return;
+  var fmtH = getFormatHeures() === 'hhmm';
+  if (!fmtH) return;
+  var v = String(input.value).trim();
+  if (/^\d+$/.test(v) && parseInt(v) <= 23) {
+    input.value = v + ':00';
+  }
+}
+/* ==================== ONGLETS POINTAGE ==================== */
+var ptCurrentTab = 'heures';
+function switchPtTab(tab) {
+  ptCurrentTab = tab;
+  document.getElementById('pt-tab-heures').classList.toggle('active', tab==='heures');
+  document.getElementById('pt-tab-montage').classList.toggle('active', tab==='montage');
+  document.getElementById('pt-tab-panier').classList.toggle('active', tab==='panier');
+  document.getElementById('pt-container').style.display = tab==='heures' ? '' : 'none';
+  document.getElementById('pt-montage-container').style.display = tab==='montage' ? '' : 'none';
+  document.getElementById('pt-panier-container').style.display = tab==='panier' ? '' : 'none';
+  if (tab==='panier') loadPanierUI();
+  else if (tab==='montage') loadPointageMontage();
+  else loadPointage();
+}
+function switchPtTab(tab) {
+  ptCurrentTab = tab;
+  document.getElementById('pt-tab-heures').classList.toggle('active', tab === 'heures');
+  document.getElementById('pt-tab-montage').classList.toggle('active', tab === 'montage');
+  document.getElementById('pt-container').style.display = tab === 'heures' ? '' : 'none';
+  document.getElementById('pt-montage-container').style.display = tab === 'montage' ? '' : 'none';
+  if (tab === 'heures') loadPointage();
+  else loadPointageMontage();
+}
+function loadPointageMontage() {
+  var ams = getArticlesMontage();
+  if (ams.length === 0) { document.getElementById('pt-montage-container').innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Aucun article de montage défini. Allez dans Données de Salaire > Articles Montage.</div>'; return; }
+  var mois = document.getElementById('pt-mois').value;
+  if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('pt-mois').value = mois; }
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var today = new Date().toISOString().slice(0,10);
+  if (today.indexOf(mois) !== 0) today = mois + '-01';
+
+  var html = '<h3 style="font-size:.9rem;margin-bottom:.5rem">Production Montage - ' + mois + '</h3>';
+
+  /* ---- ÉTAPE 1 : Sélection ---- */
+  html += '<div class="card" style="padding:1rem;margin-bottom:1rem;background:#f8fafc">';
+  html += '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.8rem">';
+  html += '<div class="form-group" style="margin:0;max-width:150px"><label style="margin:0;font-size:.68rem">Jour</label><input type="date" id="pt-montage-day" value="' + today + '" min="' + mois + '-01" max="' + mois + '-' + daysInMonth + '" style="padding:6px"></div>';
+  html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Articles <a href="#" onclick="event.preventDefault();document.querySelectorAll(\'.pt-montage-art\').forEach(function(c){c.checked=true});ptMontSelCount();return false" style="font-size:.6rem;color:var(--blue)">(tout cocher)</a></label>';
+  html += '<input type="text" id="pt-montage-art-search" placeholder="Rechercher un article (auto-complétion)... (ex : PAL80, tablette, 120)" oninput="ptMontFilterArts(this.value)" style="width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:.72rem;margin-bottom:4px;box-sizing:border-box">';
+  html += '<div id="pt-montage-arts" style="display:flex;gap:6px;flex-wrap:wrap;padding-top:2px;max-height:96px;overflow-y:auto">';
+  ams.forEach(function(a,i){
+    var lbl = (escH(a.code) + ' ' + escH(a.designation || '')).trim();
+    html += '<label data-search="' + lbl.toLowerCase() + '" style="display:flex;align-items:center;gap:3px;font-size:.7rem;cursor:pointer;padding:3px 7px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '" style="width:13px;height:13px"> ' + escH(a.code) + '</label>';
+  });
+  html += '</div><div style="font-size:.6rem;color:var(--dim);padding-top:2px"><span id="pt-montage-art-count"></span></div></div>';
+  /* Travailleurs en rendement : sélection manuelle */
+  var rendWorkers = getPersonnel().filter(function(p){ return p.rendement === true && p.status !== 'inactif'; });
+  if (rendWorkers.length > 0) {
+    html += '<div class="form-group" style="margin:0;flex:1;min-width:300px"><label style="margin:0;font-size:.68rem">Travailleurs <a href="#" onclick="event.preventDefault();document.querySelectorAll(\'.pt-montage-emp\').forEach(function(c){c.checked=true});ptMontSelCount();return false" style="font-size:.6rem;color:var(--blue)">(tout cocher)</a> <span id="pt-montage-emp-count" style="font-size:.6rem;color:var(--dim)"></span></label>';
+    html += '<input type="text" id="pt-montage-emp-search" placeholder="Rechercher un travailleur (auto-complétion)... (ex : matricule, nom)" oninput="ptMontFilterEmps(this.value)" style="width:100%;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:.72rem;margin-bottom:4px;box-sizing:border-box">';
+    html += '<div id="pt-montage-emps" style="display:flex;gap:5px;flex-wrap:wrap;padding-top:2px;max-height:120px;overflow-y:auto">';
+    rendWorkers.forEach(function(w){
+      html += '<label data-search="' + (escH(w.matricule||'') + ' ' + escH(w.nom) + ' ' + escH(w.prenoms||'')).toLowerCase() + '" style="display:flex;align-items:center;gap:3px;font-size:.68rem;cursor:pointer;padding:2px 6px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-emp" value="' + w.id + '" checked style="width:13px;height:13px"> ' + escH(w.nom) + '</label>';
+    });
+    html += '</div></div>';
+  }
+  html += '<button class="btn" style="padding:6px 16px" onclick="ptMontStart()">Commencer</button></div>';
+  /* --- Modifier une journée déjà enregistrée --- */
+  var recDays = getPointageMontage().filter(function(p){ return p.date.indexOf(mois) === 0; });
+  var dayList = [];
+  recDays.forEach(function(p){ if (dayList.indexOf(p.date) === -1) dayList.push(p.date); });
+  dayList.sort().reverse();
+  if (dayList.length > 0) {
+    html += '<div style="display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;margin-top:.8rem;padding-top:.8rem;border-top:1px dashed var(--border)">';
+    html += '<div class="form-group" style="margin:0;max-width:200px"><label style="margin:0;font-size:.68rem">Modifier une journée enregistrée</label><select id="pt-montage-edit-day">';
+    dayList.forEach(function(d){ html += '<option value="' + d + '" title="' + d + '">' + ptMontFmtDay(d) + '</option>'; });
+    html += '</select></div>';
+    html += '<button class="btn" style="padding:6px 14px" onclick="ptMontEditDay()">Modifier cette journée</button>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  /* ---- ÉTAPE 2 : Grille de saisie ---- */
+  html += '<div id="pt-montage-grid" style="margin-bottom:1rem"></div>';
+
+  /* ---- ÉTAPE 3 : État par travailleur ---- */
+  html += '<div class="tab-pills" style="margin-bottom:.5rem"><button class="active" onclick="ptMontShowEtat()">État par travailleur</button></div>';
+  html += '<div id="pt-montage-etat" style="margin-bottom:1rem"></div>';
+
+  document.getElementById('pt-montage-container').innerHTML = html;
+  ptMontShowEtat();
+  ptMontSelCount();
+}
+/* Filtre (auto-complétion) des articles à cocher dans le Montage */
+function ptMontFilterArts(q) {
+  q = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.pt-montage-art').forEach(function(cb) {
+    var lbl = cb.closest('label');
+    if (!lbl) return;
+    lbl.style.display = (!q || (lbl.getAttribute('data-search') || '').indexOf(q) !== -1) ? '' : 'none';
+  });
+  ptMontSelCount();
+}
+/* Filtre (auto-complétion) des travailleurs à cocher dans le Montage */
+function ptMontFilterEmps(q) {
+  q = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.pt-montage-emp').forEach(function(cb) {
+    var lbl = cb.closest('label');
+    if (!lbl) return;
+    lbl.style.display = (!q || (lbl.getAttribute('data-search') || '').indexOf(q) !== -1) ? '' : 'none';
+  });
+  ptMontSelCount();
+}
+/* Compteur de sélections (articles / travailleurs) dans le Montage */
+function ptMontSelCount() {
+  var na = document.querySelectorAll('.pt-montage-art:checked').length;
+  var ta = document.querySelectorAll('.pt-montage-art').length;
+  var ca = document.getElementById('pt-montage-art-count');
+  if (ca) ca.textContent = na + '/' + ta + ' article(s) sélectionné(s)';
+  var ne = document.querySelectorAll('.pt-montage-emp:checked').length;
+  var te = document.querySelectorAll('.pt-montage-emp').length;
+  var ce = document.getElementById('pt-montage-emp-count');
+  if (ce) ce.textContent = '(' + ne + '/' + te + ' coché(s))';
+}
+function ptMontStart() {
+  var day = document.getElementById('pt-montage-day').value;
+  if (!day) { toast('Sélectionnez un jour', 'error'); return; }
+  var selectedArts = [];
+  document.querySelectorAll('.pt-montage-art:checked').forEach(function(cb){ selectedArts.push(cb.value); });
+  if (selectedArts.length === 0) { toast('Sélectionnez au moins un article', 'error'); return; }
+  var selectedWorkers = [];
+  document.querySelectorAll('.pt-montage-emp:checked').forEach(function(cb){ selectedWorkers.push(cb.value); });
+  if (selectedWorkers.length === 0) { toast('Cochez au moins un travailleur', 'error'); return; }
+  var allWorkers = getPersonnel().filter(function(p){ return p.rendement === true && p.status !== 'inactif'; });
+  var presentWorkers = allWorkers.filter(function(w){ return selectedWorkers.indexOf(w.id) !== -1; });
+  buildMontageGrid(day, selectedArts, presentWorkers, false);
+}
+/* Construit la grille de saisie d'une journée de montage (nouvelle ou modification) */
+function buildMontageGrid(day, selectedArts, presentWorkers, isEdit) {
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.date === day; });
+  var grid = document.getElementById('pt-montage-grid');
+  var html = '<div class="card" style="padding:1rem;border:2px solid #7c3aed;border-radius:8px">';
+  html += '<div style="font-weight:800;font-size:.8rem;margin-bottom:.8rem;color:#7c3aed">Journée du ' + ptMontFmtDay(day) + (isEdit ? ' — <span style="color:#7c3aed">Modification de la saisie</span>' : '') + ' — ' + presentWorkers.length + ' travailleur(s)</div>';
+  html += '<div style="overflow-x:auto"><table style="margin-top:0;font-size:.72rem"><thead><tr><th style="min-width:130px">Employé</th>';
+  selectedArts.forEach(function(art){
+    var am = ams.find(function(a){ return a.code === art; });
+    html += '<th style="text-align:center;min-width:70px">' + escH(art) + '<br><small>' + (am ? fmt(am.prix) : '') + ' F</small></th>';
+  });
+  html += '<th style="text-align:center">Total F</th></tr></thead><tbody>';
+  presentWorkers.forEach(function(wk){
+    html += '<tr><td style="font-weight:700;white-space:nowrap">' + escH(wk.matricule) + ' - ' + escH(wk.nom) + '</td>';
+    var rowTotal = 0;
+    selectedArts.forEach(function(art){
+      var rec = ptMont.find(function(p){ return p.employee_id === wk.id && p.article_code === art; });
+      var qte = rec ? (rec.quantite || 0) : 0;
+      var am2 = ams.find(function(a){ return a.code === art; });
+      if (qte > 0 && am2) rowTotal += qte * am2.prix;
+      html += '<td style="text-align:center;padding:2px"><input type="text" inputmode="numeric" data-emp="' + wk.id + '" data-date="' + day + '" data-article="' + escH(art) + '" value="' + (qte || '') + '" oninput="ptMontAutoAdvance(this)" onkeydown="ptMontKeyNav(event,this)" onfocus="this.select()" style="width:50px;padding:3px;text-align:center;font-size:.7rem;border:1px solid var(--border);border-radius:4px;' + (qte>0?'background:#f5f3ff;font-weight:700':'') + '"></td>';
+    });
+    html += '<td style="text-align:right;font-weight:700;color:#7c3aed">' + (rowTotal > 0 ? fmt(rowTotal) : '') + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  html += '<div style="margin-top:.8rem;display:flex;gap:.5rem"><button class="btn" onclick="ptMontValidate(\'' + day + '\')">Valider la journée</button><button class="btn btn-sec" onclick="loadPointageMontage()">Annuler</button></div>';
+  html += '</div>';
+  grid.innerHTML = html;
+  if (isEdit) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+/* Formate une date ISO (AAAA-MM-JJ) en JJ-MM-AAAA pour l'affichage */
+function ptMontFmtDay(d) {
+  var p = String(d || '').split('-');
+  return p.length === 3 ? p[2] + '-' + p[1] + '-' + p[0] : d;
+}
+/* Filtre (auto-complétion) des articles dans le panneau de modification d'une journée */
+function ptMontFilterEditArts(q) {
+  q = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.pt-montage-edit-art').forEach(function(cb) {
+    var lbl = cb.closest('label');
+    if (!lbl) return;
+    lbl.style.display = (!q || (lbl.getAttribute('data-search') || '').indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+/* Filtre (auto-complétion) des travailleurs dans le panneau de modification d'une journée */
+function ptMontFilterEditEmps(q) {
+  q = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.pt-montage-edit-emp').forEach(function(cb) {
+    var lbl = cb.closest('label');
+    if (!lbl) return;
+    lbl.style.display = (!q || (lbl.getAttribute('data-search') || '').indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+/* Ouvre le panneau de modification d'une journée enregistrée : tous les articles et travailleurs
+   sont proposés (ceux déjà saisis sont pré-cochés), ce qui permet d'ajouter des lignes. */
+function ptMontEditDay() {
+  var sel = document.getElementById('pt-montage-edit-day');
+  if (!sel || !sel.value) { toast('Choisissez une journée à modifier', 'error'); return; }
+  var day = sel.value;
+  var recs = getPointageMontage().filter(function(p){ return p.date === day; });
+  if (recs.length === 0) { toast('Aucune saisie pour cette journée', 'error'); return; }
+  var savedArts = [], savedWorkers = [];
+  recs.forEach(function(p){
+    if (savedArts.indexOf(p.article_code) === -1) savedArts.push(p.article_code);
+    if (savedWorkers.indexOf(p.employee_id) === -1) savedWorkers.push(p.employee_id);
+  });
+  var ams = getArticlesMontage();
+  var allWorkers = getPersonnel().filter(function(p){ return p.rendement === true && p.status !== 'inactif'; });
+  var grid = document.getElementById('pt-montage-grid');
+  var html = '<div class="card" style="padding:1rem;border:2px solid #7c3aed;border-radius:8px">';
+  html += '<div style="font-weight:800;font-size:.8rem;margin-bottom:.2rem;color:#7c3aed">Modification de la journée du ' + ptMontFmtDay(day) + '</div>';
+  html += '<div style="font-size:.68rem;color:var(--dim);margin-bottom:.8rem">Cochez les articles et travailleurs à inclure (ceux déjà saisis sont déjà cochés).</div>';
+  html += '<div style="display:flex;gap:1rem;flex-wrap:wrap">';
+  /* Articles */
+  html += '<div style="flex:1;min-width:260px"><div style="font-weight:700;font-size:.72rem;margin-bottom:.4rem">Articles</div>';
+  html += '<input type="text" oninput="ptMontFilterEditArts(this.value)" placeholder="Rechercher un article..." style="width:100%;padding:4px 8px;font-size:.72rem;border:1px solid var(--border);border-radius:4px;margin-bottom:.4rem">';
+  html += '<div style="display:flex;gap:4px;flex-wrap:wrap;max-height:150px;overflow-y:auto">';
+  ams.forEach(function(a){
+    var checked = savedArts.indexOf(a.code) !== -1 ? ' checked' : '';
+    html += '<label data-search="' + escH(String(a.code).toLowerCase()) + '" style="display:flex;align-items:center;gap:3px;font-size:.68rem;cursor:pointer;padding:2px 6px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-edit-art" value="' + escH(a.code) + '"' + checked + '> ' + escH(a.code) + '</label>';
+  });
+  html += '</div></div>';
+  /* Travailleurs */
+  html += '<div style="flex:1;min-width:260px"><div style="font-weight:700;font-size:.72rem;margin-bottom:.4rem">Travailleurs</div>';
+  html += '<input type="text" oninput="ptMontFilterEditEmps(this.value)" placeholder="Rechercher un travailleur..." style="width:100%;padding:4px 8px;font-size:.72rem;border:1px solid var(--border);border-radius:4px;margin-bottom:.4rem">';
+  html += '<div style="display:flex;gap:4px;flex-wrap:wrap;max-height:150px;overflow-y:auto">';
+  allWorkers.forEach(function(w){
+    var checked = savedWorkers.indexOf(w.id) !== -1 ? ' checked' : '';
+    html += '<label data-search="' + (escH((w.matricule||'') + ' ' + w.nom + ' ' + (w.prenoms||''))).toLowerCase() + '" style="display:flex;align-items:center;gap:3px;font-size:.68rem;cursor:pointer;padding:2px 6px;border:1px solid var(--border);border-radius:4px;white-space:nowrap"><input type="checkbox" class="pt-montage-edit-emp" value="' + w.id + '"' + checked + '> ' + escH(w.nom) + '</label>';
+  });
+  html += '</div></div>';
+  html += '</div>';
+  html += '<div style="margin-top:.8rem;display:flex;gap:.5rem"><button class="btn" onclick="ptMontEditDayBuild(\'' + day + '\')">Générer la grille</button><button class="btn btn-sec" onclick="loadPointageMontage()">Annuler</button></div>';
+  html += '</div>';
+  grid.innerHTML = html;
+  grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+/* Construit la grille de modification à partir des cases cochées du panneau */
+function ptMontEditDayBuild(day) {
+  var selectedArts = [];
+  document.querySelectorAll('.pt-montage-edit-art:checked').forEach(function(cb){ selectedArts.push(cb.value); });
+  if (selectedArts.length === 0) { toast('Sélectionnez au moins un article', 'error'); return; }
+  var selectedWorkers = [];
+  document.querySelectorAll('.pt-montage-edit-emp:checked').forEach(function(cb){ selectedWorkers.push(cb.value); });
+  if (selectedWorkers.length === 0) { toast('Cochez au moins un travailleur', 'error'); return; }
+  var presentWorkers = getPersonnel().filter(function(w){ return selectedWorkers.indexOf(w.id) !== -1; });
+  buildMontageGrid(day, selectedArts, presentWorkers, true);
+}
+function ptMontValidate(day) {
+  savePointageMontage();
+  /* Marquer les travailleurs comme présents dans le pointage horaire */
+  var inputs = document.querySelectorAll('#pt-montage-grid input[data-emp]');
+  var empMarked = {};
+  inputs.forEach(function(inp){
+    if (parseInt(inp.value) > 0) empMarked[inp.getAttribute('data-emp')] = day;
+  });
+  var ptData = getPointageData();
+  for (var eid in empMarked) {
+    var existing = ptData.find(function(p){ return p.employee_id === eid && p.date === day; });
+    if (!existing) {
+      ptData.push({ id: DB.id(), employee_id: eid, date: day, present: true, h_j_manual: '', h_n_manual: '' });
+    } else if (!existing.present && (!existing.h_j_manual || existing.h_j_manual === '') && (!existing.h_n_manual || existing.h_n_manual === '')) {
+      existing.present = true;
+    }
+  }
+  setPointageData(ptData);
+  /* Recharger l'onglet heures si on y était */
+  if (ptCurrentTab === 'heures') loadPointage();
+  toast('Journée du ' + day + ' enregistrée', 'success');
+  loadPointageMontage();
+}
+function ptMontShowEtat() {
+  var mois = document.getElementById('pt-mois').value;
+  if (!mois) return;
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var jours = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+  var workers = getPersonnel().filter(function(p){ return p.rendement === true; });
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.date.indexOf(mois) === 0; });
+  var etat = document.getElementById('pt-montage-etat');
+
+  var tab = sessionStorage.getItem('ptMontEtatTab') || 'detail';
+  var selEmp = document.getElementById('pt-montage-etat-emp') ? document.getElementById('pt-montage-etat-emp').value : '';
+
+  var html = '<div class="card" style="padding:1rem">';
+  html += '<div style="display:flex;gap:.5rem;margin-bottom:.8rem;align-items:center;flex-wrap:wrap">';
+  html += '<div class="form-group" style="margin:0;min-width:200px"><label style="margin:0;font-size:.68rem">Travailleur</label><select id="pt-montage-etat-emp" onchange="ptMontShowEtat()"><option value="">Tous</option>';
+  workers.forEach(function(w){
+    html += '<option value="' + w.id + '"' + (selEmp === w.id ? ' selected' : '') + '>' + escH(w.matricule) + ' - ' + escH(w.nom) + '</option>';
+  });
+  html += '</select></div>';
+  html += '<div class="tab-pills" style="margin-bottom:0">';
+  html += '<button ' + (tab==='detail'?'class="active"':'') + ' onclick="sessionStorage.setItem(\'ptMontEtatTab\',\'detail\');ptMontShowEtat()">Détail par jour</button>';
+  html += '<button ' + (tab==='cumul'?'class="active"':'') + ' onclick="sessionStorage.setItem(\'ptMontEtatTab\',\'cumul\');ptMontShowEtat()">Cumul par article</button>';
+  html += '</div></div>';
+
+  var filtered = selEmp ? workers.filter(function(w){ return w.id === selEmp; }) : workers;
+  if (filtered.length === 0) { html += '<div style="color:var(--dim);padding:1rem">Aucun travailleur en rendement</div></div>'; etat.innerHTML = html; return; }
+
+  /* Checkboxes pour l'impression */
+  html += '<div style="display:flex;gap:.5rem;margin-bottom:.5rem;align-items:center;flex-wrap:wrap">';
+  html += '<button class="btn btn-sec" style="padding:4px 10px;font-size:.7rem" onclick="ptMontPrintEtat(\'' + mois + '\',\'' + tab + '\')">Imprimer / PDF</button>';
+  html += '<button class="btn btn-sec" style="padding:4px 10px;font-size:.7rem" onclick="ptMontExportCSV()">Export CSV</button>';
+  html += '<label style="font-size:.68rem;cursor:pointer;margin-left:8px"><input type="checkbox" id="pt-montage-print-all" checked onchange="var c=this.checked;document.querySelectorAll(\'.pt-montage-print-emp\').forEach(function(x){x.checked=c})"> Tout imprimer</label>';
+  html += '<div style="display:flex;gap:4px;flex-wrap:wrap;max-height:60px;overflow-y:auto">';
+  filtered.forEach(function(wk){
+    html += '<label style="font-size:.65rem;cursor:pointer;white-space:nowrap"><input type="checkbox" class="pt-montage-print-emp" value="' + wk.id + '" checked> ' + escH(wk.nom) + '</label>';
+  });
+  html += '</div></div>';
+
+  if (tab === 'cumul') {
+    /* CUMUL PAR ARTICLE - toujours afficher tous les articles */
+    html += '<div style="overflow-x:auto"><table style="margin-top:0;font-size:.72rem"><thead><tr><th>Employé</th>';
+    ams.forEach(function(a){ html += '<th style="text-align:center;min-width:70px">' + escH(a.code) + '<br><small>' + fmt(a.prix) + ' F</small></th>'; });
+    html += '<th style="text-align:center">Qté Totale</th><th style="text-align:right">Total F</th></tr></thead><tbody>';
+    filtered.forEach(function(wk){
+      html += '<tr><td style="font-weight:700;white-space:nowrap">' + escH(wk.nom) + '</td>';
+      var totQ = 0, totF = 0;
+      ams.forEach(function(a){
+        var q = ptMont.filter(function(p){ return p.employee_id === wk.id && p.article_code === a.code; }).reduce(function(s,p){ return s + (p.quantite||0); }, 0);
+        totQ += q; totF += q * a.prix;
+        html += '<td style="text-align:center;' + (q>0?'font-weight:700;background:#f5f3ff':'color:var(--dim)') + '">' + q + '</td>';
+      });
+      html += '<td style="text-align:center;font-weight:700">' + (totQ>0?totQ:'') + '</td>';
+      html += '<td style="text-align:right;font-weight:700;color:#7c3aed">' + (totF>0?fmt(totF)+' F':'') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  } else {
+    /* DETAIL PAR JOUR - par article */
+    html += '<div style="overflow-x:auto;max-height:55vh;overflow-y:auto"><table style="margin-top:0;font-size:.65rem">';
+    html += '<thead><tr><th style="position:sticky;top:0;background:#f1f5f9;z-index:2;min-width:120px">Employé</th>';
+    for (var d = 1; d <= daysInMonth; d++) {
+      var dow = (new Date(year, mIdx, d).getDay() + 6) % 7;
+      html += '<th style="text-align:center;min-width:70px;font-size:.6rem;padding:2px;position:sticky;top:0;background:#f1f5f9;z-index:2;white-space:nowrap">' + d + ' ' + jours[dow] + '</th>';
+    }
+    html += '</tr></thead><tbody>';
+    filtered.forEach(function(wk){
+      html += '<tr><td style="font-weight:700;font-size:.65rem;white-space:nowrap;position:sticky;left:0;background:#fff;z-index:1">' + escH(wk.nom) + '</td>';
+      for (var d2 = 1; d2 <= daysInMonth; d2++) {
+        var dk = mois + '-' + (d2 < 10 ? '0' : '') + d2;
+        var dayEntries = ptMont.filter(function(p){ return p.employee_id === wk.id && p.date === dk; });
+        var cellText = '', cellHtml = '';
+        if (dayEntries.length > 0) {
+          cellText = dayEntries.map(function(pe){ return escH(pe.article_code) + '=' + (pe.quantite||0); }).join(' ');
+          cellHtml = dayEntries.map(function(pe){ return '<div style="line-height:1.25;white-space:nowrap">' + escH(pe.article_code) + '=<b>' + (pe.quantite||0) + '</b></div>'; }).join('');
+        }
+        html += '<td style="text-align:center;font-size:.55rem;padding:1px 2px;' + (cellText?'background:#f5f3ff':'color:var(--dim)') + '" title="' + escH(cellText) + '">' + (cellHtml || '') + '</td>';
+      }
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  html += '</div>';
+  etat.innerHTML = html;
+}
+function ptMontPrintEtat(mois, tab) {
+  var workers = getPersonnel().filter(function(p){ return p.rendement === true; });
+  var selectedIds = [];
+  document.querySelectorAll('.pt-montage-print-emp:checked').forEach(function(cb){ selectedIds.push(cb.value); });
+  if (selectedIds.length > 0) workers = workers.filter(function(w){ return selectedIds.indexOf(w.id) !== -1; });
+  if (workers.length === 0) { toast('Sélectionnez au moins un travailleur', 'error'); return; }
+
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.date.indexOf(mois) === 0; });
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var jours = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+
+  var w = window.open('', '_blank', 'width=1000,height=800');
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>État Montage - ' + mois + '</title>';
+  h += '<style>body{font-family:sans-serif;padding:15px;color:#1e293b;font-size:10px}';
+  h += 'h2{margin:0 0 4px 0}table{width:100%;border-collapse:collapse;margin-top:8px;font-size:9px}';
+  h += 'th,td{border:1px solid #000;padding:2px 4px;text-align:left}';
+  h += 'th{background:#f1f5f9;font-size:8px}.tot{background:#f1f5f9;font-weight:800}';
+  h += '.page-break{page-break-before:always}';
+  h += '@media print{@page{size:A4 landscape;margin:8mm}body{padding:6px}}</style></head><body>';
+
+  workers.forEach(function(wk, wi){
+    if (wi > 0) h += '<div class="page-break"></div>';
+    h += '<h2 style="font-size:13px">' + escH(wk.matricule) + ' - ' + escH(wk.nom) + '</h2>';
+    h += '<div style="font-size:9px;color:#555;margin-bottom:6px">Production Montage - ' + mois + ' | ' + (tab==='cumul'?'Cumul par article':'Détail journalier') + '</div>';
+
+    if (tab === 'cumul') {
+      h += '<table><thead><tr><th>Article</th><th style="text-align:right">Prix U.</th><th style="text-align:right">Qté</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
+      var grTot = 0;
+      ams.forEach(function(a){
+        var q = ptMont.filter(function(p){ return p.employee_id === wk.id && p.article_code === a.code; }).reduce(function(s,p){ return s + (p.quantite||0); }, 0);
+        var mt = q * a.prix;
+        grTot += mt;
+        h += '<tr><td>' + escH(a.code) + ' - ' + escH(a.designation) + '</td><td style="text-align:right">' + fmt(a.prix) + '</td><td style="text-align:right">' + q + '</td><td style="text-align:right">' + fmt(mt) + '</td></tr>';
+      });
+      h += '<tr class="tot"><td colspan="3" style="text-align:right">TOTAL</td><td style="text-align:right;color:#7c3aed">' + fmt(grTot) + ' F</td></tr>';
+      h += '</tbody></table>';
+    } else {
+      h += '<table><thead><tr><th>Date</th><th>Jour</th>';
+      ams.forEach(function(a){ h += '<th style="text-align:center">' + escH(a.code) + '</th>'; });
+      h += '<th style="text-align:center">Total</th></tr></thead><tbody>';
+      for (var d = 1; d <= daysInMonth; d++) {
+        var dk = mois + '-' + (d < 10 ? '0' : '') + d;
+        var dow = (new Date(year, mIdx, d).getDay() + 6) % 7;
+        var dayTotal = 0;
+        h += '<tr><td>' + dk + '</td><td>' + jours[dow] + '</td>';
+        ams.forEach(function(a){
+          var q = ptMont.filter(function(p){ return p.employee_id === wk.id && p.article_code === a.code && p.date === dk; }).reduce(function(s,p){ return s + (p.quantite||0); }, 0);
+          dayTotal += q;
+          h += '<td style="text-align:center">' + q + '</td>';
+        });
+        h += '<td style="text-align:center;font-weight:700">' + (dayTotal>0?dayTotal:'') + '</td></tr>';
+      }
+      h += '</tbody></table>';
+    }
+  });
+  h += '</body></html>';
+  w.document.write(h); w.document.close();
+  setTimeout(function(){ w.print(); }, 300);
+}
+function ptMontExportCSV() {
+  var mois = document.getElementById('pt-mois').value;
+  var workers = getPersonnel().filter(function(p){ return p.rendement === true; });
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.date.indexOf(mois) === 0; });
+  var csv = [['Employé','Article','Date','Quantité','Prix U.','Montant']];
+  workers.forEach(function(wk){
+    var wkPts = ptMont.filter(function(p){ return p.employee_id === wk.id; });
+    wkPts.forEach(function(p){
+      var am = ams.find(function(a){ return a.code === p.article_code; });
+      csv.push([wk.nom, p.article_code, p.date, p.quantite||0, am?am.prix:0, (p.quantite||0)*(am?am.prix:0)]);
+    });
+  });
+  var blob = new Blob(['\uFEFF' + csv.map(function(r){ return r.join(';'); }).join('\n')], {type:'text/csv;charset=utf-8'});
+  var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'montage_' + mois + '.csv'; a.click();
+}
+/* Auto-advance: 1 chiffre → pause 800ms, 2 chiffres → immédiat, Entrée → immédiat */
+function ptMontAutoAdvance(input) {
+  var v = input.value.replace(/\D/g,'');
+  if (v === '') return;
+  input.value = v;
+  if (v.length >= 2) { advanceMontageCell(input); return; }
+  clearTimeout(input._ptTimer);
+  input._ptTimer = setTimeout(function(){ advanceMontageCell(input); }, 800);
+}
+function ptMontKeyNav(e, input) {
+  if (e.key === 'Enter') { e.preventDefault(); advanceMontageCell(input); return; }
+  if (e.key === 'Tab') return; /* default tab */
+  if (e.key === 'ArrowDown') { var td = input.parentNode; var tr = td.parentNode; var nextTr = tr.nextElementSibling; if (nextTr) { var sameIdx = Array.from(tr.children).indexOf(td); var nextTd = nextTr.children[sameIdx]; if (nextTd) { var ni = nextTd.querySelector('input'); if (ni) { ni.focus(); ni.select(); } } } e.preventDefault(); return; }
+  if (e.key === 'ArrowUp') { var td2 = input.parentNode; var tr2 = td2.parentNode; var prevTr = tr2.previousElementSibling; if (prevTr) { var si = Array.from(tr2.children).indexOf(td2); var prevTd = prevTr.children[si]; if (prevTd) { var pi = prevTd.querySelector('input'); if (pi) { pi.focus(); pi.select(); } } } e.preventDefault(); return; }
+}
+function advanceMontageCell(input) {
+  clearTimeout(input._ptTimer);
+  /* Si l'onglet Montage n'est plus visible, ne pas déplacer le curseur */
+  var mc = document.getElementById('pt-montage-container');
+  if (mc && mc.style.display === 'none') return;
+  var td = input.parentNode;
+  var nextTd = td.nextElementSibling;
+  if (nextTd) {
+    /* next cell (same row, next day) */
+    var ni = nextTd.querySelector('input');
+    if (ni) { ni.focus(); ni.select(); return; }
+  }
+  /* Last cell in row → go to first cell of next row */
+  var tr = td.parentNode;
+  var nextTr = tr.nextElementSibling;
+  if (nextTr) {
+    var firstTd = nextTr.children[1];
+    if (firstTd) {
+      var fi = firstTd.querySelector('input');
+      if (fi) { fi.focus(); fi.select(); }
+    }
+  }
+}
+/* ==================== POINTAGE MONTAGE SAVE ==================== */
+function savePointageMontage() {
+  var inputs = document.querySelectorAll('#pt-montage-grid input[data-emp]');
+  if (inputs.length === 0) return;
+  var day = inputs[0].getAttribute('data-date');
+  var allPts = getPointageMontage();
+  /* Reconstruction de la journée : on retire les anciennes saisies du jour puis on enregistre les quantités >= 1.
+     Cela permet de corriger ou de supprimer une quantité lors de la modification d'une journée. */
+  allPts = allPts.filter(function(p){ return p.date !== day; });
+  inputs.forEach(function(inp){
+    var v = parseInt(inp.value) || 0;
+    if (v <= 0) return;
+    allPts.push({ id: DB.id(), employee_id: inp.getAttribute('data-emp'), date: inp.getAttribute('data-date'), article_code: inp.getAttribute('data-article'), quantite: v });
+  });
+  setPointageMontage(allPts);
+}
+function calcMontageMensuel(empId, mois) {
+  var ams = getArticlesMontage();
+  var pts = getPointageMontage().filter(function(p){ return p.employee_id === empId && p.date.indexOf(mois) === 0; });
+  var total = 0;
+  var qtePrime = 0;
+  for (var i = 0; i < pts.length; i++) {
+    var am = ams.find(function(a){ return a.code === pts[i].article_code; });
+    if (am) {
+      total += (pts[i].quantite || 0) * am.prix;
+      if (am.compte_prime !== false) qtePrime += (pts[i].quantite || 0);
+    }
+  }
+  var cfg = getMontageConfig();
+  var prime = 0;
+  if (cfg.seuil > 0 && qtePrime >= cfg.seuil) prime = cfg.prime || 0;
+  return { total: total, prime: prime };
+}
+function timeToMins(t) { if (!t) return null; var p = t.split(':').map(Number); return p[0]*60 + p[1]; }
+function calcDur(arr, pd, pf, fin, isNight) {
+  var a = timeToMins(arr), b = timeToMins(pd), c = timeToMins(pf), d = timeToMins(fin);
+  if (a === null || d === null) return 0;
+  var diff = function(s, e) { if (s === null || e === null) return 0; if (isNight && e <= s) return e + 1440 - s; return Math.max(0, e - s); };
+  var seg1 = (a !== null && b !== null) ? diff(a,b) : 0;
+  var seg2 = (c !== null && d !== null) ? diff(c,d) : 0;
+  if (seg1 > 0 || seg2 > 0) return (seg1 + seg2) / 60;
+  return diff(a, d) / 60;
+}
+function savePointage() {
+  var empId = document.getElementById('pt-select-emp').value;
+  if (!empId) return;
+  var pts = getPointageData();
+  var inputs = document.querySelectorAll('#pt-container input[data-date]');
+  var map = {};
+  inputs.forEach(function(inp) {
+    var date = inp.dataset.date, field = inp.dataset.field;
+    if (!map[date]) map[date] = {};
+    map[date][field] = inp.type === 'checkbox' ? !!inp.checked : inp.value;
+  });
+  for (var date in map) {
+    var has = Object.keys(map[date]).some(function(f){ var v = map[date][f]; return v !== '' && v !== false; });
+    var idx = pts.findIndex(function(p){ return p.employee_id === empId && p.date === date; });
+    if (!has) { if (idx !== -1) pts.splice(idx, 1); continue; }
+    var rec = idx !== -1 ? pts[idx] : { id: DB.id(), employee_id: empId, date: date };
+    for (var f in map[date]) rec[f] = map[date][f];
+    if (idx !== -1) pts[idx] = rec; else pts.push(rec);
+  }
+  setPointageData(pts);
+}
+/* Saisie de la prime mensuelle depuis l'écran de pointage */
+function setPrimeMoisUI(inp) {
+  var empId = document.getElementById('pt-select-emp').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!empId || !mois) return;
+  setPrimeMois(empId, mois, parseFloat(inp.value) || 0);
+  toast('Prime du mois enregistr\u00e9e');
+}
+/* Saisie des jours travaillés d'un prestataire externe (prorata) */
+function setExternJoursUI(inp) {
+  var empId = document.getElementById('pt-select-emp').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!empId || !mois) return;
+  setExternJours(empId, mois, parseInt(inp.value) || 0);
+  toast('Jours travaill\u00e9s enregistr\u00e9s');
+  loadPointage();
+}
+/* Sauvegarde du congé payé (montant, période, commentaire) — titulaires seulement */
+function saveCongeUI() {
+  var empId = document.getElementById('pt-select-emp').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!empId || !mois) return;
+  var montant = parseFloat(document.getElementById('pt-conge').value) || 0;
+  var periode = '';
+  var pe = document.getElementById('pt-conge-periode');
+  if (pe) periode = pe.value;
+  var commentaire = '';
+  var ce = document.getElementById('pt-conge-comment');
+  if (ce) commentaire = ce.value;
+  setCongePaie(empId, mois, montant, periode, commentaire);
+  toast('Congé enregistré');
+  loadPointage();
+}
+/* Saisie de la gratification du mois (champ modifiable) */
+function setGratifUI(inp) {
+  var empId = document.getElementById('pt-select-emp').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!empId || !mois) return;
+  setGratif(empId, mois, parseFloat(inp.value) || 0);
+  toast('Gratification enregistr\u00e9e');
+  loadPointage();
+}
+/* Convertit des heures décimales (ex: 5.33) en format "5h20" */
+function fmtHhmm(h) {
+  var neg = h < 0; h = Math.abs(h);
+  var hh = Math.floor(h);
+  var mm = Math.round((h - hh) * 60);
+  if (mm >= 60) { hh++; mm -= 60; }
+  return (neg ? '-' : '') + hh + 'h' + (mm < 10 ? '0' : '') + mm;
+}
+/* Remplissage automatique : 8h sur chaque jour ouvrable (lun-ven), plafonné à 173,33h */
+function autoFillForfait() {
+  var empId = document.getElementById('pt-select-emp').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!empId || !mois) return;
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  if (!emp) return;
+  var pts = getPointageData();
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var cap = 173.33, total = 0;
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dow = new Date(year, mIdx, d).getDay();
+    if (dow === 0 || dow === 6) continue;
+    if (total >= cap - 0.0001) break;
+    var rem = Math.min(8, cap - total);
+    total += rem;
+    var dk = mois + '-' + (d < 10 ? '0' : '') + d;
+    var v = fmtH ? fmtHhmm(Math.round(rem * 100) / 100) : String(Math.round(rem * 100) / 100);
+    var idx = pts.findIndex(function(p){ return p.employee_id === empId && p.date === dk; });
+    if (idx !== -1) { pts[idx].h_j_manual = v; pts[idx].present = true; }
+    else pts.push({ id: DB.id(), employee_id: empId, date: dk, h_j_manual: v, present: true });
+  }
+  setPointageData(pts);
+  toast('Pointage forfaitaire rempli : ' + (Math.round(total * 100) / 100) + ' h');
+  loadPointage();
+}
+function clearPointageMois() {
+  var empId = document.getElementById('pt-select-emp').value;
+  var mois = document.getElementById('pt-mois').value;
+  if (!empId || !mois) return;
+  if (!confirm('Effacer tout le pointage de ce mois pour cet employ\u00e9 ?')) return;
+  setPointageData(getPointageData().filter(function(p){ return !(p.employee_id === empId && p.date.indexOf(mois) === 0); }));
+  loadPointage();
+}
+/* Entrée dans une case de pointage : sauvegarde + passage à la case suivante (jour suivant) */
+function ptKeyNav(e) {
+  if (!e || e.key !== 'Enter') return;
+  e.preventDefault();
+  var field = e.target.getAttribute('data-field');
+  var all = Array.prototype.slice.call(document.querySelectorAll('#pt-container input[data-field="h_j_manual"], #pt-container input[data-field="h_n_manual"]'));
+  var i = all.indexOf(e.target);
+  if (i === -1 || i >= all.length) return;
+  /* Chercher le prochain input visible */
+  for (var j = i + 1; j < all.length; j++) {
+    if (all[j].offsetParent === null) continue;
+    /* Depuis une case "jour", passer à la case "jour" du jour suivant (sauter la case "nuit" du même jour) */
+    if (field === 'h_j_manual' && all[j].getAttribute('data-field') !== 'h_j_manual') continue;
+    all[j].focus(); all[j].select(); break;
+  }
+  savePointage();
+}
+
+/* ==================== ACOMPTES & PRETS ==================== */
+function apRestP(a) { return Math.max(0, (a.montant || 0) - (a.rembourse || 0)); }
+function apInMonthP(a, month) {
+  if (!month) return true;
+  var md = a.moisDeduction || '';
+  if (!md) return false;
+  if (a.type === 'acompte') return md === month;
+  var duree = parseInt(a.dureeMois) || 0;
+  if (duree <= 0) return md === month;
+  var sy = parseInt(md.substring(0, 4)), sm = parseInt(md.substring(5, 7));
+  var selY = parseInt(month.substring(0, 4)), selM = parseInt(month.substring(5, 7));
+  var diff = (selY - sy) * 12 + (selM - sm);
+  return diff >= 0 && diff < duree && apRestP(a) > 0;
+}
+function apDeductionP(a, month) {
+  if (a.type === 'acompte') return (a.moisDeduction || '') === month ? (a.montant || 0) : 0;
+  return Math.min(a.mensualite || 0, apRestP(a));
+}
+function loadAP() {
+  var raw = getAPList() || [];
+  var list = raw.map(normalizeAP);
+  var personnel = getPersonnel();
+  var empById = {};
+  for (var i = 0; i < personnel.length; i++) empById[personnel[i].id] = personnel[i];
+  var month = window._apMonthP || '';
+  var activeTab = window._apTabP || 'tous';
+  var search = (window._apSearch || '').toLowerCase().trim();
+
+  var peSel = document.getElementById('ap-print-emp');
+  if (peSel) {
+    var peOpts = '<option value="">Tous les travailleurs (une feuille chacun)</option>';
+    var peSorted = personnel.slice().sort(function(a, b) { return (a.nom || '').localeCompare(b.nom || ''); });
+    for (var pei = 0; pei < peSorted.length; pei++) {
+      peOpts += '<option value="' + peSorted[pei].id + '">' + escH(peSorted[pei].matricule) + ' - ' + escH(peSorted[pei].nom) + ' ' + escH(peSorted[pei].prenoms || '') + '</option>';
+    }
+    peSel.innerHTML = peOpts;
+  }
+
+  var opsMap = {};
+  var opsRaw = DB.getMain('mdb_operationsCaisse') || [];
+  for (var oi = 0; oi < opsRaw.length; oi++) opsMap[opsRaw[oi].id] = opsRaw[oi];
+  var caissesMap = {};
+  var caissesRaw = DB.getMain('mdb_caisses') || [];
+  for (var csi = 0; csi < caissesRaw.length; csi++) caissesMap[caissesRaw[csi].id] = caissesRaw[csi].nom || '';
+
+  function empName(eid) { var p = empById[eid]; return p ? (p.nom + ' ' + (p.prenoms || '')) : '?'; }
+
+  var filtered = [];
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
+    if (activeTab === 'acompte' && a.type !== 'acompte') continue;
+    if (activeTab === 'pret' && a.type !== 'pret') continue;
+    if (month && !apInMonthP(a, month)) continue;
+    if (search) { if (empName(a.employee_id).toLowerCase().indexOf(search) === -1) continue; }
+    filtered.push(a);
+  }
+  filtered.sort(function(x, y) { return (y.date || '').localeCompare(x.date || ''); });
+
+  /* Stats */
+  var tAcc = 0, tPret = 0, tRemb = 0, tRest = 0;
+  for (var s = 0; s < filtered.length; s++) {
+    var fa = filtered[s];
+    if (fa.type === 'acompte') tAcc += fa.montant || 0; else tPret += fa.montant || 0;
+    tRemb += fa.rembourse || 0;
+    tRest += apRestP(fa);
+  }
+  document.getElementById('ap-stats').innerHTML =
+    '<div class="stat-card"><div class="lbl">Total acomptes vers\u00e9s</div><div class="val">' + fmtF(tAcc) + '</div></div>' +
+    '<div class="stat-card" style="border-left-color:var(--gold)"><div class="lbl">Total pr\u00eats accord\u00e9s</div><div class="val">' + fmtF(tPret) + '</div></div>' +
+    '<div class="stat-card" style="border-left-color:var(--blue)"><div class="lbl">Total rembours\u00e9</div><div class="val">' + fmtF(tRemb) + '</div></div>' +
+    '<div class="stat-card" style="border-left-color:var(--danger)"><div class="lbl">Reste \u00e0 rembourser</div><div class="val">' + fmtF(tRest) + '</div></div>';
+
+  /* Tabs */
+  var tabs = [ {k:'tous', l:'Tous'}, {k:'acompte', l:'Acomptes'}, {k:'pret', l:'Pr\u00eats'}, {k:'cumul', l:'Cumul par employ\u00e9'} ];
+  var tabsHtml = '';
+  for (var tb = 0; tb < tabs.length; tb++) tabsHtml += '<button class="' + (activeTab === tabs[tb].k ? 'active' : '') + '" onclick="window._apTabP=\'' + tabs[tb].k + '\';loadAP()">' + tabs[tb].l + '</button>';
+  document.getElementById('ap-tabs').innerHTML = tabsHtml;
+
+  var out = '';
+
+  if (activeTab === 'cumul') {
+    /* Cumul par employ\u00e9 */
+    var empAgg = {};
+    for (var ci = 0; ci < filtered.length; ci++) {
+      var ca = filtered[ci];
+      var eidC = ca.employee_id || '_x';
+      if (!empAgg[eidC]) empAgg[eidC] = {nom: empName(eidC), acc: 0, prets: 0, remb: 0, rest: 0, nb: 0, nbPrets: 0};
+      var ag = empAgg[eidC];
+      var dedC = month ? apDeductionP(ca, month) : (ca.montant || 0);
+      if (ca.type === 'acompte') ag.acc += dedC;
+      else { ag.prets += dedC; ag.nbPrets++; }
+      ag.remb += ca.rembourse || 0;
+      ag.rest += apRestP(ca);
+      ag.nb++;
+    }
+    var eids = Object.keys(empAgg);
+    eids.sort(function(x, y) { return (empAgg[y].prets + empAgg[y].acc) - (empAgg[x].prets + empAgg[x].acc); });
+    out += '<div style="overflow-x:auto"><table><thead><tr><th>Employ\u00e9</th><th>Op\u00e9rations</th><th>Pr\u00eats</th>' + (month ? '<th style="text-align:right">Acomptes (' + escH(fmtMoisAP(month)) + ')</th><th style="text-align:right">Pr\u00eats (' + escH(fmtMoisAP(month)) + ')</th><th style="text-align:right">Total \u00e0 d\u00e9duire</th>' : '<th style="text-align:right">Total acomptes</th><th style="text-align:right">Total pr\u00eats</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th>') + '</tr></thead><tbody>';
+    for (var ei = 0; ei < eids.length; ei++) {
+      var es2 = empAgg[eids[ei]];
+      if (month) {
+        var totM = es2.acc + es2.prets;
+        out += '<tr><td style="font-weight:700">' + escH(es2.nom) + '</td><td>' + es2.nb + '</td><td>' + es2.nbPrets + '</td><td style="text-align:right">' + fmtF(es2.acc) + '</td><td style="text-align:right">' + fmtF(es2.prets) + '</td><td style="text-align:right;font-weight:700;color:var(--orange-dark)">' + fmtF(totM) + '</td></tr>';
+      } else {
+        var resteDue = Math.max(0, es2.rest);
+        out += '<tr><td style="font-weight:700">' + escH(es2.nom) + '</td><td>' + es2.nb + '</td><td>' + es2.nbPrets + '</td><td style="text-align:right">' + fmtF(es2.acc) + '</td><td style="text-align:right">' + fmtF(es2.prets) + '</td><td style="text-align:right">' + fmtF(es2.remb) + '</td><td style="text-align:right;font-weight:700;color:' + (resteDue > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(resteDue) + '</td></tr>';
+      }
+    }
+    if (eids.length === 0) out += '<tr><td colspan="' + (month ? 6 : 7) + '" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune donn\u00e9e</td></tr>';
+    out += '</tbody></table></div>';
+    document.getElementById('ap-month-summary').innerHTML = '';
+  } else {
+    /* R\u00e9capitulatif par employ\u00e9 pour la p\u00e9riode s\u00e9lectionn\u00e9e */
+    if (month) {
+      var empSum = {};
+      for (var msi = 0; msi < filtered.length; msi++) {
+        var ma = filtered[msi];
+        var eidM = ma.employee_id || '_x';
+        if (!empSum[eidM]) empSum[eidM] = {nom: empName(eidM), acc: 0, prets: 0, deduit: 0, total: 0};
+        var sm = empSum[eidM];
+        var dedM = apDeductionP(ma, month);
+        sm.total += dedM;
+        if (ma.type === 'acompte') sm.acc += dedM; else sm.prets += dedM;
+        if (ma.preleve && ma.moisPreleve === month) sm.deduit += dedM;
+      }
+      var eidsM = Object.keys(empSum);
+      eidsM.sort(function(x, y) { return empSum[y].total - empSum[x].total; });
+      var sumHtml = '<h3 style="font-size:.95rem;margin:.2rem 0 .6rem;color:var(--text)">D\u00e9ductions du mois de ' + escH(fmtMoisAP(month)) + ' par employ\u00e9</h3>';
+      sumHtml += '<div style="overflow-x:auto"><table><thead><tr><th>Employ\u00e9</th><th style="text-align:right">Acomptes</th><th style="text-align:right">Pr\u00eats</th><th style="text-align:right">Total \u00e0 d\u00e9duire</th><th style="text-align:right">D\u00e9j\u00e0 d\u00e9duit</th><th style="text-align:right">\u00c0 d\u00e9duire</th></tr></thead><tbody>';
+      for (var mi = 0; mi < eidsM.length; mi++) {
+        var es3 = empSum[eidsM[mi]];
+        sumHtml += '<tr><td style="font-weight:700">' + escH(es3.nom) + '</td><td style="text-align:right">' + fmtF(es3.acc) + '</td><td style="text-align:right">' + fmtF(es3.prets) + '</td><td style="text-align:right;font-weight:700">' + fmtF(es3.total) + '</td><td style="text-align:right;font-weight:700;color:var(--green)">' + fmtF(es3.deduit) + '</td><td style="text-align:right;font-weight:700;color:' + (es3.total - es3.deduit > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(Math.max(0, es3.total - es3.deduit)) + '</td></tr>';
+      }
+      if (eidsM.length === 0) sumHtml += '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune d\u00e9duction pour cette p\u00e9riode</td></tr>';
+      sumHtml += '</tbody></table></div>';
+      document.getElementById('ap-month-summary').innerHTML = '<div class="card" style="background:#fffbeb;border:1px solid #fde68a">' + sumHtml + '</div>';
+    } else {
+      document.getElementById('ap-month-summary').innerHTML = '';
+    }
+
+    /* D\u00e9tail */
+    var hasM = !!month;
+    out += '<div style="overflow-x:auto"><table><thead><tr><th>Pi\u00e8ce</th><th>Employ\u00e9</th><th>Type</th><th>Date</th><th>Provenance</th><th>Moyen</th><th>Par qui</th><th>Mois d\u00e9d.</th><th style="text-align:right">Montant</th><th style="text-align:right">Mensualit\u00e9</th>' + (hasM ? '<th style="text-align:right">D\u00e9duction (mois)</th>' : '') + '<th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste</th><th>Pr\u00e9lev\u00e9</th><th>Statut</th><th style="width:50px"></th></tr></thead><tbody>';
+    for (var di = 0; di < filtered.length; di++) {
+      var a2 = filtered[di];
+      var rest2 = apRestP(a2);
+      var st2 = a2.statut === 'termine' ? '<span class="pill pill-green">Termin\u00e9</span>' : (a2.type === 'pret' ? '<span class="pill pill-gold">En cours</span>' : '<span class="pill pill-gray">Acompte</span>');
+      var op2 = a2.caisseOpId ? opsMap[a2.caisseOpId] : null;
+      var caisseId2 = a2.caisseId || (op2 ? op2.caisseId : '');
+      var caisseNom2 = caisseId2 ? (caissesMap[caisseId2] || '') : '';
+      var prov2;
+      if (a2.provenance === 'banque') prov2 = '<span class="pill" style="background:#dbeafe;color:#1d4ed8">Banque</span>';
+      else if (caisseNom2) prov2 = '<span class="pill" style="background:#dcfce7;color:#15803d">Caisse - ' + escH(caisseNom2) + '</span>';
+      else if (a2.provenance) prov2 = '<span class="pill" style="background:#dcfce7;color:#15803d">Caisse</span>';
+      else prov2 = '<span class="pill pill-gray">-</span>';
+      var moyen2 = a2.moyen || (a2.mensualite && a2.type === 'pret' ? 'Virement' : '') || '-';
+      var exec2 = a2.executant || (op2 ? op2.executant : '') || '-';
+      var moisDed2 = a2.moisDeduction ? escH(fmtMoisAP(a2.moisDeduction)) : '-';
+      var prelevBadge = a2.preleve ? '<span class="pill pill-green">Oui' + (a2.moisPreleve ? ' (' + escH(fmtMoisAP(a2.moisPreleve)) + ')' : '') + '</span>' : '<span class="pill pill-gray">Non</span>';
+      out += '<tr>' +
+        '<td style="white-space:nowrap;font-weight:700;color:var(--orange-dark)">' + escH(a2.numeroPiece || '-') + '</td>' +
+        '<td style="font-weight:600">' + escH(empName(a2.employee_id)) + '</td>' +
+        '<td>' + escH(a2.type) + '</td>' +
+        '<td>' + escH(a2.date || '-') + '</td>' +
+        '<td>' + prov2 + '</td>' +
+        '<td>' + escH(moyen2) + '</td>' +
+        '<td>' + escH(exec2) + '</td>' +
+        '<td>' + moisDed2 + '</td>' +
+        '<td style="text-align:right;font-weight:700">' + fmtF(a2.montant) + '</td>' +
+        '<td style="text-align:right">' + (a2.mensualite ? fmtF(a2.mensualite) : '-') + '</td>' +
+        (hasM ? '<td style="text-align:right;font-weight:700;color:var(--orange-dark)">' + fmtF(apDeductionP(a2, month)) + '</td>' : '') +
+        '<td style="text-align:right">' + fmtF(a2.rembourse || 0) + '</td>' +
+        '<td style="text-align:right;font-weight:700;color:' + (rest2 > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(rest2) + '</td>' +
+        '<td>' + prelevBadge + '</td>' +
+        '<td>' + st2 + '</td>' +
+        '<td><button class="btn btn-red" style="padding:3px 8px" onclick="delAP(\'' + a2.id + '\')">X</button></td></tr>';
+    }
+    if (filtered.length === 0) out += '<tr><td colspan="' + (hasM ? 16 : 15) + '" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune op\u00e9ration pour cette p\u00e9riode / ces filtres</td></tr>';
+    out += '</tbody></table></div>';
+  }
+  document.getElementById('ap-table-container').innerHTML = out;
+}
+function printAP() {
+  var w = window.open('', '_blank');
+  if (!w) { toast('Autorisez les pop-ups pour imprimer', 'error'); return; }
+  var list = (getAPList() || []).map(normalizeAP);
+  var personnel = getPersonnel();
+  var empById = {};
+  for (var i = 0; i < personnel.length; i++) empById[personnel[i].id] = personnel[i];
+  var month = window._apMonthP || '';
+  var activeTab = window._apTabP || 'tous';
+  var search = (window._apSearch || '').toLowerCase().trim();
+  var printEmpId = document.getElementById('ap-print-emp') ? document.getElementById('ap-print-emp').value : '';
+  var rows = [];
+  for (var i2 = 0; i2 < list.length; i2++) {
+    var a = list[i2];
+    if (activeTab === 'acompte' && a.type !== 'acompte') continue;
+    if (activeTab === 'pret' && a.type !== 'pret') continue;
+    if (month && !apInMonthP(a, month)) continue;
+    if (printEmpId && a.employee_id !== printEmpId) continue;
+    if (search) { var p = empById[a.employee_id]; var nm = (p ? p.nom + ' ' + (p.prenoms || '') : '?').toLowerCase(); if (nm.indexOf(search) === -1) continue; }
+    rows.push(a);
+  }
+  rows.sort(function(x, y) {
+    var nx = empById[x.employee_id] ? empById[x.employee_id].nom : 'zzz';
+    var ny = empById[y.employee_id] ? empById[y.employee_id].nom : 'zzz';
+    if (nx !== ny) return nx.localeCompare(ny);
+    return (x.date || '').localeCompare(y.date || '');
+  });
+  /* Regrouper par travailleur */
+  var groups = {};
+  rows.forEach(function(a) {
+    var k = a.employee_id || '_x';
+    if (!groups[k]) groups[k] = { emp: empById[a.employee_id], items: [] };
+    groups[k].items.push(a);
+  });
+  var h = '<html><head><meta charset="UTF-8"><title>Acomptes & Pr\u00eats</title><style>';
+  h += 'body{font-family:Arial;font-size:11px;padding:12px}h2{text-align:center;margin:8px 0}h3{margin:6px 0 4px;font-size:13px}';
+  h += 'table{width:100%;border-collapse:collapse;margin-bottom:10px}td,th{padding:4px 6px;border:1px solid #999;font-size:11px}th{background:#eee;text-align:left}';
+  h += '.page-break{page-break-after:always}.tot{font-weight:700;background:#f8f9fa}';
+  h += '</style></head><body>';
+  var socP = getSocieteP() || {};
+  var entP = DB.getMain('mdb_entreprise') || {};
+  var socNomP = escH(socP.nom || entP.nom || '');
+  h += '<h2>' + socNomP + (socP.adresse || entP.adresse ? ' - ' + escH(socP.adresse || entP.adresse) : '') + '</h2>';
+  h += '<h2>Acomptes & Pr\u00eats' + (month ? ' - ' + fmtMoisAP(month) : '') + '</h2>';
+  if (rows.length === 0) h += '<p style="text-align:center;padding:2rem">Aucune donn\u00e9e</p>';
+  var keys = Object.keys(groups);
+  for (var gi = 0; gi < keys.length; gi++) {
+    var g = groups[keys[gi]];
+    var emp = g.emp;
+    var empLabel = emp ? (emp.matricule ? emp.matricule + ' - ' : '') + (emp.nom || '') + ' ' + (emp.prenoms || '') : 'Employ\u00e9 inconnu';
+    h += '<h3>Employ\u00e9 : ' + escH(empLabel) + '</h3>';
+    h += '<table><thead><tr><th>Type</th><th>Date</th><th>Pi\u00e8ce</th><th>Remettant</th><th>Moyen</th><th>Par qui</th><th>Mois d\u00e9d.</th><th style="text-align:right">Montant</th>' + (month ? '<th style="text-align:right">D\u00e9duction (mois)</th>' : '') + '<th style="text-align:right">Mensualit\u00e9</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste</th></tr></thead><tbody>';
+    var tot = 0;
+    for (var r = 0; r < g.items.length; r++) {
+      var a2 = g.items[r];
+      var rest = apRestP(a2);
+      var ded = month ? apDeductionP(a2, month) : a2.montant;
+      tot += ded;
+      h += '<tr><td>' + escH(a2.type) + '</td><td>' + escH(a2.date || '-') + '</td><td>' + escH(a2.numeroPiece || '-') + '</td><td>' + escH(a2.remettant || '-') + '</td><td>' + escH(a2.moyen || '-') + '</td><td>' + escH(a2.executant || '-') + '</td><td>' + escH(a2.moisDeduction ? fmtMoisAP(a2.moisDeduction) : '-') + '</td><td style="text-align:right">' + fmt(a2.montant) + '</td>' + (month ? '<td style="text-align:right">' + fmt(ded) + '</td>' : '') + '<td style="text-align:right">' + (a2.mensualite ? fmt(a2.mensualite) : '-') + '</td><td style="text-align:right">' + fmt(a2.rembourse || 0) + '</td><td style="text-align:right">' + fmt(rest) + '</td></tr>';
+    }
+    h += '<tr class="tot"><td colspan="' + (month ? 7 : 6) + '" style="text-align:right">Total ' + (month ? '\u00e0 d\u00e9duire' : '') + '</td><td style="text-align:right">' + fmt(tot) + '</td></tr>';
+    h += '</tbody></table>';
+    if (gi < keys.length - 1) h += '<div class="page-break"></div>';
+  }
+  h += '</body></html>';
+  w.document.write(h);
+  w.document.close();
+  w.print();
+}
+function delAP(id) {
+  if (!confirm('Supprimer cette opération ?')) return;
+  setAPList(getAPList().filter(function(a){ return a.id !== id; }));
+  var mainAP = DB.getMain('mdb_acomptesPrets') || [];
+  DB.setMain('mdb_acomptesPrets', mainAP.filter(function(a){ return a.id !== id; }));
+  loadAP();
+}
+
+/* ==================== TAX RULES (2024) ==================== */
+var TAX_RULES = {
+  cnps_sal: 0.063, cnps_pat_ret: 0.077, cnps_pat_pf: 0.0575, cnps_pat_at: 0.03,
+  fdfp_app: 0.004, fdfp_form: 0.006,
+  transport_max_exo: 30000,
+  ricf_per_part: 11000,
+  scale: [ {limit:75000,rate:0}, {limit:240000,rate:0.16}, {limit:800000,rate:0.21}, {limit:2400000,rate:0.24}, {limit:8000000,rate:0.28}, {limit:Infinity,rate:0.32} ]
+};
+var DEFAULT_RULES = JSON.parse(JSON.stringify(TAX_RULES));
+function loadTaxRules() {
+  var cfg = getPayeSection('taxRules', null);
+  if (cfg && typeof cfg === 'object') {
+    for (var k in cfg) { TAX_RULES[k] = cfg[k]; }
+  }
+}
+function saveTaxRates() {
+  var t = {};
+  var pctFields = { 'config-cnps-ret-sal':'cnps_sal', 'config-cnps-ret-pat':'cnps_pat_ret', 'config-cnps-fam-pat':'cnps_pat_pf', 'config-cnps-at-pat':'cnps_pat_at', 'config-cnps-fdfp-app':'fdfp_app', 'config-cnps-fdfp-form':'fdfp_form' };
+  for (var idName in pctFields) {
+    var el = document.getElementById(idName);
+    if (el) t[pctFields[idName]] = (parseFloat(String(el.value).replace(',', '.')) || 0) / 100;
+  }
+  var absFields = { 'config-transport-exo':'transport_max_exo', 'config-ricf-part':'ricf_per_part' };
+  for (var idName2 in absFields) {
+    var el2 = document.getElementById(idName2);
+    if (el2) t[absFields[idName2]] = parseFloat(String(el2.value).replace(',', '.')) || DEFAULT_RULES[absFields[idName2]];
+  }
+  var rows = document.querySelectorAll('#its-scale-body tr');
+  var scale = [];
+  rows.forEach(function(tr) {
+    var cells = tr.querySelectorAll('input');
+    var limit = parseFloat(String(cells[0].value).replace(',', '.')) || 0;
+    var rate = parseFloat(String(cells[1].value).replace(',', '.')) / 100 || 0;
+    if (limit === 999999999) limit = Infinity;
+    scale.push({ limit: limit, rate: rate });
+  });
+  if (scale.length) t.scale = scale;
+  setPayeSection('taxRules', t);
+  for (var k in t) { TAX_RULES[k] = t[k]; }
+  toast('Taux mis à jour', 'success');
+  loadItsScale();
+}
+function loadItsScale() {
+  var body = document.getElementById('its-scale-body');
+  if (!body) return;
+  var scale = TAX_RULES.scale || DEFAULT_RULES.scale;
+  var pctFields = { 'config-cnps-ret-sal':'cnps_sal', 'config-cnps-ret-pat':'cnps_pat_ret', 'config-cnps-fam-pat':'cnps_pat_pf', 'config-cnps-at-pat':'cnps_pat_at', 'config-cnps-fdfp-app':'fdfp_app', 'config-cnps-fdfp-form':'fdfp_form' };
+  for (var idName in pctFields) {
+    var el = document.getElementById(idName);
+    if (el) el.value = ((TAX_RULES[pctFields[idName]] || 0) * 100).toFixed(2).replace('.', ',');
+  }
+  var absFields = { 'config-transport-exo':'transport_max_exo', 'config-ricf-part':'ricf_per_part' };
+  for (var idName2 in absFields) {
+    var el2 = document.getElementById(idName2);
+    if (el2) el2.value = TAX_RULES[absFields[idName2]] || '';
+  }
+  body.innerHTML = '';
+  scale.forEach(function(b, i) {
+    var limitVal = b.limit === Infinity ? '999999999' : String(b.limit);
+    var rateVal = (b.rate * 100).toFixed(1).replace('.', ',');
+    body.innerHTML += '<tr><td><input type="number" value="' + limitVal + '" style="max-width:140px" onchange="saveTaxRates()"></td><td><input type="number" step="0.01" value="' + rateVal + '" style="max-width:90px" onchange="saveTaxRates()">%</td><td><button class="btn btn-red" onclick="delItsLine(' + i + ')">X</button></td></tr>';
+  });
+}
+function addItsLine() {
+  if (!TAX_RULES.scale) TAX_RULES.scale = DEFAULT_RULES.scale.slice();
+  TAX_RULES.scale.splice(TAX_RULES.scale.length - 1, 0, { limit: 0, rate: 0 });
+  setPayeSection('taxRules', TAX_RULES);
+  loadItsScale();
+}
+function delItsLine(i) {
+  if (i < 0 || i >= TAX_RULES.scale.length) return;
+  TAX_RULES.scale.splice(i, 1);
+  setPayeSection('taxRules', TAX_RULES);
+  loadItsScale();
+}
+function getLimits() {
+  var lim = getPayeSection('limits', {}) || {};
+  return { retraite: lim.retraite || 3375000, atpf: lim.atpf || 75000 };
+}
+function calcITS(base) {
+  var tax = 0, prev = 0;
+  for (var i = 0; i < TAX_RULES.scale.length; i++) {
+    var b = TAX_RULES.scale[i];
+    var chunk = Math.min(b.limit - prev, Math.max(0, base - prev));
+    tax += chunk * b.rate;
+    if (base <= b.limit) break;
+    prev = b.limit;
+  }
+  return Math.floor(tax);
+}
+function getRICF(parts) {
+  if (!parts || parts <= 1) return 0;
+  return (parseFloat(parts) - 1) * (TAX_RULES.ricf_per_part || 11000);
+}
+
+/* ==================== PAYROLL ENGINE ==================== */
+function getMonthStats(emp, mois) {
+  /* Mode forfaitaire : 173,33h/mois automatiques (sauf externes payés au forfait mensuel) */
+  if (emp.mode_pointage === 'forfait' && empCategorie(emp) !== 'externe') {
+    return { totalBaseHours: 173.33, hs15: 0, hs50: 0, hs75: 0, hs100: 0, normalHours: 173.33, hJour: 0, hNuit: 0, transport: 30000, daysPresent: 22, businessDays: 22, businessPresent: 22 };
+  }
+  var pts = getPointageData().filter(function(p){ return p.employee_id === emp.id && p.date.indexOf(mois) === 0; });
+  /* Précharger les données montage pour les travailleurs au rendement */
+  var ptMontStats = emp.rendement ? getPointageMontage().filter(function(p){ return p.employee_id === emp.id && p.date.indexOf(mois) === 0; }) : [];
+  var montageDaysSet = {};
+  ptMontStats.forEach(function(p){ montageDaysSet[p.date] = true; });
+  var year = parseInt(mois.split('-')[0]), mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var hs15 = 0, hs50 = 0, hs75 = 0, hs100 = 0, weeklyNormal = 0, weeklyHS15 = 0, curWeek = -1;
+  var totalBaseHours = 0, daysPresent = 0, businessDays = 0, businessPresent = 0;
+  var hJour = 0, hNuit = 0, normalHours = 0;
+  var isJ = empCategorie(emp) === 'journalier';
+  var firstDow = (new Date(year, mIdx, 1).getDay() + 6) % 7;
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dk = mois + '-' + (d < 10 ? '0' : '') + d;
+    var dow = (new Date(year, mIdx, d).getDay() + 6) % 7;
+    var week = Math.floor((d + firstDow - 1) / 7);
+    if (week !== curWeek) { weeklyNormal = 0; weeklyHS15 = 0; curWeek = week; }
+    var isSun = new Date(year, mIdx, d).getDay() === 0;
+    var rec = pts.find(function(p){ return p.date === dk; });
+    var isWeekday = dow < 5;
+    if (isWeekday) businessDays++;
+    if (rec) {
+      var hJ = 0, hN = 0;
+      if (rec.h_j_manual !== undefined && rec.h_j_manual !== '') hJ = parseHeure(rec.h_j_manual);
+      if (rec.h_n_manual !== undefined && rec.h_n_manual !== '') hN = parseHeure(rec.h_n_manual);
+      if (hJ === 0 && hN === 0 && rec.present === true) hJ = 8;
+      if (hJ > 0 || hN > 0) daysPresent++;
+      if (rec.present === true || hJ > 0 || hN > 0) {
+        if (isWeekday && (hJ > 0 || hN > 0)) businessPresent++;
+      }
+      hJour += hJ; hNuit += hN;
+      if (isSun) { hs75 += hJ; hs100 += hN; }
+      else {
+        hs75 += hN;
+        var toN = Math.min(hJ, Math.max(0, 40 - weeklyNormal));
+        weeklyNormal += toN;
+        normalHours += toN;
+        var rem = hJ - toN;
+        if (rem > 0) {
+          var to15 = Math.min(rem, Math.max(0, 6 - weeklyHS15));
+          hs15 += to15; weeklyHS15 += to15;
+          hs50 += (rem - to15);
+        }
+      }
+      if (!isJ) totalBaseHours += (hJ + hN > 0) ? 8 : 0;
+      /* Jours avec montage : compter comme présent pour transport/ancienneté */
+      if (montageDaysSet[dk] === true) {
+        if (hJ === 0 && hN === 0) { daysPresent++; if (isWeekday) businessPresent++; }
+      }
+    } else if (montageDaysSet[dk] === true && !isJ) {
+      /* Jour avec montage mais sans pointage horaire : présent pour transport/ancienneté */
+      daysPresent++;
+      if (isWeekday) businessPresent++;
+    }
+  }
+  if (!isJ) {
+    if (businessPresent >= businessDays && businessDays > 0) totalBaseHours = 173.33;
+    if (totalBaseHours > 173.33) totalBaseHours = 173.33;
+  } else {
+    totalBaseHours = normalHours;
+  }
+  var transport = businessDays > 0 ? Math.round(30000 * (businessPresent / businessDays)) : 0;
+  return { totalBaseHours: totalBaseHours, hs15: hs15, hs50: hs50, hs75: hs75, hs100: hs100, transport: transport, daysPresent: daysPresent, businessDays: businessDays, businessPresent: businessPresent, normalHours: normalHours, hJour: hJour, hNuit: hNuit };
+}
+
+function calculatePayroll(emp, mois) {
+  var stats = getMonthStats(emp, mois);
+  var base = getSalaireAuMois(emp, mois);
+  var hourly = base / 173.33;
+  var items = [];
+  /* Journaliers & externes : pas de CNPS, pas d'imp\u00f4ts (ITS/CMU), pas d'avantages.
+     Journalier = taux journalier x jours point\u00e9s. Externe = montant forfaitaire. */
+  var catEmp = empCategorie(emp);
+  if (catEmp === 'journalier' || catEmp === 'externe') {
+    var apJ = getAPForMonth(emp.id, mois);
+    var primeJ = getPrimeMois(emp.id, mois);
+    var totalBrutJ = 0;
+    var thJ = 0, tauxJ = 0, mfJ = 0, joursExt = 0;
+    if (catEmp === 'externe') {
+      mfJ = Math.round(parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0);
+      joursExt = getExternJours(emp.id, mois);
+      var mfPaye = mfJ;
+      if (joursExt > 0 && joursExt < 30) mfPaye = Math.round(mfJ * joursExt / 30);
+      stats.joursExtern = joursExt > 0 ? joursExt : 30;
+      items.push({ n: '11', label: 'Montant forfaitaire mensuel' + (joursExt > 0 && joursExt < 30 ? ' (prorata ' + joursExt + 'j/30)' : ''), base: mfJ, taux: joursExt > 0 ? joursExt + 'j/30' : '', gain: mfPaye, ret: 0 });
+      totalBrutJ += mfPaye;
+      mfJ = mfPaye;
+    } else {
+      tauxJ = parseFloat(emp.taux_journalier) || parseFloat(emp.salaire_base) || 0;
+      thJ = tauxJ / 8;
+      if (stats.normalHours > 0) items.push({ n: '11', label: 'Heures normales (Jour)', base: Math.round(thJ), taux: stats.normalHours.toFixed(2).replace('.', ','), gain: Math.round(stats.normalHours * thJ), ret: 0 });
+      if (stats.hs15 > 0) items.push({ n: '23.1', label: 'H. Suppl. 15%', base: Math.round(thJ * 1.15), taux: stats.hs15.toFixed(2).replace('.', ','), gain: Math.round(stats.hs15 * thJ * 1.15), ret: 0 });
+      if (stats.hs50 > 0) items.push({ n: '23.2', label: 'H. Suppl. 50%', base: Math.round(thJ * 1.50), taux: stats.hs50.toFixed(2).replace('.', ','), gain: Math.round(stats.hs50 * thJ * 1.50), ret: 0 });
+      if (stats.hs75 > 0) items.push({ n: '23.3', label: 'H. Nuit 75%', base: Math.round(thJ * 1.75), taux: stats.hs75.toFixed(2).replace('.', ','), gain: Math.round(stats.hs75 * thJ * 1.75), ret: 0 });
+      if (stats.hs100 > 0) items.push({ n: '23.4', label: 'H. Suppl. 100%', base: Math.round(thJ * 2.00), taux: stats.hs100.toFixed(2).replace('.', ','), gain: Math.round(stats.hs100 * thJ * 2.00), ret: 0 });
+    }
+    if (primeJ > 0) items.push({ n: '25', label: 'Prime', base: primeJ, taux: '', gain: primeJ, ret: 0 });
+    var gratifJ = getGratif(emp.id, mois);
+    if (gratifJ > 0) items.push({ n: '26', label: 'Gratification', base: gratifJ, taux: '', gain: gratifJ, ret: 0 });
+    var montageJ = calcMontageMensuel(emp.id, mois);
+    if (montageJ.total > 0) items.push({ n: '27', label: 'Rémunération Montage', base: montageJ.total, taux: '', gain: montageJ.total, ret: 0 });
+    if (montageJ.prime > 0) items.push({ n: '28', label: 'Prime de Production', base: montageJ.prime, taux: '', gain: montageJ.prime, ret: 0 });
+    totalBrutJ = items.reduce(function(s, i){ return s + i.gain; }, 0);
+    if (apJ.acomptes > 0) items.push({ n: '81', label: 'Avance/Acompte', base: 0, taux: '', gain: 0, ret: apJ.acomptes });
+    if (apJ.prets > 0) items.push({ n: '82', label: 'Pr\u00eat (s)', base: 0, taux: '', gain: 0, ret: apJ.prets });
+    var totalRetJ = apJ.acomptes + apJ.prets;
+    var rawNetJ = totalBrutJ - totalRetJ;
+    var arrondiJ = rawNetJ % 100;
+    if (arrondiJ !== 0) items.push({ n: '99', label: 'Arrondi', base: 0, taux: '', gain: 0, ret: arrondiJ });
+    var netJ = rawNetJ - arrondiJ;
+    return { items: items, stats: stats, totals: { brut: totalBrutJ, brutFiscal: totalBrutJ, brutSocial: totalBrutJ, net: netJ, cnps: 0, its: 0, acomptes: apJ.acomptes, prets: apJ.prets, prime: primeJ, th: thJ, tauxJ: tauxJ, forfait: mfJ, gratif: gratifJ } };
+  }
+  var salCat = (base / 173.33) * stats.totalBaseHours;
+  items.push({ n: '11', label: 'Salaire catégoriel', base: base, taux: stats.totalBaseHours.toFixed(2).replace('.', ','), gain: Math.round(salCat), ret: 0 });
+  if (emp.date_entree) {
+    var years = calcAge(emp.date_entree);
+    if (years >= 2) {
+      var anc = base * (years * 0.01);
+      items.push({ n: '21', label: "Prime d'ancienneté", base: base, taux: years + ',00', gain: anc, ret: 0 });
+    }
+  }
+  items.push({ n: '22', label: 'Prime de transport', base: 30000, taux: stats.businessPresent + '/' + stats.businessDays, gain: stats.transport, ret: 0 });
+  if (stats.hs15 > 0) items.push({ n: '23.1', label: 'H. Suppl. 15%', base: (hourly*1.15).toFixed(0), taux: stats.hs15.toFixed(2).replace('.', ','), gain: Math.round(stats.hs15 * hourly * 1.15), ret: 0 });
+  if (stats.hs50 > 0) items.push({ n: '23.2', label: 'H. Suppl. 50%', base: (hourly*1.50).toFixed(0), taux: stats.hs50.toFixed(2).replace('.', ','), gain: Math.round(stats.hs50 * hourly * 1.50), ret: 0 });
+  if (stats.hs75 > 0) items.push({ n: '23.3', label: 'H. Suppl. 75%', base: (hourly*1.75).toFixed(0), taux: stats.hs75.toFixed(2).replace('.', ','), gain: Math.round(stats.hs75 * hourly * 1.75), ret: 0 });
+  if (stats.hs100 > 0) items.push({ n: '23.4', label: 'H. Suppl. 100%', base: (hourly*2.00).toFixed(0), taux: stats.hs100.toFixed(2).replace('.', ','), gain: Math.round(stats.hs100 * hourly * 2.00), ret: 0 });
+  var primeT = getPrimeMois(emp.id, mois);
+  if (primeT > 0) items.push({ n: '25', label: 'Prime', base: primeT, taux: '', gain: primeT, ret: 0 });
+  var congeT = getCongePaie(emp.id, mois);
+  if (congeT > 0) {
+    var _cr = getCongeRecord(emp.id, mois);
+    items.push({ n: '24', label: 'Indemnit\u00e9 de Cong\u00e9s', base: congeT, taux: '', gain: congeT, ret: 0, periode: _cr.periode || '', commentaire: _cr.commentaire || '' });
+  }
+  var gratifT = getGratif(emp.id, mois);
+  if (gratifT > 0) items.push({ n: '26', label: 'Gratification', base: gratifT, taux: '', gain: gratifT, ret: 0 });
+  /* ===== Indemnités spéciales (Art.116 CGI - exo ITS 10%) ===== */
+  /* Lues depuis la config centralisée dans Données de Salaire > Primes Spéciales */
+  var primesSpecActives = getPrimesSpecEmp(emp.id);
+  primesSpecActives.forEach(function(p) {
+    var LABELS = { ind_representation:'Prime de représentation', ind_deplacement:'Prime de déplacement', ind_salissure:'Prime de salissure', ind_tenue:'Prime de tenue', ind_caisse:'Prime de caisse', ind_responsabilite:'Prime de responsabilité', ind_fonction:'Prime de fonction' };
+    var label = p.type === 'custom' ? (p.label||'Indemnité') : (LABELS[p.type]||p.label||p.type);
+    var num = p.num || '30';
+    var montant = parseFloat(p.montant)||0;
+    if (montant > 0) items.push({ n: num, label: label, base: montant, taux: '', gain: montant, ret: 0 });
+  });
+  /* Prime de panier */
+  var panierT = getPanierTotal(emp.id, mois);
+  if (panierT > 0) items.push({ n: '29', label: 'Prime de panier', base: panierT, taux: getPanierJours(emp.id, mois).length + 'j', gain: panierT, ret: 0 });
+  /* Rémunération Montage (Production) */
+  var montage = calcMontageMensuel(emp.id, mois);
+  if (montage.total > 0) items.push({ n: '27', label: 'Rémunération Montage', base: montage.total, taux: '', gain: montage.total, ret: 0 });
+  if (montage.prime > 0) items.push({ n: '28', label: 'Prime de Production', base: montage.prime, taux: '', gain: montage.prime, ret: 0 });
+  var totalBrut = items.reduce(function(s, i){ return s + i.gain; }, 0);
+  /* ===== AVANTAGES EN NATURE ===== */
+  var totalAvantages = 0, totalNonTaxable = 0, totalImposable = 0;
+  if (emp.avantage_logement) {
+    var valLog, impLog;
+    if (emp.avantage_mode === 'manual') { valLog = emp.log_valeur || 0; impLog = emp.log_imposable || 0; }
+    else { valLog = Math.round(base * 0.15); impLog = valLog; }
+    items.push({ n: '41', label: 'Avantage Nature Logement', base: base, taux: '15,00%', gain: valLog, ret: 0 });
+    totalAvantages += valLog; totalImposable += impLog; totalNonTaxable += Math.max(0, valLog - impLog);
+  }
+  if (emp.avantage_nourriture) {
+    var valNour, impNour;
+    if (emp.avantage_mode === 'manual') { valNour = emp.nour_valeur || 0; impNour = emp.nour_imposable || 0; }
+    else { valNour = Math.round(base * 0.15); impNour = valNour; }
+    items.push({ n: '42', label: 'Avantage Nature Nourriture', base: base, taux: '15,00%', gain: valNour, ret: 0 });
+    totalAvantages += valNour; totalImposable += impNour; totalNonTaxable += Math.max(0, valNour - impNour);
+  }
+  if (emp.avantage_utilites) {
+    var valUtil, impUtil;
+    if (emp.avantage_mode === 'manual') { valUtil = emp.util_valeur || 0; impUtil = emp.util_imposable || 0; }
+    else { valUtil = Math.round(base * 0.02) + Math.round(base * 0.03); impUtil = valUtil; }
+    items.push({ n: '43', label: 'Avantage Nature Eau & \u00c9lectricit\u00e9', base: base, taux: '2%+3%', gain: valUtil, ret: 0 });
+    totalAvantages += valUtil; totalImposable += impUtil; totalNonTaxable += Math.max(0, valUtil - impUtil);
+  }
+  var nbCV = parseInt(emp.avantage_vehicule) || 0;
+  if (nbCV > 0 || (emp.veh_valeur && emp.veh_valeur > 0)) {
+    var valVeh, impVeh;
+    if (emp.avantage_mode === 'manual') { valVeh = emp.veh_valeur || 0; impVeh = emp.veh_imposable || 0; }
+    else { valVeh = nbCV * 5000; impVeh = valVeh; }
+    items.push({ n: '45', label: 'Avantage Nature V\u00e9hicule', base: nbCV, taux: '5000/CV', gain: valVeh, ret: 0 });
+    totalAvantages += valVeh; totalImposable += impVeh; totalNonTaxable += Math.max(0, valVeh - impVeh);
+  }
+  /* Retenue des avantages fournis en nature (déduite du net) */
+  if (totalAvantages > 0) {
+    items.push({ n: '88', label: 'Retenue Avantages en Nature', base: totalAvantages, taux: '', gain: 0, ret: totalAvantages });
+    totalBrut += totalAvantages;
+  }
+  var transportExo = Math.min(stats.transport, TAX_RULES.transport_max_exo);
+  /* ===== Calcul exonération 10% indemnités spéciales (Art.116 CGI) ===== */
+  var remuNumeraire = totalBrut - totalAvantages;
+  var totalIndSpec = primesSpecActives.reduce(function(s,p){ return s + (parseFloat(p.montant)||0); }, 0);
+  var plafond10pct = Math.floor(remuNumeraire * (TAX_RULES.indemnites_spec_pct || 0.10));
+  var indSpecExo = Math.min(totalIndSpec, plafond10pct);
+  /* Brut fiscal = base ITS (hors transport exo + avantages non taxables + indemnités spéciales exonérées) */
+  var brutFiscal = totalBrut - transportExo - totalNonTaxable - indSpecExo;
+  /* Brut social = base CNPS (les indemnités spéciales restent incluses) */
+  var brutSocial = totalBrut - transportExo - totalNonTaxable;
+  var lim = getLimits();
+  var baseRet = Math.min(brutSocial, lim.retraite);
+  var baseATPF = Math.min(brutSocial, lim.atpf);
+  var cnpsSal = Math.floor(baseRet * TAX_RULES.cnps_sal);
+  items.push({ n: '61', label: 'CNPS, Régime de Retraite', base: baseRet, taux: '6,30', gain: 0, ret: cnpsSal, tauxPat: '7,70', retPat: Math.floor(baseRet * 0.077) });
+  var atPatRate = TAX_RULES.cnps_pat_at || 0.02;
+  var pfPatRate = TAX_RULES.cnps_pat_pf || 0.05;
+  var matPatRate = TAX_RULES.cnps_pat_mat || 0.0075;
+  items.push({ n: '62', label: 'CNPS, Accident Travail', base: baseATPF, taux: '', gain: 0, ret: 0, tauxPat: (atPatRate*100).toFixed(2).replace('.',','), retPat: Math.floor(baseATPF * atPatRate) });
+  items.push({ n: '63', label: 'CNPS, Prest. Famil.', base: baseATPF, taux: '', gain: 0, ret: 0, tauxPat: (pfPatRate*100).toFixed(2).replace('.',','), retPat: Math.floor(baseATPF * pfPatRate) });
+  items.push({ n: '64', label: 'CNPS, Ass. Maternité', base: baseATPF, taux: '', gain: 0, ret: 0, tauxPat: (matPatRate*100).toFixed(2).replace('.',','), retPat: Math.floor(baseATPF * matPatRate) });
+  var itsBrut = calcITS(brutFiscal);
+  items.push({ n: '60', label: 'Impôt brut', base: brutFiscal, taux: '', gain: 0, ret: itsBrut, tauxPat: '1,20', retPat: Math.floor(brutFiscal * 0.012) });
+  var parts = parseFloat(emp.nb_parts) || 1;
+  var ricf = Math.min(itsBrut, getRICF(parts));
+  items.push({ n: '65', label: 'Reduc. Charges Fam. (RICF)', base: getRICF(parts), taux: parts.toFixed(1) + ' P.', gain: 0, ret: -ricf, tauxPat: '', retPat: 0 });
+  var countKids = (parseInt(emp.enfants)||0) + (parseInt(emp.enfants_infirmes)||0);
+  var cmuCount = 1 + (emp.situation_matrimoniale === 'marie' ? 1 : 0) + countKids;
+  items.push({ n: '72', label: 'CMU', base: cmuCount * 1000, taux: '', gain: 0, ret: cmuCount * 500, tauxPat: '', retPat: cmuCount * 500 });
+  var ap = getAPForMonth(emp.id, mois);
+  items.push({ n: '81', label: 'Avance/Acompte', base: 0, taux: '', gain: 0, ret: ap.acomptes });
+  items.push({ n: '82', label: 'Prêt (s)', base: 0, taux: '', gain: 0, ret: ap.prets });
+  var assur = parseFloat(emp.assurance_mensuelle)||0;
+  if (assur > 0) items.push({ n: '85', label: 'Assurance Maladie', base: assur, taux: '', gain: 0, ret: assur });
+  var totalRet = items.reduce(function(s, i){ return s + i.ret; }, 0);
+  var rawNet = totalBrut - totalRet;
+  var arrondi = rawNet % 100;
+  if (arrondi !== 0) items.push({ n: '99', label: 'Arrondi', base: 0, taux: '', gain: 0, ret: arrondi });
+  var net = rawNet - arrondi;
+  items.sort(function(a, b) { return (parseFloat(a.n) || 9999) - (parseFloat(b.n) || 9999); });
+  return { items: items, stats: stats, totals: { brut: totalBrut, brutFiscal: brutFiscal, brutSocial: brutSocial, net: net, cnps: cnpsSal, its: itsBrut - ricf, acomptes: ap.acomptes, prets: ap.prets, prime: primeT, transport: stats.transport, cmu: cmuCount * 500, itsBrut: itsBrut, ricf: ricf, conge: congeT, gratif: gratifT, congeRec: { periode: (getCongeRecord(emp.id,mois).periode||''), commentaire: (getCongeRecord(emp.id,mois).commentaire||'') } } };
+}
+
+
+/* ==================== PRIME DE PANIER UI ==================== */
+function loadPanierUI() {
+  var container = document.getElementById('pt-panier-container');
+  var mois = document.getElementById('pt-mois').value;
+  if (!mois) { container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Sélectionnez un mois</div>'; return; }
+
+  var year = parseInt(mois.split('-')[0]);
+  var mIdx = parseInt(mois.split('-')[1]) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var personList = getPersonnelActifs().filter(function(p){ return p.en_paie !== false && empCategorie(p) !== 'externe'; });
+  var panierData = getPanierData();
+  var montantUn = TAX_RULES.panier_montant || 1500;
+
+  var h = '<div style="margin-bottom:1rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap">';
+  h += '<span style="font-weight:700;font-size:.85rem">Prime de Panier — ' + mois + '</span>';
+  h += '<label style="font-size:.78rem">Montant/jour : <input type="number" id="panier-montant-unit" value="' + montantUn + '" min="0" step="100" style="width:100px;padding:3px 6px" onchange="TAX_RULES.panier_montant=parseFloat(this.value)||1500;setPayeSection('taxRules',TAX_RULES);loadPanierUI()"> FCFA</label>';
+  h += '<button class="btn btn-sec" onclick="selectAllPanier()" style="font-size:.75rem;padding:4px 10px">Cocher tout</button>';
+  h += '<button class="btn btn-sec" onclick="clearAllPanier()" style="font-size:.75rem;padding:4px 10px">Tout effacer</button>';
+  h += '<button class="btn" onclick="savePanierUI()" style="font-size:.75rem;padding:4px 14px">Enregistrer</button>';
+  h += '</div>';
+
+  // En-tête calendrier
+  h += '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:.72rem;min-width:900px">';
+  h += '<thead><tr><th style="border:1px solid #d1d5db;padding:4px 8px;text-align:left;min-width:160px">Employé</th>';
+
+  var jNoms = ['L','M','M','J','V','S','D'];
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dow = new Date(year, mIdx, d).getDay(); // 0=dim
+    var isWE = dow === 0 || dow === 6;
+    h += '<th style="border:1px solid #d1d5db;padding:3px 2px;text-align:center;width:28px;' + (isWE ? 'background:#fef3c7' : '') + '">' +
+      '<div>' + jNoms[(dow+6)%7] + '</div><div style="font-weight:800">' + d + '</div></th>';
+  }
+  h += '<th style="border:1px solid #d1d5db;padding:4px;text-align:right">Total</th></tr></thead><tbody>';
+
+  personList.forEach(function(emp) {
+    var key = emp.id + '|' + mois;
+    var checked = Array.isArray(panierData[key]) ? panierData[key] : [];
+    var total = checked.length * (TAX_RULES.panier_montant || 1500);
+    h += '<tr>';
+    h += '<td style="border:1px solid #d1d5db;padding:3px 6px;white-space:nowrap">' +
+      '<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="panier-emp-sel" data-empid="' + emp.id + '" style="width:13px;height:13px"> ' +
+      escH(emp.nom) + ' ' + escH(emp.prenoms||'') + '</label></td>';
+    for (var dd = 1; dd <= daysInMonth; dd++) {
+      var dateStr = mois + '-' + (dd < 10 ? '0' : '') + dd;
+      var dow2 = new Date(year, mIdx, dd).getDay();
+      var isWE2 = dow2 === 0 || dow2 === 6;
+      var isChecked = checked.indexOf(dateStr) !== -1;
+      h += '<td style="border:1px solid #d1d5db;text-align:center;' + (isWE2 ? 'background:#fef9e7' : '') + '">' +
+        '<input type="checkbox" class="panier-cb" data-empid="' + emp.id + '" data-date="' + dateStr + '"' +
+        (isChecked ? ' checked' : '') + ' style="width:14px;height:14px"></td>';
+    }
+    h += '<td style="border:1px solid #d1d5db;padding:3px 6px;text-align:right;font-weight:700" id="panier-total-' + emp.id + '">' +
+      (total > 0 ? fmtF(total) + ' F' : '-') + '</td>';
+    h += '</tr>';
+  });
+
+  h += '</tbody></table></div>';
+  container.innerHTML = h;
+
+  // Listener pour maj total en temps réel
+  container.querySelectorAll('.panier-cb').forEach(function(cb) {
+    cb.addEventListener('change', function() {
+      var empId = this.dataset.empid;
+      var totalEl = document.getElementById('panier-total-' + empId);
+      if (!totalEl) return;
+      var cnt = container.querySelectorAll('.panier-cb[data-empid="' + empId + '"]:checked').length;
+      var tot = cnt * (TAX_RULES.panier_montant || 1500);
+      totalEl.textContent = tot > 0 ? (tot.toLocaleString('fr-FR') + ' F') : '-';
+    });
+  });
+}
+
+function savePanierUI() {
+  var container = document.getElementById('pt-panier-container');
+  var mois = document.getElementById('pt-mois').value;
+  if (!mois) return;
+  var d = getPanierData();
+  var empIds = new Set();
+  container.querySelectorAll('.panier-cb').forEach(function(cb) { empIds.add(cb.dataset.empid); });
+  empIds.forEach(function(empId) {
+    var checked = [];
+    container.querySelectorAll('.panier-cb[data-empid="' + empId + '"]:checked').forEach(function(cb) {
+      checked.push(cb.dataset.date);
+    });
+    d[empId + '|' + mois] = checked;
+  });
+  setPanierData(d);
+  toast('Paniers enregistrés', 'success');
+  loadPanierUI();
+}
+
+function selectAllPanier() {
+  var container = document.getElementById('pt-panier-container');
+  // Sélectionner uniquement les employés cochés (si aucun sélectionné, cocher tous les jours de tous)
+  var empSels = Array.from(container.querySelectorAll('.panier-emp-sel:checked')).map(function(x){ return x.dataset.empid; });
+  container.querySelectorAll('.panier-cb').forEach(function(cb) {
+    if (empSels.length === 0 || empSels.indexOf(cb.dataset.empid) !== -1) cb.checked = true;
+    cb.dispatchEvent(new Event('change'));
+  });
+}
+
+function clearAllPanier() {
+  var container = document.getElementById('pt-panier-container');
+  var empSels = Array.from(container.querySelectorAll('.panier-emp-sel:checked')).map(function(x){ return x.dataset.empid; });
+  container.querySelectorAll('.panier-cb').forEach(function(cb) {
+    if (empSels.length === 0 || empSels.indexOf(cb.dataset.empid) !== -1) cb.checked = false;
+    cb.dispatchEvent(new Event('change'));
+  });
+}
+
+/* ==================== BULLETIN ==================== */
+function generateBulletin() {
+  var out = document.getElementById('paie-output');
+  try {
+  var empId = document.getElementById('paie-select-emp').value;
+  var mois  = document.getElementById('paie-mois').value;
+  if (!empId || !mois) { out.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--dim)">Sélectionnez un employé et un mois</div>'; return; }
+  var emp  = getPersonnel().find(function(p){ return p.id === empId; });
+  if (!emp) return;
+  var calc = calculatePayroll(emp, mois);
+  var soc  = getSocieteP();
+  var ent  = DB.getMain('mdb_entreprise') || {};
+  var mp   = mois.split('-');
+  var period = new Date(mois).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }).toUpperCase();
+
+  var B = 'border:1px solid black;';
+  var P = 'padding:3px 5px;';
+
+  function td(style, content) { return '<td style="' + B + P + (style||'') + '">' + (content||'') + '</td>'; }
+  function tdC(content) { return td('text-align:center;', content); }
+  function tdL(content) { return td('text-align:left;', content); }
+  function tdR(content, bold) { return td('text-align:right;' + (bold ? 'font-weight:bold;' : ''), content); }
+  function tdBrut(label) { return '<td colspan="2" style="' + B + P + 'font-weight:bold;text-align:center;">' + label + '</td>'; }
+
+  // Labels qui appartiennent aux cotisations même sans numéro
+  function isCot(i) {
+    var n = parseInt(i.n, 10);
+    if (!isNaN(n) && n >= 50) return true;
+    var lbl = (i.label || '').toLowerCase().trim();
+    if (lbl.indexOf('cmu') === 0) return true;   // CMU (Part Salariale)
+    if (lbl === 'arrondi') return true;
+    return false;
+  }
+  // Séparer: gains/salaires (avant 40) et cotisations (à partir de 50 + CMU/Arrondi)
+  var gainItems = calc.items.filter(function(i){ return i.label && !isCot(i); });
+  var cotItems  = calc.items.filter(function(i){ return i.label &&  isCot(i); });
+  // Arrondi toujours en dernière position
+  cotItems.sort(function(a, b) {
+    var aA = (a.label || '').toLowerCase().trim() === 'arrondi' ? 1 : 0;
+    var bA = (b.label || '').toLowerCase().trim() === 'arrondi' ? 1 : 0;
+    return aA - bA;
+  });
+
+
+  function buildRow(i) {
+    var isGray = ['22','23','24','25','26','31','32','81','82'].indexOf(i.n) >= 0;
+    var bg = isGray ? 'background:#d1d5db;' : '';
+    var baseStr = i.base > 0 ? fmt(i.base) : '';
+    var gainStr = i.gain > 0 ? fmt(i.gain) : '';
+    var retStr  = i.ret  > 0 ? fmt(i.ret)  : (i.ret < 0 ? fmt(-i.ret) : '');
+    var tauxPatStr = i.tauxPat || '';
+    var retPatStr = i.retPat > 0 ? fmt(i.retPat) : '';
+    return '<tr>' +
+      tdC(escH(i.n||'')) +
+      tdL(escH(i.label)) +
+      td('text-align:right;'+bg, baseStr) +
+      tdC(escH(i.taux||'')) +
+      tdR(gainStr) +
+      tdR(retStr) +
+      tdC(escH(tauxPatStr)) + tdR(retPatStr) +
+    '</tr>';
+  }
+
+  var rows = '';
+  gainItems.forEach(function(i){ rows += buildRow(i); });
+
+  // --- Lignes 40 / 41 / 42 dans le TBODY, comme dans le PDF ---
+  rows +=
+    '<tr>' + tdC('40') + tdBrut('Total brut') + tdC('') + tdR(fmt(calc.totals.brut), true) + tdR('') + tdC('') + tdR('') + '</tr>' +
+    '<tr>' + tdC('41') + tdBrut('Brut fiscal') + tdC('') + tdR(fmt(calc.totals.brutFiscal), true) + tdR('') + tdC('') + tdR('') + '</tr>' +
+    '<tr>' + tdC('42') + tdBrut('Brut social') + tdC('') + tdR(fmt(calc.totals.brutSocial), true) + tdR('') + tdC('') + tdR('') + '</tr>';
+
+  cotItems.forEach(function(i){ rows += buildRow(i); });
+
+  // Totaux colonnes (dernière ligne du tableau)
+  var totGain = gainItems.reduce(function(s,i){ return s+(i.gain>0?i.gain:0); }, 0) + calc.totals.brut;
+  var totRet  = calc.items.reduce(function(s,i){ return s+(i.ret>0?i.ret:0); }, 0);
+  var totRetPat = calc.items.reduce(function(s,i){ return s+(i.retPat>0?i.retPat:0); }, 0);
+
+  rows +=
+    '<tr>' +
+      td('','') + td('','') + td('','') + td('','') +
+      tdR(fmt(totGain), true) +
+      tdR(fmt(totRet), true) +
+      td('','') +
+      tdR(fmt(totRetPat), true) +
+    '</tr>';
+
+  // --- HTML du bulletin ---
+  var h = '<div class="card" style="max-width:900px;margin:0 auto">';
+  h += '<div style="display:flex;justify-content:space-between;border-bottom:2px solid #0f172a;padding-bottom:.8rem;margin-bottom:1rem;align-items:flex-start">';
+  h += '<div style="display:flex;gap:12px;align-items:center">';
+  if (ent.logo) h += '<img src="' + ent.logo + '" style="max-width:70px;max-height:70px;object-fit:contain">';
+  h += '<div><h3 style="font-size:1.1rem">' + escH(soc.nom || ent.nom || 'MA SOCIETE') + '</h3><div style="font-size:.72rem;color:var(--dim)">' + escH(soc.adresse || ent.adresse || '') + '</div><div style="font-size:.68rem;color:var(--dim)">NCC: ' + escH(soc.ncc || ent.nui || '-') + ' | CNPS: ' + escH(soc.cnps || ent.cnps || '-') + '</div></div></div>';
+  h += '<div style="text-align:right"><h3 style="font-size:1rem;color:var(--orange)">BULLETIN DE PAIE</h3><div style="font-weight:700;font-size:.75rem;color:var(--gold)">MOIS DE : ' + period + '</div></div></div>';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;padding:.8rem;border:1px solid var(--border);border-radius:8px;background:#f8fafc;font-size:.75rem">';
+  h += '<div><strong>Matricule:</strong> ' + escH(emp.matricule) + '<br><strong>Nom:</strong> ' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '<br><strong>Fonction:</strong> ' + escH(emp.fonction || '-') + '<br><strong>Catégorie:</strong> ' + escH(emp.categorie_id || '-') + '</div>';
+  var catBul = empCategorie(emp);
+  if (catBul === 'journalier' || catBul === 'externe') {
+    var stB = calc.stats || {};
+    var hsB = (stB.hs15||0) + (stB.hs50||0) + (stB.hs75||0) + (stB.hs100||0);
+    h += '<div>';
+    if (catBul === 'journalier') h += '<strong>Taux journalier:</strong> ' + fmt(calc.totals.tauxJ || 0) + '<br><strong>Taux horaire:</strong> ' + fmt(calc.totals.th || 0) + '<br>';
+    else h += '<strong>Montant forfaitaire:</strong> ' + fmt(calc.totals.forfait || 0) + '<br>';
+    h += '<strong>Heures (Jour):</strong> ' + (stB.hJour||0).toFixed(1) + 'h<br><strong>Heures (Nuit):</strong> ' + (stB.hNuit||0).toFixed(1) + 'h<br><strong>Heures supp.:</strong> ' + hsB.toFixed(1) + 'h<br><strong>Prime du mois:</strong> ' + fmt(calc.totals.prime || 0) + ' F</div></div>';
+  } else {
+    h += '<div><strong>N° CNPS:</strong> ' + escH(emp.num_cnps || '-') + '<br><strong>N° CMU:</strong> ' + escH(emp.num_cmu || '-') + '<br><strong>Nbre Parts:</strong> ' + (emp.nb_parts || '1').toFixed(1).replace('.', ',') + '<br><strong>Sit. Mat.:</strong> ' + escH(emp.situation_matrimoniale || '-') + '</div></div>';
+  }
+
+  // Tableau
+  h += '<table style="width:100%;border-collapse:collapse;font-size:10.5px">' +
+    '<thead>' +
+      '<tr>' +
+        '<th rowspan="2" style="' + B + 'text-align:center;padding:3px;width:28px">N°</th>' +
+        '<th rowspan="2" style="' + B + 'text-align:left;padding:3px;width:200px">DESIGNATION</th>' +
+        '<th rowspan="2" style="' + B + 'text-align:right;padding:3px;width:75px">BASE</th>' +
+        '<th colspan="2" style="' + B + 'text-align:center;padding:3px">PART SALARIALE</th>' +
+        '<th colspan="3" style="' + B + 'text-align:center;padding:3px">PART PATRONALE</th>' +
+      '</tr>' +
+      '<tr>' +
+        '<th style="' + B + 'text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
+        '<th style="' + B + 'text-align:right;padding:3px;width:65px">GAINS</th>' +
+        '<th style="' + B + 'text-align:right;padding:3px;width:65px">RETENUE</th>' +
+        '<th style="' + B + 'text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
+        '<th style="' + B + 'text-align:right;padding:3px;width:65px">RETENUE</th>' +
+      '</tr>' +
+    '</thead>' +
+    '<tbody>' + rows + '</tbody>' +
+  '</table>';
+
+  // NET A PAYER et Options d'impression
+  h += '<div style="background:#0f172a;color:#fff;display:flex;justify-content:flex-end;align-items:center;padding:.8rem 1rem;margin-top:1rem;border-radius:8px;font-weight:800;font-size:1.1rem"><span style="margin-right:2rem;font-size:.75rem;color:#94a3b8">NET À PAYER :</span><span style="color:#fbbf24">' + fmt(calc.totals.net) + ' FCFA</span></div>';
+  
+  h += '<div contenteditable="true" style="margin-top:10px;font-size:10px;text-align:center;color:#64748b;font-style:italic;padding:5px;border:1px dashed transparent;transition:border 0.2s" onfocus="this.style.border=\'1px dashed #cbd5e1\'" onblur="this.style.border=\'1px dashed transparent\'">Dans votre intérêt et pour vous aider à faire valoir vos droits, conservez ce bulletin de paie sans limitation de durée.</div>';
+
+  h += '<div class="no-print" style="margin-top:1rem;padding:1rem;background:#f8fafc;border:1px solid var(--border);border-radius:8px">';
+  h += '<div style="font-weight:700;font-size:.8rem;margin-bottom:.6rem">Options d\'impression / export</div>';
+  h += '<label style="display:flex;align-items:center;gap:8px;font-size:.8rem;margin-bottom:6px;cursor:pointer"><input type="checkbox" id="opt-acomptes" checked style="width:16px;height:16px"> Détail des acomptes & prêts</label>';
+  h += '<label style="display:flex;align-items:center;gap:8px;font-size:.8rem;margin-bottom:6px;cursor:pointer"><input type="checkbox" id="opt-pointage" checked style="width:16px;height:16px"> Détail du pointage</label>';
+  h += '<div style="margin-top:.8rem;display:flex;gap:1rem"><button class="btn" style="flex:1" onclick="printBulletinComplet(\'' + empId + '\',\'' + mois + '\')">Imprimer / Exporter le bulletin</button></div>';
+  h += '</div>';
+  h += '</div>'; // Fermeture div.card
+
+  out.innerHTML = h;
+  } catch (err) {
+    out.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--danger)">Erreur : ' + escH(err && err.message ? err.message : err) + '</div>';
+  }
+}
+
+
+function setLPFilter(f) {
+  lpFilter = f;
+  document.querySelectorAll('#livre_paie .tab-pills button').forEach(function(b, i) {
+    b.classList.toggle('active', (f === 'all' && i === 0) || (f === 'titulaire' && i === 1) || (f === 'journalier' && i === 2) || (f === 'externe' && i === 3));
+  });
+  loadLivrePaie();
+}
+function empCategorie(emp) {
+  if (emp.type_contrat === 'Journalier') return 'journalier';
+  if (emp.type_contrat === 'Externe' || emp.categorie === 'externe') return 'externe';
+  return 'titulaire';
+}
+function loadLivrePaie() {
+  var mois = document.getElementById('lp-mois').value;
+  if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('lp-mois').value = mois; }
+  var container = document.getElementById('lp-container');
+  var groups = [];
+  if (lpFilter === 'journalier') groups = [['journalier', 'LIVRE DE PAIE - JOURNALIERS']];
+  else if (lpFilter === 'externe') groups = [['externe', 'LIVRE DE PAIE - PRESTATAIRES EXTERNES']];
+  else if (lpFilter === 'titulaire') groups = [['titulaire', 'LIVRE DE PAIE - TITULAIRES']];
+  else groups = [['titulaire', 'LIVRE DE PAIE - TITULAIRES'], ['journalier', 'LIVRE DE PAIE - JOURNALIERS'], ['externe', 'LIVRE DE PAIE - PRESTATAIRES EXTERNES']];
+  var html = '', tBrut = 0, tCotis = 0, tImp = 0, tNet = 0;
+   groups.forEach(function(g) {
+    var personnel = getPersonnel().filter(function(p){ return empVisibleMois(p, mois) && (p.en_paie !== false || empCategorie(p) === 'externe') && empCategorie(p) === g[0]; });
+    var cols = 17, theadHtml = '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">S. Base</th><th style="text-align:right">Transport</th><th style="text-align:right">Cong\u00e9</th><th style="text-align:right">Gratification</th><th style="text-align:right">Brut</th><th style="text-align:right">Brut Fiscal</th><th style="text-align:right">Brut Social</th><th style="text-align:right">CMU (S)</th><th style="text-align:right">Imp\u00f4t Brut</th><th style="text-align:right">R\u00e9duc. Imp\u00f4t</th><th style="text-align:right">CNPS (6,3%)</th><th style="text-align:right">ITS</th><th style="text-align:right">Acomptes</th><th style="text-align:right">Pr\u00eats</th><th style="text-align:right">Prime</th><th style="text-align:right">NET</th></tr>';
+    if (g[0] === 'journalier') { theadHtml = '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Taux Journalier</th><th style="text-align:right">Taux Horaire</th><th style="text-align:right">H. Jour</th><th style="text-align:right">H. Nuit</th><th style="text-align:right">HS</th><th style="text-align:right">Gratification</th><th style="text-align:right">Acompte</th><th style="text-align:right">Pr\u00eat</th><th style="text-align:right">Prime</th><th style="text-align:right">NET</th></tr>'; cols = 11; }
+    else if (g[0] === 'externe') { theadHtml = '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Forfait Mensuel</th><th style="text-align:right">Jours</th><th style="text-align:right">Montant Prorata</th><th style="text-align:right">Gratification</th><th style="text-align:right">Acompte</th><th style="text-align:right">Pr\u00eat</th><th style="text-align:right">Prime</th><th style="text-align:right">NET</th></tr>'; cols = 9; }
+    html += '<div style="padding:.55rem 1rem;background:#1e293b;color:#fff;font-weight:800;font-size:.75rem;letter-spacing:.5px">' + g[1] + ' - ' + mois + ' <span style="font-weight:400;font-size:.66rem;color:#94a3b8">(' + personnel.length + ' personne' + (personnel.length>1?'s':'') + ')</span></div>';
+    if (personnel.length === 0) { html += '<div style="padding:1.5rem;text-align:center;color:var(--dim)">Aucun employ\u00e9 dans cette cat\u00e9gorie pour ce mois</div>'; return; }
+    html += '<table class="lp-table"><thead>' + theadHtml + '</thead><tbody>';
+    var gBrut = 0, gCotis = 0, gImp = 0, gNet = 0;
+    personnel.forEach(function(emp) {
+      var c = calculatePayroll(emp, mois);
+      var cotis = c.totals.cnps + (parseInt(emp.assurance_mensuelle)||0);
+      var impots = c.totals.its;
+      tBrut += c.totals.brut; tCotis += cotis; tImp += impots; tNet += c.totals.net;
+      gBrut += c.totals.brut; gCotis += cotis; gImp += impots; gNet += c.totals.net;
+      var catBadge = empCategorie(emp) === 'journalier' ? '<span class="pill pill-gold">J</span>' : (empCategorie(emp) === 'externe' ? '<span class="pill pill-gray">PE</span>' : '<span class="pill pill-green">T</span>');
+      var st = c.stats || {};
+      var row = '<tr><td class="fw-700 lp-mat">' + escH(emp.matricule) + ' - <strong>' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '</strong> ' + catBadge + '</td>';
+      if (g[0] === 'journalier') {
+        var tauxJ = parseFloat(emp.taux_journalier) || parseFloat(emp.salaire_base) || 0;
+        var thJ = tauxJ / 8;
+        var hs = (st.hs15||0) + (st.hs50||0) + (st.hs75||0) + (st.hs100||0);
+        row += '<td style="text-align:right">' + fmt(tauxJ) + '</td><td style="text-align:right">' + fmt(thJ) + '</td><td style="text-align:right">' + (st.hJour||0).toFixed(1) + 'h</td><td style="text-align:right">' + (st.hNuit||0).toFixed(1) + 'h</td><td style="text-align:right">' + hs.toFixed(1) + 'h</td><td style="text-align:right">' + fmt(c.totals.gratif||0) + '</td><td style="text-align:right">' + fmt(c.totals.acomptes) + '</td><td style="text-align:right">' + fmt(c.totals.prets) + '</td><td style="text-align:right">' + fmt(c.totals.prime) + '</td><td class="lp-net">' + fmt(c.totals.net) + '</td></tr>';
+      } else if (g[0] === 'externe') {
+        var mfJ = parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0;
+        row += '<td style="text-align:right">' + fmt(mfJ) + '</td><td style="text-align:right">' + (c.stats ? c.stats.joursExtern : '-') + '</td><td style="text-align:right">' + fmt(c.totals.forfait) + '</td><td style="text-align:right">' + fmt(c.totals.gratif||0) + '</td><td style="text-align:right">' + fmt(c.totals.acomptes) + '</td><td style="text-align:right">' + fmt(c.totals.prets) + '</td><td style="text-align:right">' + fmt(c.totals.prime) + '</td><td class="lp-net">' + fmt(c.totals.net) + '</td></tr>';
+      } else {
+        var baseCol = parseFloat(emp.salaire_base) || 0;
+        row += '<td style="text-align:right">' + fmt(baseCol) + '</td><td style="text-align:right">' + fmt(c.totals.transport||0) + '</td><td style="text-align:right">' + fmt(c.totals.conge||0) + '</td><td style="text-align:right">' + fmt(c.totals.gratif||0) + '</td><td style="text-align:right;font-weight:700">' + fmt(c.totals.brut) + '</td><td style="text-align:right">' + fmt(c.totals.brutFiscal) + '</td><td style="text-align:right">' + fmt(c.totals.brutSocial) + '</td><td style="text-align:right">' + fmt(c.totals.cmu||0) + '</td><td style="text-align:right">' + fmt(c.totals.itsBrut||0) + '</td><td style="text-align:right">' + fmt(c.totals.ricf||0) + '</td><td style="text-align:right">' + fmt(c.totals.cnps) + '</td><td style="text-align:right">' + fmt(c.totals.its) + '</td><td style="text-align:right">' + fmt(c.totals.acomptes) + '</td><td style="text-align:right">' + fmt(c.totals.prets) + '</td><td style="text-align:right">' + fmt(c.totals.prime) + '</td><td class="lp-net">' + fmt(c.totals.net) + '</td></tr>';
+      }
+      html += row;
+    });
+    html += '<tfoot><tr style="background:#f1f5f9;font-weight:800"><td colspan="' + (cols - 3) + '" style="text-align:right">TOT. LIVRE</td><td style="text-align:right">' + fmt(gBrut) + '</td><td style="text-align:right">' + fmt(gCotis) + '</td><td style="text-align:right">' + fmt(gImp) + '</td><td style="text-align:right;color:var(--green)">' + fmt(gNet) + '</td></tr></tfoot>';
+    html += '</tbody></table>';
+   });
+  container.innerHTML = html;
+  document.getElementById('lp-tot-brut').textContent = fmtF(tBrut);
+  document.getElementById('lp-tot-cotis').textContent = fmtF(tCotis);
+  document.getElementById('lp-tot-impots').textContent = fmtF(tImp);
+  document.getElementById('lp-tot-net').textContent = fmtF(tNet);
+}
+function exportLP() {
+  var container = document.getElementById('lp-container');
+  var rows = [];
+  var tables = container.querySelectorAll('table.lp-table');
+  tables.forEach(function(tbl) {
+    var hdr = [];
+    tbl.querySelectorAll('thead th').forEach(function(th) { hdr.push(th.textContent.trim()); });
+    rows.push(hdr);
+    tbl.querySelectorAll('tbody tr').forEach(function(tr) {
+      var row = [];
+      tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText); });
+      if (row.length) rows.push(row);
+    });
+    rows.push(['']);
+  });
+  var csv = rows.map(function(r){ return r.join(';'); }).join('\n');
+  var blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'livre_paie_' + document.getElementById('lp-mois').value + '.csv';
+  a.click();
+}
+
+/* ==================== DECLARATIONS ==================== */
+var declType = 'CNPS';
+function switchDecl(type) {
+  declType = type;
+  document.querySelectorAll('#declarations .tab-pills button').forEach(function(b){ b.classList.remove('active'); });
+  var idx = type === 'CNPS' ? 1 : type === 'ITS' ? 2 : type === 'DISA' ? 3 : 4;
+  document.querySelector('#declarations .tab-pills button:nth-child(' + idx + ')').classList.add('active');
+  loadDeclaration();
+}
+function loadDeclaration() {
+  var mois = document.getElementById('decl-mois').value;
+  if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('decl-mois').value = mois; }
+  var year = parseInt(mois.split('-')[0]);
+  var personnel = getPersonnel().filter(function(p){ return empVisibleMois(p, mois) && p.en_paie !== false && empCategorie(p) === 'titulaire'; });
+  var thead = document.getElementById('decl-thead'), tbody = document.getElementById('decl-tbody'), tfoot = document.getElementById('decl-tfoot');
+  tbody.innerHTML = '';
+  var rows = '', t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+  if (declType === 'CNPS') {
+    thead.innerHTML = '<tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Brut Social</th><th style="text-align:right">Base Retraite</th><th style="text-align:right">Cotis. Sal. 6.3%</th><th style="text-align:right">Pat. Retraite 7.7%</th><th style="text-align:right">PF 5.75%</th><th style="text-align:right">AT 3%</th><th style="text-align:right">TOTAL</th></tr>';
+    personnel.forEach(function(emp) {
+      var c = calculatePayroll(emp, mois);
+      var lim = getLimits();
+      var bRet = Math.min(c.totals.brutSocial, lim.retraite), bAt = Math.min(c.totals.brutSocial, lim.atpf);
+      var sal = Math.floor(bRet * 0.063), pat = Math.floor(bRet * 0.077), pf = Math.floor(bAt * 0.0575), at = Math.floor(bAt * 0.03);
+      var total = sal + pat + pf + at;
+      t1 += bRet; t2 += bAt; t3 += total;
+      rows += '<tr><td>' + escH(emp.matricule) + '</td><td>' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '</td><td style="text-align:right">' + fmt(c.totals.brutSocial) + '</td><td style="text-align:right">' + fmt(bRet) + '</td><td style="text-align:right">' + fmt(sal) + '</td><td style="text-align:right">' + fmt(pat) + '</td><td style="text-align:right">' + fmt(pf) + '</td><td style="text-align:right">' + fmt(at) + '</td><td style="text-align:right;font-weight:700">' + fmt(total) + '</td></tr>';
+    });
+    tfoot.innerHTML = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="3">TOTAUX</td><td></td><td></td><td></td><td></td><td></td><td style="text-align:right">' + fmt(t3) + ' F</td></tr>';
+  } else if (declType === 'ITS') {
+    thead.innerHTML = '<tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Brut Fiscal</th><th style="text-align:right">ITS Brut</th><th style="text-align:right">RICF</th><th style="text-align:right">NET ITS</th></tr>';
+    personnel.forEach(function(emp) {
+      var c = calculatePayroll(emp, mois);
+      var itsBrut = calcITS(c.totals.brutFiscal);
+      var ricf = Math.min(itsBrut, getRICF(parseFloat(emp.nb_parts)||1));
+      var netIts = itsBrut - ricf;
+      t1 += itsBrut; t2 += ricf; t3 += netIts;
+      rows += '<tr><td>' + escH(emp.matricule) + '</td><td>' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '</td><td style="text-align:right">' + fmt(c.totals.brutFiscal) + '</td><td style="text-align:right">' + fmt(itsBrut) + '</td><td style="text-align:right;color:var(--green)">-' + fmt(ricf) + '</td><td style="text-align:right;font-weight:700">' + fmt(netIts) + '</td></tr>';
+    });
+    tfoot.innerHTML = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="2">TOTAUX</td><td></td><td style="text-align:right">' + fmt(t1) + '</td><td></td><td style="text-align:right">' + fmt(t3) + ' F</td></tr>';
+  } else if (declType === 'DISA') {
+    thead.innerHTML = '<tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Salaire Annuel</th><th style="text-align:right">CNPS Salariale</th><th style="text-align:right">ITS Annuel</th><th style="text-align:right">Net Imposable</th></tr>';
+    for (var m = 1; m <= 12; m++) {
+      var mo = year + '-' + (m < 10 ? '0' : '') + m;
+      personnel.forEach(function(emp) {
+        var c = calculatePayroll(emp, mo);
+        t1 += c.totals.brut;
+        t2 += c.totals.cnps;
+        t3 += c.totals.its;
+      });
+    }
+    personnel.forEach(function(emp) {
+      var salAnn = 0, cnpsAnn = 0, itsAnn = 0;
+      for (var m2 = 1; m2 <= 12; m2++) {
+        var mo2 = year + '-' + (m2 < 10 ? '0' : '') + m2;
+        var c2 = calculatePayroll(emp, mo2);
+        salAnn += c2.totals.brut; cnpsAnn += c2.totals.cnps; itsAnn += c2.totals.its;
+      }
+      t4 += salAnn;
+      rows += '<tr><td>' + escH(emp.matricule) + '</td><td>' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '</td><td style="text-align:right">' + fmt(salAnn) + '</td><td style="text-align:right">' + fmt(cnpsAnn) + '</td><td style="text-align:right">' + fmt(itsAnn) + '</td><td style="text-align:right;font-weight:700">' + fmt(salAnn - cnpsAnn) + '</td></tr>';
+    });
+    tfoot.innerHTML = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="2">TOTAUX ' + year + '</td><td style="text-align:right">' + fmt(t4) + ' F</td><td style="text-align:right">' + fmt(t2) + ' F</td><td style="text-align:right">' + fmt(t3) + ' F</td><td></td></tr>';
+  } else if (declType === 'ETAT301') {
+    thead.innerHTML = '<tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Brut Annuel</th><th style="text-align:right">Avantages</th><th style="text-align:right">CNPS Sal.</th><th style="text-align:right">ITS</th><th style="text-align:right">Net</th><th style="text-align:right">Effectif</th></tr>';
+    var count = 0;
+    personnel.forEach(function(emp) {
+      var salAnn = 0, avantAnn = 0, cnpsAnn = 0, itsAnn = 0, netAnn = 0;
+      for (var m3 = 1; m3 <= 12; m3++) {
+        var mo3 = year + '-' + (m3 < 10 ? '0' : '') + m3;
+        var c3 = calculatePayroll(emp, mo3);
+        salAnn += c3.totals.brut;
+        cnpsAnn += c3.totals.cnps;
+        itsAnn += c3.totals.its;
+        netAnn += c3.totals.net;
+        var avItems = c3.items.filter(function(i){ return String(i.n).indexOf('4') === 0; });
+        avantAnn += avItems.reduce(function(s, i){ return s + i.gain; }, 0);
+      }
+      count++;
+      t1 += salAnn; t2 += avantAnn; t3 += cnpsAnn; t4 += itsAnn;
+      rows += '<tr><td>' + escH(emp.matricule) + '</td><td>' + escH(emp.nom) + ' ' + escH(emp.prenoms) + '</td><td style="text-align:right">' + fmt(salAnn) + '</td><td style="text-align:right">' + fmt(avantAnn) + '</td><td style="text-align:right">' + fmt(cnpsAnn) + '</td><td style="text-align:right">' + fmt(itsAnn) + '</td><td style="text-align:right">' + fmt(netAnn) + '</td><td style="text-align:center">' + count + '</td></tr>';
+    });
+    tfoot.innerHTML = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="2">TOTAUX ' + year + '</td><td style="text-align:right">' + fmt(t1) + ' F</td><td style="text-align:right">' + fmt(t2) + ' F</td><td style="text-align:right">' + fmt(t3) + ' F</td><td style="text-align:right">' + fmt(t4) + ' F</td><td></td><td style="text-align:center">' + count + '</td></tr>';
+  }
+  tbody.innerHTML = rows || '<tr><td colspan="9" style="text-align:center;padding:1.5rem;color:var(--dim)">Aucune donnée</td></tr>';
+}
+function exportDecl() {
+  var table = document.getElementById('decl-table');
+  var rows = [];
+  table.querySelectorAll('tr').forEach(function(tr) {
+    var row = [];
+    tr.querySelectorAll('td, th').forEach(function(td) { row.push(td.innerText); });
+    if (row.length) rows.push(row);
+  });
+  var csv = rows.map(function(r){ return r.join(';'); }).join('\n');
+  var blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'declaration_' + declType + '_' + document.getElementById('decl-mois').value + '.csv';
+  a.click();
+}
+
+/* ==================== CONGES ==================== */
+function loadConges() {
+  var showAll = sessionStorage.getItem('congeShowAll') === '1';
+  renderCongeTable(showAll);
+}
+/* Calcule le congé dû selon convention CI */
+function calcCongeDroit(emp, finPeriode, jours) {
+  if (!emp || !finPeriode) return { montant: 0, detail: [] };
+  var sum = 0, count = 0;
+  var detail = [];
+  var fy = parseInt(finPeriode.split('-')[0]), fm = parseInt(finPeriode.split('-')[1]);
+  var moisNoms = ['Janv','Fév','Mars','Avr','Mai','Juin','Juil','Août','Sept','Oct','Nov','Déc'];
+  for (var i = 11; i >= 0; i--) {
+    var m = fm - i;
+    var y = fy;
+    while (m < 1) { m += 12; y--; }
+    var mm = y + '-' + (m < 10 ? '0' : '') + m;
+    var sal = getSalaireAuMois(emp, mm);
+    var anc = 0;
+    if (emp.date_entree) { var yrs = calcAnnee(emp.date_entree); if (yrs >= 2) anc = sal * (yrs * 0.01); }
+    else { var yrs = 1; }
+    var av = 0;
+    if (emp.avantage_logement) av += Math.round(sal * 0.15);
+    if (emp.avantage_nourriture) av += Math.round(sal * 0.15);
+    if (emp.avantage_utilites) av += Math.round(sal * 0.05);
+    var nbCV = parseInt(emp.avantage_vehicule) || 0;
+    if (nbCV > 0) av += nbCV * 5000;
+    var moisTotal = Math.round(sal + anc + av);
+    sum += moisTotal;
+    count++;
+    detail.push({ mois: mm, label: moisNoms[m-1] + ' ' + y, salaire: Math.round(sal), anciennete: Math.round(anc), avantages: Math.round(av), total: moisTotal });
+  }
+  var moy = count > 0 ? Math.round(sum / count) : 0;
+  var tauxJ = Math.round(moy / 30);
+  var montant = tauxJ * (jours || 30);
+  return { montant: montant, detail: detail, moyenne: moy, tauxJour: tauxJ, jours: jours || 30, total: sum };
+}
+function calcAnnee(d) { if (!d) return 0; var b = new Date(d), n = new Date(); var a = n.getFullYear()-b.getFullYear(); var m = n.getMonth()-b.getMonth(); if (m<0||(m===0&&n.getDate()<b.getDate())) a--; return a; }
+/* Calcule les périodes de congé auto */
+function getCongePeriodes(emp) {
+  if (!emp || !emp.date_entree) return [];
+  var periods = [];
+  var sd = new Date(emp.date_entree + 'T00:00:00');
+  var now = new Date();
+  var cur = new Date(sd);
+  var num = 1;
+  var moisNoms = ['Janv','Fév','Mars','Avr','Mai','Juin','Juil','Août','Sept','Oct','Nov','Déc'];
+  while (cur <= now) {
+    var startStr = moisNoms[cur.getMonth()] + '-' + String(cur.getFullYear()).slice(2);
+    var end = new Date(cur);
+    end.setMonth(end.getMonth() + 11);
+    var endStr = moisNoms[end.getMonth()] + '-' + String(end.getFullYear()).slice(2);
+    var finPeriode = end.getFullYear() + '-' + ((end.getMonth()+1) < 10 ? '0' : '') + (end.getMonth()+1);
+    var calc = calcCongeDroit(emp, finPeriode, 30);
+    periods.push({ num: num, debut: startStr, fin: endStr, debutIso: cur.getFullYear()+'-'+(cur.getMonth()<9?'0':'')+(cur.getMonth()+1), finIso: finPeriode, conge_du: calc.montant, calcul: calc });
+    cur.setMonth(cur.getMonth() + 12);
+    num++;
+  }
+  return periods;
+}
+function getCongePeriodePaye(empId, debutIso, finIso) {
+  var recs = getCongeRecords().filter(function(r){ return r.employee_id === empId && r.debut_periode === debutIso && r.fin_periode === finIso; });
+  var total = 0;
+  recs.forEach(function(r){ if (r.paiements) r.paiements.forEach(function(p){ total += p.montant || 0; }); });
+  return total;
+}
+function getCongePeriodePaiements(empId, debutIso, finIso) {
+  var recs = getCongeRecords().filter(function(r){ return r.employee_id === empId && r.debut_periode === debutIso && r.fin_periode === finIso; });
+  var all = [];
+  recs.forEach(function(r){ if (r.paiements) all = all.concat(r.paiements); });
+  return all;
+}
+function renderCongeTable(showAll) {
+  var person = getPersonnelActifs().filter(function(p){ return p.en_paie !== false && empCategorie(p) !== 'externe'; });
+  var container = document.getElementById('conge-records-list');
+  var html = '<div style="display:flex;gap:.5rem;margin-bottom:.8rem;align-items:center"><label style="font-size:.7rem;cursor:pointer"><input type="checkbox" id="conge-show-all"' + (showAll?' checked':'') + ' onchange="var c=this.checked;sessionStorage.setItem(\'congeShowAll\',c?\'1\':\'0\');renderCongeTable(c)"> Afficher congés soldés</label>';
+  html += '<button class="btn btn-sec" style="padding:4px 10px;font-size:.7rem" onclick="printCongeEtat()">Imprimer état</button></div>';
+
+  /* Formulaire de paiement multi-congés */
+  html += '<div class="card" style="padding:1rem;margin-bottom:.5rem;background:#f8fafc"><form onsubmit="addCongePaiementsMulti(event)" style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:flex-end">';
+  html += '<div class="form-group" style="margin:0;min-width:180px"><label style="font-size:.65rem">Employé</label><select id="conge-q-emp" required style="padding:4px" onchange="fillCongePaiementsForm()">' + person.map(function(p){ return '<option value="' + p.id + '">' + escH(p.matricule) + ' - ' + escH(p.nom) + '</option>'; }).join('') + '</select></div>';
+  html += '<div class="form-group" style="margin:0;max-width:130px"><label style="font-size:.65rem">Mois de paie</label><input type="month" id="conge-q-mois" style="padding:4px"></div>';
+  html += '<div class="form-group" style="margin:0;min-width:200px"><label style="font-size:.65rem">Commentaire</label><input type="text" id="conge-q-comm" style="padding:4px" placeholder="ex: 1ère tranche"></div>';
+  html += '<button class="btn" style="padding:4px 10px;font-size:.7rem">Enregistrer les paiements</button></form>';
+  html += '<div id="conge-multi-payments" style="margin-top:.5rem"></div></div>';
+
+  /* Tableau principal */
+  html += '<div class="card" style="padding:0;overflow-x:auto"><table style="font-size:.65rem"><thead><tr><th>Employé</th><th>Entrée</th><th>Congé</th><th>Période</th><th style="text-align:right">Salaire 12m</th><th style="text-align:right">Taux/J</th><th style="text-align:center">Calcul</th><th style="text-align:right">Congé Dû</th><th style="text-align:right">Payé</th><th style="text-align:right">Solde</th></tr></thead><tbody>';
+  var hasData = false;
+  person.forEach(function(emp){
+    var periods = getCongePeriodes(emp);
+    if (periods.length === 0) return;
+    periods.forEach(function(per, pi){
+      var paye = getCongePeriodePaye(emp.id, per.debutIso, per.finIso);
+      var solde = per.conge_du - paye;
+      var paiements = getCongePeriodePaiements(emp.id, per.debutIso, per.finIso);
+      if (!showAll && solde <= 0) return;
+      hasData = true;
+      var rowId = 'conge-row-' + emp.id.replace(/[^a-z0-9]/g,'') + '-' + per.num;
+      html += '<tr>';
+      if (pi === 0) html += '<td rowspan="' + periods.length + '" style="font-weight:700;white-space:nowrap">' + escH(emp.matricule) + ' - ' + escH(emp.nom) + '</td><td rowspan="' + periods.length + '">' + fmtDate(emp.date_entree) + '</td>';
+      html += '<td style="font-weight:700">Congé ' + per.num + '</td>';
+      html += '<td>' + per.debut + ' à ' + per.fin + '</td>';
+      html += '<td style="text-align:right">' + fmt(per.calcul.moyenne) + '</td>';
+      html += '<td style="text-align:right">' + fmt(per.calcul.tauxJour) + '</td>';
+      html += '<td style="text-align:center"><a href="#" onclick="event.preventDefault();showCongeCalc(\'' + emp.id + '\',' + per.num + ')" style="font-size:.6rem;color:var(--blue)">Détail</a></td>';
+      html += '<td style="text-align:right;font-weight:700;color:var(--green)">' + fmt(per.conge_du) + '</td>';
+      html += '<td style="text-align:right">' + (paye > 0 ? '<span title="' + paiements.map(function(p){ return escH(p.mois)+': '+fmt(p.montant)+(p.commentaire?' ('+escH(p.commentaire)+')':''); }).join('&#10;') + '">' + fmt(paye) + '</span>' : '') + '</td>';
+      html += '<td style="text-align:right;font-weight:700;color:' + (solde <= 0 ? 'var(--green)' : 'var(--danger)') + '">' + (solde > 0 ? fmt(solde) : 'Soldé') + '</td></tr>';
+    });
+  });
+  html += '</tbody></table></div>';
+  if (!hasData) html += '<div style="color:var(--dim);padding:1rem;text-align:center">' + (showAll ? 'Aucun employé' : 'Tous les congés sont soldés. <a href="#" onclick="sessionStorage.setItem(\'congeShowAll\',\'1\');renderCongeTable(true);return false">Afficher tout</a>') + '</div>';
+  container.innerHTML = html;
+  fillCongePaiementsForm();
+}
+function fillCongePaiementsForm() {
+  var empId = document.getElementById('conge-q-emp').value;
+  var div = document.getElementById('conge-multi-payments');
+  if (!empId) { div.innerHTML = ''; return; }
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  var periods = getCongePeriodes(emp);
+  var html = '';
+  periods.forEach(function(per){
+    var paye = getCongePeriodePaye(empId, per.debutIso, per.finIso);
+    var solde = per.conge_du - paye;
+    if (solde <= 0) return;
+    html += '<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:4px;font-size:.7rem">';
+    html += '<span style="min-width:80px;font-weight:700">Congé ' + per.num + '</span>';
+    html += '<span style="min-width:120px;color:var(--dim)">' + per.debut + ' à ' + per.fin + '</span>';
+    html += '<span style="min-width:80px;color:var(--green)">Dû: ' + fmt(per.conge_du) + '</span>';
+    html += '<span style="min-width:80px;color:var(--dim)">Payé: ' + fmt(paye) + '</span>';
+    html += '<input type="number" class="conge-multi-amt" data-periode="' + per.debutIso + '|' + per.finIso + '" placeholder="Montant" min="0" style="width:90px;padding:2px 4px;font-size:.65rem;border:1px solid var(--border);border-radius:4px">';
+    html += '</div>';
+  });
+  if (!html) html = '<div style="font-size:.7rem;color:var(--dim)">Tous les congés sont soldés</div>';
+  div.innerHTML = html;
+}
+function addCongePaiementsMulti(e) {
+  e.preventDefault();
+  var empId = document.getElementById('conge-q-emp').value;
+  var mois = document.getElementById('conge-q-mois').value;
+  var comm = document.getElementById('conge-q-comm').value.trim();
+  if (!empId || !mois) { toast('Employé et mois de paie requis', 'error'); return; }
+  var inputs = document.querySelectorAll('.conge-multi-amt');
+  var hasPayment = false;
+  var recs = getCongeRecords();
+  inputs.forEach(function(inp){
+    var montant = parseFloat(inp.value) || 0;
+    if (montant <= 0) return;
+    hasPayment = true;
+    var parts = inp.getAttribute('data-periode').split('|');
+    var existing = recs.find(function(r){ return r.employee_id === empId && r.debut_periode === parts[0] && r.fin_periode === parts[1]; });
+    if (!existing) { existing = { id: DB.id(), employee_id: empId, debut_periode: parts[0], fin_periode: parts[1], duree_jours: 0, commentaire: '', paiements: [] }; recs.push(existing); }
+    if (!existing.paiements) existing.paiements = [];
+    existing.paiements.push({ mois: mois, montant: montant, commentaire: comm });
+    inp.value = '';
+  });
+  if (!hasPayment) { toast('Saisissez au moins un montant', 'error'); return; }
+  setCongeRecords(recs);
+  document.getElementById('conge-q-comm').value = '';
+  renderCongeTable(sessionStorage.getItem('congeShowAll') === '1');
+  toast('Paiements enregistrés', 'success');
+}
+function showCongeCalc(empId, num) {
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  var periods = getCongePeriodes(emp);
+  var per = null;
+  for (var i = 0; i < periods.length; i++) { if (periods[i].num === num) { per = periods[i]; break; } }
+  if (!per) return;
+  var c = per.calcul;
+  var w = window.open('', '_blank', 'width=900,height=700');
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Calcul Congé ' + num + '</title>';
+  h += '<style>body{font-family:sans-serif;padding:25px;font-size:11px;color:#1e293b}';
+  h += 'h2{margin:0 0 4px 0;font-size:16px}h3{margin:16px 0 8px;font-size:13px;border-bottom:1px solid #ccc;padding-bottom:4px}';
+  h += 'table{width:100%;border-collapse:collapse;margin-top:8px;font-size:10px}';
+  h += 'th,td{border:1px solid #000;padding:4px 6px;text-align:right}';
+  h += 'th{background:#f1f5f9;text-align:center;font-size:9px}';
+  h += '.formula{background:#f0fdf4;padding:10px;border-radius:6px;margin:12px 0;font-size:12px;font-weight:700}';
+  h += '.total{font-weight:800;background:#f1f5f9}';
+  h += '@media print{@page{size:A4 portrait;margin:12mm}body{padding:10px}}</style></head><body>';
+  h += '<h2>DÉTAIL CALCUL DU CONGÉ ' + num + '</h2>';
+  h += '<div style="margin-bottom:16px"><strong>Employé :</strong> ' + escH(emp.matricule) + ' - ' + escH(emp.nom) + ' ' + escH(emp.prenoms||'') + '<br>';
+  h += '<strong>Période :</strong> ' + per.debut + ' à ' + per.fin + '<br>';
+  h += '<strong>Date d\'entrée :</strong> ' + fmtDate(emp.date_entree) + '</div>';
+
+  h += '<h3>1. SALAIRES DES 12 DERNIERS MOIS (hors transport)</h3>';
+  h += '<div style="font-size:9px;color:#555;margin-bottom:6px">Base + Ancienneté + Avantages en nature = Salaire retenu</div>';
+  h += '<table><thead><tr><th>Mois</th><th style="text-align:right">Salaire Base</th><th style="text-align:right">Ancienneté</th><th style="text-align:right">Avantages</th><th style="text-align:right;font-weight:700">Total retenu</th></tr></thead><tbody>';
+  c.detail.forEach(function(d){
+    h += '<tr><td>' + d.label + '</td><td>' + fmt(d.salaire) + '</td><td>' + fmt(d.anciennete) + '</td><td>' + fmt(d.avantages) + '</td><td style="font-weight:700">' + fmt(d.total) + '</td></tr>';
+  });
+  h += '<tr class="total"><td colspan="4" style="text-align:right">TOTAL 12 MOIS</td><td>' + fmt(c.total) + ' F</td></tr></tbody></table>';
+
+  h += '<h3>2. CALCUL FINAL</h3>';
+  h += '<div class="formula">';
+  h += '<div>Salaire moyen mensuel = ' + fmt(c.total) + ' ÷ 12 = <strong>' + fmt(c.moyenne) + ' FCFA</strong></div>';
+  h += '<div style="margin-top:6px">Taux journalier = ' + fmt(c.moyenne) + ' ÷ 30 = <strong>' + fmt(c.tauxJour) + ' FCFA/jour</strong></div>';
+  h += '<div style="margin-top:6px;font-size:14px;color:#16a34a">Congé dû = ' + fmt(c.tauxJour) + ' × ' + c.jours + ' jours = <strong style="font-size:16px">' + fmt(c.montant) + ' FCFA</strong></div>';
+  h += '</div>';
+
+  var paye = getCongePeriodePaye(emp.id, per.debutIso, per.finIso);
+  var solde = c.montant - paye;
+  h += '<h3>3. SITUATION</h3>';
+  h += '<table><tr><td style="text-align:left;width:50%">Congé dû</td><td>' + fmt(c.montant) + ' F</td></tr>';
+  h += '<tr><td style="text-align:left">Déjà payé</td><td>' + fmt(paye) + ' F</td></tr>';
+  h += '<tr style="font-weight:700;font-size:13px"><td style="text-align:left">Solde</td><td style="color:' + (solde<=0?'#16a34a':'#dc2626') + '">' + fmt(solde) + ' F</td></tr></table>';
+
+  h += '<div style="margin-top:20px;text-align:center"><button onclick="window.print()" style="padding:8px 20px;font-size:12px;cursor:pointer">Imprimer</button></div>';
+  h += '</body></html>';
+  w.document.write(h); w.document.close();
+}
+function printCongeEtat() {
+  var w = window.open('', '_blank', 'width=1000,height=800');
+  var person = getPersonnelActifs().filter(function(p){ return p.en_paie !== false && empCategorie(p) !== 'externe'; });
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>État des Congés</title>';
+  h += '<style>body{font-family:sans-serif;padding:15px;font-size:10px}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #000;padding:3px 5px}th{background:#f1f5f9;font-size:9px}.page-break{page-break-before:always}@media print{@page{size:A4 landscape;margin:8mm}}</style></head><body>';
+  h += '<h2>État des Congés - ' + new Date().toLocaleDateString('fr-FR') + '</h2>';
+  person.forEach(function(emp, wi){
+    if (wi > 0) h += '<div class="page-break"></div>';
+    h += '<h3>' + escH(emp.matricule) + ' - ' + escH(emp.nom) + ' (' + fmtDate(emp.date_entree) + ')</h3>';
+    h += '<table><thead><tr><th>Congé</th><th>Période</th><th style="text-align:right">Salaire 12m</th><th style="text-align:right">Taux/J</th><th style="text-align:right">Dû</th><th style="text-align:right">Payé</th><th style="text-align:right">Solde</th></tr></thead><tbody>';
+    var periods = getCongePeriodes(emp);
+    periods.forEach(function(per){
+      var paye = getCongePeriodePaye(emp.id, per.debutIso, per.finIso);
+      var solde = per.conge_du - paye;
+      h += '<tr><td>Congé ' + per.num + '</td><td>' + per.debut + ' à ' + per.fin + '</td><td style="text-align:right">' + fmt(per.calcul.moyenne) + '</td><td style="text-align:right">' + fmt(per.calcul.tauxJour) + '</td><td style="text-align:right">' + fmt(per.conge_du) + '</td><td style="text-align:right">' + (paye>0?fmt(paye):'') + '</td><td style="text-align:right;font-weight:700">' + fmt(solde) + '</td></tr>';
+    });
+    h += '</tbody></table>';
+  });
+  h += '</body></html>';
+  w.document.write(h); w.document.close();
+  setTimeout(function(){ w.print(); }, 300);
+}
+function switchCongeTab(tab) {
+  document.querySelectorAll('#conges .tab-pills button').forEach(function(b){ b.classList.remove('active'); });
+  document.querySelector('#conges .tab-pills button:nth-child(' + (tab==='conges'?1:2) + ')').classList.add('active');
+  document.getElementById('tab-conges-content').style.display = tab === 'conges' ? '' : 'none';
+  document.getElementById('tab-gratif-content').style.display = tab === 'gratif' ? '' : 'none';
+  if (tab === 'conges') loadConges();
+  else loadGratif();
+}
+function loadGratif() {
+  var personnel = getPersonnelActifs().filter(function(p){ return p.en_paie !== false; });
+  var year = new Date().getFullYear();
+  var moisNoms = ['Jan','Fév','Mar','Avr','Mai','Juin','Juil','Aoû','Sep','Oct','Nov','Déc'];
+  var titulaires = [], journaliers = [], externes = [];
+  personnel.forEach(function(emp){
+    var cat = empCategorie(emp);
+    var moisSal = [];
+    for (var m = 1; m <= 12; m++) {
+      var sal = getSalaireAuMois(emp, year + '-' + (m < 10 ? '0' : '') + m);
+      if (cat === 'journalier') sal = Math.min(sal, 75000);
+      if (cat === 'externe') sal = 0;
+      moisSal.push(sal);
+    }
+    var sum = moisSal.reduce(function(a,b){ return a+b; }, 0);
+    var moy = Math.round(sum / 12);
+    var calc = Math.round(moy * 0.75);
+    var verse = getGratif(emp.id, year + '-12');
+    var rec = { emp: emp, moisSal: moisSal, moy: moy, calc: calc, verse: verse };
+    if (cat === 'journalier') journaliers.push(rec);
+    else if (cat === 'externe') externes.push(rec);
+    else titulaires.push(rec);
+  });
+
+  var html = '';
+  function renderGroup(title, data) {
+    if (data.length === 0) return;
+    html += '<div class="card" style="padding:0;overflow-x:auto;margin-bottom:1rem"><h4 style="padding:.6rem 1rem;background:#f1f5f9;font-size:.8rem;margin:0">' + title + ' (' + data.length + ')</h4>';
+    html += '<table style="font-size:.72rem"><thead><tr><th>Employé</th>';
+    for (var m = 1; m <= 12; m++) html += '<th style="text-align:right;font-size:.65rem">' + moisNoms[m-1] + '</th>';
+    html += '<th style="text-align:right">Moyenne</th><th style="text-align:right">Gratif. calcul</th><th style="text-align:right">Gratif. accordé</th></tr></thead><tbody>';
+    data.forEach(function(r){
+      html += '<tr><td style="white-space:nowrap;font-weight:600">' + escH(r.emp.matricule) + ' - ' + escH(r.emp.nom) + '</td>';
+      for (var m2 = 0; m2 < 12; m2++) html += '<td style="text-align:right">' + (r.moisSal[m2] > 0 ? fmt(r.moisSal[m2]) : '') + '</td>';
+      html += '<td style="text-align:right;font-weight:700">' + fmt(r.moy) + '</td>';
+      html += '<td style="text-align:right;font-weight:700;color:#7c3aed">' + fmt(r.calc) + '</td>';
+      html += '<td style="text-align:right"><input type="number" value="' + (r.verse || r.calc) + '" onchange="setGratifUI2(\'' + r.emp.id + '\',\'' + year + '-12\',this.value)" style="width:80px;padding:2px 4px;text-align:right;font-size:.7rem;border:1px solid var(--border);border-radius:4px;font-weight:700"></td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  renderGroup('Titulaires', titulaires);
+  renderGroup('Journaliers (plafond 75 000 F)', journaliers);
+  renderGroup('Prestataires externes', externes);
+  document.getElementById('gratif-tables').innerHTML = html || '<div style="color:var(--dim);padding:1rem">Aucun employé</div>';
+}
+function setGratifUI2(empId, mois, val) {
+  setGratif(empId, mois, parseFloat(val) || 0);
+}
+
+/* ==================== DASHBOARD ==================== */
+function loadDashboard() {
+  var personnel = getPersonnelActifs().filter(function(p){ return p.en_paie !== false; });
+  var mois = document.getElementById('dash-month').value;
+  if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('dash-month').value = mois; }
+  document.getElementById('dash-effectif').textContent = personnel.length;
+  var masse = personnel.reduce(function(s,p){ return s + (parseFloat(p.salaire_base)||0); }, 0);
+  document.getElementById('dash-masse').textContent = fmt(masse) + ' F';
+  var prets = (getAPList() || []).map(normalizeAP).filter(function(a){ return a.type === 'pret' && a.statut === 'actif'; });
+  document.getElementById('dash-prets').textContent = prets.length;
+  var net = personnel.reduce(function(s,p){ return s + calculatePayroll(p, mois).totals.net; }, 0);
+  document.getElementById('dash-net').textContent = fmt(net) + ' F';
+}
+
+/* ==================== CONTRATS ==================== */
+function loadContrats() {
+  var personnel = getPersonnel().filter(function(p){ return p.status !== 'inactif'; });
+  var tbody = document.getElementById('contrats-tbody');
+  tbody.innerHTML = '';
+  var today = new Date(); today.setHours(0,0,0,0);
+  personnel.sort(function(a, b) {
+    if (!a.date_entree) return 1;
+    if (!b.date_entree) return -1;
+    return (a.date_entree || '').localeCompare(b.date_entree || '');
+  });
+  personnel.forEach(function(emp) {
+    var echeance = '';
+    if (emp.type_contrat !== 'CDI' && emp.date_entree && emp.duree_contrat > 0) {
+      var d = new Date(emp.date_entree);
+      d.setMonth(d.getMonth() + (parseInt(emp.duree_contrat)||0));
+      echeance = d.toISOString().slice(0,10);
+    }
+    var status = '', statusStyle = '', daysLeft = '-';
+    if (echeance) {
+      var diff = Math.ceil((new Date(echeance) - today) / (1000*60*60*24));
+      daysLeft = diff + ' j';
+      if (diff < 0) { status = 'Expiré'; statusStyle = 'background:#fee2e2;color:#b91c1c;padding:3px 8px;border-radius:4px;font-weight:700;font-size:.7rem'; }
+      else if (diff <= 30) { status = 'Bientôt'; statusStyle = 'background:#ffedd5;color:#c2410c;padding:3px 8px;border-radius:4px;font-weight:700;font-size:.7rem'; }
+      else { status = 'Valide'; statusStyle = 'background:#dcfce7;color:#15803d;padding:3px 8px;border-radius:4px;font-weight:700;font-size:.7rem'; }
+    } else {
+      status = emp.type_contrat || 'Actif';
+      statusStyle = 'background:#f1f5f9;color:#475569;padding:3px 8px;border-radius:4px;font-weight:700;font-size:.7rem';
+    }
+    tbody.innerHTML += '<tr><td><strong>' + escH(emp.nom) + ' ' + escH(emp.prenoms || '') + '</strong><div style="font-size:.7rem;color:var(--dim)">' + escH(emp.matricule) + '</div></td><td>' + escH(emp.type_contrat) + '</td><td>' + escH(emp.date_entree || '-') + '</td><td>' + (emp.type_contrat !== 'CDI' ? (emp.duree_contrat ? emp.duree_contrat + ' mois' : '-') : 'N/A') + '</td><td style="font-weight:700">' + escH(echeance || 'Indéterminée') + '</td><td style="font-weight:700">' + daysLeft + '</td><td><span style="' + statusStyle + '">' + status + '</span>' + (status === 'Expiré' ? ' <button class="btn btn-red" style="padding:2px 6px;font-size:.65rem" onclick="openEmpModal(\'' + emp.id + '\')">Renouveler</button>' : '') + '</td><td><button class="btn-sec" style="padding:3px 8px" onclick="openEmpModal(\'' + emp.id + '\')">Modifier</button></td></tr>';
+  });
+  if (personnel.length === 0) tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:1.5rem;color:var(--dim)">Aucun employé</td></tr>';
+}
+
+/* ==================== ECRITURES COMPTABLES (OHADA) ==================== */
+function loadEcritures() {
+  var mois = document.getElementById('ec-mois').value;
+  if (!mois) { mois = new Date().toISOString().slice(0,7); document.getElementById('ec-mois').value = mois; }
+  var personnel = getPersonnel().filter(function(p){ return empVisibleMois(p, mois) && p.en_paie !== false; });
+  var tbody = document.getElementById('ec-tbody'), tfoot = document.getElementById('ec-tfoot');
+  tbody.innerHTML = '';
+  var t = { brut:0, cnps_p:0, cmu_p:0, its:0, cnps_s:0, cmu_s:0, assur:0, ap:0, net:0 };
+  personnel.forEach(function(emp) {
+    var c = calculatePayroll(emp, mois);
+    var lim = getLimits();
+    var bRet = Math.min(c.totals.brutSocial, lim.retraite), bAt = Math.min(c.totals.brutSocial, lim.atpf);
+    var cnpsPat = Math.floor(bRet * 0.077) + Math.floor(bAt * 0.0575) + Math.floor(bAt * 0.03);
+    var cmuCount = 1 + (emp.situation_matrimoniale === 'marie' ? 1 : 0) + ((parseInt(emp.enfants)||0) + (parseInt(emp.enfants_infirmes)||0));
+    var cmuS = cmuCount * 500, cmuP = cmuCount * 500;
+    var assur = parseFloat(emp.assurance_mensuelle)||0;
+    t.brut += c.totals.brut; t.cnps_p += cnpsPat; t.cmu_p += cmuP; t.its += c.totals.its;
+    t.cnps_s += c.totals.cnps; t.cmu_s += cmuS; t.assur += assur;
+    t.ap += (c.totals.acomptes + c.totals.prets); t.net += c.totals.net;
+  });
+  var entries = [
+    { ac: '641100', label: 'Rémunérations du personnel', desc: 'Salaires + Primes ' + mois, deb: t.brut, cr: 0 },
+    { ac: '645100', label: 'Charges sociales patronales (CNPS)', desc: 'Part Patronale CNPS ' + mois, deb: t.cnps_p, cr: 0 },
+    { ac: '645800', label: 'Charges sociales patronales (CMU)', desc: 'Part Patronale CMU ' + mois, deb: t.cmu_p, cr: 0 },
+    { ac: '447110', label: 'État, Impôts sur salaires', desc: 'ITS retenus ' + mois, deb: 0, cr: t.its },
+    { ac: '431100', label: 'CNPS, Organismes Sociaux', desc: 'Cotisations CNPS (S+P) ' + mois, deb: 0, cr: t.cnps_s + t.cnps_p },
+    { ac: '431200', label: 'CMU, Organisme CMU', desc: 'Cotisations CMU (S+P) ' + mois, deb: 0, cr: t.cmu_s + t.cmu_p },
+    { ac: '438100', label: 'Organismes Sociaux, Assurances', desc: 'Retenues Assurances ' + mois, deb: 0, cr: t.assur },
+    { ac: '422100', label: 'Personnel, Avances & Acomptes', desc: 'Retenues acomptes/prêts ' + mois, deb: 0, cr: t.ap },
+    { ac: '421100', label: 'Personnel, Rémunérations dues', desc: 'Net à payer ' + mois, deb: 0, cr: t.net }
+  ];
+  tbody.innerHTML = entries.map(function(e) {
+    return '<tr><td style="font-family:monospace;font-weight:700;color:var(--green)">' + e.ac + '</td><td>' + e.label + '</td><td style="font-size:.72rem;color:var(--dim)">' + e.desc + '</td><td style="text-align:right;font-weight:700">' + (e.deb > 0 ? fmt(e.deb) : '') + '</td><td style="text-align:right;font-weight:700;color:var(--danger)">' + (e.cr > 0 ? fmt(e.cr) : '') + '</td></tr>';
+  }).join('');
+  var tDeb = entries.reduce(function(s,e){ return s + e.deb; }, 0);
+  var tCr = entries.reduce(function(s,e){ return s + e.cr; }, 0);
+  tfoot.innerHTML = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="3" style="text-align:right">TOTAUX ÉQUILIBRÉS</td><td style="text-align:right;color:var(--green)">' + fmt(tDeb) + '</td><td style="text-align:right;color:var(--danger)">' + fmt(tCr) + '</td></tr>';
+}
+function exportEcritures() {
+  var rows = [['Compte','Libellé','Écriture','Débit','Crédit']];
+  document.querySelectorAll('#ec-tbody tr, #ec-tfoot tr').forEach(function(tr) {
+    var row = [];
+    tr.querySelectorAll('td').forEach(function(td){ row.push(td.innerText); });
+    if (row.length) rows.push(row);
+  });
+  var csv = rows.map(function(r){ return r.join(';'); }).join('\n');
+  var blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ecritures_comptables_' + document.getElementById('ec-mois').value + '.csv';
+  a.click();
+}
+
+/* ==================== STC & DEPARTS ==================== */
+function calculateSTC(e) {
+  e.preventDefault();
+  var f = e.target;
+  var empId = f.elements['employee_id'].value;
+  var dateFin = f.elements['date_fin'].value;
+  var motif = f.elements['motif'].value;
+  var preavis = f.elements['preavis_status'].value;
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  var out = document.getElementById('stc-result');
+  if (!emp) { out.innerHTML = '<div style="color:var(--danger)">Employé introuvable</div>'; return; }
+  var start = new Date(emp.date_entree || dateFin);
+  var end = new Date(dateFin);
+  var years = Math.max(0, (end - start) / (1000*60*60*24*365.25));
+  var salaire = parseFloat(emp.salaire_base) || 0;
+  var items = [], total = 0;
+  /* 1. Indemnité de licenciement */
+  if (motif.indexOf('licenciement') === 0 && motif !== 'licenciement_faute_grave' && years >= 1) {
+    var amount = 0, rem = years;
+    var first5 = Math.min(5, rem); amount += first5 * salaire * 0.30; rem -= first5;
+    if (rem > 0) { var next5 = Math.min(5, rem); amount += next5 * salaire * 0.35; rem -= next5; }
+    if (rem > 0) amount += rem * salaire * 0.40;
+    items.push({ label: 'Indemnité de Licenciement', amount: Math.floor(amount) });
+    total += amount;
+  }
+  /* 2. Préavis */
+  if (preavis === 'non_effectue' && motif !== 'licenciement_faute_grave') {
+    var moisPreavis = emp.categorie_id && parseInt(emp.categorie_id) >= 4 ? 3 : 1;
+    var val = salaire * moisPreavis;
+    items.push({ label: 'Indemnité de Préavis (' + moisPreavis + ' mois)', amount: Math.floor(val) });
+    total += val;
+  }
+  /* 3. Congés payés restants (estimation 15 jours) */
+  var congeVal = (salaire / 30) * 15;
+  items.push({ label: 'Indemnité de Congés (15 jours)', amount: Math.floor(congeVal) });
+  total += congeVal;
+  var html = '<h3 style="color:var(--green);border-bottom:1px solid var(--border);padding-bottom:.5rem;margin-bottom:1rem">Résultat du Calcul STC</h3>';
+  html += '<div style="margin-bottom:1rem;font-size:.85rem"><strong>Employé :</strong> ' + escH(emp.nom) + ' ' + escH(emp.prenoms || '') + '<br><strong>Ancienneté :</strong> ' + years.toFixed(2) + ' ans<br><strong>Motif :</strong> ' + motif.replace(/_/g, ' ') + '</div>';
+  html += '<table><thead><tr><th>Nature de l\'indemnité</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
+  items.forEach(function(i) { html += '<tr><td>' + i.label + '</td><td style="text-align:right;font-weight:700">' + fmtF(i.amount) + '</td></tr>'; });
+  html += '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:800;color:var(--green)"><td>NET À PAYER STC</td><td style="text-align:right">' + fmtF(total) + '</td></tr></tfoot></table>';
+  html += '<div class="no-print" style="margin-top:1rem"><button class="btn" onclick="window.print()">Imprimer le STC</button></div>';
+  out.innerHTML = html;
+}
+
+/* ==================== DOCUMENTS ==================== */
+function getDocs() { return getPayeSection('documents', []); }
+function setDocs(v) { setPayeSection('documents', v); }
+function loadDocs() {
+  var docs = getDocs();
+  var tbody = document.getElementById('doc-tbody');
+  tbody.innerHTML = '';
+  docs.forEach(function(d, i) {
+    tbody.innerHTML += '<tr><td>' + escH(d.nom) + '</td><td>' + (d.mandatory ? '<span class="pill pill-red">Obligatoire</span>' : '<span class="pill pill-gray">Optionnel</span>') + '</td><td><button class="btn btn-red" style="padding:3px 8px" onclick="delDoc(' + i + ')">X</button></td></tr>';
+  });
+  if (docs.length === 0) tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:1.5rem;color:var(--dim)">Aucun document configuré</td></tr>';
+}
+function addDoc() {
+  var nom = document.getElementById('doc-name').value.trim();
+  if (!nom) { toast('Nom du document obligatoire', 'error'); return; }
+  var docs = getDocs();
+  docs.push({ nom: nom, mandatory: document.getElementById('doc-mandatory').value === 'true' });
+  setDocs(docs);
+  document.getElementById('doc-name').value = '';
+  loadDocs();
+  toast('Document ajouté', 'success');
+}
+function delDoc(i) { var d = getDocs(); d.splice(i,1); setDocs(d); loadDocs(); }
+
+/* ==================== ACTUALITES ==================== */
+function loadActualites() {
+  var dgi = [
+    { date: '18 Déc 2024', title: 'Loi de Finances 2025 (n° 2024-1109)', summary: "L'annexe fiscale 2025 introduit des suspensions de taxes temporaires en phase d'investissement au lieu d'exonérations totales." },
+    { date: '06 Fév 2025', title: 'Réforme TVA Gaz Butane', summary: 'Exonération de TVA sur le transport de gaz butane à usage domestique pour stabiliser les prix à la consommation.' }
+  ];
+  var cnps = [
+    { date: '01 Oct 2024', title: 'Réforme Historique des Pensions', summary: 'La pension minimum CNPS passe de 30.000 FCFA à 60.000 FCFA. Entrée en vigueur fin octobre 2024.' },
+    { date: 'Oct 2024', title: 'Déplafonnement du Taux de Remplacement', summary: 'Le taux de remplacement pourra désormais atteindre 100% du salaire moyen de référence contre 50% auparavant.' }
+  ];
+  var render = function(list) {
+    return list.map(function(n) {
+      return '<div style="border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.8rem">' +
+        '<div style="font-size:.68rem;color:var(--dim);font-weight:700;text-transform:uppercase;margin-bottom:.4rem">' + n.date + '</div>' +
+        '<div style="font-weight:700;margin-bottom:.3rem">' + n.title + '</div>' +
+        '<div style="font-size:.78rem;color:var(--dim)">' + n.summary + '</div></div>';
+    }).join('');
+  };
+  document.getElementById('news-dgi').innerHTML = render(dgi);
+  document.getElementById('news-cnps').innerHTML = render(cnps);
+}
+
+/* ==================== IMPRESSION BULLETIN COMPLET ==================== */
+function printBulletinComplet(empId, mois) {
+  var emp = getPersonnel().find(function(p){ return p.id === empId; });
+  if (!emp) return;
+  var calc = calculatePayroll(emp, mois);
+  var soc = DB.getMain('mdb_entreprise') || {};
+  var period = new Date(mois).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }).toUpperCase();
+  var showAP = document.getElementById('opt-acomptes') ? document.getElementById('opt-acomptes').checked : true;
+  var showPT = document.getElementById('opt-pointage') ? document.getElementById('opt-pointage').checked : true;
+  var w = window.open('', '_blank', 'width=1000,height=800');
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Bulletin - ' + escH(emp.nom) + ' ' + mois + '</title>';
+  h += '<style>body{font-family:sans-serif;padding:20px;color:#1e293b;font-size:12px}';
+  h += 'h1,h2,h3{margin:0}';
+  h += 'table{width:100%;border-collapse:collapse;font-size:11px;margin-top:10px}';
+  h += 'th,td{border:1px solid #000;padding:4px 6px;text-align:left}';
+  h += 'th{background:#f1f5f9;text-transform:uppercase;font-size:10px}';
+  h += '.header{display:flex;justify-content:space-between;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px}';
+  h += '.net{background:#0f172a;color:#fff;text-align:right;padding:10px;font-size:16px;font-weight:800;margin-top:10px}';
+  h += '.section-title{margin:16px 0 6px;padding:4px 8px;background:#f1f5f9;font-weight:800;text-transform:uppercase;font-size:11px}';
+  h += '.tot{background:#f1f5f9;font-weight:800}';
+   h += '@media print{@page{size:A4 portrait;margin:12mm}body{padding:10px}.page-break{page-break-before:always}}';
+  h += '</style></head><body>';
+
+  /* ===== BULLETIN ===== */
+  h += '<div class="header">';
+  h += '<div style="display:flex;gap:10px;align-items:center">';
+  if (soc.logo) h += '<img src="' + soc.logo + '" style="max-width:60px;max-height:60px">';
+  h += '<div><h1 style="font-size:16px">' + escH(soc.nom || emp.nom) + '</h1>';
+  h += '<div style="font-size:10px;color:#555">' + escH(soc.adresse || '') + ' | NCC: ' + escH(soc.nui || '-') + ' | CNPS: ' + escH(soc.cnps || '-') + '</div></div></div>';
+  h += '<div style="text-align:right"><h2 style="font-size:14px;color:#f97316">BULLETIN DE PAIE</h2><div style="font-weight:700;font-size:11px;color:#d97706">MOIS DE : ' + period + '</div></div></div>';
+
+  h += '<table><tr><td><strong>Matricule:</strong> ' + escH(emp.matricule) + '</td><td><strong>Nom:</strong> ' + escH(emp.nom) + ' ' + escH(emp.prenoms || '') + '</td></tr>';
+  h += '<tr><td><strong>Fonction:</strong> ' + escH(emp.fonction || '-') + '</td><td><strong>Cat\u00e9gorie:</strong> ' + escH(emp.categorie_id || '-') + '</td></tr>';
+  if (empCategorie(emp) === 'journalier' || empCategorie(emp) === 'externe') {
+    var stP = calc.stats || {};
+    var hsP = (stP.hs15||0) + (stP.hs50||0) + (stP.hs75||0) + (stP.hs100||0);
+    h += '<tr><td><strong>' + (empCategorie(emp) === 'journalier' ? 'Taux journalier:' : 'Montant forfaitaire:') + '</strong> ' + (empCategorie(emp) === 'journalier' ? fmt(calc.totals.tauxJ || 0) : fmt(calc.totals.forfait || 0)) + ' F' + (empCategorie(emp) === 'journalier' ? ' | Taux horaire: ' + fmt(calc.totals.th || 0) + ' F' : '') + '</td><td><strong>Prime du mois:</strong> ' + fmt(calc.totals.prime || 0) + ' F</td></tr>';
+    h += '<tr><td><strong>Heures (Jour):</strong> ' + (stP.hJour||0).toFixed(1) + 'h</td><td><strong>Heures (Nuit):</strong> ' + (stP.hNuit||0).toFixed(1) + 'h | <strong>HS:</strong> ' + hsP.toFixed(1) + 'h</td></tr></table>';
+  } else {
+    h += '<tr><td><strong>N\u00b0 CNPS:</strong> ' + escH(emp.num_cnps || '-') + '</td><td><strong>N\u00b0 CMU:</strong> ' + escH(emp.num_cmu || '-') + '</td></tr>';
+    h += '<tr><td><strong>Nbre Parts:</strong> ' + (emp.nb_parts || '1').toFixed(1).replace('.', ',') + '</td><td><strong>Sit. Mat.:</strong> ' + escH(emp.situation_matrimoniale || '-') + '</td></tr></table>';
+  }
+
+  h += '<table><thead><tr><th>N\u00b0</th><th>D\u00e9signation</th><th style="text-align:right">Base</th><th style="text-align:center">Taux</th><th style="text-align:right">Gains</th><th style="text-align:right">Retenues</th></tr></thead><tbody>';
+  calc.items.forEach(function(i) {
+    if (!i.label) return;
+    h += '<tr><td>' + escH(i.n || '') + '</td><td>' + escH(i.label) + '</td><td style="text-align:right">' + (i.base > 0 ? fmt(i.base) : '') + '</td><td style="text-align:center">' + escH(i.taux || '') + '</td><td style="text-align:right;font-weight:700">' + (i.gain > 0 ? fmt(i.gain) : '') + '</td><td style="text-align:right;font-weight:700;color:#dc2626">' + (i.ret > 0 ? fmt(i.ret) : '') + '</td></tr>';
+    if (i.commentaire && i.label.indexOf('Cong') > -1) {
+      var note = (i.periode ? 'Période : ' + escH(i.periode) + (i.commentaire ? ' — ' : '') : '') + escH(i.commentaire);
+      h += '<tr><td colspan="6" style="font-size:9px;color:#666;font-style:italic;padding-left:10px">' + escH(note) + '</td></tr>';
+    }
+  });
+  h += '</tbody><tfoot><tr class="tot"><td colspan="4" style="text-align:right">TOTAL BRUT</td><td style="text-align:right;color:#16a34a">' + fmt(calc.totals.brut) + '</td><td style="text-align:right">' + fmt(calc.items.reduce(function(s,i){return s+i.ret;},0)) + '</td></tr></tfoot></table>';
+  h += '<div class="net">NET \u00c0 PAYER : ' + fmt(calc.totals.net) + ' FCFA</div>';
+
+  /* ===== DÉTAIL ACOMPTES & PRÊTS ===== */
+  if (showAP) {
+    var apListEmp = (getAPList() || []).map(normalizeAP).filter(function(a){ return a.employee_id === emp.id; });
+    if (apListEmp.length > 0) {
+      h += '<div class="page-break"></div>';
+      h += '<div class="section-title">D\u00c9TAIL DES ACOMPTES & PR\u00caTS</div>';
+      h += '<table><thead><tr><th>Date</th><th>Type</th><th>Provenance</th><th>Moyen</th><th>Par qui</th><th>Observation</th><th style="text-align:right">Montant</th><th style="text-align:right">D\u00e9duit ce mois</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th></tr></thead><tbody>';
+      apListEmp.forEach(function(a) {
+        var rest = Math.max(0, (a.montant||0) - (a.rembourse||0));
+        var deduit = 0;
+        if (a.type === 'acompte') { if (a.date && a.date.indexOf(mois) === 0) deduit = a.montant || 0; }
+        else if (a.type === 'pret' && a.statut !== 'termine') { var md = a.moisDeduction || (a.date||'').substring(0,7); if (md && md === mois) deduit = Math.min(a.mensualite||0, rest); }
+        h += '<tr><td>' + escH(a.date || '-') + '</td><td>' + escH(a.type === 'pret' ? 'Pr\u00eat' : 'Acompte') + '</td><td>' + escH(a.provenance === 'banque' ? 'Banque' : (a.provenance === 'caisse' ? 'Caisse' : '-')) + '</td><td>' + escH(a.moyen || '-') + '</td><td>' + escH(a.executant || '-') + '</td><td>' + escH(a.notes || a.motif || '-') + '</td><td style="text-align:right;font-weight:700">' + fmt(a.montant) + '</td><td style="text-align:right;font-weight:700;color:#dc2626">' + (deduit > 0 ? fmt(deduit) : '-') + '</td><td style="text-align:right">' + fmt(a.rembourse||0) + '</td><td style="text-align:right;font-weight:700">' + fmt(rest) + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      var futursPrets = apListEmp.filter(function(a){ return a.type === 'pret' && a.statut !== 'termine' && (a.montant||0) - (a.rembourse||0) > 0; });
+      if (futursPrets.length > 0) {
+        h += '<div style="margin-top:8px;padding:8px;background:#fffbeb;border:1px solid #fde68a;font-size:11px"><strong>SUIVI \u00c0 VENIR :</strong><ul style="margin:4px 0 0 18px">';
+        futursPrets.forEach(function(a) {
+          var rest = Math.max(0, (a.montant||0) - (a.rembourse||0));
+          var mens = Math.min(a.mensualite||0, rest);
+          var nb = mens > 0 ? Math.ceil(rest / mens) : 0;
+          h += '<li>' + (a.type === 'pret' ? 'Pr\u00eat' : 'Acompte') + ' : ' + fmt(mens) + ' FCFA/mois, ~' + nb + ' mois restants (reste ' + fmt(rest) + ' FCFA) - d\u00e9duction d\u00e9but ' + escH(a.moisDeduction || '-') + '</li>';
+        });
+        h += '</ul></div>';
+      }
+    }
+  }
+
+  /* ===== DÉTAIL POINTAGE ===== */
+  if (showPT) {
+    var ptsEmp = getPointageData().filter(function(p){ return p.employee_id === emp.id && p.date.indexOf(mois) === 0; });
+    if (ptsEmp.length > 0) {
+      ptsEmp.sort(function(a,b){ return a.date.localeCompare(b.date); });
+      h += '<div class="page-break"></div>';
+      var jours = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+      h += '<div class="section-title">D\u00c9TAIL DU POINTAGE - ' + mois + '</div>';
+      h += '<table><thead><tr><th>Date</th><th>Jour</th><th>Arriv\u00e9e</th><th>Pause D.</th><th>Reprise</th><th>Fin</th><th>Nuit d\u00e9but</th><th>Nuit fin</th><th style="text-align:right">H. Jour</th><th style="text-align:right">H. Nuit</th><th style="text-align:right">Total</th></tr></thead><tbody>';
+      var tHJ = 0, tHN = 0;
+      ptsEmp.forEach(function(p) {
+        var hJ = calcDur(p.j_arr, p.j_pd, p.j_pf, p.j_fin);
+        var hN = calcDur(p.n_arr, p.n_pd, p.n_pf, p.n_fin, true);
+        tHJ += hJ; tHN += hN;
+        var d = new Date(p.date + 'T00:00:00');
+        var dow = (d.getDay() + 6) % 7;
+        h += '<tr><td>' + escH(p.date) + '</td><td>' + jours[dow] + '</td><td>' + escH(p.j_arr || '-') + '</td><td>' + escH(p.j_pd || '-') + '</td><td>' + escH(p.j_pf || '-') + '</td><td>' + escH(p.j_fin || '-') + '</td><td>' + escH(p.n_arr || '-') + '</td><td>' + escH(p.n_fin || '-') + '</td><td style="text-align:right;font-weight:700;color:#16a34a">' + (hJ > 0 ? hJ.toFixed(1) + 'h' : '-') + '</td><td style="text-align:right;font-weight:700;color:#2563eb">' + (hN > 0 ? hN.toFixed(1) + 'h' : '-') + '</td><td style="text-align:right;font-weight:700">' + (hJ + hN > 0 ? (hJ + hN).toFixed(1) + 'h' : '-') + '</td></tr>';
+      });
+      h += '<tr class="tot"><td colspan="8" style="text-align:right">TOTAUX</td><td style="text-align:right">' + tHJ.toFixed(1) + 'h</td><td style="text-align:right">' + tHN.toFixed(1) + 'h</td><td style="text-align:right">' + (tHJ + tHN).toFixed(1) + 'h</td></tr>';
+      h += '</tbody></table>';
+    }
+  }
+  /* ===== DÉTAIL PRODUCTION MONTAGE ===== */
+  var ams = getArticlesMontage();
+  var ptMont = getPointageMontage().filter(function(p){ return p.employee_id === emp.id && p.date.indexOf(mois) === 0; });
+  if (ams.length > 0 && ptMont.length > 0) {
+    h += '<div class="page-break"></div>';
+    h += '<div class="section-title">PRODUCTION (MONTAGE) - ' + mois + '</div>';
+    h += '<table><thead><tr><th>Date</th>';
+    for (var a = 0; a < ams.length; a++) h += '<th style="text-align:right">' + escH(ams[a].code) + '<br><small>' + fmt(ams[a].prix) + ' F</small></th>';
+    h += '<th style="text-align:right">Total</th></tr></thead><tbody>';
+    ptMont.sort(function(a,b){ return a.date.localeCompare(b.date); });
+    var byDate = {};
+    ptMont.forEach(function(p){
+      if (!byDate[p.date]) byDate[p.date] = {};
+      byDate[p.date][p.article_code] = (byDate[p.date][p.article_code] || 0) + (p.quantite || 0);
+    });
+    var dTotal = 0;
+    for (var dk in byDate) {
+      var dayTot = 0;
+      h += '<tr><td>' + escH(dk) + '</td>';
+      for (var a2 = 0; a2 < ams.length; a2++) {
+        var q = byDate[dk][ams[a2].code] || 0;
+        var val = q * ams[a2].prix;
+        dayTot += val;
+        h += '<td style="text-align:right">' + (q || '') + '</td>';
+      }
+      dTotal += dayTot;
+      h += '<td style="text-align:right;font-weight:700">' + fmt(dayTot) + '</td></tr>';
+    }
+    h += '<tr class="tot"><td>TOTAL</td>';
+    for (var a3 = 0; a3 < ams.length; a3++) {
+      var tq = ptMont.filter(function(p){ return p.article_code === ams[a3].code; }).reduce(function(s,p){ return s + (p.quantite||0); }, 0);
+      h += '<td style="text-align:right">' + tq + '</td>';
+    }
+    h += '<td style="text-align:right;color:#7c3aed">' + fmt(dTotal) + ' F</td></tr>';
+    h += '</tbody></table>';
+  }
+
+  h += '<div style="margin-top:20px;font-size:10px;color:#777;text-align:right">Document g\u00e9n\u00e9r\u00e9 le ' + new Date().toLocaleString('fr-FR') + '</div>';
+  h += '</body></html>';
+  w.document.write(h);
+  w.document.close();
+  setTimeout(function() { w.print(); }, 300);
+}
+
+/* ==================== INIT ==================== */
+document.addEventListener('DOMContentLoaded', function() {
+  initData();
+  var saved = localStorage.getItem('paye_currentSection') || 'dashboard';
+  showSection(saved);
+  /* Récupérer les données depuis le cloud (n'importe quel ordinateur) */
+  setTimeout(function() {
+    pullPayeCloud();
+    syncFromMain();
+    startRealtimeSync();
+  }, 800);
+});

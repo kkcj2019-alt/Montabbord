@@ -863,6 +863,8 @@ function setCurrentModule(m) {
 function openPayeModule() {
   var a = document.createElement('a');
   a.href = 'paye.html';
+  a.target = '_blank';
+  a.rel = 'noopener';
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
@@ -976,19 +978,7 @@ function escH(s) {
   if (s === null || s === undefined) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
-var AJAX = {
-  el: function(id) { return document.getElementById(id); },
-  html: function(id, h) { var e = this.el(id); if (e) e.innerHTML = h; },
-  val: function(id, v) { var e = this.el(id); if (e && e.value !== undefined) e.value = v; },
-  show: function(id) { var e = this.el(id); if (e) e.style.display = ''; },
-  hide: function(id) { var e = this.el(id); if (e) e.style.display = 'none'; },
-  text: function(id, t) { var e = this.el(id); if (e) e.textContent = t; },
-  flash: function(id, color) { var e = this.el(id); if (!e) return; e.style.transition = 'none'; e.style.background = color || '#dcfce7'; e.offsetHeight; e.style.transition = 'background .4s'; e.style.background = ''; },
-  rowUpdate: function(tbodyId, idx, html) { var tb = this.el(tbodyId); if (!tb) return; var rows = tb.rows; if (rows[idx]) { rows[idx].innerHTML = html; rows[idx].classList.remove('ajax-flash'); void rows[idx].offsetWidth; rows[idx].classList.add('ajax-flash'); } },
-  rowInsert: function(tbodyId, idx, html) { var tb = this.el(tbodyId); if (!tb) return; var tr = document.createElement('tr'); tr.innerHTML = html; if (idx >= tb.rows.length) tb.appendChild(tr); else tb.insertBefore(tr, tb.rows[idx]); },
-  rowRemove: function(tbodyId, idx) { var tb = this.el(tbodyId); if (!tb || !tb.rows[idx]) return; tb.deleteRow(idx); },
-  recalcRows: function(tbodyId, renderFn) { var tb = this.el(tbodyId); if (!tb) return; for (var r = 0; r < tb.rows.length; r++) { tb.rows[r].innerHTML = renderFn(r); tb.rows[r].setAttribute('data-idx', r); } }
-};
+var AJAX_FLASH_DISABLED = true;
 
 function getDevise() { var e = getEntreprise(); return e.devise || 'FCFA'; }
 function fmtMoney(n) {
@@ -1396,6 +1386,7 @@ function showApp() {
   document.getElementById('loginOverlay').style.display = 'none';
   document.getElementById('app').style.display = '';
   resetIdleTimer();
+  migrateClientTypes();
   var dispName = currentUser.isSuperAdmin ? (currentUser.nom + ' (Super Admin)') : (currentUser.nom + (currentUser.isAdmin ? ' (Admin)' : ''));
   document.getElementById('sidebarUserInfo').textContent = dispName;
   buildSidebar();
@@ -2969,6 +2960,8 @@ function navigateTo(page) {
   if (!canAccess(page, false)) { toast('Acc\u00e8s non autoris\u00e9', 'error'); return; }
   saveDraft(currentPage);
   currentPage = page;
+  var contentEl = document.getElementById('content');
+  contentEl.style.overflow = ''; contentEl.style.padding = '';
   DB.set('mdb_currentPage', page);
   var pageNames2 = {
     'tresorerie:caisse:enregistrement':'Enregistrement caisse',
@@ -3077,6 +3070,17 @@ function closeModal() {
   document.getElementById('formOverlay').style.display = 'none';
 }
 function getClients() { return DB.get('mdb_clients') || []; }
+var _clientTypeMigrationDone = false;
+function migrateClientTypes() {
+  if (_clientTypeMigrationDone) return;
+  _clientTypeMigrationDone = true;
+  var clients = getClients();
+  var changed = false;
+  for (var i = 0; i < clients.length; i++) {
+    if (!clients[i].type || clients[i].type === '') { clients[i].type = 'entreprise'; changed = true; }
+  }
+  if (changed) DB.set('mdb_clients', clients);
+}
 function getArticles() { return DB.get('mdb_nomenclature') || []; }
 function getBLs() { return DB.get('mdb_bl') || []; }
 function getFactures() { return DB.get('mdb_factures') || []; }
@@ -3505,10 +3509,11 @@ function renderBC() {
   html += '<select id="bcFilterType" onchange="filterBC()" style="width:160px"><option value="">Tous types</option>';
   html += '<option value="particulier">Particulier</option><option value="entreprise">Entreprise</option><option value="administration">Administration</option><option value="association">Association</option>';
   html += '</select>';
+  html += '<select id="bcFilterSource" onchange="filterBC()" style="width:180px"><option value="">Toutes sources</option><option value="import">Cr\u00e9\u00e9s depuis import</option><option value="manuel">Cr\u00e9\u00e9s manuellement</option></select>';
   if (!readonly) html += '<button class="btn btn-primary" onclick="openBCModal()">+ Nouveau BC</button>';
   html += '<button class="btn btn-outline" onclick="exportBCPDF()">Exporter PDF</button>';
   html += '</div>';
-  html += '<div id="bcBody">';
+  html += '<div id="bcBody" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px">';
   for (var i = 0; i < showBcs.length; i++) {
     var b = showBcs[i];
     var cl = getClientById(b.clientId);
@@ -3516,106 +3521,69 @@ function renderBC() {
     if (b.lignes) { for (var j = 0; j < b.lignes.length; j++) { total += (b.lignes[j].quantite || 0) * (b.lignes[j].prixUnitaire || 0); qteInit += (b.lignes[j].quantite || 0); } }
     var qteLiv = 0;
     var deliveredQty = {};
-    var perLineDeliveries = {};
     for (var di = 0; di < bls.length; di++) {
       if (bls[di].bcId !== b.id || !bls[di].lignes) continue;
       for (var dl = 0; dl < bls[di].lignes.length; dl++) {
         var artKey = bls[di].lignes[dl].articleId || bls[di].lignes[dl].designation || '';
         deliveredQty[artKey] = (deliveredQty[artKey] || 0) + (bls[di].lignes[dl].quantite || 0);
-        if (!perLineDeliveries[artKey]) perLineDeliveries[artKey] = [];
-        perLineDeliveries[artKey].push({blNumero: bls[di].numero || '-', blDate: bls[di].dateLivraison, qte: bls[di].lignes[dl].quantite || 0, prix: bls[di].lignes[dl].prixUnitaire || 0});
       }
     }
     for (var dk in deliveredQty) { qteLiv += deliveredQty[dk]; }
     var reste = Math.max(0, qteInit - qteLiv);
-    var searchStr = (b.numero + ' ' + (cl ? cl.nom : '') + ' ' + b.statut + ' ' + (b.raisonAnnulation || '') + ' ' + (b.lignes ? b.lignes.map(function(l){return (l.articleId||'')+' '+(l.designation||'');}).join(' ') : '')).toLowerCase();
-    html += '<div class="section" data-search="' + escH(searchStr) + '" data-statut="' + b.statut + '" data-type="' + (cl ? (cl.type || '') : '') + '" style="margin-bottom:16px;border:1px solid var(--gray-200);border-radius:8px;overflow:hidden">';
-    html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--gray-50);gap:12px;flex-wrap:wrap;cursor:pointer" onclick="toggleBCDetail(\'' + b.id + '\')">';
-    html += '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;flex:1;min-width:0">';
-    html += '<div style="display:flex;align-items:center;gap:8px"><svg id="bcArrow_' + b.id + '" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--gray-400)" stroke-width="2" style="flex-shrink:0;transition:transform .2s;transform:rotate(-90deg)"><polyline points="6 9 12 15 18 9"/></svg><strong style="font-size:14px">' + escH(b.numero || '-') + '</strong><div style="font-size:12px;color:var(--gray-500);margin-left:8px">' + escH(cl ? cl.nom : '-') + ' &mdash; ' + fmtDate(b.dateBC) + '</div></div>';
-    html += '<div>' + getStatusBadge(b.statut);
-    if (b.raisonAnnulation) html += ' <span title="' + escH(b.raisonAnnulation) + ' (' + escH(b.dateAnnulation || '') + ')" style="cursor:pointer;color:var(--gray-400);font-size:11px">\u2139</span>';
-    html += '</div>';
-    html += '<div style="font-size:12px;color:var(--gray-500)">';
-    html += '<span style="margin-right:12px">Qt\u00e9: <strong style="color:var(--gray-700)">' + qteInit + '</strong></span>';
-    html += '<span style="margin-right:12px">Livr\u00e9e: <strong style="color:' + (qteLiv > 0 ? 'var(--success)' : 'var(--gray-700)') + '">' + qteLiv + '</strong></span>';
-    html += '<span style="margin-right:12px">Reste: <strong style="color:' + (reste > 0 ? 'var(--warning)' : 'var(--success)') + '">' + reste + '</strong></span>';
-    if (b.tvaActive) {
-      var tvaAmt = total * (b.tauxTva || 18) / 100;
-      var totalTTC = total + tvaAmt;
-      html += '<span style="margin-right:12px">Total HT: <strong style="color:var(--gray-700)">' + fmtMoney(total) + '</strong></span>';
-      html += '<span style="margin-right:12px">TVA ' + (b.tauxTva || 18) + '%: <strong style="color:var(--gray-500)">' + fmtMoney(tvaAmt) + '</strong></span>';
-      html += '<span>Total TTC: <strong style="color:var(--primary)">' + fmtMoney(totalTTC) + '</strong></span>';
-    } else {
-      html += '<span>Total: <strong style="color:var(--gray-700)">' + fmtMoney(total) + '</strong></span>';
-    }
-    html += '</div>';
+    var searchStr = (b.numero + ' ' + (cl ? cl.nom : '') + ' ' + b.statut + ' ' + (b.raisonAnnulation || '') + ' ' + (b._fromImport ? 'import ' : '') + ' ' + (b.lignes ? b.lignes.map(function(l){return (l.articleId||'')+' '+(l.designation||'');}).join(' ') : '')).toLowerCase();
+    var cardBorder = b._fromImport ? '#818cf8' : (b.statut === 'annule' ? 'var(--danger)' : 'var(--gray-200)');
+    var cardBg = b.statut === 'annule' ? 'var(--gray-50)' : '#fff';
+    html += '<div class="section" data-search="' + escH(searchStr) + '" data-statut="' + b.statut + '" data-type="' + (cl ? (cl.type || '') : '') + '" data-fromimport="' + (b._fromImport ? '1' : '0') + '" style="border:1px solid ' + cardBorder + ';border-radius:10px;overflow:hidden;background:' + cardBg + ';display:flex;flex-direction:column">';
+    html += '<div style="padding:10px 14px;background:var(--gray-50);border-bottom:1px solid var(--gray-100)">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">';
+    html += '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">';
+    html += '<strong style="font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escH(b.numero || '-') + '</strong>';
+    if (b._fromImport) html += '<span style="flex-shrink:0;background:#818cf8;color:#fff;font-size:8px;font-weight:700;padding:1px 5px;border-radius:3px">IMPORT</span>';
+    html += getStatusBadge(b.statut);
     html += '</div>';
     if (!readonly) {
-      html += '<div style="display:flex;gap:4px;flex-shrink:0" onclick="event.stopPropagation()">';
-      html += '<button class="btn-icon" onclick="openBCModal(\'' + b.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
-      if (b.statut !== 'annule') html += '<button class="btn-icon" onclick="archiveBC(\'' + b.id + '\')" title="Abandonner" style="color:var(--warning)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg></button>';
-      html += '<button class="btn-icon danger" onclick="deleteBC(\'' + b.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
-      html += '<button class="btn-icon" onclick="printBC(\'' + b.id + '\')" title="Imprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg></button>';
+      html += '<div style="display:flex;gap:3px;flex-shrink:0">';
+      html += '<button class="btn-icon" onclick="openBCModal(\'' + b.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
+      html += '<button class="btn-icon" onclick="duplicateBC(\'' + b.id + '\')" title="Dupliquer" style="color:var(--info)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
+      html += '<button class="btn-icon danger" onclick="deleteBC(\'' + b.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
       html += '</div>';
     }
     html += '</div>';
-    html += '<div id="bcDetail_' + b.id + '" style="display:none">';
+    html += '<div style="font-size:12px;color:var(--gray-500);margin-top:4px">' + escH(cl ? cl.nom : '-') + ' &mdash; ' + fmtDate(b.dateBC) + '</div>';
+    html += '</div>';
+    html += '<div style="padding:8px 14px;flex:1;overflow-y:auto;max-height:180px">';
     if (b.lignes && b.lignes.length > 0) {
-      html += '<div style="padding:0 16px 12px">';
-      html += '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:var(--gray-100)">';
-      html += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--gray-200)">Article</th>';
-      html += '<th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--gray-200)">D\u00e9signation</th>';
-      html += '<th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--gray-200)">Qt\u00e9</th>';
-      html += '<th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--gray-200)">Livr\u00e9e/Qt\u00e9</th>';
-      html += '<th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--gray-200)">Reste</th>';
-      html += '<th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--gray-200)">Prix U.</th>';
-      html += '<th style="padding:6px 10px;text-align:right;border-bottom:1px solid var(--gray-200)">Montant</th>';
-      html += '<th style="width:30px;border-bottom:1px solid var(--gray-200)"></th>';
-  html += '</tr></thead><tbody id="importPreviewBody">';
+      html += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
       for (var k = 0; k < b.lignes.length; k++) {
         var l = b.lignes[k];
         var mt = (l.quantite || 0) * (l.prixUnitaire || 0);
-        var artKeyL = l.articleId || l.designation || '';
-        var livree = deliveredQty[artKeyL] || 0;
-        var resteL = Math.max(0, (l.quantite || 0) - livree);
-        var bgRow = k % 2 === 0 ? '' : 'background:var(--gray-50)';
-        var hasDeliveries = perLineDeliveries[artKeyL] && perLineDeliveries[artKeyL].length > 0;
-        var rowId = 'bcLine_' + b.id + '_' + k;
-        html += '<tr style="' + bgRow + (hasDeliveries ? 'cursor:pointer' : '') + '" onclick="' + (hasDeliveries ? 'toggleBCLineDetail(\'' + rowId + '\')' : '') + '">';
-        html += '<td style="padding:5px 10px">' + getArticleLabel(l.articleId) + '</td>';
-        html += '<td style="padding:5px 10px">' + escH(l.designation || '') + '</td>';
-        html += '<td style="padding:5px 10px;text-align:right;font-weight:600">' + (l.quantite || 0) + '</td>';
-        html += '<td style="padding:5px 10px;text-align:right;color:' + (livree > 0 ? 'var(--success)' : 'inherit') + ';font-weight:' + (livree > 0 ? '600' : '400') + '">' + livree + '/' + (l.quantite || 0) + '</td>';
-        html += '<td style="padding:5px 10px;text-align:right;font-weight:600;color:' + (resteL > 0 ? 'var(--warning)' : 'var(--success)') + '">' + resteL + '</td>';
-        html += '<td style="padding:5px 10px;text-align:right">' + fmtMoney(l.prixUnitaire || 0) + '</td>';
-        html += '<td style="padding:5px 10px;text-align:right;font-weight:600">' + fmtMoney(mt) + '</td>';
-        html += '<td style="padding:5px 10px;text-align:center">' + (hasDeliveries ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="var(--gray-400)" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>' : '') + '</td>';
+        html += '<tr style="' + (k % 2 === 1 ? 'background:var(--gray-50)' : '') + '">';
+        html += '<td style="padding:3px 0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escH(l.designation || '') + '">' + escH(l.designation || '-') + '</td>';
+        html += '<td style="padding:3px 6px;text-align:right;white-space:nowrap">' + (l.quantite || 0) + '</td>';
+        html += '<td style="padding:3px 0;text-align:right;white-space:nowrap;color:var(--gray-500)">' + fmtMoney(l.prixUnitaire || 0) + '</td>';
+        html += '<td style="padding:3px 0;text-align:right;font-weight:600;white-space:nowrap">' + fmtMoney(mt) + '</td>';
         html += '</tr>';
-        if (hasDeliveries) {
-          html += '<tr id="' + rowId + '" style="display:none"><td colspan="8" style="padding:0">';
-          html += '<div style="padding:6px 12px 10px 30px;background:var(--gray-50);border-top:1px solid var(--gray-200);font-size:12px">';
-          html += '<strong style="color:var(--gray-500)">Historique des livraisons :</strong>';
-          html += '<table style="width:100%;margin-top:4px;border-collapse:collapse"><thead><tr style="font-size:11px;color:var(--gray-500)"><th style="padding:2px 8px;text-align:left">BL</th><th style="padding:2px 8px;text-align:left">Date</th><th style="padding:2px 8px;text-align:right">Qt\u00e9 livr\u00e9e</th><th style="padding:2px 8px;text-align:right">Montant</th></tr></thead><tbody>';
-          var dlList = perLineDeliveries[artKeyL];
-          var dlTotal = 0;
-          for (var di2 = 0; di2 < dlList.length; di2++) {
-            var dlMt = dlList[di2].qte * dlList[di2].prix;
-            dlTotal += dlMt;
-            html += '<tr><td style="padding:2px 8px">' + escH(dlList[di2].blNumero) + '</td><td style="padding:2px 8px">' + fmtDate(dlList[di2].blDate) + '</td><td style="padding:2px 8px;text-align:right;font-weight:600;color:var(--success)">' + dlList[di2].qte + '</td><td style="padding:2px 8px;text-align:right">' + fmtMoney(dlMt) + '</td></tr>';
-          }
-          html += '<tr style="font-weight:600;border-top:1px solid var(--gray-300)"><td style="padding:2px 8px" colspan="2">Total livr\u00e9</td><td style="padding:2px 8px;text-align:right;color:var(--success)">' + livree + '</td><td style="padding:2px 8px;text-align:right">' + fmtMoney(dlTotal) + '</td></tr>';
-          html += '</tbody></table></div></td></tr>';
-        }
       }
-      html += '</tbody></table>';
+      html += '</table>';
     } else {
-      html += '<div style="padding:8px 16px 12px;color:var(--gray-400);font-size:12px">Aucune ligne</div>';
+      html += '<div style="color:var(--gray-400);font-size:11px;padding:4px 0">Aucune ligne</div>';
     }
     html += '</div>';
-    html += '</div></div>';
+    html += '<div style="padding:8px 14px;border-top:1px solid var(--gray-100);background:var(--gray-50);display:flex;flex-wrap:wrap;gap:6px;font-size:11px">';
+    html += '<span>Qt\u00e9: <strong>' + qteInit + '</strong></span>';
+    html += '<span>Livr\u00e9e: <strong style="color:' + (qteLiv > 0 ? 'var(--success)' : 'inherit') + '">' + qteLiv + '</strong></span>';
+    html += '<span>Reste: <strong style="color:' + (reste > 0 ? 'var(--warning)' : 'var(--success)') + '">' + reste + '</strong></span>';
+    if (b.tvaActive) {
+      var tvaAmt = total * (b.tauxTva || 18) / 100;
+      var totalTTC = total + tvaAmt;
+      html += '<span style="margin-left:auto;font-weight:700;color:var(--primary)">' + fmtMoney(totalTTC) + ' TTC</span>';
+    } else {
+      html += '<span style="margin-left:auto;font-weight:700;color:var(--gray-700)">' + fmtMoney(total) + '</span>';
+    }
+    html += '</div>';
+    html += '</div>';
   }
-  if (showBcs.length === 0) html += '<div class="text-center text-muted" style="padding:40px">Aucun bon de commande ' + (_bcSubTab === 'actifs' ? 'actif' : 'termin\u00e9') + '</div>';
+  if (showBcs.length === 0) html += '<div class="text-center text-muted" style="padding:40px;grid-column:1/-1">Aucun bon de commande ' + (_bcSubTab === 'actifs' ? 'actif' : 'termin\u00e9') + '</div>';
   html += '</div>';
   var fcEl = document.getElementById('facturationContent');
   if (fcEl) fcEl.innerHTML = html;
@@ -3641,14 +3609,18 @@ function filterBC() {
   var q = (document.getElementById('bcSearch').value || '').toLowerCase();
   var fs = document.getElementById('bcFilterStatut').value;
   var ft = document.getElementById('bcFilterType') ? document.getElementById('bcFilterType').value : '';
+  var fsrc = document.getElementById('bcFilterSource') ? document.getElementById('bcFilterSource').value : '';
   var sections = document.getElementById('bcBody').querySelectorAll('.section');
   for (var i = 0; i < sections.length; i++) {
     var s = sections[i].getAttribute('data-search') || '';
     var st = sections[i].getAttribute('data-statut') || '';
     var tp = sections[i].getAttribute('data-type') || '';
+    var fi = sections[i].getAttribute('data-fromimport') || '0';
     var show = s.indexOf(q) !== -1;
     if (fs) show = show && st === fs;
     if (ft) show = show && tp === ft;
+    if (fsrc === 'import') show = show && fi === '1';
+    if (fsrc === 'manuel') show = show && fi === '0';
     sections[i].style.display = show ? '' : 'none';
   }
 }
@@ -3666,23 +3638,12 @@ function openBCModal(id) {
   var title = b ? 'Modifier le BC' : 'Nouveau bon de commande';
   var html = '';
   html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Num\u00e9ro</label><input type="text" id="bcNumero" value="' + escH(b ? b.numero : '') + '" placeholder="Saisir le num\u00e9ro du bon de commande client"></div>';
+  html += '<div class="form-group"><label>Num\u00e9ro</label><input type="text" id="bcNumero" value="' + escH(b ? b.numero : '') + '" list="bcNumeroList" placeholder="Num\u00e9ro du bon de commande"><datalist id="bcNumeroList"></datalist></div>';
   html += '<div class="form-group"><label>Client *</label><div id="bcClient"></div></div>';
   html += '</div>';
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Date du bon</label><input type="date" id="bcDate" value="' + (b ? b.dateBC : getToday()) + '"></div>';
   html += '<div class="form-group"><label>D\u00e9lai de livraison (jours)</label><input type="number" id="bcDelai" value="' + (b ? (b.delaiLivraison || 30) : 30) + '" min="1"></div>';
-  html += '</div>';
-  html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Statut</label><select id="bcStatut">';
-  html += '<option value="en_attente"' + (b && b.statut === 'en_attente' ? ' selected' : '') + '>En attente</option>';
-  html += '<option value="valide"' + (b && b.statut === 'valide' ? ' selected' : '') + '>Valid\u00e9</option>';
-  html += '<option value="en_cours"' + (b && b.statut === 'en_cours' ? ' selected' : '') + '>En cours</option>';
-  html += '<option value="livre"' + (b && b.statut === 'livre' ? ' selected' : '') + '>Livr\u00e9</option>';
-  html += '<option value="partiel_livre"' + (b && b.statut === 'partiel_livre' ? ' selected' : '') + '>Partiellement livr\u00e9</option>';
-  html += '<option value="annule"' + (b && b.statut === 'annule' ? ' selected' : '') + '>Annul\u00e9</option>';
-  html += '</select></div>';
-  html += '</div>';
   html += '</div>';
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Soumis \u00e0 la TVA</label><select id="bcTvaActive">';
@@ -3699,6 +3660,64 @@ function openBCModal(id) {
   populateClientSelect('bcClient', b ? b.clientId : '');
   renderFormLignes();
   restoreDraftToForm('bc', !!id);
+  setTimeout(function() {
+    var cs = document.getElementById('bcClient');
+    if (cs) { cs.addEventListener('change', onBCClientChange); onBCClientChange(); }
+  }, 100);
+}
+function onBCClientChange() {
+  var cs = document.getElementById('bcClient');
+  var dl = document.getElementById('bcNumeroList');
+  if (!cs || !dl) return;
+  var clientId = cs.value;
+  dl.innerHTML = '';
+  if (!clientId) return;
+  var bcs = getBCs();
+  for (var i = 0; i < bcs.length; i++) {
+    if (bcs[i].clientId === clientId && bcs[i].numero && bcs[i].statut !== 'annule' && bcs[i].statut !== 'livre') {
+      dl.innerHTML += '<option value="' + escH(bcs[i].numero) + '">';
+    }
+  }
+}
+function duplicateBC(id) {
+  var bcs = getBCs();
+  var src = null;
+  for (var i = 0; i < bcs.length; i++) { if (bcs[i].id === id) { src = bcs[i]; break; } }
+  if (!src) return;
+  formLignes = [];
+  if (src.lignes) {
+    for (var j = 0; j < src.lignes.length; j++) {
+      var line = src.lignes[j];
+      formLignes.push({articleId:line.articleId||'', designation:line.designation||'', quantite:line.quantite||1, prixUnitaire:line.prixUnitaire||0});
+    }
+  }
+  var title = 'Dupliquer le BC ' + (src.numero || '');
+  var html = '';
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label>Num\u00e9ro</label><input type="text" id="bcNumero" value="" placeholder="Nouveau num\u00e9ro du bon de commande"></div>';
+  html += '<div class="form-group"><label>Client *</label><div id="bcClient"></div></div>';
+  html += '</div>';
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label>Date du bon</label><input type="date" id="bcDate" value="' + getToday() + '"></div>';
+  html += '<div class="form-group"><label>D\u00e9lai de livraison (jours)</label><input type="number" id="bcDelai" value="' + (src.delaiLivraison || 30) + '" min="1"></div>';
+  html += '</div>';
+  html += '<div class="form-row">';
+  html += '</div>';
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label>Soumis \u00e0 la TVA</label><select id="bcTvaActive">';
+  html += '<option value="0"' + (!src.tvaActive ? ' selected' : '') + '>Non</option>';
+  html += '<option value="1"' + (src.tvaActive ? ' selected' : '') + '>Oui</option>';
+  html += '</select></div>';
+  html += '<div class="form-group"><label>Taux TVA (%)</label><input type="number" id="bcTaux" value="' + (src.tauxTva || 18) + '" min="0" max="100" step="0.1"></div>';
+  html += '</div>';
+  html += '<div class="form-group"><label>Observations</label><textarea id="bcObs" rows="2">' + escH(src.observations || '') + '</textarea></div>';
+  html += '<div class="form-group"><label>Lignes (copi\u00e9es de ' + escH(src.numero || '') + ')</label><div id="lignesContainer"></div></div>';
+  var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
+  footer += '<button class="btn btn-primary" onclick="saveBC(\'\')">Cr\u00e9er le BC dupliqu\u00e9</button>';
+  openFormModal(title, html, footer, true);
+  populateClientSelect('bcClient', src.clientId);
+  renderFormLignes();
+  toast('BC dupliqu\u00e9 — modifiez le num\u00e9ro et enregistrez', 'info');
 }
 
 function saveBC(id) {
@@ -3709,7 +3728,7 @@ function saveBC(id) {
     numero: document.getElementById('bcNumero').value.trim(),
     clientId: clientId, dateBC: document.getElementById('bcDate').value,
     delaiLivraison: parseInt(document.getElementById('bcDelai').value) || 30,
-    statut: document.getElementById('bcStatut').value,
+    statut: (b && b.statut) ? b.statut : 'valide',
     tvaActive: document.getElementById('bcTvaActive').value === '1',
     tauxTva: parseFloat(document.getElementById('bcTaux').value) || 18,
     observations: document.getElementById('bcObs').value.trim(),
@@ -3718,7 +3737,7 @@ function saveBC(id) {
   var bcs = getBCs();
   if (id) {
     for (var i = 0; i < bcs.length; i++) {
-      if (bcs[i].id === id) { data.id = id; data.dateCreation = bcs[i].dateCreation; bcs[i] = data; break; }
+      if (bcs[i].id === id) { data.id = id; data.dateCreation = bcs[i].dateCreation; if (bcs[i]._fromImport) data._fromImport = true; bcs[i] = data; break; }
     }
   } else {
     data.id = DB.genId(); data.dateCreation = getToday(); bcs.push(data);
@@ -5261,7 +5280,7 @@ function filterClients() { filterTable('clientsBody', 'clientSearch'); }
 var _facturationTab = 'bc';
 function switchFacturationTab(tab) { _facturationTab = tab; renderFacturation(); saveAppState(); }
 function renderFacturation() {
-  var tabHtml = '<div style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:24px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none" id="facturationTabs">';
+  var tabHtml = '<div style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex-shrink:0" id="facturationTabs">';
   var tabs = [{key:'bc',label:'BC'},{key:'bl',label:'BL'},{key:'factures',label:'Factures & Journal'},{key:'nomenclature',label:'Nomenclature'}];
   for (var i = 0; i < tabs.length; i++) {
     var t = tabs[i];
@@ -5279,7 +5298,15 @@ function renderFacturation() {
 }
 function renderFacturesJournal() {
   var fjTab = _fjTab || 'factures';
-  var html = '<div style="display:flex;gap:0;border-bottom:1px solid var(--gray-200);margin-bottom:16px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none">';
+  var contentEl = document.getElementById('content');
+  var fcEl = document.getElementById('facturationContent');
+  var fjEl = document.getElementById('fjContent');
+  if (fjTab !== 'import') {
+    contentEl.style.overflow = ''; contentEl.style.padding = ''; contentEl.style.display = ''; contentEl.style.flexDirection = '';
+    if (fcEl) { fcEl.style.flex = ''; fcEl.style.minHeight = ''; fcEl.style.display = ''; fcEl.style.flexDirection = ''; fcEl.style.overflow = ''; }
+    if (fjEl) { fjEl.style.flex = ''; fjEl.style.minHeight = ''; fjEl.style.overflow = ''; fjEl.style.display = ''; fjEl.style.flexDirection = ''; }
+  }
+  var html = '<div style="display:flex;gap:0;border-bottom:1px solid var(--gray-200);margin-bottom:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex-shrink:0">';
   var subTabs = [{key:'factures',label:'Factures'},{key:'journal',label:'Journal des ventes'},{key:'import',label:'Import Journal'}];
   for (var i = 0; i < subTabs.length; i++) {
     var st = subTabs[i];
@@ -5914,7 +5941,9 @@ function renderFactures() {
     html += '<td style="color:' + (restant > 0 ? 'var(--danger)' : 'var(--success)') + '" class="fw-600">' + fmtMoney(restant) + '</td>';
     html += '<td><span class="badge ' + stBadge + '">' + escH(f.statut) + '</span></td>';
     if (!readonly) {
-      html += '<td><button class="btn-icon" onclick="openFactureModal(\'' + f.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
+      if (restant > 0) html += '<td><button class="btn-icon" onclick="openFacturePayment(\'' + f.id + '\')" title="Payer" style="color:var(--success)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></button> ';
+      else html += '<td style="color:var(--success)">✓ </td>';
+      html += '<button class="btn-icon" onclick="openFactureModal(\'' + f.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
       html += '<button class="btn-icon danger" onclick="deleteFacture(\'' + f.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
     }
     html += '</tr>';
@@ -6157,8 +6186,22 @@ function renderJournalImport(targetId) {
   if (targetId) _importTarget = targetId;
   var el = document.getElementById(_importTarget);
   var imports = getJournalImports();
-  var html = '<div style="max-width:1200px;margin:0 auto">';
-  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px"><h2 style="margin:0;font-size:18px">Import Journal de Vente</h2>';
+  var hasPreview = _importData && _importData.lignes && _importData.lignes.length > 0;
+  var contentEl = document.getElementById('content');
+  var fcEl = document.getElementById('facturationContent');
+  var fjEl = document.getElementById(_importTarget);
+  if (hasPreview) {
+    contentEl.style.overflow = 'hidden'; contentEl.style.padding = '0';
+    contentEl.style.display = 'flex'; contentEl.style.flexDirection = 'column';
+    if (fcEl) { fcEl.style.flex = '1'; fcEl.style.minHeight = '0'; fcEl.style.display = 'flex'; fcEl.style.flexDirection = 'column'; fcEl.style.overflow = 'hidden'; }
+    if (fjEl) { fjEl.style.flex = '1'; fjEl.style.minHeight = '0'; fjEl.style.overflow = 'hidden'; fjEl.style.display = 'flex'; fjEl.style.flexDirection = 'column'; }
+  } else {
+    contentEl.style.overflow = ''; contentEl.style.padding = ''; contentEl.style.display = ''; contentEl.style.flexDirection = '';
+    if (fcEl) { fcEl.style.flex = ''; fcEl.style.minHeight = ''; fcEl.style.display = ''; fcEl.style.flexDirection = ''; fcEl.style.overflow = ''; }
+    if (fjEl) { fjEl.style.flex = ''; fjEl.style.minHeight = ''; fjEl.style.overflow = ''; fjEl.style.display = ''; fjEl.style.flexDirection = ''; }
+  }
+  var html = '<div style="' + (hasPreview ? 'display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;padding:12px' : 'max-width:1200px;margin:0 auto') + '">';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-shrink:0"><h2 style="margin:0;font-size:18px">Import Journal de Vente</h2>';
   html += '<button class="btn btn-primary" onclick="openImportZone()">+ Importer un fichier</button></div>';
   if (!_importData) {
     html += '<div class="card" style="padding:24px;text-align:center;color:var(--gray-500);margin-bottom:16px" id="importDropZone">';
@@ -6407,7 +6450,7 @@ function parseDesignationField(text, fallbackQty, articles) {
 function splitBCField(bcVal) {
   if (!bcVal) return [''];
   var trimmed = bcVal.trim();
-  if (trimmed.match(/^\d[\d\s]*\/\s*\d[\d\s]*$/)) { return trimmed.split('/').map(function(p){ return p.trim(); }).filter(function(p){ return p; }); }
+  if (trimmed.indexOf('/') !== -1) { return trimmed.split('/').map(function(p){ return p.trim(); }).filter(function(p){ return p; }); }
   return [bcVal];
 }
 function matchArticle(desig, articles) {
@@ -6519,13 +6562,27 @@ function findClientIdByName(name) {
   }
   return '';
 }
+var _bcCheckCache = null;
+function checkBCExists(numeroBC, clientId) {
+  if (!numeroBC || !clientId) return null;
+  if (_bcCheckCache === null) {
+    _bcCheckCache = {};
+    var bcs = getBCs();
+    for (var i = 0; i < bcs.length; i++) {
+      _bcCheckCache[(bcs[i].numero || '') + '||' + (bcs[i].clientId || '')] = true;
+    }
+  }
+  return _bcCheckCache[(numeroBC || '') + '||' + (clientId || '')] || false;
+}
+function resetBCCheckCache() { _bcCheckCache = null; }
 function renderImportPreview() {
   if (!_importData || !_importData.lignes || _importData.lignes.length === 0) return '';
+  _bcCheckCache = null;
   var lignes = _importData.lignes;
   var clients = getClients();
   var totalMontant = 0;
   for (var t = 0; t < lignes.length; t++) totalMontant += lignes[t].montant || 0;
-  var html = '<div class="card" style="padding:0;margin-bottom:16px;max-height:calc(100vh - 100px);display:flex;flex-direction:column">';
+  var html = '<div class="card" style="padding:0;margin-bottom:16px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">';
   html += '<div style="padding:6px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--gray-200);flex-shrink:0">';
   html += '<div><strong id="importHeaderInfo">' + escH(_importData.fileName) + '</strong> — <span style="color:var(--dim)">' + lignes.length + ' lignes — Total: <strong>' + fmtMoney(totalMontant) + '</strong></span></div>';
   html += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
@@ -6541,38 +6598,73 @@ function renderImportPreview() {
   for (var m = 0; m < lignes.length; m++) { if (lignes[m].articleId) nbMatched++; if (lignes[m].hasTVA) nbTVACount++; if (lignes[m].typeLigne === 'prestation') nbPresta++; }
   html += '<span id="importStatsBar" style="font-size:.6rem;color:var(--dim);margin-left:8px">' + nbMatched + '/' + lignes.length + ' article(s) détecté(s) — ' + nbPresta + ' prestation(s) — ' + nbTVACount + ' TVA</span>';
   html += '</div>';
-  html += '<div class="table-responsive" style="flex:1;overflow:auto"><table style="font-size:.7rem;min-width:1600px"><thead style="position:sticky;top:0;background:var(--gray-50);z-index:1"><tr>';
-  html += '<th style="width:28px">#</th><th style="width:95px">Date</th><th style="width:110px">Client</th><th style="width:120px">N°FACT</th><th style="width:150px">BC</th><th style="width:80px">Type</th><th style="min-width:120px">Libellé / Désignation</th><th style="width:90px">Qté</th><th style="width:100px">Prix U.</th><th style="width:110px">HT</th><th style="width:50px">TVA%</th><th style="width:50px">TVA</th><th style="width:110px">TTC</th><th style="width:28px"></th>';
+  html += '<div class="table-responsive" style="flex:1;min-height:0;overflow-y:scroll"><table style="font-size:.7rem;min-width:1600px"><thead style="position:sticky;top:0;background:var(--gray-50);z-index:1"><tr>';
+  html += '<th style="width:28px">#</th><th style="width:95px">Date</th><th style="width:110px">Client</th><th style="width:120px">N°FACT</th><th style="width:150px">BC</th><th style="width:80px">Type</th><th style="min-width:120px">Libellé / Désignation</th><th style="width:90px">Qté</th><th style="width:100px">Prix U.</th><th style="width:80px">HT</th><th style="width:38px">TVA%</th><th style="width:65px">TVA</th><th style="width:80px">TTC</th><th style="width:28px"></th>';
   html += '</tr></thead><tbody id="importPreviewBody">';
+
+  var _factGroups = {};
+  var _factOrder = [];
+  for (var fi = 0; fi < lignes.length; fi++) {
+    var _fk2 = (lignes[fi].numeroFact || '').trim() || ('__noline_' + fi);
+    if (!_factGroups[_fk2]) { _factGroups[_fk2] = []; _factOrder.push(_fk2); }
+    _factGroups[_fk2].push(fi);
+  }
+
   var _factLineNumber = 0;
   var _lastFactKey = '';
-  for (var i = 0; i < lignes.length; i++) {
-    var l = lignes[i];
-    var _fk = (l.numeroFact || '').trim();
-    if (_fk && _fk === _lastFactKey) { /* same facture, keep same line number */ }
-    else if (_fk) { _factLineNumber = i + 1; _lastFactKey = _fk; }
-    else { _factLineNumber = i + 1; _lastFactKey = ''; }
-    l._lineNum = _factLineNumber;
-    var isPresta = l.typeLigne === 'prestation';
-    var isCont = !!l._groupContinuation;
-    var artBadge = l.articleId ? '<span style="font-size:.55rem;color:var(--primary);font-weight:600;white-space:nowrap" title="Article trouvé: ' + escH(l.articleCode || l.designation) + '">✓ ' + escH(l.articleCode || '') + '</span>' : (isPresta ? '<span style="font-size:.55rem;color:#7c3aed;font-weight:600" title="Prestation / Saisie libre">★</span>' : '<span style="font-size:.55rem;color:var(--warning);font-weight:600;cursor:pointer" title="Article non trouvé — cliquer pour choisir" onclick="promptImportArticleType(' + i + ')">?</span>');
-    var clientTitle = l.clientId ? 'Client existant' : 'Client non trouvé — à créer ou sélectionner';
-    var isInGroup = !!l._groupKey;
-    var typeBg = isInGroup ? '#f0f6ff' : (isPresta ? '#f3f0ff' : (l.articleId ? '' : 'var(--warning-light)'));
-    if (isCont) typeBg = '#f0f6ff';
-    html += '<tr data-idx="' + i + '" style="' + (typeBg ? 'background:' + typeBg : '') + (isInGroup ? ';border-left:3px solid var(--info)' : '') + '">';
-    html += '<td style="text-align:center;color:var(--gray-400)">' + l._lineNum + '</td>';
-    if (isCont) {
-      html += '<td><input type="date" value="' + escH(l.date) + '" onchange="updateImportLigne(' + i + ',\'date\',this.value)" style="width:100%;padding:3px 5px;border:1px solid var(--gray-200);border-radius:3px;font-size:.65rem;color:var(--dim);background:#f0f6ff"></td>';
-      html += '<td style="color:var(--dim);font-size:.65rem;padding:3px 5px;background:#f0f6ff">↳ ' + escH(l.clientNom) + '</td>';
-      html += '<td style="color:var(--dim);font-size:.65rem;padding:3px 5px;background:#f0f6ff">↳ ' + escH(l.numeroFact || '—') + '</td>';
-      html += '<td style="color:var(--dim);font-size:.65rem;padding:3px 5px;background:#f0f6ff">↳ ' + escH(l.numeroBC || '—') + '</td>';
-    } else {
+  for (var fi2 = 0; fi2 < _factOrder.length; fi2++) {
+    var _groupKey = _factOrder[fi2];
+    var _indices = _factGroups[_groupKey];
+    var _isFactGroup = _groupKey.indexOf('__noline_') === -1 && _indices.length > 1;
+    var _groupHT = 0, _groupTVA = 0, _groupTTC = 0;
+    for (var gi = 0; gi < _indices.length; gi++) {
+      var _gl = lignes[_indices[gi]];
+      var _ght = _gl.montant || 0;
+      var _gtva = _gl.hasTVA ? Math.round(_ght * (_gl.tvaRate || 18) / 100) : 0;
+      _groupHT += _ght; _groupTVA += _gtva; _groupTTC += _ght + _gtva;
+    }
+    var _bcParts = _indices.length > 0 ? splitBCField(lignes[_indices[0]].numeroBC) : [];
+    var _hasMultiBC = _bcParts.length > 1;
+
+    for (var gi2 = 0; gi2 < _indices.length; gi2++) {
+      var i = _indices[gi2];
+      var l = lignes[i];
+      var _fk = (l.numeroFact || '').trim();
+      if (_fk && _fk === _lastFactKey) { /* same facture */ }
+      else if (_fk) { _factLineNumber = i + 1; _lastFactKey = _fk; }
+      else { _factLineNumber = i + 1; _lastFactKey = ''; }
+      l._lineNum = _factLineNumber;
+      var isPresta = l.typeLigne === 'prestation';
+      var isFirstInGroup = gi2 === 0;
+      var isLastInGroup = gi2 === _indices.length - 1;
+      var bcExists = checkBCExists(l.numeroBC, l.clientId);
+      var bcBorderColor = !l.numeroBC ? 'var(--gray-200)' : (bcExists ? 'var(--success)' : 'var(--danger)');
+      var bcTitleSuffix = !l.numeroBC ? '' : (bcExists ? ' ✓ BC trouvé en base' : ' ✗ BC introuvable');
+      var artBadge = l.articleId ? '<span style="font-size:.55rem;color:var(--primary);font-weight:600;white-space:nowrap" title="Article trouvé: ' + escH(l.articleCode || l.designation) + '">✓ ' + escH(l.articleCode || '') + '</span>' : (isPresta ? '<span style="font-size:.55rem;color:#7c3aed;font-weight:600" title="Prestation / Saisie libre">★</span>' : '<span style="font-size:.55rem;color:var(--warning);font-weight:600;cursor:pointer" title="Article non trouvé — cliquer pour choisir" onclick="promptImportArticleType(' + i + ')">?</span>');
+      var clientTitle = l.clientId ? 'Client existant' : 'Client non trouvé — à créer ou sélectionner';
+      var typeBg = _isFactGroup ? (isPresta ? '#f5f3ff' : (l.articleId ? '#f0f7ff' : '#fffbeb')) : (isPresta ? '#f3f0ff' : (l.articleId ? '' : 'var(--warning-light)'));
+      var borderStyle = _isFactGroup ? ';border-left:3px solid #3b82f6' : '';
+      if (_isFactGroup && isFirstInGroup) borderStyle += ';border-top:2px solid #3b82f6;border-radius:6px 6px 0 0';
+      if (_isFactGroup && isLastInGroup) borderStyle += ';border-bottom:2px solid #3b82f6;border-radius:0 0 6px 6px';
+      if (_isFactGroup && _indices.length === 1) borderStyle += ';border:2px solid #3b82f6;border-radius:6px';
+      html += '<tr data-idx="' + i + '" style="' + (typeBg ? 'background:' + typeBg : '') + borderStyle + '">';
+      html += '<td style="text-align:center;color:var(--gray-400)">' + l._lineNum + '</td>';
       html += '<td><input type="date" value="' + escH(l.date) + '" onchange="updateImportLigne(' + i + ',\'date\',this.value)" style="width:100%;padding:3px 5px;border:1px solid var(--gray-200);border-radius:3px;font-size:.7rem"></td>';
       html += '<td><input type="text" value="' + escH(l.clientNom) + '" list="importClientsList" onchange="updateImportLigneClient(' + i + ',this.value)" style="width:100%;padding:3px 5px;border:1px solid ' + (l.clientId ? 'var(--success)' : 'var(--danger)') + ';border-radius:3px;font-size:.7rem" title="' + clientTitle + '"></td>';
       html += '<td><input type="text" value="' + escH(l.numeroFact || '') + '" onchange="updateImportLigne(' + i + ',\'numeroFact\',this.value)" style="width:100%;padding:3px 5px;border:1px solid ' + (l.numeroFact ? 'var(--info)' : 'var(--gray-200)') + ';border-radius:3px;font-size:.7rem" title="N° Facture"></td>';
-      html += '<td><input type="text" value="' + escH(l.numeroBC) + '" onchange="updateImportLigne(' + i + ',\'numeroBC\',this.value)" style="width:100%;padding:3px 5px;border:1px solid var(--gray-200);border-radius:3px;font-size:.7rem"></td>';
-    }
+      if (_hasMultiBC && isFirstInGroup) {
+        html += '<td style="position:relative"><input type="text" value="' + escH(l.numeroBC) + '" onchange="updateImportLigne(' + i + ',\'numeroBC\',this.value)" style="width:100%;padding:3px 5px;border:2px solid ' + bcBorderColor + ';border-radius:3px;font-size:.7rem;font-weight:700" title="BC multi: ' + escH(l.numeroBC) + bcTitleSuffix + '"><div style="position:absolute;top:0;right:0;display:flex;gap:1px">';
+        for (var bp = 0; bp < _bcParts.length; bp++) {
+          html += '<button onclick="assignBCToGroup(\'' + _groupKey + '\',' + bp + ')" style="font-size:.5rem;padding:1px 3px;background:var(--info);color:#fff;border:none;border-radius:2px;cursor:pointer" title="Attribuer ' + escH(_bcParts[bp]) + ' à cette ligne">BC' + (bp+1) + '</button>';
+        }
+        html += '</div></td>';
+      } else if (_hasMultiBC && !_isFactGroup) {
+        html += '<td><input type="text" value="' + escH(l.numeroBC) + '" onchange="updateImportLigne(' + i + ',\'numeroBC\',this.value)" style="width:100%;padding:3px 5px;border:2px solid ' + bcBorderColor + ';border-radius:3px;font-size:.7rem" title="' + bcTitleSuffix + '"></td>';
+      } else if (_isFactGroup && !isFirstInGroup) {
+        html += '<td><input type="text" value="' + escH(l.numeroBC) + '" onchange="updateImportLigne(' + i + ',\'numeroBC\',this.value)" style="width:100%;padding:3px 5px;border:2px solid ' + bcBorderColor + ';border-radius:3px;font-size:.7rem;background:#f0f7ff" title="BC (modifiable)' + bcTitleSuffix + '"></td>';
+      } else {
+        html += '<td><input type="text" value="' + escH(l.numeroBC) + '" onchange="updateImportLigne(' + i + ',\'numeroBC\',this.value)" style="width:100%;padding:3px 5px;border:2px solid ' + bcBorderColor + ';border-radius:3px;font-size:.7rem" title="' + (l.numeroBC ? bcTitleSuffix : 'N° BC') + '"></td>';
+      }
     html += '<td><select onchange="changeImportLigneType(' + i + ',this.value)" style="width:100%;padding:3px 2px;border:1px solid var(--gray-200);border-radius:3px;font-size:.65rem">';
     html += '<option value=""' + (!l.typeLigne ? ' selected' : '') + '></option>';
     html += '<option value="produit_fini"' + (l.typeLigne === 'produit_fini' ? ' selected' : '') + '>Produit fini</option>';
@@ -6583,19 +6675,36 @@ function renderImportPreview() {
     html += '<option value="prestation"' + (l.typeLigne === 'prestation' ? ' selected' : '') + '>Prestation</option>';
     html += '</select></td>';
     var desigBorder = isPresta ? 'var(--purple)' : (l.articleId ? 'var(--success)' : 'var(--warning)');
-    html += '<td>' + artBadge + ' <input type="text" value="' + escH(l.designation) + '" list="importArticlesList" onchange="onImportArtChange(' + i + ',this.value)" oninput="if(_importData&&_importData.lignes[' + i + '])_importData.lignes[' + i + ''].designation=this.value" style="width:calc(100% - 20px);padding:3px 5px;border:1px solid ' + desigBorder + ';border-radius:3px;font-size:.7rem;background:' + (isPresta ? '#faf8ff' : '#fff') + '" title="' + (l.articleId ? 'Article: ' + escH(l.articleCode) : (isPresta ? 'Prestation libre' : 'Article non trouvé — tapez pour chercher')) + '"></td>';
+    html += '<td>' + artBadge + ' <input type="text" value="' + escH(l.designation) + '" list="importArticlesList" onchange="onImportArtChange(' + i + ',this.value)" oninput="if(_importData&&_importData.lignes[' + i + '])_importData.lignes[' + i + '].designation=this.value" style="width:calc(100% - 20px);padding:3px 5px;border:1px solid ' + desigBorder + ';border-radius:3px;font-size:.7rem;background:' + (isPresta ? '#faf8ff' : '#fff') + '" title="' + (l.articleId ? 'Article: ' + escH(l.articleCode) : (isPresta ? 'Prestation libre' : 'Article non trouvé — tapez pour chercher')) + '"></td>';
     html += '<td><input type="number" value="' + l.quantite + '" step="0.01" oninput="updateImportLigneLive(' + i + ',\'quantite\',this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:.75rem;text-align:right"></td>';
-    html += '<td><input type="number" value="' + l.prixUnitaire + '" step="0.01" oninput="updateImportLigneLive(' + i + ',\'prixUnitaire\',this.value)" style="width:100%;padding:4px 6px;border:1px solid ' + (l.prixUnitaire > 0 ? 'var(--success)' : 'var(--danger)') + ';border-radius:3px;font-size:.75rem;text-align:right"></td>';
+    html += '<td><input type="number" value="' + l.prixUnitaire + '" step="0.01" oninput="updateImportLigneLive(' + i + ',\'prixUnitaire\',this.value)" onchange="propagatePrixUnitaire(' + i + ',this.value)" style="width:100%;padding:4px 6px;border:1px solid ' + (l.prixUnitaire > 0 ? 'var(--success)' : 'var(--danger)') + ';border-radius:3px;font-size:.75rem;text-align:right"></td>';
     var ht = l.montant || 0;
     var tvaRate = l.tvaRate || 18;
     var tvaAmt = l.hasTVA ? Math.round(ht * tvaRate / 100) : 0;
     var ttc = ht + tvaAmt;
-    html += '<td id="montant-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:right;color:var(--dim)">' + fmtMoney(ht) + '</td>';
+    html += '<td id="montant-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:center;color:var(--dim)">' + fmtMoney(ht) + '</td>';
     html += '<td style="text-align:center"><input type="checkbox" ' + (l.hasTVA ? 'checked' : '') + ' onchange="updateImportLigneTVA(' + i + ',this.checked)" style="cursor:pointer" title="TVA 18%"></td>';
-    html += '<td id="tva-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:right;color:var(--dim)">' + (l.hasTVA ? fmtMoney(tvaAmt) : '—') + '</td>';
-    html += '<td id="ttc-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:right;color:var(--dim)">' + fmtMoney(ttc) + '</td>';
+    html += '<td id="tva-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:center;color:var(--dim)">' + (l.hasTVA ? fmtMoney(tvaAmt) : '—') + '</td>';
+    html += '<td id="ttc-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:center;color:var(--dim)">' + fmtMoney(ttc) + '</td>';
     html += '<td><button onclick="removeImportLigne(' + i + ')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:14px" title="Supprimer">×</button></td>';
     html += '</tr>';
+    }
+    if (_isFactGroup && _indices.length > 1) {
+      html += '<tr style="background:#e0ecff;border-left:3px solid #3b82f6;border-bottom:2px solid #3b82f6">';
+      html += '<td colspan="14" style="padding:3px 8px;white-space:nowrap;font-size:.6rem;font-weight:700;color:#1e40af;text-align:right">';
+      html += '<button onclick="addImportLigneInGroup(\'' + _groupKey + '\')" style="font-size:.6rem;padding:2px 8px;background:#3b82f6;color:#fff;border:none;border-radius:3px;cursor:pointer;margin-right:8px;vertical-align:middle" title="Ajouter une ligne \u00e0 cette facture">+ Ligne</button>';
+      html += 'TOTAL ' + escH(_groupKey) + ' (' + _indices.length + ' lignes) &nbsp;&nbsp; ';
+      html += '<span style="background:#c7d2fe;border-radius:3px;padding:1px 5px;margin-left:6px">HT: ' + fmtMoney(_groupHT) + '</span> ';
+      html += '<span style="background:#c7d2fe;border-radius:3px;padding:1px 5px">TVA: ' + fmtMoney(_groupTVA) + '</span> ';
+      html += '<span style="background:#c7d2fe;border-radius:3px;padding:1px 5px;font-weight:900">TTC: ' + fmtMoney(_groupTTC) + '</span>';
+      html += '</td></tr>';
+    }
+    if (_isFactGroup && _indices.length === 1) {
+      html += '<tr style="background:#f0f7ff;border-left:3px solid #3b82f6;border-bottom:1px solid #bfdbfe">';
+      html += '<td colspan="14" style="padding:2px 8px;text-align:right;font-size:.6rem">';
+      html += '<button onclick="addImportLigneInGroup(\'' + _groupKey + '\')" style="font-size:.6rem;padding:2px 8px;background:#3b82f6;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Ajouter une ligne \u00e0 cette facture">+ Ligne</button>';
+      html += '</td></tr>';
+    }
   }
   html += '</tbody></table></div></div>';
   html += '<datalist id="importClientsList">';
@@ -6607,72 +6716,29 @@ function renderImportPreview() {
   html += '</datalist>';
   return html;
 }
-function ajaxRenderImportRow(i) {
-  var l = _importData.lignes[i];
-  if (!l) return '';
-  var isPresta = l.typeLigne === 'prestation';
-  var isCont = !!l._groupContinuation;
-  var artBadge = l.articleId ? '<span style="font-size:.55rem;color:var(--primary);font-weight:600;white-space:nowrap" title="Article trouvé: ' + escH(l.articleCode || l.designation) + '">✓ ' + escH(l.articleCode || '') + '</span>' : (isPresta ? '<span style="font-size:.55rem;color:#7c3aed;font-weight:600" title="Prestation / Saisie libre">★</span>' : '<span style="font-size:.55rem;color:var(--warning);font-weight:600;cursor:pointer" title="Article non trouvé — cliquer pour choisir" onclick="promptImportArticleType(' + i + ')">?</span>');
-  var clientTitle = l.clientId ? 'Client existant' : 'Client non trouvé — à créer ou sélectionner';
-  var typeBg = isPresta ? '#f3f0ff' : (l.articleId ? '' : 'var(--warning-light)');
-  if (isCont) typeBg = '#f8faff';
-  var h = '';
-  h += '<td style="text-align:center;color:var(--gray-400)">' + (l._lineNum || (i + 1)) + '</td>';
-  if (isCont) {
-    h += '<td><input type="date" value="' + escH(l.date) + '" onchange="updateImportLigne(' + i + ',\'date\',this.value)" style="width:100%;padding:3px 5px;border:1px solid var(--gray-200);border-radius:3px;font-size:.65rem;color:var(--dim);background:#f8faff"></td>';
-    h += '<td style="color:var(--dim);font-size:.65rem;padding:3px 5px;background:#f8faff">↳ ' + escH(l.clientNom) + '</td>';
-    h += '<td style="color:var(--dim);font-size:.65rem;padding:3px 5px;background:#f8faff">↳ ' + escH(l.numeroFact || '—') + '</td>';
-    h += '<td style="color:var(--dim);font-size:.65rem;padding:3px 5px;background:#f8faff">↳ ' + escH(l.numeroBC || '—') + '</td>';
-  } else {
-    h += '<td><input type="date" value="' + escH(l.date) + '" onchange="updateImportLigne(' + i + ',\'date\',this.value)" style="width:100%;padding:3px 5px;border:1px solid var(--gray-200);border-radius:3px;font-size:.7rem"></td>';
-    h += '<td><input type="text" value="' + escH(l.clientNom) + '" list="importClientsList" onchange="updateImportLigneClient(' + i + ',this.value)" style="width:100%;padding:3px 5px;border:1px solid ' + (l.clientId ? 'var(--success)' : 'var(--danger)') + ';border-radius:3px;font-size:.7rem" title="' + clientTitle + '"></td>';
-    h += '<td><input type="text" value="' + escH(l.numeroFact || '') + '" onchange="updateImportLigne(' + i + ',\'numeroFact\',this.value)" style="width:100%;padding:3px 5px;border:1px solid ' + (l.numeroFact ? 'var(--info)' : 'var(--gray-200)') + ';border-radius:3px;font-size:.7rem" title="N° Facture"></td>';
-    h += '<td><input type="text" value="' + escH(l.numeroBC) + '" onchange="updateImportLigne(' + i + ',\'numeroBC\',this.value)" style="width:100%;padding:3px 5px;border:1px solid var(--gray-200);border-radius:3px;font-size:.7rem"></td>';
+function assignBCToGroup(groupKey, bcIdx) {
+  if (!_importData || !_importData.lignes) return;
+  var lignes = _importData.lignes;
+  for (var i = 0; i < lignes.length; i++) {
+    var fk = (lignes[i].numeroFact || '').trim() || ('__noline_' + i);
+    if (fk === groupKey) {
+      var bcParts = splitBCField(lignes[i].numeroBC);
+      if (bcParts[bcIdx]) { updateImportLigne(i, 'numeroBC', bcParts[bcIdx]); }
+    }
   }
-  h += '<td><select onchange="changeImportLigneType(' + i + ',this.value)" style="width:100%;padding:3px 2px;border:1px solid var(--gray-200);border-radius:3px;font-size:.65rem">';
-  h += '<option value=""' + (!l.typeLigne ? ' selected' : '') + '></option>';
-  h += '<option value="produit_fini"' + (l.typeLigne === 'produit_fini' ? ' selected' : '') + '>Produit fini</option>';
-  h += '<option value="marchandise"' + (l.typeLigne === 'marchandise' ? ' selected' : '') + '>Marchandise</option>';
-  h += '<option value="semi_fini"' + (l.typeLigne === 'semi_fini' ? ' selected' : '') + '>Semi-finis</option>';
-  h += '<option value="consommable"' + (l.typeLigne === 'consommable' ? ' selected' : '') + '>Consommable</option>';
-  h += '<option value="autres"' + (l.typeLigne === 'autres' ? ' selected' : '') + '>Autres</option>';
-  h += '<option value="prestation"' + (l.typeLigne === 'prestation' ? ' selected' : '') + '>Prestation</option>';
-  h += '</select></td>';
-  var desigBorder = isPresta ? 'var(--purple)' : (l.articleId ? 'var(--success)' : 'var(--warning)');
-  h += '<td>' + artBadge + ' <input type="text" value="' + escH(l.designation) + '" list="importArticlesList" onchange="onImportArtChange(' + i + ',this.value)" oninput="if(_importData&&_importData.lignes[' + i + '])_importData.lignes[' + i + ''].designation=this.value" style="width:calc(100% - 20px);padding:3px 5px;border:1px solid ' + desigBorder + ';border-radius:3px;font-size:.7rem;background:' + (isPresta ? '#faf8ff' : '#fff') + '" title="' + (l.articleId ? 'Article: ' + escH(l.articleCode) : (isPresta ? 'Prestation libre' : 'Article non trouvé')) + '"></td>';
-  h += '<td><input type="number" value="' + l.quantite + '" step="0.01" oninput="updateImportLigneLive(' + i + ',\'quantite\',this.value)" style="width:100%;padding:4px 6px;border:1px solid var(--gray-200);border-radius:3px;font-size:.75rem;text-align:right"></td>';
-  h += '<td><input type="number" value="' + l.prixUnitaire + '" step="0.01" oninput="updateImportLigneLive(' + i + ',\'prixUnitaire\',this.value)" style="width:100%;padding:4px 6px;border:1px solid ' + (l.prixUnitaire > 0 ? 'var(--success)' : 'var(--danger)') + ';border-radius:3px;font-size:.75rem;text-align:right"></td>';
-  var ht2 = l.montant || 0;
-  var tvaRate2 = l.tvaRate || 18;
-  var tvaAmt2 = l.hasTVA ? Math.round(ht2 * tvaRate2 / 100) : 0;
-  var ttc2 = ht2 + tvaAmt2;
-  h += '<td id="montant-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:right;color:var(--dim)">' + fmtMoney(ht2) + '</td>';
-  h += '<td style="text-align:center"><input type="checkbox" ' + (l.hasTVA ? 'checked' : '') + ' onchange="updateImportLigneTVA(' + i + ',this.checked)" style="cursor:pointer" title="TVA 18%"></td>';
-  h += '<td id="tva-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:right;color:var(--dim)">' + (l.hasTVA ? fmtMoney(tvaAmt2) : '—') + '</td>';
-  h += '<td id="ttc-cell-' + i + '" style="font-size:.65rem;white-space:nowrap;text-align:right;color:var(--dim)">' + fmtMoney(ttc2) + '</td>';
-  h += '<td><button onclick="removeImportLigne(' + i + ')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:14px" title="Supprimer">×</button></td>';
-  return h;
+  renderJournalImport(_importTarget);
+  toast('BC "' + groupKey.split('/').pop() + '" attribué aux lignes de cette facture', 'success');
 }
-function ajaxUpdateRow(idx) {
-  var tbody = document.querySelector('#importPreviewBody');
-  if (!tbody || !_importData || !_importData.lignes[idx]) return;
-  var rows = tbody.getElementsByTagName('tr');
-  if (rows[idx]) { rows[idx].innerHTML = ajaxRenderImportRow(idx); var _lg = _importData.lignes[idx]; var _bg = _lg._groupKey ? '#f0f6ff' : (_lg.typeLigne === 'prestation' ? '#f3f0ff' : (_lg.articleId ? '' : '#fffbeb')); rows[idx].style.background = _bg; if (_lg._groupKey) rows[idx].style.borderLeft = '3px solid var(--info)'; rows[idx].classList.remove('ajax-flash'); void rows[idx].offsetWidth; rows[idx].classList.add('ajax-flash'); }
+function validateJournalImport(id) {
+  var imports = getJournalImports();
+  for (var i = 0; i < imports.length; i++) {
+    if (imports[i].id === id) { _importData = JSON.parse(JSON.stringify(imports[i])); break; }
+  }
+  if (_importData) saveJournalImport('valide');
 }
-function ajaxInsertRow(idx) {
-  var tbody = document.querySelector('#importPreviewBody');
-  if (!tbody) return;
-  var tr = document.createElement('tr');
-  tr.setAttribute('data-idx', idx);
-  tr.innerHTML = ajaxRenderImportRow(idx);
-  if (idx >= tbody.rows.length) tbody.appendChild(tr); else tbody.insertBefore(tr, tbody.rows[idx]);
-}
-function ajaxRemoveRow(idx) {
-  var tbody = document.querySelector('#importPreviewBody');
-  if (!tbody || !tbody.rows[idx]) return;
-  tbody.deleteRow(idx);
-  for (var r = idx; r < tbody.rows.length; r++) { tbody.rows[r].innerHTML = ajaxRenderImportRow(r); tbody.rows[r].setAttribute('data-idx', r); }
-}
+function ajaxUpdateRow(idx) { renderImportPreview(); }
+function ajaxInsertRow(idx) { renderImportPreview(); }
+function ajaxRemoveRow(idx) { renderImportPreview(); }
 function ajaxUpdateStats() {
   if (!_importData) return;
   var lignes = _importData.lignes;
@@ -6747,6 +6813,26 @@ function refreshImportTVACells(idx) {
   if (tc) tc.textContent = l.hasTVA ? fmtMoney(tvaAmt) : '—';
   var ttc2 = document.getElementById('ttc-cell-' + idx);
   if (ttc2) ttc2.textContent = fmtMoney(ttc);
+}
+function propagatePrixUnitaire(sourceIdx, newPrix) {
+  if (!_importData || !_importData.lignes[sourceIdx]) return;
+  var src = _importData.lignes[sourceIdx];
+  if (!src.articleId) return;
+  var newP = parseFloat(newPrix) || 0;
+  if (newP <= 0) return;
+  var count = 0;
+  for (var i = 0; i < _importData.lignes.length; i++) {
+    if (i === sourceIdx) continue;
+    var l = _importData.lignes[i];
+    if (l.articleId !== src.articleId) continue;
+    l.prixUnitaire = newP;
+    l.montant = Math.round(l.quantite * l.prixUnitaire * 100) / 100;
+    refreshImportTVACells(i);
+    var row = document.querySelector('tr[data-idx="' + i + '"]');
+    if (row) { var inputs = row.querySelectorAll('input[type="number"]'); if (inputs.length >= 2) { inputs[1].value = newP; inputs[1].style.borderColor = 'var(--success)'; } }
+    count++;
+  }
+  if (count > 0) toast('Prix propagé sur ' + count + ' ligne(s) similaire(s)', 'info');
 }
 function updateImportLigneTVA(idx, checked) {
   if (!_importData || !_importData.lignes[idx]) return;
@@ -6961,7 +7047,7 @@ function autoAssignSimilarLines(sourceIdx) {
       l.articleId = src.articleId;
       l.articleCode = src.articleCode;
       l.typeLigne = src.typeLigne;
-      if (!l.prixUnitaire && src.prixUnitaire) {
+      if (src.prixUnitaire) {
         l.prixUnitaire = src.prixUnitaire;
         l.montant = Math.round(l.quantite * l.prixUnitaire * 100) / 100;
       }
@@ -7017,35 +7103,97 @@ function addImportLigne() {
   ajaxInsertRow(_importData.lignes.length - 1);
   ajaxUpdateStats();
 }
+function addImportLigneInGroup(groupKey) {
+  if (!_importData) return;
+  var lignes = _importData.lignes;
+  var insertIdx = lignes.length;
+  for (var i = lignes.length - 1; i >= 0; i--) {
+    var fk = (lignes[i].numeroFact || '').trim() || ('__noline_' + i);
+    if (fk === groupKey) { insertIdx = i + 1; break; }
+  }
+  var refClient = '', refClientId = '';
+  for (var j = 0; j < lignes.length; j++) {
+    var fk2 = (lignes[j].numeroFact || '').trim() || ('__noline_' + j);
+    if (fk2 === groupKey && lignes[j].clientId) { refClient = lignes[j].clientNom || ''; refClientId = lignes[j].clientId || ''; break; }
+  }
+  var newL = { id: 'il_' + Date.now(), date: getToday(), clientNom: refClient, numeroFact: groupKey.indexOf('__noline_') === -1 ? groupKey : '', numeroBC: '', designation: '', quantite: 0, prixUnitaire: 0, montant: 0, clientId: refClientId, typeLigne: '' };
+  lignes.splice(insertIdx, 0, newL);
+  _recomputeFactLineNums();
+  renderImportPreview();
+  var tbody = document.querySelector('#importPreviewBody');
+  if (tbody && tbody.rows[insertIdx]) tbody.rows[insertIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  ajaxUpdateStats();
+}
+function findSimilarClient(name) {
+  if (!name) return null;
+  var clients = getClients();
+  var nl = name.toLowerCase().trim();
+  var norm = nl.replace(/[\s\-_\.\/\\]/g, '');
+  var best = null, bestScore = 0;
+  for (var i = 0; i < clients.length; i++) {
+    var cn = (clients[i].nom || '').toLowerCase().trim();
+    var cnNorm = cn.replace(/[\s\-_\.\/\\]/g, '');
+    if (cn === nl) return { client: clients[i], score: 100, reason: 'identique' };
+    if (cnNorm === norm) { if (10 > bestScore) { bestScore = 10; best = { client: clients[i], score: 10, reason: 'identique (normalisé)' }; } }
+    if (cn.indexOf(nl) !== -1 || nl.indexOf(cn) !== -1) {
+      var shorter = cn.length < nl.length ? cn : nl;
+      var longer = cn.length >= nl.length ? cn : nl;
+      var ratio = shorter.length / longer.length;
+      if (ratio > 0.6 && 8 > bestScore) { bestScore = 8; best = { client: clients[i], score: 8, reason: 'partiellement similaire' }; }
+    }
+    var words1 = nl.split(/\s+/), words2 = cn.split(/\s+/);
+    var matchCount = 0;
+    for (var w = 0; w < words1.length; w++) { if (words2.indexOf(words1[w]) !== -1 && words1[w].length > 1) matchCount++; }
+    if (matchCount >= 2 && matchCount / Math.max(words1.length, words2.length) > 0.5 && 6 > bestScore) {
+      bestScore = 6; best = { client: clients[i], score: 6, reason: 'mots en commun' };
+    }
+  }
+  return best && bestScore >= 6 ? best : null;
+}
 function addAllMissingClients() {
   if (!_importData || !_importData.lignes) return;
   var clients = getClients();
-  var newClients = 0;
+  var toCreate = [];
+  var toMap = [];
   var clientCache = {};
-  var changedRows = [];
   for (var i = 0; i < _importData.lignes.length; i++) {
     var l = _importData.lignes[i];
     if (l.clientId || !l.clientNom) continue;
     var nl = l.clientNom.trim();
-    if (clientCache[nl]) { l.clientId = clientCache[nl]; changedRows.push(i); continue; }
+    if (clientCache[nl]) { l.clientId = clientCache[nl]; toMap.push(i); continue; }
     var found = false;
     for (var j = 0; j < clients.length; j++) {
-      if ((clients[j].nom || '').toLowerCase().trim() === nl.toLowerCase().trim()) { l.clientId = clients[j].id; found = true; break; }
+      if ((clients[j].nom || '').toLowerCase().trim() === nl.toLowerCase().trim()) { l.clientId = clients[j].id; found = true; clientCache[nl] = clients[j].id; break; }
     }
     if (!found) {
-      var newId = DB.genId();
-      clients.push({ id: newId, nom: nl, email: '', telephone: '', adresse: '', siret: '', type: 'entreprise', delaiPaiement: 30, soldeInitial: 0, typeSolde: 'debiteur', banqueId: '' });
-      l.clientId = newId;
-      clientCache[nl] = newId;
-      newClients++;
-    } else {
-      clientCache[nl] = l.clientId;
+      var sim = findSimilarClient(nl);
+      if (sim) {
+        if (confirm('Le client "' + nl + '" ressemble à "' + sim.client.nom + '" (' + sim.reason + ').\nUtiliser le client existant "' + sim.client.nom + '" ?')) {
+          l.clientId = sim.client.id;
+          clientCache[nl] = sim.client.id;
+          toMap.push(i);
+          continue;
+        }
+      }
+      toCreate.push({ lineIdx: i, name: nl });
     }
-    changedRows.push(i);
+    toMap.push(i);
+  }
+  var newClients = 0;
+  for (var tc = 0; tc < toCreate.length; tc++) {
+    var tcItem = toCreate[tc];
+    var newId = DB.genId();
+    clients.push({ id: newId, nom: tcItem.name, email: '', telephone: '', adresse: '', siret: '', type: 'entreprise', delaiPaiement: 30, soldeInitial: 0, typeSolde: 'debiteur', banqueId: '' });
+    _importData.lignes[tcItem.lineIdx].clientId = newId;
+    clientCache[tcItem.name] = newId;
+    newClients++;
+    toMap.push(tcItem.lineIdx);
   }
   if (newClients > 0) DB.set('mdb_clients', clients);
-  for (var r = 0; r < changedRows.length; r++) ajaxUpdateRow(changedRows[r]);
-  toast(newClients + ' client(s) créé(s)', 'success');
+  for (var r = 0; r < toMap.length; r++) ajaxUpdateRow(toMap[r]);
+  var msg = newClients + ' client(s) créé(s)';
+  var simUsed = toCreate.filter(function(x){ return false; }).length;
+  toast(msg, newClients > 0 ? 'success' : 'info');
 }
 function saveJournalImport(statut) {
   if (!_importData || !_importData.lignes || _importData.lignes.length === 0) { toast('Aucune ligne à sauvegarder', 'error'); return; }
@@ -7064,7 +7212,7 @@ function saveJournalImport(statut) {
     DB.set('mdb_journal_ventes', imports);
     _importData = null;
     renderJournalImport(_importTarget);
-    var msg = 'Import validé ! ' + result.clientsCreated + ' client(s), ' + result.bcsCreated + ' BC, ' + result.blsCreated + ' BL, ' + result.facsCreated + ' facture(s)';
+    var msg = 'Import validé ! ' + result.clientsCreated + ' client(s), ' + result.bcsCreated + ' BC créé(s)' + (result.bcsMerged > 0 ? ', ' + result.bcsMerged + ' BC existant(s) réutilisé(s)' : '') + ', ' + result.blsCreated + ' BL, ' + result.facsCreated + ' facture(s)';
     if (result.stockWarnings.length > 0) {
       msg += '\n⚠️ ' + result.stockWarnings.length + ' article(s) en stock insuffisant :';
       for (var sw = 0; sw < result.stockWarnings.length; sw++) {
@@ -7087,7 +7235,7 @@ function saveJournalImport(statut) {
   }
 }
 function validateImportData(data) {
-  var result = { clientsCreated: 0, bcsCreated: 0, blsCreated: 0, facsCreated: 0, lignesImported: 0, stockWarnings: [] };
+  var result = { clientsCreated: 0, bcsCreated: 0, bcsMerged: 0, blsCreated: 0, facsCreated: 0, lignesImported: 0, stockWarnings: [] };
   var clients = getClients();
   var bcs = getBCs();
   var bls = getBLs();
@@ -7107,9 +7255,13 @@ function validateImportData(data) {
           if ((clients[ci].nom || '').toLowerCase().trim() === nl) { cid = clients[ci].id; break; }
         }
         if (!cid) {
-          cid = DB.genId();
-          clients.push({ id: cid, nom: l.clientNom.trim(), email: '', telephone: '', adresse: '', siret: '', type: 'entreprise', delaiPaiement: 30, soldeInitial: 0, typeSolde: 'debiteur', banqueId: '' });
-          result.clientsCreated++;
+          var simC = findSimilarClient(l.clientNom.trim());
+          if (simC) { cid = simC.client.id; }
+          else {
+            cid = DB.genId();
+            clients.push({ id: cid, nom: l.clientNom.trim(), email: '', telephone: '', adresse: '', siret: '', type: 'entreprise', delaiPaiement: 30, soldeInitial: 0, typeSolde: 'debiteur', banqueId: '' });
+            result.clientsCreated++;
+          }
         }
         clientCache[nl] = cid;
       }
@@ -7130,16 +7282,17 @@ function validateImportData(data) {
     for (var factKey2 in factGroups) {
       var factLignes = factGroups[factKey2];
       var bcId = null;
-      if (bcKey2 !== '_nbc_') {
+      if (factKey2 !== '_nbc_') {
         var existingBC = null;
         for (var bi = 0; bi < bcs.length; bi++) {
-          if (bcs[bi].numero === bcKey2 && bcs[bi].clientId === cid2) { existingBC = bcs[bi]; break; }
+          if (bcs[bi].numero === factKey2 && bcs[bi].clientId === cid2) { existingBC = bcs[bi]; break; }
         }
         if (existingBC) {
           bcId = existingBC.id;
+          result.bcsMerged++;
           var hasTVAInGroup = false;
-          for (var bli = 0; bli < bcLignes.length; bli++) {
-            var bl = bcLignes[bli];
+          for (var bli = 0; bli < factLignes.length; bli++) {
+            var bl = factLignes[bli];
             existingBC.lignes.push({ articleId: bl.articleId || '', designation: bl.designation, quantite: bl.quantite || 0, prixUnitaire: bl.prixUnitaire || 0 });
             if (bl.hasTVA) hasTVAInGroup = true;
           }
@@ -7148,27 +7301,27 @@ function validateImportData(data) {
           bcId = DB.genId();
           var bcLignesData = [];
           var hasTVA2 = false;
-          for (var blj = 0; blj < bcLignes.length; blj++) {
-            bcLignesData.push({ articleId: bcLignes[blj].articleId || '', designation: bcLignes[blj].designation, quantite: bcLignes[blj].quantite || 0, prixUnitaire: bcLignes[blj].prixUnitaire || 0 });
-            if (bcLignes[blj].hasTVA) hasTVA2 = true;
+          for (var blj = 0; blj < factLignes.length; blj++) {
+            bcLignesData.push({ articleId: factLignes[blj].articleId || '', designation: factLignes[blj].designation, quantite: factLignes[blj].quantite || 0, prixUnitaire: factLignes[blj].prixUnitaire || 0 });
+            if (factLignes[blj].hasTVA) hasTVA2 = true;
           }
-          bcs.push({ id: bcId, numero: bcKey2, clientId: cid2, dateBC: bcLignes[0].date || getToday(), delaiLivraison: 30, statut: 'valide', tvaActive: hasTVA2, tauxTva: 18, observations: 'Import journal de vente', lignes: bcLignesData, dateCreation: getToday() });
+          bcs.push({ id: bcId, numero: factKey2, clientId: cid2, dateBC: factLignes[0].date || getToday(), delaiLivraison: 30, statut: 'valide', tvaActive: hasTVA2, tauxTva: 18, observations: 'Import journal de vente', lignes: bcLignesData, dateCreation: getToday(), _fromImport: true });
           result.bcsCreated++;
         }
       }
       var blId = DB.genId();
       var blLignesData = [];
       var hasTVA3 = false;
-      for (var blk = 0; blk < bcLignes.length; blk++) {
-        blLignesData.push({ articleId: bcLignes[blk].articleId || '', designation: bcLignes[blk].designation, quantite: bcLignes[blk].quantite || 0, prixUnitaire: bcLignes[blk].prixUnitaire || 0, bcId: bcId || '' });
-        if (bcLignes[blk].hasTVA) hasTVA3 = true;
+      for (var blk = 0; blk < factLignes.length; blk++) {
+        blLignesData.push({ articleId: factLignes[blk].articleId || '', designation: factLignes[blk].designation, quantite: factLignes[blk].quantite || 0, prixUnitaire: factLignes[blk].prixUnitaire || 0, bcId: bcId || '' });
+        if (factLignes[blk].hasTVA) hasTVA3 = true;
       }
-      bls.push({ id: blId, numero: getNumero('BL'), clientId: cid2, dateLivraison: bcLignes[0].date || getToday(), statut: 'livree', lignes: blLignesData, bcId: bcId, factureId: null, raisonNonFacture: '' });
+      bls.push({ id: blId, numero: getNumero('BL'), clientId: cid2, dateLivraison: factLignes[0].date || getToday(), statut: 'livree', lignes: blLignesData, bcId: bcId, factureId: null, raisonNonFacture: '' });
       result.blsCreated++;
       var facLignesData = [];
       var facTotalHT = 0, facTotalTVA = 0;
-      for (var fl = 0; fl < bcLignes.length; fl++) {
-        var flLine = bcLignes[fl];
+      for (var fl = 0; fl < factLignes.length; fl++) {
+        var flLine = factLignes[fl];
         var lineMT = (flLine.quantite || 0) * (flLine.prixUnitaire || 0);
         var lineTVA = flLine.hasTVA ? Math.round(lineMT * (flLine.tvaRate || 18) / 100 * 100) / 100 : 0;
         facTotalHT += lineMT;
@@ -7176,8 +7329,8 @@ function validateImportData(data) {
         facLignesData.push({ articleId: flLine.articleId || '', designation: flLine.designation, quantite: flLine.quantite || 0, prixUnitaire: flLine.prixUnitaire || 0, bcId: bcId || '', blId: blId, tvaRate: flLine.hasTVA ? (flLine.tvaRate || 18) : 0 });
       }
       var facNumero = getNumero('FAC');
-      for (var fn = 0; fn < bcLignes.length; fn++) { if (bcLignes[fn].numeroFact) { facNumero = bcLignes[fn].numeroFact; break; } }
-      facs.push({ id: DB.genId(), numero: facNumero, clientId: cid2, dateEmission: bcLignes[0].date || getToday(), echeance: '', statut: 'validee', lignes: facLignesData, total: Math.round(facTotalHT * 100) / 100, tva: facTotalTVA > 0 ? 'oui' : 'non', tvaAmount: Math.round(facTotalTVA * 100) / 100, totalTTC: Math.round((facTotalHT + facTotalTVA) * 100) / 100, tauxTvaDefaut: 18, blIds: [blId], bcIds: bcId ? [bcId] : [], montantPaye: 0 });
+      for (var fn = 0; fn < factLignes.length; fn++) { if (factLignes[fn].numeroFact) { facNumero = factLignes[fn].numeroFact; break; } }
+      facs.push({ id: DB.genId(), numero: facNumero, clientId: cid2, dateEmission: factLignes[0].date || getToday(), echeance: '', statut: 'validee', lignes: facLignesData, total: Math.round(facTotalHT * 100) / 100, tva: facTotalTVA > 0 ? 'oui' : 'non', tvaAmount: Math.round(facTotalTVA * 100) / 100, totalTTC: Math.round((facTotalHT + facTotalTVA) * 100) / 100, tauxTvaDefaut: 18, blIds: [blId], bcIds: bcId ? [bcId] : [], montantPaye: 0 });
       result.facsCreated++;
     }
     result.lignesImported += clientLignes.length;
@@ -8913,8 +9066,163 @@ function saveReglementDirect(clientId, factureId) {
     DB.set('mdb_operationsCaisse', ops);
   }
   closeModal();
-  toast('R\u00e8glement enregistr\u00e9');
+  toast('Règlement enregistré');
   showExtraitCompte(clientId);
+}
+function openFacturePayment(factureId) {
+  var factures = getFactures();
+  var f = null;
+  for (var i = 0; i < factures.length; i++) { if (factures[i].id === factureId) { f = factures[i]; break; } }
+  if (!f) return;
+  var cl = getClientById(f.clientId);
+  var restant = (f.totalTTC || f.total || 0) - (f.montantPaye || 0);
+  if (restant <= 0) { toast('Facture déjà payée', 'error'); return; }
+  var html = '';
+  html += '<div style="background:var(--gray-50);border-radius:8px;padding:14px;margin-bottom:14px">';
+  html += '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">';
+  html += '<div><span style="font-size:11px;color:var(--gray-500);text-transform:uppercase">Facture</span><div style="font-weight:700;font-size:15px">' + escH(f.numero) + '</div></div>';
+  html += '<div><span style="font-size:11px;color:var(--gray-500);text-transform:uppercase">Client</span><div style="font-weight:600">' + escH(cl ? cl.nom : '-') + '</div></div>';
+  html += '<div><span style="font-size:11px;color:var(--gray-500);text-transform:uppercase">Total TTC</span><div style="font-weight:700">' + fmtMoney(f.totalTTC || f.total || 0) + '</div></div>';
+  html += '<div><span style="font-size:11px;color:var(--gray-500);text-transform:uppercase">Déjà payé</span><div style="font-weight:600">' + fmtMoney(f.montantPaye || 0) + '</div></div>';
+  html += '<div><span style="font-size:11px;color:var(--danger);text-transform:uppercase">Reste à payer</span><div style="font-weight:700;font-size:16px;color:var(--danger)">' + fmtMoney(restant) + '</div></div>';
+  html += '</div></div>';
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label>Date *</label><input type="date" id="fpDate" value="' + getToday() + '"></div>';
+  html += '<div class="form-group"><label>Montant (FCFA) *</label><input type="number" id="fpMontant" min="1" max="' + restant + '" value="' + restant + '"></div>';
+  html += '</div>';
+  html += '<div class="form-group"><label>Destination *</label><select id="fpDest" onchange="toggleFpFields()"><option value="caisse">Caisse</option><option value="banque">Banque</option></select></div>';
+  html += '<div id="fpBanqueGroup" style="display:none">';
+  html += '<div class="form-group"><label>Banque *</label><select id="fpBanqueId"><option value="">Choisir une banque</option></select></div>';
+  html += '<div class="form-group"><label>Mode de paiement *</label><select id="fpMode" onchange="toggleFpChequeFields()"><option value="virement">Virement</option><option value="cheque">Chèque</option></select></div>';
+  html += '<div id="fpChequeGroup" style="display:none">';
+  html += '<div class="form-group"><label>N° Chèque *</label><input type="text" id="fpChequeNum" placeholder="Numéro du chèque (obligatoire)"></div>';
+  html += '<div class="form-group"><label>Date chèque</label><input type="date" id="fpChequeDate"></div>';
+  html += '</div>';
+  html += '<div id="fpVirementGroup">';
+  html += '<div class="form-group"><label>Référence virement</label><input type="text" id="fpVirementRef" placeholder="Référence du virement"></div>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="form-group"><label>Notes</label><textarea id="fpNotes" rows="2" placeholder="Observations..."></textarea></div>';
+  var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
+  footer += '<button class="btn btn-success" onclick="saveFacturePayment(\'' + factureId + '\')">Enregistrer le paiement</button>';
+  openFormModal('Paiement rapide', html, footer, '520px');
+  setTimeout(function() {
+    populateBanqueSelect();
+    document.getElementById('fpBanqueId').value = '';
+  }, 50);
+}
+function toggleFpFields() {
+  var dest = document.getElementById('fpDest').value;
+  document.getElementById('fpBanqueGroup').style.display = dest === 'banque' ? 'block' : 'none';
+}
+function toggleFpChequeFields() {
+  var mode = document.getElementById('fpMode').value;
+  document.getElementById('fpChequeGroup').style.display = mode === 'cheque' ? 'block' : 'none';
+  document.getElementById('fpVirementGroup').style.display = mode === 'virement' ? 'block' : 'none';
+}
+function saveFacturePayment(factureId) {
+  var date = document.getElementById('fpDate').value;
+  var montant = parseFloat(document.getElementById('fpMontant').value) || 0;
+  var dest = document.getElementById('fpDest').value;
+  if (!date) { toast('La date est obligatoire', 'error'); return; }
+  if (montant <= 0) { toast('Le montant doit être positif', 'error'); return; }
+  var mode = 'especes';
+  var reference = '';
+  var chequeNum = '';
+  var chequeDate = '';
+  var clientBankId = '';
+  var banqueId = '';
+  if (dest === 'banque') {
+    banqueId = document.getElementById('fpBanqueId').value;
+    mode = document.getElementById('fpMode').value;
+    if (!banqueId) { toast('Choisissez une banque', 'error'); return; }
+    if (mode === 'cheque') {
+      chequeNum = document.getElementById('fpChequeNum').value.trim();
+      if (!chequeNum) { toast('Le numéro de chèque est obligatoire', 'error'); return; }
+      chequeDate = document.getElementById('fpChequeDate').value || '';
+      reference = 'Chèque n°' + chequeNum;
+    } else {
+      reference = document.getElementById('fpVirementRef').value.trim();
+    }
+    clientBankId = banqueId;
+  } else {
+    mode = 'especes';
+  }
+  var notes = document.getElementById('fpNotes').value.trim();
+  var factures = getFactures();
+  var f = null;
+  for (var i = 0; i < factures.length; i++) { if (factures[i].id === factureId) { f = factures[i]; break; } }
+  if (!f) { toast('Facture introuvable', 'error'); return; }
+  var reg = {
+    id: DB.genId(),
+    clientId: f.clientId,
+    factureId: factureId,
+    date: date,
+    montant: montant,
+    modePaiement: mode,
+    reference: reference,
+    notes: notes,
+    dest: dest,
+    clientBankId: clientBankId,
+    chequeNum: chequeNum,
+    chequeDate: chequeDate,
+    banqueId: banqueId,
+    dateEnregistrement: getToday()
+  };
+  var regs = getReglements();
+  regs.push(reg);
+  DB.set('mdb_reglements', regs);
+  updateFactureFromReglement(null, reg);
+  if (dest === 'banque') {
+    var banqueOps = DB.get('mdb_banqueOperations') || [];
+    var banque = null;
+    var banques = getBanques();
+    for (var b = 0; b < banques.length; b++) { if (banques[b].id === banqueId) { banque = banques[b]; break; } }
+    var bnObj = {};
+    bnObj.id = DB.genId();
+    bnObj.banqueId = banqueId;
+    bnObj.date = date;
+    bnObj.heure = new Date().toTimeString().substr(0, 5);
+    bnObj.sens = 'entree';
+    bnObj.montant = montant;
+    bnObj.libelle = 'Règlement facture ' + f.numero;
+    bnObj.reference = reference;
+    bnObj.beneficiaireType = 'client';
+    bnObj.beneficiaireId = f.clientId;
+    bnObj.beneficiaireNom = (getClientById(f.clientId) ? getClientById(f.clientId).nom : '');
+    bnObj.moyenPaiement = mode;
+    bnObj.observations = notes;
+    if (mode === 'cheque') { bnObj.chequeNum = chequeNum; bnObj.chequeDate = chequeDate; }
+    banqueOps.push(bnObj);
+    DB.set('mdb_banqueOperations', banqueOps);
+  } else {
+    var ops = getOperationsCaisse();
+    var caisses = getCaisses();
+    var caisseId = '';
+    for (var ci = 0; ci < caisses.length; ci++) { if (caisses[ci].type === 'generale') { caisseId = caisses[ci].id; break; } }
+    if (!caisseId && caisses.length > 0) caisseId = caisses[0].id;
+    var pieceNum = generatePieceNumber ? generatePieceNumber(caisseId, date) : '';
+    var opObj = {};
+    opObj.id = DB.genId();
+    opObj.caisseId = caisseId;
+    opObj.date = date;
+    opObj.heure = new Date().toTimeString().substr(0, 5);
+    opObj.sens = 'entree';
+    opObj.montant = montant;
+    opObj.libelle = 'Règlement facture ' + f.numero;
+    opObj.piece = pieceNum;
+    opObj.beneficiaireType = 'client';
+    opObj.beneficiaireId = f.clientId;
+    opObj.beneficiaireNom = (getClientById(f.clientId) ? getClientById(f.clientId).nom : '');
+    opObj.moyenPaiement = 'Espèce';
+    opObj.observations = notes;
+    ops.push(opObj);
+    DB.set('mdb_operationsCaisse', ops);
+  }
+  closeModal();
+  toast('Paiement de ' + fmtMoney(montant) + ' enregistré');
+  renderFactures();
+  buildSidebar();
 }
 function saisieFournisseurDepuisCompte(fournisseurId, fournisseurNom) {
   var caisses = getCaisses();
