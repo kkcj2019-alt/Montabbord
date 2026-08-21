@@ -9519,6 +9519,7 @@ function saveReglement(id) {
   var factureId = document.getElementById('regFacture').value;
   var dest = document.getElementById('regDest') ? document.getElementById('regDest').value : 'caisse';
   var clientBankId = dest === 'banque' ? (document.getElementById('regBanqueId') ? document.getElementById('regBanqueId').value : '') : '';
+  if (dest === 'banque' && !clientBankId) { toast('Choisissez une banque', 'error'); return; }
   var data = {clientId:clientId, factureId:factureId||null, date:document.getElementById('regDate').value, montant:montant, modePaiement:document.getElementById('regMode').value, reference:document.getElementById('regRef').value.trim(), notes:document.getElementById('regNotes').value.trim(), dest:dest, clientBankId:clientBankId};
   var regs = getReglements();
   var oldReg = null;
@@ -9526,6 +9527,7 @@ function saveReglement(id) {
     for (var i = 0; i < regs.length; i++) { if (regs[i].id === id) { oldReg = regs[i]; data.id = id; regs[i] = data; break; } }
   } else { data.id = DB.genId(); regs.push(data); }
   DB.set('mdb_reglements', regs);
+  syncReglementBanqueOp(oldReg, data);
   updateFactureFromReglement(oldReg, data);
   closeModal();
   toast('R\u00e8glement enregistr\u00e9');
@@ -9567,6 +9569,7 @@ function deleteReglement(id) {
   var regs = getReglements(); var oldReg = null; var result = [];
   for (var i = 0; i < regs.length; i++) { if (regs[i].id === id) oldReg = regs[i]; else result.push(regs[i]); }
   DB.set('mdb_reglements', result);
+  removeReglementBanqueOps(id);
   if (oldReg) updateFactureFromReglement(oldReg, null);
   toast('R\u00e8glement supprim\u00e9');
   renderTresorerie();
@@ -9585,10 +9588,25 @@ function reglerFactureDepuisCompte(clientId, factureId) {
   html += '<div class="form-group"><label>Mode de paiement *</label><select id="regModeDirect"><option value="especes">Esp\u00e8ces</option><option value="virement">Virement</option><option value="cheque">Ch\u00e8que</option><option value="mobile">Mobile</option></select></div>';
   html += '</div>';
   html += '<div class="form-group"><label>R\u00e9f\u00e9rence</label><input type="text" id="regRefDirect" placeholder="N\u00b0 ch\u00e8que, r\u00e9f\u00e9rence..."></div>';
-  html += '<div class="form-group"><label>Moyen</label><select id="regDestDirect"><option value="caisse">Caisse</option><option value="banque">Banque</option></select></div>';
+  html += '<div class="form-group"><label>Moyen</label><select id="regDestDirect" onchange="toggleRegBanqueSelectDirect()"><option value="caisse">Caisse</option><option value="banque">Banque</option></select></div>';
+  html += '<div class="form-group" id="regBanqueGroupDirect" style="display:none"><label>Banque *</label><select id="regBanqueIdDirect"><option value="">Choisir une banque</option></select></div>';
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-success" onclick="saveReglementDirect(\'' + clientId + '\',\'' + factureId + '\')">Enregistrer le r\u00e8glement</button>';
   openFormModal('R\u00e9gler la facture ' + (fac.numero || ''), html, footer);
+  setTimeout(function() {
+    var selB = document.getElementById('regBanqueIdDirect');
+    if (selB) {
+      var bqs = getBanques();
+      var optHtml = '<option value="">Choisir une banque</option>';
+      for (var bi = 0; bi < bqs.length; bi++) optHtml += '<option value="' + bqs[bi].id + '">' + escH(bqs[bi].nom) + '</option>';
+      selB.innerHTML = optHtml;
+    }
+  }, 50);
+}
+function toggleRegBanqueSelectDirect() {
+  var sel = document.getElementById('regDestDirect');
+  var group = document.getElementById('regBanqueGroupDirect');
+  if (sel && group) group.style.display = sel.value === 'banque' ? 'block' : 'none';
 }
 function saveReglementDirect(clientId, factureId) {
   var montant = parseFloat(document.getElementById('regMontantDirect').value) || 0;
@@ -9598,14 +9616,21 @@ function saveReglementDirect(clientId, factureId) {
   var dest = document.getElementById('regDestDirect').value;
   if (montant <= 0) { toast('Le montant doit \u00eatre positif', 'error'); return; }
   if (!date) { toast('La date est obligatoire', 'error'); return; }
-  var reg = {id:DB.genId(), clientId:clientId, factureId:factureId, montant:montant, date:date, modePaiement:mode, reference:ref, dateEnregistrement:getToday()};
+  var banqueIdD = '';
+  if (dest === 'banque') {
+    banqueIdD = document.getElementById('regBanqueIdDirect') ? document.getElementById('regBanqueIdDirect').value : '';
+    if (!banqueIdD) { toast('Choisissez une banque', 'error'); return; }
+  }
+  var reg = {id:DB.genId(), clientId:clientId, factureId:factureId, montant:montant, date:date, modePaiement:mode, reference:ref, dest:dest, clientBankId:banqueIdD, dateEnregistrement:getToday()};
   var regs = getReglements();
   regs.push(reg);
   DB.set('mdb_reglements', regs);
   updateFactureFromReglement(null, reg);
   if (dest === 'banque') {
+    var clNameD = getClientById(clientId) ? getClientById(clientId).nom : '';
+    var facObjD = getFactureById(factureId);
     var banqueOps = DB.get('mdb_banqueOperations') || [];
-    banqueOps.push({id:DB.genId(), date:date, sens:'entree', montant:montant, libelle:'R\u00e9glement client ' + (getClientById(clientId) ? getClientById(clientId).nom : ''), beneficiaireType:'client', beneficiaireId:clientId, beneficiaireNom:getClientById(clientId) ? getClientById(clientId).nom : ''});
+    banqueOps.push({id:DB.genId(), reglementId:reg.id, banqueId:banqueIdD, date:date, heure:new Date().toTimeString().substr(0,5), sens:'entree', montant:montant, libelle:'R\u00e9glement ' + (facObjD && facObjD.numero ? 'facture ' + facObjD.numero : 'client ' + clNameD), reference:ref, beneficiaireType:'client', beneficiaireId:clientId, beneficiaireNom:clNameD, moyenPaiement:mode});
     DB.set('mdb_banqueOperations', banqueOps);
   } else {
     var ops = getOperationsCaisse();
@@ -9733,6 +9758,7 @@ function saveFacturePayment(factureId) {
     for (var b = 0; b < banques.length; b++) { if (banques[b].id === banqueId) { banque = banques[b]; break; } }
     var bnObj = {};
     bnObj.id = DB.genId();
+    bnObj.reglementId = reg.id;
     bnObj.banqueId = banqueId;
     bnObj.date = date;
     bnObj.heure = new Date().toTimeString().substr(0, 5);
@@ -10340,6 +10366,10 @@ function renderActif() {
         if (d.factureId && rub.key === 'creance_douteuse') {
           html += '<button class="btn-icon" onclick="event.stopPropagation();toggleFactureDouteuse(\'' + d.factureId + '\')" title="Retirer des créances douteuses" style="color:var(--success)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button> ';
         }
+        if (d.isBankLine) {
+          html += '<button class="btn-icon" onclick="event.stopPropagation();openBankSoldeModal(\'' + d.banqueId + '\')" title="' + (d.hasOverride ? 'Modifier le solde indiqué' : 'Indiquer un solde manuel') + '"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
+          if (d.hasOverride) html += '<button class="btn-icon danger" onclick="event.stopPropagation();clearBankSoldeOverride(\'' + d.banqueId + '\')" title="Effacer le solde indiqué (reprendre le solde réel)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
+        }
         html += '</td>';
       }
       html += '</tr>';
@@ -10878,6 +10908,68 @@ function moveLigneDown(rubId, lineId) {
   }
   DB.set('mdb_actif', actif);
   renderActif();
+}
+
+function openBankSoldeModal(banqueId) {
+  var banques = getBanques();
+  var bk = null;
+  for (var i = 0; i < banques.length; i++) { if (banques[i].id === banqueId) { bk = banques[i]; break; } }
+  if (!bk) return;
+  var overrides = DB.get('mdb_bankSoldeOverrides') || {};
+  var hasOv = Object.prototype.hasOwnProperty.call(overrides, banqueId);
+  var ops = DB.get('mdb_banqueOperations') || [];
+  var reel = calcSoldeBanque(bk, ops);
+  var html = '<div style="background:var(--gray-50);padding:10px;border-radius:var(--radius-sm);margin-bottom:12px;font-size:13px">';
+  html += '<strong>Compte courant ' + escH(bk.nom || '') + '</strong><br>Solde r\u00e9el calcul\u00e9 : <strong style="color:var(--primary)">' + fmtMoney(reel) + ' FCFA</strong>';
+  html += '</div>';
+  html += '<div class="form-group"><label>Solde \u00e0 afficher dans l\'Actif (FCFA)</label><input type="number" id="bankOvMontant" step="1" value="' + (hasOv ? overrides[banqueId] : reel) + '" style="font-size:16px;font-weight:700;color:var(--primary)"></div>';
+  html += '<div style="font-size:12px;color:var(--gray-500)">Indiquez un montant diff\u00e9rent du solde r\u00e9el pour corriger l\'affichage. Le bouton poubelle dans l\'Actif efface le solde indiqu\u00e9 et reprend le solde r\u00e9el.</div>';
+  var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
+  footer += '<button class="btn btn-primary" onclick="saveBankSoldeOverride(\'' + banqueId + '\')">Enregistrer</button>';
+  openFormModal('Compte courant ' + (bk.nom || ''), html, footer);
+}
+function saveBankSoldeOverride(banqueId) {
+  var v = document.getElementById('bankOvMontant').value;
+  if (v === '') { toast('Indiquez un montant', 'error'); return; }
+  var overrides = DB.get('mdb_bankSoldeOverrides') || {};
+  overrides[banqueId] = parseFloat(v) || 0;
+  DB.set('mdb_bankSoldeOverrides', overrides);
+  closeModal();
+  toast('Solde indiqué enregistré');
+  if (currentPage === 'actif') renderActif();
+}
+function clearBankSoldeOverride(banqueId) {
+  var overrides = DB.get('mdb_bankSoldeOverrides') || {};
+  delete overrides[banqueId];
+  DB.set('mdb_bankSoldeOverrides', overrides);
+  toast('Solde indiqué effacé — retour au solde réel');
+  if (currentPage === 'actif') renderActif();
+}
+function removeReglementBanqueOps(reglementId) {
+  var ops = DB.get('mdb_banqueOperations') || [];
+  var kept = [], removed = false;
+  for (var i = 0; i < ops.length; i++) {
+    if (ops[i].reglementId === reglementId) { removed = true; continue; }
+    kept.push(ops[i]);
+  }
+  if (removed) DB.set('mdb_banqueOperations', kept);
+}
+function createReglementBanqueOp(reg) {
+  if (!reg || reg.dest !== 'banque' || !reg.clientBankId) return;
+  var banques = getBanques();
+  var banque = null;
+  for (var b = 0; b < banques.length; b++) { if (banques[b].id === reg.clientBankId) { banque = banques[b]; break; } }
+  var cl = getClientById(reg.clientId);
+  var facNum = '';
+  if (reg.factureId) { var f = getFactureById(reg.factureId); facNum = f ? (f.numero || '') : ''; }
+  var op = {id:DB.genId(), reglementId:reg.id, banqueId:reg.clientBankId, date:reg.date, heure:new Date().toTimeString().substr(0,5), sens:'entree', montant:reg.montant||0, libelle:'R\u00e8glement ' + (facNum ? 'facture ' + facNum : 'client ' + (cl ? cl.nom : '')), reference:reg.reference||'', beneficiaireType:'client', beneficiaireId:reg.clientId, beneficiaireNom:(cl ? cl.nom : ''), moyenPaiement:reg.modePaiement||'', observations:reg.notes||''};
+  var ops = DB.get('mdb_banqueOperations') || [];
+  ops.push(op);
+  DB.set('mdb_banqueOperations', ops);
+}
+function syncReglementBanqueOp(oldReg, newReg) {
+  if (oldReg && oldReg.id) removeReglementBanqueOps(oldReg.id);
+  if (newReg && newReg.dest === 'banque' && newReg.clientBankId) createReglementBanqueOp(newReg);
 }
 
 function openPrintActifModal() {
