@@ -385,41 +385,22 @@ tbody tr:hover{background:var(--gray-50)}
 <div class="modal-footer" id="formModalFooter"></div>
 </div>
 </div>
-<script src="firebase-sdk/firebase-app-compat.js"></script>
-<script src="firebase-sdk/firebase-auth-compat.js"></script>
-<script src="firebase-sdk/firebase-firestore-compat.js"></script>
+<script src="supabase-sdk/supabase.js"></script>
+<script src="supabase-sdk/mdb-supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
+/* Base de données : Supabase (PostgreSQL) via l'adaptateur compatible Firestore */
 var firebaseApp = null;
-var firebaseAuth = null;
+var firebaseAuth = null; /* Conservé pour les garde-fous existants ; l'auth est gérée par l'app elle-même */
 var firebaseDb = null;
-var FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBayjllPQ199Ve_hiERosXY5qxgCewVCMg",
-  authDomain: "montabbord.firebaseapp.com",
-  projectId: "montabbord",
-  storageBucket: "montabbord.firebasestorage.app",
-  messagingSenderId: "686589891075",
-  appId: "1:686589891075:web:1a4e65a8f93243f045f436"
-};
-function initFirebase() {
+(function initDatabase() {
   try {
-    if (typeof firebase === 'undefined' || !firebase.initializeApp) {
-      setTimeout(initFirebase, 200);
-      return;
-    }
-    firebaseApp = firebase.initializeApp(FIREBASE_CONFIG);
-    firebaseAuth = firebase.auth();
-    firebaseAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-    firebaseDb = firebase.firestore();
-    firebaseDb.enablePersistence({synchronizeTabs:true}).catch(function(e) {
-      if (e.code === 'failed-precondition') console.warn('Persistence failed: multi-tab');
-      else if (e.code === 'unimplemented') console.warn('Persistence not available');
-      else console.warn('Persistence error:', e);
-    });
-  } catch(e) { console.warn('Firebase init error:', e); setTimeout(initFirebase, 500); }
-}
-initFirebase();
+    if (typeof supabase === 'undefined' || !window.__MDB_ADAPTER__) { setTimeout(initDatabase, 150); return; }
+    firebaseDb = window.__MDB_ADAPTER__;
+    console.log('[MDB] Base de données initialisée (Supabase)');
+  } catch(e) { console.warn('Init database error:', e); setTimeout(initDatabase, 400); }
+})();
 var _receivingSnapshot = false;
 var _dirtyKeys = {};
 var _pushTimer = null;
@@ -441,7 +422,7 @@ function startUniqueSession(enterpriseUid, userId, forceNew) {
   if (!forceNew && stored) { _sessionToken = stored; }
   else { _sessionToken = DB.genId(); localStorage.setItem(storeKey, _sessionToken); }
   var ref = firebaseDb.collection('enterprises').doc(enterpriseUid).collection('sessions').doc(userId);
-  ref.set({token: _sessionToken, userId: userId, updatedAt: firebase.firestore.FieldValue.serverTimestamp()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
+  ref.set({token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
   _sessionUnsubscribe = ref.onSnapshot(function(doc) {
     if (!doc.exists || !doc.data().token || doc.data().token === _sessionToken) return;
     stopUniqueSession();
@@ -542,12 +523,17 @@ function schedulePush() {
 }
 
 function pushToCloud() {
-  if (!currentUser || !currentUser.id || _receivingSnapshot) return;
+  if (!currentUser || !currentUser.id) return;
   if (currentUser.isSuperAdmin && !currentUser.isImpersonating) return;
-  if (_isPushing) return;
   var keys = Object.keys(_dirtyKeys);
   if (keys.length === 0) return;
   if (!firebaseDb) return;
+  /* Ne jamais abandonner une écriture en attente : réessayer après la fenêtre de chargement */
+  if (_receivingSnapshot || _isPushing) {
+    clearTimeout(_pushTimer);
+    _pushTimer = setTimeout(pushToCloud, 1500);
+    return;
+  }
   _isPushing = true;
   var data = {};
   for (var i = 0; i < keys.length; i++) {
@@ -1365,14 +1351,9 @@ function doSaQuickLogin() {
               errEl.style.display = 'none';
               startSaSession(true);
               showApp();
-    if (firebaseAuth) {
-      firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
-        firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', pass).catch(function(){});
-      });
-    }
     return;
   }
-  if (!firebaseDb) { errEl.textContent = 'Firebase non disponible'; errEl.style.color = 'var(--danger)'; errEl.style.display = 'block'; return; }
+  if (!firebaseDb) { errEl.textContent = 'Base de donn\u00e9es non disponible'; errEl.style.color = 'var(--danger)'; errEl.style.display = 'block'; return; }
   firebaseDb.collection('superAdmin').doc('config').get().then(function(doc) {
     if (doc.exists && doc.data().password === pass) {
       currentUser = {id: 'SUPER-ADMIN', nom: doc.data().nom || 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
@@ -1397,94 +1378,51 @@ function initAuth() {
   initDB();
   if (checkPersistedIdleExpiry()) {
     stopRealtimeSync();
-    if (firebaseAuth) firebaseAuth.signOut().catch(function() {});
     currentUser = null;
     showLogin();
     var err = document.getElementById('loginError');
     if (err) { err.textContent = 'Session expir\u00e9e (15 min d\u2019inactivit\u00e9). Veuillez vous reconnecter.'; err.style.color = 'var(--danger)'; err.style.display = 'block'; }
     return;
   }
-  if (firebaseAuth) {
-    firebaseAuth.onAuthStateChanged(function(user) {
-      if (window._registrationInProgress) return;
-      if (user) {
-        if (currentUser && currentUser.isSuperAdmin) return;
-        if (user.email === 'superadmin@mdb.app') {
-          var saUid = DB.get('mdb_enterpriseUid');
-          var saUid2 = DB.get('mdb_currentUser');
-          if (saUid === 'SUPER-ADMIN' && saUid2 === 'SUPER-ADMIN') {
-            var saNom = DB.get('mdb_saNom') || 'Super Admin';
-            currentUser = {id: 'SUPER-ADMIN', nom: saNom, login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
-            DB.set('mdb_currentUser', 'SUPER-ADMIN');
-            DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
-            startSaSession(false);
-            showApp();
-            return;
-          }
-          return;
-        }
-        if (currentUser && currentUser.id === user.uid && currentPage) return;
-        currentUser = {id: user.uid, nom: user.displayName || user.email, email: user.email, login: user.email, isAdmin: true, sections: {}};
-        DB.set('mdb_currentUser', user.uid);
-        _receivingSnapshot = true;
-        showApp();
-        loadCloudData(user.uid, function() {
-  buildSidebar();
-  restoreSidebarState();
-          if (currentPage) navigateTo(currentPage);
-          startRealtimeSync(user.uid);
-        });
-      } else {
-        var subUid = DB.get('mdb_enterpriseUid');
-        var subUserId = DB.get('mdb_currentUser');
-        var sadminBackup = DB.get('mdb_sadminBackup');
-        if (sadminBackup) {
-          currentUser = {id: 'SUPER-ADMIN', nom: DB.get('mdb_saNom') || 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
-          stopRealtimeSync();
-          showApp();
-          navigateTo('sadminEnterprises');
-          toast('Session impersonation restaur\u00e9e. Cliquez sur Retour Super Admin.');
-          return;
-        }
-        if (subUid === 'SUPER-ADMIN' && subUserId === 'SUPER-ADMIN') {
-          var saNom = DB.get('mdb_saNom') || 'Super Admin';
-          currentUser = {id: 'SUPER-ADMIN', nom: saNom, login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
-          showApp();
-          return;
-        }
-        var users = DB.get('mdb_users') || [];
-        var found = null;
-        if (subUid && subUserId) {
-          for (var i = 0; i < users.length; i++) {
-            if (users[i].id === subUserId) { found = users[i]; break; }
-          }
-        }
-        if (found) {
-          currentUser = {id: subUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
-          startUniqueSession(subUid, found.id);
-          _receivingSnapshot = true;
-          showApp();
-          loadCloudData(subUid, function() {
-            buildSidebar();
-            restoreSidebarState();
-            if (currentPage) navigateTo(currentPage);
-            startRealtimeSync(subUid);
-          });
-        } else {
-          stopRealtimeSync();
-          showLogin();
-        }
-      }
+  var sadminBackup = DB.get('mdb_sadminBackup');
+  if (sadminBackup) {
+    currentUser = {id: 'SUPER-ADMIN', nom: DB.get('mdb_saNom') || 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
+    stopRealtimeSync();
+    showApp();
+    navigateTo('sadminEnterprises');
+    toast('Session impersonation restaur\u00e9e. Cliquez sur Retour Super Admin.');
+    return;
+  }
+  var curId = DB.get('mdb_currentUser');
+  var subUid = DB.get('mdb_enterpriseUid');
+  if (curId === 'SUPER-ADMIN' && subUid === 'SUPER-ADMIN') {
+    var saNom = DB.get('mdb_saNom') || 'Super Admin';
+    currentUser = {id: 'SUPER-ADMIN', nom: saNom, login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
+    startSaSession(false);
+    showApp();
+    return;
+  }
+  var users = DB.get('mdb_users') || [];
+  var found = null;
+  if (subUid && curId && curId !== 'IMPERSONATING') {
+    for (var i = 0; i < users.length; i++) {
+      if (users[i].id === curId) { found = users[i]; break; }
+    }
+  }
+  if (found) {
+    currentUser = {id: subUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false};
+    startUniqueSession(subUid, found.id);
+    _receivingSnapshot = true;
+    showApp();
+    loadCloudData(subUid, function() {
+      buildSidebar();
+      restoreSidebarState();
+      if (currentPage) navigateTo(currentPage);
+      startRealtimeSync(subUid);
     });
   } else {
-    var curId = DB.get('mdb_currentUser');
-    if (curId) {
-      var users = DB.get('mdb_users') || [];
-      for (var i = 0; i < users.length; i++) {
-        if (users[i].id === curId) { currentUser = users[i]; break; }
-      }
-    }
-    if (currentUser) { showApp(); } else { showLogin(); }
+    stopRealtimeSync();
+    showLogin();
   }
 }
 
@@ -1613,11 +1551,6 @@ function doFirebaseLogin() {
         errEl.style.display = 'none';
         startSaSession(true);
         showApp();
-        if (firebaseAuth) {
-          firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
-            firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', pass).catch(function(){});
-          });
-        }
       };
       var doSaConfigFallback = function() {
         firebaseDb.collection('superAdmin').doc('config').get().then(function(configDoc) {
@@ -1635,69 +1568,11 @@ function doFirebaseLogin() {
               DB.set('mdb_saNom', 'Super Admin');
               errEl.style.display = 'none';
               showApp();
-              if (firebaseAuth) {
-                firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
-                  firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', pass).catch(function(){});
-                });
-              }
             });
           } else { errEl.textContent = 'Identifiant ou mot de passe incorrect'; errEl.style.color = 'var(--danger)'; errEl.style.display = 'block'; }
         }).catch(function(e2) { errEl.textContent = 'Erreur config : ' + (e2.message || 'inconnu'); errEl.style.color = 'var(--danger)'; errEl.style.display = 'block'; });
       };
-      if (firebaseAuth) {
-        firebaseAuth.signInWithEmailAndPassword(saEmail, pass).then(function() {
-          return firebaseDb.collection('superAdmin').doc('config').get().then(function(doc) {
-            if (doc.exists) {
-              currentUser = {id: 'SUPER-ADMIN', nom: doc.data().nom || 'Super Admin', login: login, isSuperAdmin: true, isAdmin: true, sections: {}};
-              DB.set('mdb_currentUser', 'SUPER-ADMIN');
-              DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
-              DB.set('mdb_saNom', doc.data().nom || 'Super Admin');
-              errEl.style.display = 'none';
-              startSaSession(true);
-              showApp();
-            } else {
-              return firebaseDb.collection('superAdmin').doc('config').set({login: 'admin', password: pass, nom: 'Super Admin'}).then(function() {
-                return firebaseDb.collection('superAdmin').doc('config').get();
-              }).then(function(d2) {
-                if (d2.exists) doSaLogin(d2.data());
-                else { errEl.textContent = 'Impossible de cr\u00e9er la config'; errEl.style.color = 'var(--danger)'; errEl.style.display = 'block'; }
-              });
-            }
-          });
-        }).catch(function(error) {
-          console.error('SA login error:', error);
-          if (pass === 'admin123' && login === 'admin') {
-            firebaseAuth.createUserWithEmailAndPassword(saEmail, pass).catch(function() {
-              return firebaseAuth.signInWithEmailAndPassword(saEmail, pass);
-            }).then(function() {
-              return firebaseDb.collection('superAdmin').doc('config').set({login: 'admin', password: 'admin123', nom: 'Super Admin'}, {merge: true});
-            }).then(function() {
-              currentUser = {id: 'SUPER-ADMIN', nom: 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
-              DB.set('mdb_currentUser', 'SUPER-ADMIN');
-              DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
-              DB.set('mdb_saNom', 'Super Admin');
-              errEl.style.display = 'none';
-              startSaSession(true);
-              showApp();
-            }).catch(function() {
-              currentUser = {id: 'SUPER-ADMIN', nom: 'Super Admin', login: 'admin', isSuperAdmin: true, isAdmin: true, sections: {}};
-              DB.set('mdb_currentUser', 'SUPER-ADMIN');
-              DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
-              DB.set('mdb_saNom', 'Super Admin');
-              errEl.style.display = 'none';
-              startSaSession(true);
-              showApp();
-              firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', pass).catch(function() {
-                firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', pass).catch(function(){});
-              });
-            });
-          } else {
-            doSaConfigFallback();
-          }
-        });
-      } else {
-        doSaConfigFallback();
-      }
+      doSaConfigFallback();
       return;
     }
     var entIdVariants = [entId, entIdRaw, entIdRaw.toUpperCase()];
@@ -1766,10 +1641,6 @@ function doFirebaseLogin() {
         showApp();
         startRealtimeSync(adminUid);
         _receivingSnapshot = false;
-        if (firebaseAuth) {
-          var fbLoginEmail = found.email || (login.replace(/[^a-z0-9]/gi, '_') + '@mdb.app');
-          firebaseAuth.signInWithEmailAndPassword(fbLoginEmail, pass).catch(function() {});
-        }
       });
     }).catch(function(e) {
       errEl.style.color = 'var(--danger)';
@@ -1786,82 +1657,85 @@ function doResetPassword() {
   var entId = document.getElementById('loginEntId').value.trim().toLowerCase();
   var login = document.getElementById('loginEmail').value.trim();
   var errEl = document.getElementById('loginError');
-  var email = '';
-  if (entId && firebaseDb) {
-    errEl.textContent = 'Recherche en cours...';
-    errEl.style.color = 'var(--primary)';
+  if (!firebaseDb) { errEl.textContent = 'Base de donn\u00e9es non disponible'; errEl.style.display = 'block'; return; }
+  if (!entId && !login) {
+    errEl.textContent = 'Veuillez saisir l\'identifiant de l\'entreprise ou votre identifiant utilisateur';
+    errEl.style.color = 'var(--danger)';
     errEl.style.display = 'block';
-    var proceedWithEmail = function(adminEmail) {
-      if (!adminEmail || !firebaseAuth) {
-        errEl.textContent = 'Impossible de r\u00e9initialiser le mot de passe sans email valide';
+    return;
+  }
+  errEl.textContent = 'Recherche en cours...';
+  errEl.style.color = 'var(--primary)';
+  errEl.style.display = 'block';
+  if (entId) {
+    firebaseDb.collection('enterpriseIndex').doc(entId).get().then(function(doc) {
+      if (!doc.exists) {
+        errEl.textContent = 'Identifiant d\'entreprise non trouv\u00e9';
         errEl.style.color = 'var(--danger)';
         errEl.style.display = 'block';
         return;
       }
-      doSendResetEmail(adminEmail);
-    };
-    firebaseDb.collection('enterpriseIndex').doc(entId).get().then(function(doc) {
-      if (doc.exists) {
-        var idxData = doc.data();
-        if (idxData.email) proceedWithEmail(idxData.email);
-        else {
-          firebaseDb.collection('enterprises').doc(idxData.uid).get().then(function(entDoc) {
-            if (entDoc.exists) proceedWithEmail(entDoc.data().email || '');
-            else proceedWithEmail('');
-          }).catch(function() { proceedWithEmail(''); });
+      var idxData = doc.data();
+      var uid = idxData.uid || '';
+      return firebaseDb.collection('enterprises').doc(uid).get().then(function(entDoc) {
+        var d = entDoc.exists ? entDoc.data() : {};
+        var email = idxData.email || d.email || '';
+        var users = d['mdb_users'] || [];
+        var uLogin = '';
+        for (var i = 0; i < users.length; i++) {
+          if (users[i].isAdmin) { uLogin = users[i].login || ''; break; }
         }
-      } else {
-        errEl.textContent = 'Identifiant d\'entreprise non trouv\u00e9';
+        if (!email) { email = uLogin; }
+        doSendResetEmail(email, uid, uLogin);
+      });
+    }).catch(function() {
+      if (login) doSendResetEmail(login, '', '');
+      else {
+        errEl.textContent = 'Erreur lors de la recherche';
         errEl.style.color = 'var(--danger)';
         errEl.style.display = 'block';
       }
-    }).catch(function() {
-      if (login) doSendResetEmail(login);
     });
-  } else if (login) {
-    doSendResetEmail(login);
   } else {
-    errEl.textContent = 'Veuillez saisir l\'identifiant de l\'entreprise ou votre identifiant utilisateur';
-    errEl.style.color = 'var(--danger)';
-    errEl.style.display = 'block';
+    doSendResetEmail(login, '', '');
   }
 }
-function doSendResetEmail(email) {
+function doSendResetEmail(email, uid, userLogin) {
   var errEl = document.getElementById('loginError');
-  if (!firebaseAuth) { errEl.textContent = 'Firebase non disponible'; errEl.style.display = 'block'; return; }
-  errEl.textContent = 'Envoi en cours...';
+  if (!email) {
+    errEl.textContent = 'Impossible de r\u00e9initialiser le mot de passe sans identifiant valide';
+    errEl.style.color = 'var(--danger)';
+    errEl.style.display = 'block';
+    return;
+  }
+  errEl.textContent = 'G\u00e9n\u00e9ration du code...';
   errEl.style.color = 'var(--primary)';
   errEl.style.display = 'block';
   var code = String(Math.floor(100000 + Math.random() * 900000));
   var expiry = Date.now() + 15 * 60 * 1000;
-  firebaseDb.collection('resetCodes').doc(email.replace(/\./g, '_')).set({code: code, expiry: expiry, email: email}).then(function() {
-    return firebaseAuth.sendPasswordResetEmail(email);
-  }).then(function() {
+  firebaseDb.collection('resetCodes').doc(email.replace(/\./g, '_')).set({code: code, expiry: expiry, email: email, uid: uid || '', login: userLogin || ''}).then(function() {
     var html = '<div style="text-align:center">';
-    html += '<p style="font-size:14px;margin-bottom:16px">Un email de r\u00e9initialisation a \u00e9t\u00e9 envoy\u00e9 \u00e0 <strong>' + escH(email) + '</strong></p>';
-    html += '<p style="font-size:14px;margin-bottom:16px;color:var(--gray-500)">Si le mail est vide, v\u00e9rifiez vos spams ou configurez le template d\'email dans la console Firebase :<br><small>Authentication \u2192 Templates \u2192 R\u00e9initialisation du mot de passe</small></p>';
-    html += '<hr style="margin:16px 0;border:none;border-top:1px solid var(--gray-200)">';
-    html += '<p style="font-size:13px;color:var(--gray-500);margin-bottom:12px">Code de v\u00e9rification (usage interne) :</p>';
+    html += '<p style="font-size:14px;margin-bottom:16px">V\u00e9rification de votre identit\u00e9 pour <strong>' + escH(email) + '</strong></p>';
+    html += '<p style="font-size:13px;color:var(--gray-500);margin-bottom:12px">Votre code de v\u00e9rification :</p>';
     html += '<div style="font-size:28px;font-weight:700;letter-spacing:6px;color:var(--primary);margin-bottom:16px">' + code + '</div>';
     html += '<div class="form-group" style="text-align:left"><label>Nouveau mot de passe</label><input type="password" id="resetNewPass" placeholder="Min. 6 caract\u00e8res"></div>';
     html += '<div class="form-group" style="text-align:left"><label>Confirmer</label><input type="password" id="resetNewPass2" placeholder="R\u00e9p\u00e9tez"></div>';
     html += '<div class="form-group" style="text-align:left"><label>Code re\u00e7u</label><input type="text" id="resetCode" placeholder="6 chiffres"></div>';
     html += '<p id="resetMsg" style="font-size:13px;display:none;margin-bottom:12px"></p>';
-    html += '<button class="btn btn-primary" style="width:100%" onclick="confirmResetPassword(\'' + escH(email) + '\')">R\u00e9initialiser</button>';
+    html += '<button class="btn btn-primary" style="width:100%" onclick="confirmResetPassword(\'' + encodeURIComponent(email) + '\',\'' + encodeURIComponent(uid || '') + '\',\'' + encodeURIComponent(userLogin || '') + '\')">R\u00e9initialiser</button>';
     html += '</div>';
     document.getElementById('loginForm').innerHTML = html;
   }).catch(function(error) {
     errEl.style.color = 'var(--danger)';
-    var msg = 'Erreur lors de l\'envoi';
-    if (error.code === 'auth/user-not-found') msg = 'Aucun compte trouv\u00e9 avec cet email';
-    else if (error.code === 'auth/invalid-email') msg = 'Email invalide';
-    else msg = error.message;
-    errEl.textContent = msg;
+    errEl.textContent = 'Erreur : ' + (error.message || 'inconnue');
     errEl.style.display = 'block';
   });
 }
 
-function confirmResetPassword(email) {
+function confirmResetPassword(emailEnc, uidEnc, loginEnc) {
+  var email = decodeURIComponent(emailEnc || '');
+  var uid = decodeURIComponent(uidEnc || '');
+  var userLogin = decodeURIComponent(loginEnc || '');
   var newPass = document.getElementById('resetNewPass').value;
   var newPass2 = document.getElementById('resetNewPass2').value;
   var code = document.getElementById('resetCode').value;
@@ -1875,17 +1749,37 @@ function confirmResetPassword(email) {
     var data = doc.data();
     if (data.code !== code) { msgEl.textContent = 'Code incorrect'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
     if (Date.now() > data.expiry) { msgEl.textContent = 'Code expir\u00e9, demandez un nouveau'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
+    var targetUid = uid || data.uid || '';
+    var targetLogin = userLogin || data.login || '';
+    if (!targetUid) { msgEl.textContent = 'Entreprise introuvable pour ce code'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
     ref.delete();
-    return firebaseAuth.signInWithEmailAndPassword(email, '___dummy___');
-  }).then(function(result) {
-    if (result && result.user) {
-      return result.user.updatePassword(newPass).then(function() {
-        msgEl.textContent = 'Mot de passe r\u00e9initialis\u00e9 avec succ\u00e8s !';
-        msgEl.style.color = 'var(--success)';
+    return firebaseDb.collection('enterprises').doc(targetUid).get().then(function(entDoc) {
+      if (!entDoc.exists) throw new Error('notfound');
+      var d = entDoc.data();
+      var users = d['mdb_users'] || [];
+      var updated = false;
+      for (var i = 0; i < users.length; i++) {
+        var u = users[i];
+        if ((targetLogin && u.login === targetLogin) || (u.email && u.email.toLowerCase() === email.toLowerCase()) || (u.login && u.login.toLowerCase() === email.toLowerCase())) {
+          u.password = newPass;
+          updated = true;
+          break;
+        }
+      }
+      if (!updated) return false;
+      return firebaseDb.collection('enterprises').doc(targetUid).set({mdb_users: users}, {merge: true}).then(function() { return true; });
+    }).then(function(ok) {
+      if (ok === false) {
+        msgEl.textContent = 'Utilisateur introuvable pour cet identifiant.';
+        msgEl.style.color = 'var(--warning)';
         msgEl.style.display = 'block';
-        setTimeout(function() { location.reload(); }, 2000);
-      });
-    }
+        return;
+      }
+      msgEl.textContent = 'Mot de passe r\u00e9initialis\u00e9 avec succ\u00e8s !';
+      msgEl.style.color = 'var(--success)';
+      msgEl.style.display = 'block';
+      setTimeout(function() { location.reload(); }, 2000);
+    });
   }).catch(function() {
     msgEl.textContent = 'Erreur: le code a \u00e9t\u00e9 valid\u00e9 mais le changement a \u00e9chou\u00e9. Connectez-vous normalement.';
     msgEl.style.color = 'var(--warning)';
@@ -1908,7 +1802,7 @@ function doFirebaseRegister() {
   if (!nom || !pass) { errEl.textContent = 'Veuillez remplir les champs obligatoires'; errEl.style.display = 'block'; return; }
   if (pass.length < 6) { errEl.textContent = 'Le mot de passe doit contenir au moins 6 caract\u00e8res'; errEl.style.display = 'block'; return; }
   if (pass !== pass2) { errEl.textContent = 'Les mots de passe ne correspondent pas'; errEl.style.display = 'block'; return; }
-  if (!firebaseAuth) { errEl.textContent = 'Firebase non disponible'; errEl.style.display = 'block'; return; }
+  if (!firebaseDb) { errEl.textContent = 'Base de donn\u00e9es non disponible'; errEl.style.display = 'block'; return; }
   errEl.textContent = 'V\u00e9rification de l\'identifiant...';
   errEl.style.color = 'var(--primary)';
   errEl.style.display = 'block';
@@ -1949,32 +1843,28 @@ function doFirebaseRegister() {
       errEl.style.display = 'block';
       return;
     }
-    errEl.textContent = 'Cr\u00e9ation du compte Firebase...';
+    errEl.textContent = 'Cr\u00e9ation du compte...';
     window._registrationInProgress = true;
-    var fbEmail = email || (entId.replace(/[^a-z0-9]/gi, '_') + '@mdb.app');
-    firebaseAuth.createUserWithEmailAndPassword(fbEmail, pass).then(function(cred) {
+    var newUid = (typeof SB_genUid === 'function') ? SB_genUid('ent_') : ('ent_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10));
+    var enterpriseData = {
+      identifiant: entId, nom: nom, email: email, telephone: tel, plan: validatedPlan,
+      dateCreation: getToday(),
+      subscription: {status: validatedStatus, plan: validatedPlan, startDate: getToday(), endDate: '', paymentMethod: validatedLicence ? 'licence' : '', licenceKey: validatedLicence},
+      adresse: '', ncc: '', rc: '', formeJuridique: '', regimeFiscal: '', banque: '', rib: ''
+    };
+    var regUsers = [{id: DB.genId(), nom: 'Administrateur', login: entId, email: email || (entId + '@mdb.app'), password: pass, isAdmin: true, sections: {}}];
+    firebaseDb.collection('enterprises').doc(newUid).set(enterpriseData).then(function() {
       errEl.textContent = 'Enregistrement des donn\u00e9es...';
-      return cred.user.updateProfile({displayName: nom}).then(function() {
-        var enterpriseData = {
-          identifiant: entId, nom: nom, email: email, telephone: tel, plan: validatedPlan,
-          dateCreation: getToday(),
-          subscription: {status: validatedStatus, plan: validatedPlan, startDate: getToday(), endDate: '', paymentMethod: validatedLicence ? 'licence' : '', licenceKey: validatedLicence},
-          adresse: '', ncc: '', rc: '', formeJuridique: '', regimeFiscal: '', banque: '', rib: ''
-        };
-        return firebaseDb.collection('enterprises').doc(cred.user.uid).set(enterpriseData).then(function() {
-          if (validatedLicence && validatedLicence !== 'MDB-DEV-2024' && validatedLicence !== 'MDB-PROPRIETAIRE-2024') {
-            firebaseDb.collection('licenseKeys').doc(validatedLicence).update({used: true, usedBy: cred.user.uid, usedAt: getToday()}).catch(function(){});
-          }
-          var users = [{id: DB.genId(), nom: 'Administrateur', login: entId, email: email || (entId + '@mdb.app'), password: pass, isAdmin: true, sections: {}}];
-          return firebaseDb.collection('enterprises').doc(cred.user.uid).set({mdb_users: users}, {merge: true}).then(function() {
-            return firebaseDb.collection('enterpriseIndex').doc(entId).set({uid: cred.user.uid, email: email, nom: nom});
-          });
-        });
-      });
+      return firebaseDb.collection('enterprises').doc(newUid).set({mdb_users: regUsers}, {merge: true});
     }).then(function() {
+      return firebaseDb.collection('enterpriseIndex').doc(entId).set({uid: newUid, email: email, nom: nom});
+    }).then(function() {
+      if (validatedLicence && validatedLicence !== 'MDB-DEV-2024' && validatedLicence !== 'MDB-PROPRIETAIRE-2024') {
+        firebaseDb.collection('licenseKeys').doc(validatedLicence).update({used: true, usedBy: newUid, usedAt: getToday()}).catch(function(){});
+      }
       errEl.textContent = 'Connexion en cours...';
       var normEntId = entId.toUpperCase().replace(/[\s_]/g, '-');
-      return firebaseDb.collection('enterprises').doc(firebaseAuth.currentUser.uid).get().then(function(doc) {
+      return firebaseDb.collection('enterprises').doc(newUid).get().then(function(doc) {
         if (!doc.exists) { errEl.textContent = 'Donn\u00e9es introuvables. Reconnectez-vous.'; errEl.style.display = 'block'; return; }
         var cloudData = doc.data();
         var users = cloudData['mdb_users'] || [];
@@ -1998,14 +1888,14 @@ function doFirebaseRegister() {
             DB.set(key, (val !== undefined && val !== null) ? val : []);
           }
         }
-        currentUser = {id: firebaseAuth.currentUser.uid, nom: found.nom || nom, email: found.email || email, login: found.login, isAdmin: found.isAdmin || false, isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id};
+        currentUser = {id: newUid, nom: found.nom || nom, email: found.email || email, login: found.login, isAdmin: found.isAdmin || false, isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id};
         DB.set('mdb_currentUser', found.id);
-        DB.set('mdb_enterpriseUid', firebaseAuth.currentUser.uid);
+        DB.set('mdb_enterpriseUid', newUid);
         errEl.style.display = 'none';
-        startUniqueSession(firebaseAuth.currentUser.uid, found.id, true);
+        startUniqueSession(newUid, found.id, true);
         _receivingSnapshot = true;
         showApp();
-        startRealtimeSync(firebaseAuth.currentUser.uid);
+        startRealtimeSync(newUid);
         _receivingSnapshot = false;
         window._registrationInProgress = false;
       });
@@ -11839,32 +11729,15 @@ function doDeleteSadminEnt(uid, entId) {
     }
     if (!adminUser && users.length > 0) adminUser = users[0];
     var entIdentifiant = enterpriseData.identifiant || entId || '';
-    var fbEmail = enterpriseData.email || (entIdentifiant.replace(/[^a-z0-9]/gi, '_') + '@mdb.app');
-    var fbPass = adminUser ? adminUser.password : '';
     var pIdx = entIdentifiant ? firebaseDb.collection('enterpriseIndex').doc(entIdentifiant).delete().catch(function(){}) : Promise.resolve();
     return pIdx.then(function() {
       return firebaseDb.collection('enterprises').doc(uid).delete();
     }).then(function() {
-      if (!fbEmail || !fbPass || !firebaseAuth) return;
-      var saEmail = 'superadmin@mdb.app';
-      var saPass = saConfig.password || 'admin123';
-      return firebaseAuth.signOut().then(function() {
-        return firebaseAuth.signInWithEmailAndPassword(fbEmail, fbPass).then(function(cred) {
-          return cred.user.delete();
-        }).catch(function() {});
-      }).then(function() {
-        return firebaseAuth.signInWithEmailAndPassword(saEmail, saPass).catch(function(err2) {
-          return firebaseAuth.createUserWithEmailAndPassword(saEmail, saPass).catch(function() {
-            return firebaseAuth.signInWithEmailAndPassword(saEmail, saPass);
-          });
-        });
-      }).then(function() {
-        DB.set('mdb_currentUser', 'SUPER-ADMIN');
-        DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
-        startSaSession(true);
-        var saNom = saConfig.nom || 'Super Admin';
-        currentUser = {id: 'SUPER-ADMIN', nom: saNom, isSuperAdmin: true, isAdmin: true, sections: {}};
-      });
+      DB.set('mdb_currentUser', 'SUPER-ADMIN');
+      DB.set('mdb_enterpriseUid', 'SUPER-ADMIN');
+      startSaSession(true);
+      var saNom = saConfig.nom || 'Super Admin';
+      currentUser = {id: 'SUPER-ADMIN', nom: saNom, isSuperAdmin: true, isAdmin: true, sections: {}};
     });
   }).then(function() {
     if (overlay) overlay.style.display = 'none';
@@ -12001,7 +11874,7 @@ function saveSadminSub(uid) {
   var licenceKey = document.getElementById('saSubLicence').value.trim().toUpperCase() || '';
   var update = {subscription: {plan: plan, status: status, startDate: startDate, endDate: endDate}};
   if (licenceKey) update.subscription.licenceKey = licenceKey;
-  else update.subscription.licenceKey = firebase.firestore.FieldValue.delete();
+  else update.subscription.licenceKey = '';
   firebaseDb.collection('enterprises').doc(uid).set(update, {merge: true}).then(function() {
     if (licenceKey && licenceKey !== 'MDB-DEV-2024' && licenceKey !== 'MDB-PROPRIETAIRE-2024') {
       firebaseDb.collection('licenseKeys').doc(licenceKey).get().then(function(dk) {
@@ -12094,11 +11967,6 @@ function returnToSadmin() {
   startSaSession(false);
   navigateTo('sadminEnterprises');
   toast('Retour au Super Admin');
-  if (firebaseAuth && !firebaseAuth.currentUser) {
-    firebaseAuth.signInWithEmailAndPassword('superadmin@mdb.app', 'admin123').catch(function() {
-      firebaseAuth.createUserWithEmailAndPassword('superadmin@mdb.app', 'admin123').catch(function(){});
-    });
-  }
 }
 
 function createEnterpriseFromSadmin() {
@@ -12154,48 +12022,45 @@ function doSadminCreateEnt() {
   if (overlay) overlay.style.display = 'flex';
   firebaseDb.collection('enterpriseIndex').doc(entId).get().then(function(doc) {
     if (doc.exists) { toast('Identifiant d\u00e9j\u00e0 utilis\u00e9', 'error'); throw 'duplicate'; }
-    var fbEmail = email || (entId.replace(/[^a-z0-9]/g, '_') + '@mdb.app');
-    return firebaseAuth.createUserWithEmailAndPassword(fbEmail, pass).then(function(cred) {
-      return cred.user.updateProfile({displayName: nom}).then(function() {
-        var validatedPlan = plan;
-        var validatedStatus = status;
-        var validatedLicence = '';
-        var checkLicence = function() {
-          if (!licenceCode) return Promise.resolve();
-          if (licenceCode === 'MDB-DEV-2024' || licenceCode === 'MDB-PROPRIETAIRE-2024') {
-            validatedPlan = 'enterprise';
-            validatedStatus = 'lifetime';
-            validatedLicence = licenceCode;
-            return Promise.resolve();
+    var newUid = (typeof SB_genUid === 'function') ? SB_genUid('ent_') : ('ent_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10));
+    var validatedPlan = plan;
+    var validatedStatus = status;
+    var validatedLicence = '';
+    var checkLicence = function() {
+      if (!licenceCode) return Promise.resolve();
+      if (licenceCode === 'MDB-DEV-2024' || licenceCode === 'MDB-PROPRIETAIRE-2024') {
+        validatedPlan = 'enterprise';
+        validatedStatus = 'lifetime';
+        validatedLicence = licenceCode;
+        return Promise.resolve();
+      }
+      return firebaseDb.collection('licenseKeys').doc(licenceCode).get().then(function(dk) {
+        if (dk.exists) {
+          validatedPlan = dk.data().plan || plan;
+          validatedStatus = 'active';
+          validatedLicence = licenceCode;
+        }
+      });
+    };
+    return checkLicence().then(function() {
+      var enterpriseData = {
+        identifiant: entId, nom: nom, email: email, telephone: tel, plan: validatedPlan,
+        dateCreation: getToday(),
+        subscription: {status: validatedStatus, plan: validatedPlan, startDate: getToday(), endDate: '', paymentMethod: validatedLicence ? 'licence' : '', licenceKey: validatedLicence},
+        adresse: '', ncc: '', rc: '', formeJuridique: '', regimeFiscal: '', banque: '', rib: ''
+      };
+      return firebaseDb.collection('enterprises').doc(newUid).set(enterpriseData).then(function() {
+        var users = [{id: DB.genId(), nom: 'Administrateur', login: entId, email: email || (entId + '@mdb.app'), password: pass, isAdmin: true, sections: {}}];
+        return firebaseDb.collection('enterprises').doc(newUid).set({mdb_users: users}, {merge: true}).then(function() {
+          return firebaseDb.collection('enterpriseIndex').doc(entId).set({uid: newUid, email: email, nom: nom});
+        }).then(function() {
+          if (validatedLicence && validatedLicence !== 'MDB-DEV-2024' && validatedLicence !== 'MDB-PROPRIETAIRE-2024') {
+            firebaseDb.collection('licenseKeys').doc(validatedLicence).update({used: true, usedBy: newUid, usedAt: getToday()}).catch(function(){});
           }
-          return firebaseDb.collection('licenseKeys').doc(licenceCode).get().then(function(dk) {
-            if (dk.exists) {
-              validatedPlan = dk.data().plan || plan;
-              validatedStatus = 'active';
-              validatedLicence = licenceCode;
-            }
-          });
-        };
-        return checkLicence().then(function() {
-          var enterpriseData = {
-            identifiant: entId, nom: nom, email: email, telephone: tel, plan: validatedPlan,
-            dateCreation: getToday(),
-            subscription: {status: validatedStatus, plan: validatedPlan, startDate: getToday(), endDate: '', paymentMethod: validatedLicence ? 'licence' : '', licenceKey: validatedLicence},
-            adresse: '', ncc: '', rc: '', formeJuridique: '', regimeFiscal: '', banque: '', rib: ''
-          };
-          return firebaseDb.collection('enterprises').doc(cred.user.uid).set(enterpriseData).then(function() {
-            var users = [{id: DB.genId(), nom: 'Administrateur', login: entId, email: email || (entId + '@mdb.app'), password: pass, isAdmin: true, sections: {}}];
-            return firebaseDb.collection('enterprises').doc(cred.user.uid).set({mdb_users: users}, {merge: true}).then(function() {
-              return firebaseDb.collection('enterpriseIndex').doc(entId).set({uid: cred.user.uid, email: email, nom: nom});
-            }).then(function() {
-              if (validatedLicence && validatedLicence !== 'MDB-DEV-2024' && validatedLicence !== 'MDB-PROPRIETAIRE-2024') {
-                firebaseDb.collection('licenseKeys').doc(validatedLicence).update({used: true, usedBy: cred.user.uid, usedAt: getToday()}).catch(function(){});
-              }
-            });
-          });
         });
       });
-    }).then(function() {
+    });
+  }).then(function() {
       if (overlay) overlay.style.display = 'none';
       loadSadminEnts();
       var credsBody = '<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:16px;margin-bottom:12px"><p style="margin:0 0 8px;font-weight:600;color:var(--success)">\u2713 Entreprise cr\u00e9\u00e9e avec succ\u00e8s</p></div>';
@@ -12213,7 +12078,6 @@ function doSadminCreateEnt() {
       if (e === 'duplicate') return;
       toast('Erreur : ' + (e.message || 'inconnue'), 'error');
     });
-  });
 }
 function renderSadminLicences() {
   renderLicences();
@@ -19314,11 +19178,9 @@ function printBcFournisseur(id) {
 
 function startAuth() {
   if (_authStarted) return;
-  if (firebaseAuth) { _authStarted = true; initAuth(); }
-  else if (_authTimedOut) { _authStarted = true; initAuth(); }
+  if (firebaseDb) { _authStarted = true; initAuth(); }
   else { setTimeout(startAuth, 100); }
 }
-setTimeout(function() { _authTimedOut = true; }, 3000);
 startAuth();
 startIdleTracking();
 window.addEventListener('beforeunload', function() {
