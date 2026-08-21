@@ -50,10 +50,16 @@
 
   /* ---------- Conversion ligne <-> document ---------- */
 
+  /* Si la colonne data a ete ecrite comme tableau [{...}], on la deballe automatiquement */
+  function unwrapData(v) {
+    if (Array.isArray(v)) return (v.length === 1 && v[0] && typeof v[0] === 'object' && !Array.isArray(v[0])) ? v[0] : {};
+    return (v && typeof v === 'object') ? v : {};
+  }
+
   function rowToDocData(table, row) {
     switch (table) {
       case 'enterprises':
-        return row.data || {};
+        return unwrapData(row.data);
       case 'enterprise_index':
         return row.data && Object.keys(row.data).length > 0 ? row.data : { uid: row.uid || '', email: row.email || '', nom: row.nom || '' };
       case 'license_keys':
@@ -73,6 +79,10 @@
 
   function docToRow(table, docId, data) {
     var clean = deepClean(data || {});
+    if (table === 'enterprises') {
+      /* Garde-fou : jamais de tableau comme document entreprise */
+      if (Array.isArray(clean)) clean = (clean.length === 1 && clean[0] && typeof clean[0] === 'object' && !Array.isArray(clean[0])) ? clean[0] : {};
+    }
     switch (table) {
       case 'enterprises':
         return { row: { id: docId,
