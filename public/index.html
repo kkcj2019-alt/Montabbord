@@ -511,9 +511,35 @@ function isSyncable(key) {
   return key !== 'mdb_currentUser' && key.indexOf('mdb_draft_') === -1 && key.indexOf('mdb_sa') !== 0 && key.indexOf('mdb_pending') === -1 && key !== 'mdb_sync_queue';
 }
 
+/* File d'attente persistante : toute modification non encore envoyée est mémorisée
+   sur le disque. Même si la page est fermée/refresh avant l'envoi, elle partira
+   dès la prochaine connexion. Rien ne se perd jamais dans un seul navigateur. */
+var PENDING_SYNC_KEY = 'mdb_pendingSync';
+function persistPendingSync() {
+  try { localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(_dirtyKeys)); } catch(e) {}
+}
+function clearPendingSync(keys) {
+  try {
+    if (!keys) { localStorage.removeItem(PENDING_SYNC_KEY); return; }
+    var p = JSON.parse(localStorage.getItem(PENDING_SYNC_KEY)) || {};
+    for (var i = 0; i < keys.length; i++) delete p[keys[i]];
+    localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(p));
+  } catch(e) {}
+}
+function restorePendingSync() {
+  try {
+    var p = JSON.parse(localStorage.getItem(PENDING_SYNC_KEY)) || {};
+    var n = 0;
+    for (var k in p) {
+      if (p.hasOwnProperty(k) && isSyncable(k)) { _dirtyKeys[k] = true; n++; }
+    }
+    if (n > 0) schedulePush();
+  } catch(e) {}
+}
 function markDirty(key) {
   if (!isSyncable(key)) return;
   _dirtyKeys[key] = true;
+  persistPendingSync();
   schedulePush();
 }
 
@@ -521,9 +547,17 @@ function schedulePush() {
   clearTimeout(_pushTimer);
   _pushTimer = setTimeout(pushToCloud, 300);
 }
+restorePendingSync();
+window.addEventListener('pagehide', function() {
+  if (currentUser && Object.keys(_dirtyKeys).length > 0) { try { pushToCloud(); } catch(e) {} }
+});
 
 function pushToCloud() {
-  if (!currentUser || !currentUser.id) return;
+  if (!currentUser || !currentUser.id) {
+    /* Pas encore connecté : on réessaie automatiquement après la connexion */
+    if (Object.keys(_dirtyKeys).length > 0) { clearTimeout(_pushTimer); _pushTimer = setTimeout(pushToCloud, 2500); }
+    return;
+  }
   if (currentUser.isSuperAdmin && !currentUser.isImpersonating) return;
   var keys = Object.keys(_dirtyKeys);
   if (keys.length === 0) return;
@@ -573,12 +607,15 @@ function pushToCloud() {
     }
     if (Object.keys(data).length === 0) { _isPushing = false; if (ind) ind.textContent = ''; return; }
     return firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
+      var cleared = [];
       for (var bi = 0; bi < batch.length; bi++) {
         var bk = batch[bi];
         var cur = null;
         try { cur = localStorage.getItem(bk); } catch(ge) {}
-        if (cur === sentRaw[bk]) delete _dirtyKeys[bk];
+        if (cur === sentRaw[bk]) { delete _dirtyKeys[bk]; cleared.push(bk); }
       }
+      if (cleared.length > 0) clearPendingSync(cleared);
+      _pushFailStreak = 0;
       _isPushing = false;
       if (ind) ind.textContent = '\u2713 Sync';
       setTimeout(function() { if (ind) ind.textContent = ''; }, 2000);
@@ -586,6 +623,8 @@ function pushToCloud() {
     });
   }).catch(function(e) {
     _isPushing = false;
+    _pushFailStreak = (_pushFailStreak || 0) + 1;
+    if (_pushFailStreak === 3) toast('Synchronisation en attente : vérifiez votre connexion Internet. Rien n\'est perdu, nouvel essai automatique.', 'error');
     if (ind) ind.textContent = '\u2717 Sync';
     setTimeout(function() { if (ind) ind.textContent = ''; }, 3000);
     console.warn('Sync error:', e);
