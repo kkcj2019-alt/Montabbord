@@ -535,20 +535,55 @@ function pushToCloud() {
     return;
   }
   _isPushing = true;
-  var data = {};
-  for (var i = 0; i < keys.length; i++) {
-    var val = DB.get(keys[i]);
-    if (val !== null && val !== undefined) data[keys[i]] = val;
-  }
-  if (Object.keys(data).length === 0) { _dirtyKeys = {}; _isPushing = false; return; }
+  var batch = keys.slice();
+  var sentRaw = {};
+  for (var si = 0; si < batch.length; si++) { try { sentRaw[batch[si]] = localStorage.getItem(batch[si]); } catch(se) {} }
   var ind = document.getElementById('syncIndicator');
   if (ind) ind.textContent = '\u21bb Sync...';
-  firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
-    _dirtyKeys = {};
-    _isPushing = false;
-    if (ind) ind.textContent = '\u2713 Sync';
-    setTimeout(function() { if (ind) ind.textContent = ''; }, 2000);
-    try { localStorage.removeItem('mdb_sync_queue'); } catch(e) {}
+  /* Convergence : lire le cloud d'abord et FUSIONNER (union par ID, la version locale gagne)
+     pour qu'un appareil ou onglet périmé ne puisse plus écraser des données récentes. */
+  firebaseDb.collection('enterprises').doc(currentUser.id).get().then(function(doc) {
+    var cloud = (doc && doc.exists) ? doc.data() : {};
+    var data = {};
+    for (var i = 0; i < batch.length; i++) {
+      var k = batch[i];
+      var lv = DB.get(k);
+      if (lv === null || lv === undefined) continue;
+      if (Array.isArray(lv)) {
+        var cv = cloud[k];
+        var base = Array.isArray(cv) ? cv : [];
+        var byId = {};
+        var j;
+        for (j = 0; j < base.length; j++) { if (base[j] && base[j].id) byId[base[j].id] = base[j]; }
+        for (j = 0; j < lv.length; j++) { if (lv[j] && lv[j].id) byId[lv[j].id] = lv[j]; }
+        var mergedArr = [];
+        var seenIds = {};
+        for (j = 0; j < lv.length; j++) {
+          mergedArr.push(lv[j]);
+          if (lv[j] && lv[j].id) seenIds[lv[j].id] = true;
+        }
+        for (j = 0; j < base.length; j++) {
+          var cr = base[j];
+          if (cr && cr.id && !seenIds[cr.id]) { mergedArr.push(cr); seenIds[cr.id] = true; }
+        }
+        data[k] = stripTombstoned(k, mergedArr);
+      } else {
+        data[k] = lv;
+      }
+    }
+    if (Object.keys(data).length === 0) { _isPushing = false; if (ind) ind.textContent = ''; return; }
+    return firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
+      for (var bi = 0; bi < batch.length; bi++) {
+        var bk = batch[bi];
+        var cur = null;
+        try { cur = localStorage.getItem(bk); } catch(ge) {}
+        if (cur === sentRaw[bk]) delete _dirtyKeys[bk];
+      }
+      _isPushing = false;
+      if (ind) ind.textContent = '\u2713 Sync';
+      setTimeout(function() { if (ind) ind.textContent = ''; }, 2000);
+      try { localStorage.removeItem('mdb_sync_queue'); } catch(e) {}
+    });
   }).catch(function(e) {
     _isPushing = false;
     if (ind) ind.textContent = '\u2717 Sync';
@@ -633,12 +668,20 @@ function restoreFromLocalBackup(slotIndex) {
     var backup = JSON.parse(localStorage.getItem('mdb_backup_' + entry.index));
     if (!backup) { alert('Donn\u00e9es de sauvegarde introuvables.'); return; }
     var count = 0;
-    for (var key in backup) {
-      if (backup.hasOwnProperty(key) && DATA_KEYS.indexOf(key) !== -1) {
-        DB.set(key, backup[key]);
-        count++;
+    window._restoringBackup = true;
+    try {
+      for (var key in backup) {
+        if (backup.hasOwnProperty(key) && DATA_KEYS.indexOf(key) !== -1) {
+          DB.set(key, backup[key]);
+          count++;
+        }
       }
-    }
+    } finally { window._restoringBackup = false; }
+    /* La restauration est autoritaire : on annule les suppressions m\u00e9moris\u00e9es et on propage l'annulation */
+    try {
+      localStorage.setItem(TOMBSTONE_KEY, JSON.stringify({__resetAt: Date.now()}));
+      if (currentUser && currentUser.id) markDirty(TOMBSTONE_KEY);
+    } catch(e) {}
     pushToCloud();
     alert(count + ' cl\u00e9s restaur\u00e9es depuis la sauvegarde du ' + new Date(entry.ts).toLocaleString('fr-FR') + ' (' + formatSize(entry.size) + ')');
   } catch(e) { alert('Erreur restauration: ' + e.message); }
@@ -730,11 +773,83 @@ function startAutoBackup() {
   }, 1800000);
 }
 
+/* ===== Pierres tombales : les suppressions sont mémorisées pour ne jamais ressusciter ===== */
+var TOMBSTONE_KEY = 'mdb_tombstones';
+function getTombstones() {
+  try { return JSON.parse(localStorage.getItem(TOMBSTONE_KEY)) || {}; } catch(e) { return {}; }
+}
+function addTombstones(entityKey, ids) {
+  if (!entityKey || !ids || !ids.length) return;
+  var t = getTombstones();
+  if (!t[entityKey]) t[entityKey] = {};
+  var now = Date.now();
+  for (var i = 0; i < ids.length; i++) { if (ids[i]) t[entityKey][ids[i]] = now; }
+  try { localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(t)); } catch(e) {}
+}
+function pruneTombstones() {
+  var t = getTombstones();
+  var cutoff = Date.now() - 90 * 24 * 3600 * 1000;
+  var changed = false;
+  for (var k in t) {
+    if (!t.hasOwnProperty(k) || k === '__resetAt') continue;
+    for (var id in t[k]) {
+      if (t[k].hasOwnProperty(id) && t[k][id] < cutoff) { delete t[k][id]; changed = true; }
+    }
+    var remaining = 0; for (var id2 in t[k]) { if (t[k].hasOwnProperty(id2)) remaining++; }
+    if (remaining === 0) { delete t[k]; changed = true; }
+  }
+  if (changed) { try { localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(t)); } catch(e) {} }
+}
+function stripTombstoned(entityKey, arr) {
+  var t = getTombstones()[entityKey];
+  if (!t || !Array.isArray(arr)) return arr;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var r = arr[i];
+    if (r && r.id && t[r.id]) continue;
+    out.push(r);
+  }
+  return out;
+}
+function mergeTombstonesFromCloud(cloudT) {
+  if (!cloudT || typeof cloudT !== 'object' || Array.isArray(cloudT)) return;
+  var local = getTombstones();
+  var cloudReset = cloudT.__resetAt || 0;
+  var localReset = local.__resetAt || 0;
+  if (cloudReset > localReset) {
+    try { localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(cloudT)); } catch(e) {}
+    return;
+  }
+  var changed = false;
+  for (var k in cloudT) {
+    if (!cloudT.hasOwnProperty(k) || k === '__resetAt') continue;
+    if (!local[k]) local[k] = {};
+    for (var id in cloudT[k]) {
+      if (cloudT[k].hasOwnProperty(id) && !local[k][id]) { local[k][id] = cloudT[k][id]; changed = true; }
+    }
+  }
+  if (changed) { try { localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(local)); } catch(e) {} }
+}
+
 var DB = {
   get: function(key) {
     try { return JSON.parse(localStorage.getItem(key)); } catch(e) { return null; }
   },
   set: function(key, data) {
+    var old = null;
+    try { old = JSON.parse(localStorage.getItem(key)); } catch(e) {}
+    /* Toute ligne pr\u00e9sente avant et absente apr\u00e8s \u00e9criture = suppression d\u00e9finitive (pierre tombale) */
+    if (!_receivingSnapshot && !_loadingCloud && !window._restoringBackup && Array.isArray(old) && Array.isArray(data)) {
+      var removedIds = [];
+      var presentIds = {};
+      for (var ni = 0; ni < data.length; ni++) { if (data[ni] && data[ni].id) presentIds[data[ni].id] = true; }
+      for (var oi = 0; oi < old.length; oi++) {
+        var orow = old[oi];
+        if (orow && orow.id && !presentIds[orow.id] && removedIds.indexOf(orow.id) === -1) removedIds.push(orow.id);
+      }
+      if (removedIds.length > 0) addTombstones(key, removedIds);
+    }
+    if (Array.isArray(data) && !window._restoringBackup) data = stripTombstoned(key, data);
     localStorage.setItem(key, JSON.stringify(data));
     saveLocalBackup(key, data);
     if (!_receivingSnapshot && currentUser && currentUser.id) {
@@ -748,6 +863,7 @@ var DB = {
     localStorage.removeItem(key);
   }
 };
+pruneTombstones();
 
 var pageNames = {
   dashboard: 'Tableau de Bord', tiers: 'Tiers', facturation: 'Facturation',
@@ -2012,7 +2128,7 @@ function doLogout() {
   }
 }
 
-var DATA_KEYS = ['mdb_clients','mdb_nomenclature','mdb_bc','mdb_deletedBLs','mdb_deletedFactures','mdb_deletedOps','mdb_deletedStocks','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory','mdb_dashboardCreances','mdb_actif_hiddenFournisseurs','mdb_actif_pin','mdb_actif_hideZero'];
+var DATA_KEYS = ['mdb_tombstones','mdb_clients','mdb_nomenclature','mdb_bc','mdb_deletedBLs','mdb_deletedFactures','mdb_deletedOps','mdb_deletedStocks','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_users','mdb_previsions','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory','mdb_dashboardCreances','mdb_actif_hiddenFournisseurs','mdb_actif_pin','mdb_actif_hideZero'];
 var _loadingCloud = false;
 
 function mergeArraysPreferCloud(local, cloud) {
@@ -2195,6 +2311,7 @@ function loadCloudData(uid, callback) {
         if (key === 'mdb_entreprise') continue;
         if (_dirtyKeys[key]) continue;
         var val = data[key];
+        if (key === 'mdb_tombstones') { mergeTombstonesFromCloud(val); continue; }
         if (key === 'mdb_paye') {
           if (val && typeof val === 'object' && !Array.isArray(val)) DB.set(key, val);
           else if (!DB.get(key) || Array.isArray(DB.get(key))) DB.set(key, {});
@@ -2247,6 +2364,7 @@ function startRealtimeSync(uid) {
       var key = DATA_KEYS[i];
       if (data[key] === undefined || data[key] === null) continue;
       if (_dirtyKeys[key] && !_loadingCloud) continue;
+      if (key === 'mdb_tombstones') { mergeTombstonesFromCloud(data[key]); continue; }
       var local = DB.get(key);
       /* Pr\u00e9vention perte de donn\u00e9es : ne pas remplacer des donn\u00e9es locales non vides par du cloud vide */
       if ((Array.isArray(data[key]) && data[key].length === 0) && local && (!Array.isArray(local) || local.length > 0)) continue;
@@ -2569,6 +2687,7 @@ function refreshData() {
     _receivingSnapshot = true;
     for (var i = 0; i < DATA_KEYS.length; i++) {
       if (_dirtyKeys[DATA_KEYS[i]]) continue;
+      if (DATA_KEYS[i] === 'mdb_tombstones') { mergeTombstonesFromCloud(data[DATA_KEYS[i]]); continue; }
       if (data[DATA_KEYS[i]] !== undefined && data[DATA_KEYS[i]] !== null) {
         DB.set(DATA_KEYS[i], data[DATA_KEYS[i]]);
       }
