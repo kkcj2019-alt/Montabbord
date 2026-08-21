@@ -70,8 +70,16 @@
         return row.data || {};
       case 'backups':
         return row.data || {};
-      case 'sessions':
-        return { token: row.token || '', userId: row.user_id || '', updatedAt: row.updated_at ? new Date(row.updated_at) : null };
+      case 'sessions': {
+        /* Plusieurs appareils peuvent être connectés en même temps : la colonne
+           token contient les jetons séparés par '|'. Le dernier = login le plus récent. */
+        var rawTok = row.token || '';
+        var parts = String(rawTok).split('|').filter(Boolean);
+        return { token: parts.length > 0 ? parts[parts.length - 1] : '',
+                 tokens: parts,
+                 userId: row.user_id || '',
+                 updatedAt: row.updated_at ? new Date(row.updated_at) : null };
+      }
       default:
         return row.data || {};
     }
@@ -161,9 +169,33 @@
 
     if (conv.needsParent) {
       if (table === 'sessions') {
+        /* Sessions simultanées : fusionner la liste de jetons au lieu d'écraser.
+           - Login (appareil) : union, l'appareil passe en fin de liste (max 5).
+           - Déconnexion/révocation : l'app envoie _replaceTokens + liste restante. */
         row.enterprise_id = parentId;
-        return sb.from('sessions').upsert(row, { onConflict: 'enterprise_id,user_id' })
-          .then(function(res) { if (res.error) throw res.error; });
+        var replaceAll = !!data._replaceTokens;
+        var incoming = (Array.isArray(data.tokens) && data.tokens.length > 0) ? data.tokens.slice()
+                     : (data.token ? [data.token] : []);
+        return sb.from('sessions').select('*').eq('enterprise_id', parentId).eq('user_id', docId).limit(1)
+          .then(function(res) {
+            var erow = res.data && res.data[0];
+            var cur = (erow && erow.token) ? String(erow.token).split('|').filter(Boolean) : [];
+            var merged;
+            if (replaceAll) {
+              merged = incoming.slice();
+            } else {
+              merged = cur.slice();
+              for (var mi = 0; mi < incoming.length; mi++) {
+                var at = merged.indexOf(incoming[mi]);
+                if (at !== -1) merged.splice(at, 1);
+                merged.push(incoming[mi]);
+              }
+              while (merged.length > 5) merged.shift();
+            }
+            row.token = merged.join('|');
+            return sb.from('sessions').upsert(row, { onConflict: 'enterprise_id,user_id' })
+              .then(function(r2) { if (r2.error) throw r2.error; });
+          });
       }
       if (table === 'backups') {
         row.enterprise_id = parentId;

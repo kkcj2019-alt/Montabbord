@@ -426,6 +426,8 @@ function startUniqueSession(enterpriseUid, userId, forceNew) {
   /* Sessions simultanées : chaque appareil enregistre son propre jeton dans la
      liste. Personne n'est déconnecté par l'ouverture d'un autre navigateur.
      (Limite 5 appareils actifs, les plus anciens sortent en premier.) */
+  var settled = false;
+  setTimeout(function() { settled = true; }, 10000);
   ref.get().then(function(doc) {
     var d = (doc && doc.exists) ? doc.data() : {};
     var tokens = [];
@@ -434,11 +436,12 @@ function startUniqueSession(enterpriseUid, userId, forceNew) {
     tokens = tokens.filter(function(t) { return t && t !== _sessionToken; });
     tokens.push(_sessionToken);
     while (tokens.length > 5) tokens.shift();
-    ref.set({tokens: tokens, token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
+    ref.set({tokens: tokens, token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).then(function() { settled = true; }).catch(function(e) { console.warn('Session sync error:', e); settled = true; });
   }).catch(function() {
-    ref.set({token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {});
+    ref.set({token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).then(function() { settled = true; }).catch(function() { settled = true; });
   });
   _sessionUnsubscribe = ref.onSnapshot(function(doc) {
+    if (!settled) return; /* ignorer les snapshots antérieurs à notre propre enregistrement */
     if (!doc.exists) return;
     var d = doc.data();
     /* Déconnexion uniquement si mon jeton a été explicitement révoqué
@@ -517,9 +520,10 @@ function checkPersistedIdleExpiry() {
         sref.get().then(function(sdoc) {
           if (!sdoc.exists) return;
           var d = sdoc.data();
-          var tokens = Array.isArray(d.tokens) ? d.tokens.filter(function(t) { return t !== token; }) : [];
-          if (tokens.length === 0 && d.token === token) { sref.delete().catch(function() {}); }
-          else if (tokens.length !== (Array.isArray(d.tokens) ? d.tokens.length : 0)) { sref.set({tokens: tokens, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {}); }
+          var all = Array.isArray(d.tokens) ? d.tokens : (d.token ? [d.token] : []);
+          var restants = all.filter(function(t) { return t !== token; });
+          if (restants.length === 0) { sref.delete().catch(function() {}); }
+          else { sref.set({tokens: restants, _replaceTokens: true, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {}); }
         }).catch(function() {});
       }
       localStorage.removeItem(storeKey);
@@ -2168,9 +2172,10 @@ function doLogout() {
       sref.get().then(function(sdoc) {
         if (!sdoc.exists) return;
         var d = sdoc.data();
-        var tokens = Array.isArray(d.tokens) ? d.tokens.filter(function(t) { return t !== myToken; }) : [];
-        if (tokens.length === 0) { sref.delete().catch(function() {}); }
-        else { sref.set({tokens: tokens, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {}); }
+        var all = Array.isArray(d.tokens) ? d.tokens : (d.token ? [d.token] : []);
+        var restants = all.filter(function(t) { return t !== myToken; });
+        if (restants.length === 0) { sref.delete().catch(function() {}); }
+        else { sref.set({tokens: restants, _replaceTokens: true, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {}); }
       }).catch(function() {});
     }
     stopUniqueSession();
