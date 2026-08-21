@@ -405,6 +405,7 @@ var _receivingSnapshot = false;
 var _dirtyKeys = {};
 var _pushTimer = null;
 var _isPushing = false;
+var _pushFailStreak = 0;
 var _autoBackupTimer = null;
 var _sessionUnsubscribe = null;
 var _sessionToken = '';
@@ -422,9 +423,30 @@ function startUniqueSession(enterpriseUid, userId, forceNew) {
   if (!forceNew && stored) { _sessionToken = stored; }
   else { _sessionToken = DB.genId(); localStorage.setItem(storeKey, _sessionToken); }
   var ref = firebaseDb.collection('enterprises').doc(enterpriseUid).collection('sessions').doc(userId);
-  ref.set({token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
+  /* Sessions simultanées : chaque appareil enregistre son propre jeton dans la
+     liste. Personne n'est déconnecté par l'ouverture d'un autre navigateur.
+     (Limite 5 appareils actifs, les plus anciens sortent en premier.) */
+  ref.get().then(function(doc) {
+    var d = (doc && doc.exists) ? doc.data() : {};
+    var tokens = [];
+    if (d && Array.isArray(d.tokens)) tokens = d.tokens.slice();
+    else if (d && d.token) tokens = [d.token];
+    tokens = tokens.filter(function(t) { return t && t !== _sessionToken; });
+    tokens.push(_sessionToken);
+    while (tokens.length > 5) tokens.shift();
+    ref.set({tokens: tokens, token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).catch(function(e) { console.warn('Session sync error:', e); });
+  }).catch(function() {
+    ref.set({token: _sessionToken, userId: userId, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {});
+  });
   _sessionUnsubscribe = ref.onSnapshot(function(doc) {
-    if (!doc.exists || !doc.data().token || doc.data().token === _sessionToken) return;
+    if (!doc.exists) return;
+    var d = doc.data();
+    /* Déconnexion uniquement si mon jeton a été explicitement révoqué
+       (absent de la liste ET différent du jeton principal). */
+    var ok = false;
+    if (d.token === _sessionToken) ok = true;
+    if (Array.isArray(d.tokens) && d.tokens.indexOf(_sessionToken) !== -1) ok = true;
+    if (ok) return;
     stopUniqueSession();
     stopRealtimeSync();
     localStorage.removeItem(storeKey);
@@ -434,7 +456,7 @@ function startUniqueSession(enterpriseUid, userId, forceNew) {
     localStorage.removeItem('mdb_enterpriseUid');
     showLogin();
     var err = document.getElementById('loginError');
-    if (err) { err.textContent = 'Ce compte vient d\'\u00eatre ouvert sur un autre appareil.'; err.style.color = 'var(--danger)'; err.style.display = 'block'; }
+    if (err) { err.textContent = 'Cette session a \u00e9t\u00e9 ferm\u00e9e depuis un autre appareil.'; err.style.color = 'var(--danger)'; err.style.display = 'block'; }
   });
 }
 
@@ -491,10 +513,13 @@ function checkPersistedIdleExpiry() {
       var storeKey = 'mdb_session_' + subUserId;
       var token = localStorage.getItem(storeKey);
       if (token && firebaseDb) {
-        firebaseDb.collection('enterprises').doc(subUid).collection('sessions').doc(subUserId).get().then(function(sdoc) {
-          if (sdoc.exists && sdoc.data().token === token) {
-            firebaseDb.collection('enterprises').doc(subUid).collection('sessions').doc(subUserId).delete().catch(function() {});
-          }
+        var sref = firebaseDb.collection('enterprises').doc(subUid).collection('sessions').doc(subUserId);
+        sref.get().then(function(sdoc) {
+          if (!sdoc.exists) return;
+          var d = sdoc.data();
+          var tokens = Array.isArray(d.tokens) ? d.tokens.filter(function(t) { return t !== token; }) : [];
+          if (tokens.length === 0 && d.token === token) { sref.delete().catch(function() {}); }
+          else if (tokens.length !== (Array.isArray(d.tokens) ? d.tokens.length : 0)) { sref.set({tokens: tokens, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {}); }
         }).catch(function() {});
       }
       localStorage.removeItem(storeKey);
@@ -605,7 +630,13 @@ function pushToCloud() {
         data[k] = lv;
       }
     }
-    if (Object.keys(data).length === 0) { _isPushing = false; if (ind) ind.textContent = ''; return; }
+    if (Object.keys(data).length === 0) {
+      for (var ei = 0; ei < batch.length; ei++) delete _dirtyKeys[batch[ei]];
+      clearPendingSync(batch);
+      _isPushing = false;
+      if (ind) ind.textContent = '';
+      return;
+    }
     return firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
       var cleared = [];
       for (var bi = 0; bi < batch.length; bi++) {
@@ -2133,10 +2164,13 @@ function doLogout() {
       var sUserId = sessionUserId;
       var myToken = _sessionToken;
       localStorage.removeItem('mdb_session_' + sUserId);
-      firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId).get().then(function(sdoc) {
-        if (sdoc.exists && sdoc.data().token === myToken) {
-          firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId).delete().catch(function() {});
-        }
+      var sref = firebaseDb.collection('enterprises').doc(sUid).collection('sessions').doc(sUserId);
+      sref.get().then(function(sdoc) {
+        if (!sdoc.exists) return;
+        var d = sdoc.data();
+        var tokens = Array.isArray(d.tokens) ? d.tokens.filter(function(t) { return t !== myToken; }) : [];
+        if (tokens.length === 0) { sref.delete().catch(function() {}); }
+        else { sref.set({tokens: tokens, updatedAt: new Date().toISOString()}, {merge: true}).catch(function() {}); }
       }).catch(function() {});
     }
     stopUniqueSession();
