@@ -10663,9 +10663,12 @@ function computeActifData() {
     var fr = fournisseurs[fri];
     if (!fBalances[fr.id]) fBalances[fr.id] = {nom: fr.nom, dettes: 0, paid: 0};
     var siF = fr.soldeInitial || 0;
-    if (siF !== 0) {
-      if (fr.typeSolde === 'debiteur') fBalances[fr.id].dettes += siF;
-      else fBalances[fr.id].dettes += siF;
+    if (siF === 0) continue;
+    if (fr.typeSolde === 'debiteur') {
+      /* Le fournisseur NOUS doit (solde d\u00e9biteur) : cr\u00e9ance -> ligne POSITIVE dans l'actif */
+      dettesFDetails.push({id:'fcreance_' + fr.id, designation: fr.nom, subLabel:'Solde initial (il me doit)', montant: Math.abs(siF), signe: '+', fournisseurId: fr.id});
+    } else {
+      fBalances[fr.id].dettes += siF;
     }
   }
   var hiddenFournisseurs = DB.get('mdb_actif_hiddenFournisseurs') || [];
@@ -10762,7 +10765,10 @@ function computeActifData() {
       }
     }
     var allDetailsD = rubD.details.slice();
+    var _sysNamesD = { 'pr\u00e9financement \u00e0 rembourser': 1, 'r\u00e9serve disponible': 1, 'r\u00e9serve indisponible': 1 };
     for (var mlD = 0; mlD < manualLignesD.length; mlD++) {
+      /* Les lignes système de trésorerie (réserves/préfinancement) sont calculées : on ignore les doublons saisis manuellement */
+      if (rubD.key === 'tresorerie' && _sysNamesD[(manualLignesD[mlD].designation || '').trim().toLowerCase()]) continue;
       var mlSigneD = manualLignesD[mlD].signe || '+';
       var _lBaseD = (mlSigneD === '-' ? -1 : 1) * Math.abs(manualLignesD[mlD].montant || 0);
       var _lMvsD = manualLignesD[mlD].mouvements || [];
@@ -10778,10 +10784,39 @@ function computeActifData() {
       allDetailsD.push({id:'man_' + manualLignesD[mlD].id, designation:manualLignesD[mlD].designation, subLabel:_mlSubD, qte:(manualLignesD[mlD].qte !== undefined ? manualLignesD[mlD].qte : undefined), prix:(manualLignesD[mlD].prixUnitaire !== undefined ? manualLignesD[mlD].prixUnitaire : undefined), montant:Math.abs(_lEffD), signe:_lEffD < 0 ? '-' : '+', isManual:true, rubIdx:riD, hasMvts:_lMvsD.length > 0});
     }
     var visibleDetailsD = [];
-    for (var vdD = 0; vdD < allDetailsD.length; vdD++) {
-      if (allDetailsD[vdD].isHidden) continue;
-      if (hideZero && allDetailsD[vdD].montant === 0 && !allDetailsD[vdD].fournisseurId) continue;
-      visibleDetailsD.push(allDetailsD[vdD]);
+    if (rubD.key === 'tresorerie') {
+      /* Dédoublonnage des libellés système + filtres classiques */
+      var _seenSysT = {};
+      for (var vdS = 0; vdS < allDetailsD.length; vdS++) {
+        var dS = allDetailsD[vdS];
+        if (dS.isHidden) continue;
+        if (!dS.isManual && _sysNamesD[(dS.designation || '').trim().toLowerCase()]) {
+          var kS = dS.designation.trim().toLowerCase() + '|' + dS.signe + '|' + Math.abs(dS.montant || 0);
+          if (_seenSysT[kS]) continue;
+          _seenSysT[kS] = 1;
+        }
+        if (hideZero && dS.montant === 0 && !dS.fournisseurId && !dS.isManual) continue;
+        visibleDetailsD.push(dS);
+      }
+    } else {
+      for (var vdD = 0; vdD < allDetailsD.length; vdD++) {
+        if (allDetailsD[vdD].isHidden) continue;
+        if (hideZero && allDetailsD[vdD].montant === 0 && !allDetailsD[vdD].fournisseurId) continue;
+        visibleDetailsD.push(allDetailsD[vdD]);
+      }
+    }
+    /* Total de rubrique : hors lignes masquées et hors doublons système */
+    var _countableD = [];
+    var _seenTotD = {};
+    for (var ctD = 0; ctD < allDetailsD.length; ctD++) {
+      var dCt = allDetailsD[ctD];
+      if (dCt.isHidden) continue;
+      if (!dCt.isManual && rubD.key === 'tresorerie' && _sysNamesD[(dCt.designation || '').trim().toLowerCase()]) {
+        var kCt = dCt.designation.trim().toLowerCase() + '|' + dCt.signe + '|' + Math.abs(dCt.montant || 0);
+        if (_seenTotD[kCt]) continue;
+        _seenTotD[kCt] = 1;
+      }
+      _countableD.push(dCt);
     }
     if (rubD.key === 'tresorerie') {
       /* Tri par montant décroissant ; la paire Réserve dispo/indispo reste soudée pour la cellule cumul fusionnée */
@@ -10802,10 +10837,9 @@ function computeActifData() {
       visibleDetailsD = _flatD;
     }
     var rubTotalD = 0;
-    for (var dtD = 0; dtD < allDetailsD.length; dtD++) {
-      if (allDetailsD[dtD].isHidden) continue;
-      if (allDetailsD[dtD].signe === '-') rubTotalD -= Math.abs(allDetailsD[dtD].montant);
-      else rubTotalD += Math.abs(allDetailsD[dtD].montant);
+    for (var dtD = 0; dtD < _countableD.length; dtD++) {
+      if (_countableD[dtD].signe === '-') rubTotalD -= Math.abs(_countableD[dtD].montant);
+      else rubTotalD += Math.abs(_countableD[dtD].montant);
     }
     grandTotal += rubTotalD;
     rubD.visibleDetails = visibleDetailsD;
@@ -10858,16 +10892,16 @@ function renderActif() {
     var rubTotal = rub.rubTotal;
 
     html += '<div class="section mb-16" style="border-left:4px solid ' + rub.color + '">';
-    html += '<div class="section-header" style="cursor:pointer" onclick="toggleRubrique(this)">';
+    html += '<div class="section-header" data-rkey="' + escH(rub.key || rub.nom) + '" style="cursor:pointer" onclick="toggleRubrique(this)">';
     html += '<h3 style="display:flex;align-items:center;gap:12px"><span>' + escH(rub.nom) + '</span>';
-    html += '<span style="font-weight:700;color:' + rub.color + '">' + fmtMoney(rubTotal) + '</span></h3>';
+    html += '<span style="font-weight:700;color:' + (rubTotal < 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(rubTotal) + '</span></h3>';
     html += '<div>';
     if (!readonly) {
       var _quickAdd = (rub.key === 'bl_facturer' || rub.key === 'stock');
       html += '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();' + (_quickAdd ? 'quickAddActifLigne' : 'openLigneModalForRubrique') + '(\'' + rub.key + '\',\'' + escH(rub.nom) + '\')" style="margin-right:4px">+ Ligne</button>';
     }
     html += '</div></div>';
-    html += '<div class="section-body" style="padding:0">';
+    html += '<div class="section-body" style="padding:0' + (window._actifCollapsed && window._actifCollapsed[rub.key || rub.nom] ? ';display:none' : '') + '">';
     var _isSimple = (rub.key === 'tresorerie' || rub.key === 'factures_recouvrer' || rub.key === 'dette_fournisseur' || rub.key === 'creance_douteuse');
     var _showQtePrix = !_isSimple;
     /* Colonnes identiques pour toutes les rubriques : la colonne Montant est alignée partout.
@@ -11054,8 +11088,8 @@ function renderActif() {
       else mTotal += Math.abs(mRub.lignes[ml2].montant || 0);
     }
     html += '<div class="section mb-16">';
-    html += '<div class="section-header" style="cursor:pointer" onclick="toggleRubrique(this)">';
-    html += '<h3><span>' + escH(mRub.nom) + '</span> <span style="color:var(--primary);font-weight:700;margin-left:12px">' + fmtMoney(mTotal) + '</span></h3>';
+    html += '<div class="section-header" data-rkey="' + escH(mRub.key || mRub.id) + '" style="cursor:pointer" onclick="toggleRubrique(this)">';
+    html += '<h3><span>' + escH(mRub.nom) + '</span> <span style="color:' + (mTotal < 0 ? 'var(--danger)' : 'var(--success)') + ';font-weight:700;margin-left:12px">' + fmtMoney(mTotal) + '</span></h3>';
     html += '<div>';
     if (!readonly) {
       html += '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();openLigneModalForRubrique(\'' + (mRub.key || mRub.id) + '\',\'' + escH(mRub.nom) + '\')" style="margin-right:4px">+ Ligne</button>';
@@ -11063,7 +11097,7 @@ function renderActif() {
       html += '<button class="btn-icon danger" onclick="event.stopPropagation();deleteRubrique(\'' + mRub.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
     }
     html += '</div></div>';
-    html += '<div class="section-body" style="padding:0">';
+    html += '<div class="section-body" style="padding:0' + (window._actifCollapsed && window._actifCollapsed[mRub.key || mRub.id] ? ';display:none' : '') + '">';
     var _mHasQte = !!mRub.hasQte;
     var _mHasPrix = !!mRub.hasPrix;
     html += '<div class="table-responsive"><table class="actif-table" style="width:100%;table-layout:fixed"><colgroup><col style="width:auto"><col style="width:55px"><col style="width:95px"><col style="width:165px"><col style="width:185px">' + (!readonly ? '<col style="width:85px">' : '') + '</colgroup><thead><tr><th>D\u00e9signation</th><th style="text-align:right">' + (_mHasQte ? 'Qt\u00e9' : '') + '</th><th style="text-align:right">' + (_mHasPrix ? 'Prix unit.' : '') + '</th><th style="text-align:right">Montant</th><th>Observation</th>' + (!readonly ? '<th>Actions</th>' : '') + '</tr></thead><tbody>';
@@ -11336,7 +11370,13 @@ function toggleFournisseurActif(fournisseurId) {
 function toggleRubrique(header) {
   var section = header.parentElement;
   var body = section.querySelector('.section-body');
-  if (body) { body.style.display = body.style.display === 'none' ? '' : 'none'; }
+  if (!body) return;
+  var rk = header.getAttribute('data-rkey') || '';
+  var willHide = body.style.display !== 'none';
+  body.style.display = willHide ? 'none' : '';
+  /* Mémorise l'état replié pour survivre aux re-rendus (+ligne, etc.) */
+  window._actifCollapsed = window._actifCollapsed || {};
+  if (rk) { if (willHide) window._actifCollapsed[rk] = true; else delete window._actifCollapsed[rk]; }
 }
 
 function openRubriqueModal(id) {
@@ -11627,9 +11667,12 @@ function quickAddActifLigne(key, nom) {
 
 function saveLigneForRubrique(key, nom, lineId) {
   if (document.getElementById('ligneClient')) { return _saveBlFactLigne(key, nom, lineId); }
-  var desig = document.getElementById('ligneDesig').value.trim();
-  var montant = parseFloat(document.getElementById('ligneMontant').value) || 0;
-  var signe = document.getElementById('ligneSigne').value;
+  var desigEl2 = document.getElementById('ligneDesig');
+  var montantEl2 = document.getElementById('ligneMontant');
+  var signeEl2 = document.getElementById('ligneSigne');
+  var desig = desigEl2 ? desigEl2.value.trim() : '';
+  var montant = montantEl2 ? (parseFloat(montantEl2.value) || 0) : 0;
+  var signe = signeEl2 ? signeEl2.value : '+';
   if (montant < 0) { signe = '-'; montant = Math.abs(montant); }
   if (!desig) { toast('La d\u00e9signation est obligatoire', 'error'); return; }
   var qteEl2 = document.getElementById('ligneQte');
@@ -12011,6 +12054,18 @@ function doPrintActif() {
   if (modal) modal.remove();
   printActifWithSelection(modes);
 }
+function _printRubColor(nm) {
+  /* Mêmes couleurs que les barres verticales du tableau Actif */
+  var s = String(nm || '').toLowerCase();
+  if (s.indexOf('tr\u00e9sorerie') >= 0) return {main:'#16a34a',light:'#e7f6ec'};
+  if (s.indexOf('recouvrer') >= 0) return {main:'#d97706',light:'#fdf3e3'};
+  if (s.indexOf('bl ') >= 0 || s.indexOf('\u00e0 facturer') >= 0) return {main:'#2563eb',light:'#e8effd'};
+  if (s.indexOf('stock') >= 0) return {main:'#4b5563',light:'#eef0f3'};
+  if (s.indexOf('dette') >= 0) return {main:'#dc2626',light:'#fdeaea'};
+  if (s.indexOf('douteuse') >= 0) return {main:'#dc2626',light:'#fdeaea'};
+  return {main:'#7c3aed',light:'#f1ebfd'};
+}
+
 function printActifWithSelection(modes) {
   var includeDet = {};
   var detSels = document.querySelectorAll('.printDetSel');
@@ -12018,10 +12073,11 @@ function printActifWithSelection(modes) {
   var printHtml = '<!DOCTYPE html><html><head><title>Actif - Bilan</title>';
   printHtml += '<style>@page{size:A4;margin:8mm}body{font-family:Arial,sans-serif;font-size:12.5px;color:#222;margin:0;padding:0}';
   printHtml += '#fitWrap{width:100%}';
-  printHtml += 'table{width:100%;border-collapse:collapse;margin:5px 0;table-layout:fixed}';
-  printHtml += 'th,td{padding:3px 6px;border:1px solid #ccc;text-align:left;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;line-height:1.25}';
+  printHtml += 'table{width:100%;border-collapse:collapse;margin:6px 0 10px;table-layout:fixed}';
+  printHtml += 'th,td{padding:5px 9px;border:1px solid #bbb;text-align:left;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;line-height:1.45}';
   printHtml += 'th{background:#f2f2f2;font-weight:700;font-size:12.5px}';
-  printHtml += '.section-title{font-size:14px;font-weight:700;margin:9px 0 4px;padding:4px 9px;background:#f0f0f0;border-left:4px solid #2563eb}';
+  printHtml += 'tbody tr:nth-child(even) td{background:#fafafa}';
+  printHtml += '.section-title{font-size:15px;font-weight:700;margin:14px 0 6px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;border-radius:4px}';
   printHtml += '.grand-total{font-size:16px;font-weight:800;text-align:center;padding:10px;margin:10px 0;background:#e8f0fe;border:2px solid #2563eb}';
   printHtml += '.text-right{text-align:right}';
   printHtml += '</style></head><body><div id="fitWrap">';
@@ -12034,12 +12090,20 @@ function printActifWithSelection(modes) {
     var h3 = sections[i].querySelector('h3');
     if (!h3) continue;
     var sectionTitle = h3.textContent.trim();
-    printHtml += '<div class="section-title">' + escH(sectionTitle) + '</div>';
+    /* Nom et total séparés : le total est décollé du nom, dans la bande colorée de la rubrique */
+    var _spansT = h3.querySelectorAll('span');
+    var _rubNameP = _spansT.length > 0 ? _spansT[0].textContent.trim() : sectionTitle;
+    var _rubTotTxtP = '';
+    for (var st2 = 1; st2 < _spansT.length; st2++) { if (_spansT[st2].textContent.trim()) _rubTotTxtP = _spansT[st2].textContent.trim(); }
+    var _rubColP = _printRubColor(_rubNameP);
+    var _totNegP = _rubTotTxtP.replace(/\s/g,'').indexOf('-') === 0;
+    printHtml += '<div class="section-title" style="background:' + _rubColP.light + ';border-left:14px solid ' + _rubColP.main + '">';
+    printHtml += '<span style="font-weight:800;color:#111">' + escH(_rubNameP) + '</span>';
+    if (_rubTotTxtP) printHtml += '<span style="margin-left:24px;font-weight:800;font-size:13.5px;color:' + (_totNegP ? '#dc2626' : '#15803d') + '">' + escH(_rubTotTxtP) + '</span>';
+    printHtml += '</div>';
     if (modeP === 'total') {
-      var spansH = h3.querySelectorAll('span');
-      var totTxt = spansH.length > 0 ? spansH[spansH.length - 1].textContent.trim() : '';
       printHtml += '<table><thead><tr><th style="text-align:left;width:auto">Rubrique</th><th style="text-align:right;width:150px">Montant</th></tr></thead><tbody>';
-      printHtml += '<tr><td>' + escH(sectionTitle) + '</td><td style="text-align:right;font-weight:600">' + escH(totTxt) + '</td></tr>';
+      printHtml += '<tr><td>' + escH(_rubNameP) + '</td><td style="text-align:right;font-weight:600;color:' + (_totNegP ? '#dc2626' : '#15803d') + '">' + escH(_rubTotTxtP) + '</td></tr>';
       printHtml += '</tbody></table>';
       continue;
     }
