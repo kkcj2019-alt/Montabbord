@@ -10711,7 +10711,12 @@ function renderActif() {
     var allDetails = rub.details.slice();
     for (var ml = 0; ml < manualLignes.length; ml++) {
       var mlSigne = manualLignes[ml].signe || '+';
-      allDetails.push({id:'man_' + manualLignes[ml].id, designation:manualLignes[ml].designation, montant:manualLignes[ml].montant || 0, signe:mlSigne, isManual:true, rubIdx:ri});
+      var _lBase = (mlSigne === '-' ? -1 : 1) * Math.abs(manualLignes[ml].montant || 0);
+      var _lMvs = manualLignes[ml].mouvements || [];
+      var _lNet = 0;
+      for (var lmv = 0; lmv < _lMvs.length; lmv++) { _lNet += (_lMvs[lmv].sens === 'sortie' ? -1 : 1) * Math.abs(_lMvs[lmv].montant || 0); }
+      var _lEff = _lBase + _lNet;
+      allDetails.push({id:'man_' + manualLignes[ml].id, designation:manualLignes[ml].designation, montant:Math.abs(_lEff), signe:_lEff < 0 ? '-' : '+', isManual:true, rubIdx:ri, hasMvts:_lMvs.length > 0});
     }
 
     var visibleDetails = [];
@@ -10779,6 +10784,9 @@ function renderActif() {
         if (di > 0) html += '<button class="btn-icon" onclick="event.stopPropagation();moveDetailUp(\'' + rub.key + '\',' + di + ')" title="Monter"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg></button> ';
         if (di < visibleDetails.length - 1) html += '<button class="btn-icon" onclick="event.stopPropagation();moveDetailDown(\'' + rub.key + '\',' + di + ')" title="Descendre"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button> ';
         if (d.isManual) {
+          if (rub.key === 'tresorerie') {
+            html += '<button class="btn-icon" onclick="event.stopPropagation();openLigneMouvements(\'' + rub.key + '\',\'' + escH(rub.nom) + '\',\'' + d.id.replace('man_','') + '\')" title="Mouvements (entr\u00e9es / sorties)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 7l4-4 4 4"/><line x1="12" y1="3" x2="12" y2="21"/><path d="M16 17l-4 4-4-4"/></svg></button> ';
+          }
           html += '<button class="btn-icon" onclick="event.stopPropagation();openLigneModalForRubrique(\'' + rub.key + '\',\'' + escH(rub.nom) + '\',\'' + d.id.replace('man_','') + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
           html += '<button class="btn-icon danger" onclick="event.stopPropagation();deleteLigneForRubrique(\'' + rub.key + '\',\'' + d.id.replace('man_','') + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>';
         }
@@ -11345,7 +11353,98 @@ function deleteLigneForRubrique(key, lineId) {
       }
     }
     DB.set('mdb_actif', actif);
-    toast('Ligne supprim\u00e9e');
+    toast('Ligne supprim\u00e9');
+    renderActif();
+  });
+}
+
+function _ligneMvFind(key, nom, lineId) {
+  var actif = getActif();
+  var ri = _findActifRubriqueByKey(key, nom);
+  if (!actif.rubriques[ri]) return null;
+  var lignes = actif.rubriques[ri].lignes || [];
+  for (var j = 0; j < lignes.length; j++) { if (lignes[j].id === lineId) return {rubrique: actif.rubriques[ri], ligne: lignes[j]}; }
+  return null;
+}
+function _ligneMvCalc(ligne) {
+  var base = ((ligne.signe || '+') === '-' ? -1 : 1) * Math.abs(ligne.montant || 0);
+  var mvs = ligne.mouvements || [], net = 0;
+  for (var i = 0; i < mvs.length; i++) { net += (mvs[i].sens === 'sortie' ? -1 : 1) * Math.abs(mvs[i].montant || 0); }
+  return {base: base, mvts: net, solde: base + net};
+}
+function openLigneMouvements(key, nom, lineId) {
+  window._lmKey = key; window._lmNom = nom; window._lmLineId = lineId;
+  openFormModal('Mouvements de la ligne', '<div id="lmBody"></div>', '<button class="btn btn-outline" onclick="closeModal()">Fermer</button>');
+  renderLigneMouvementsBody();
+}
+function renderLigneMouvementsBody() {
+  var el = document.getElementById('lmBody');
+  if (!el) return;
+  var f = _ligneMvFind(window._lmKey, window._lmNom, window._lmLineId);
+  if (!f) { el.innerHTML = '<p style="color:var(--danger)">Ligne introuvable</p>'; return; }
+  var c = _ligneMvCalc(f.ligne);
+  var html = '<div style="background:var(--gray-100);border-radius:8px;padding:12px;margin-bottom:14px">';
+  html += '<div style="font-weight:600;font-size:15px">' + escH(f.ligne.designation) + '</div>';
+  html += '<div style="display:flex;gap:18px;margin-top:8px;flex-wrap:wrap;font-size:13px">';
+  html += '<span>Base : <b>' + fmtMoney(Math.abs(c.base)) + '</b></span>';
+  html += '<span>Mouvements : <b style="color:' + (c.mvts < 0 ? 'var(--danger)' : 'var(--success)') + '">' + (c.mvts >= 0 ? '+' : '\u2212') + ' ' + fmtMoney(Math.abs(c.mvts)) + '</b></span>';
+  html += '<span>Solde actuel : <b style="font-size:16px;color:' + (c.solde < 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(c.solde) + '</b></span>';
+  html += '</div></div>';
+  html += '<h4 style="margin:0 0 10px">Nouveau mouvement</h4>';
+  html += '<div class="form-row"><div class="form-group"><label>Date</label><input type="date" id="lmDate" value="' + getToday() + '"></div>';
+  html += '<div class="form-group"><label>Type</label><select id="lmSens"><option value="entree">Entr\u00e9e (+)</option><option value="sortie">Sortie (\u2212)</option></select></div></div>';
+  html += '<div class="form-row"><div class="form-group"><label>Libell\u00e9 *</label><input type="text" id="lmLibelle" placeholder="Ex : D\u00e9p\u00f4t client"></div>';
+  html += '<div class="form-group"><label>Montant (FCFA) *</label><input type="number" id="lmMontant" min="0"></div></div>';
+  html += '<button class="btn btn-primary" onclick="saveLigneMouvementForm()">Enregistrer le mouvement</button>';
+  var mvs = f.ligne.mouvements || [];
+  if (mvs.length > 0) {
+    html += '<h4 style="margin:16px 0 8px">Historique (' + mvs.length + ')</h4>';
+    html += '<div class="table-responsive"><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr>';
+    html += '<th style="text-align:left;padding:6px;border-bottom:2px solid var(--gray-200)">Date</th>';
+    html += '<th style="text-align:left;padding:6px;border-bottom:2px solid var(--gray-200)">Libell\u00e9</th>';
+    html += '<th style="text-align:left;padding:6px;border-bottom:2px solid var(--gray-200)">Type</th>';
+    html += '<th style="text-align:right;padding:6px;border-bottom:2px solid var(--gray-200)">Montant</th>';
+    html += '<th style="padding:6px;border-bottom:2px solid var(--gray-200)"></th></tr></thead><tbody>';
+    for (var i = mvs.length - 1; i >= 0; i--) {
+      var m = mvs[i];
+      html += '<tr><td style="padding:6px;border-bottom:1px solid var(--gray-100)">' + fmtDate(m.date) + '</td>';
+      html += '<td style="padding:6px;border-bottom:1px solid var(--gray-100)">' + escH(m.libelle || '') + '</td>';
+      html += '<td style="padding:6px;border-bottom:1px solid var(--gray-100);color:' + (m.sens === 'sortie' ? 'var(--danger)' : 'var(--success)') + ';font-weight:600">' + (m.sens === 'sortie' ? 'Sortie' : 'Entr\u00e9e') + '</td>';
+      html += '<td style="padding:6px;border-bottom:1px solid var(--gray-100);text-align:right">' + fmtMoney(Math.abs(m.montant || 0)) + '</td>';
+      html += '<td style="padding:6px;border-bottom:1px solid var(--gray-100);text-align:center"><button class="btn-icon danger" onclick="deleteLigneMouvement(\'' + m.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td></tr>';
+    }
+    html += '</tbody></table></div>';
+  } else {
+    html += '<p style="color:var(--gray-500);font-size:13px;margin-top:14px">Aucun mouvement enregistr\u00e9 pour le moment.</p>';
+  }
+  el.innerHTML = html;
+}
+function saveLigneMouvementForm() {
+  var date = document.getElementById('lmDate').value || getToday();
+  var sens = document.getElementById('lmSens').value;
+  var libelle = document.getElementById('lmLibelle').value.trim();
+  var montant = parseFloat(document.getElementById('lmMontant').value) || 0;
+  if (!libelle) { toast('Le libell\u00e9 est obligatoire', 'error'); return; }
+  if (montant <= 0) { toast('Le montant doit \u00eatre sup\u00e9rieur \u00e0 0', 'error'); return; }
+  var f = _ligneMvFind(window._lmKey, window._lmNom, window._lmLineId);
+  if (!f) { toast('Ligne introuvable', 'error'); return; }
+  if (!f.ligne.mouvements) f.ligne.mouvements = [];
+  f.ligne.mouvements.push({id: DB.genId(), date: date, libelle: libelle, sens: sens, montant: montant});
+  DB.set('mdb_actif', getActif());
+  toast(sens === 'sortie' ? 'Sortie enregistr\u00e9e' : 'Entr\u00e9e enregistr\u00e9e');
+  renderLigneMouvementsBody();
+  renderActif();
+}
+function deleteLigneMouvement(mvId) {
+  openConfirm('Supprimer ce mouvement ?', function() {
+    var f = _ligneMvFind(window._lmKey, window._lmNom, window._lmLineId);
+    if (!f || !f.ligne.mouvements) return;
+    var r = [];
+    for (var i = 0; i < f.ligne.mouvements.length; i++) { if (f.ligne.mouvements[i].id !== mvId) r.push(f.ligne.mouvements[i]); }
+    f.ligne.mouvements = r;
+    DB.set('mdb_actif', getActif());
+    toast('Mouvement supprim\u00e9');
+    if (document.getElementById('lmBody')) renderLigneMouvementsBody();
     renderActif();
   });
 }
