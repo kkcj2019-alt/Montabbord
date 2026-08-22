@@ -8040,6 +8040,31 @@ function renderPrefinClients(el) {
   html += '<div class="stat-card"><div class="stat-info"><div class="stat-value" style="color:var(--success)">' + fmtMoney(reservesDispoCard) + '</div><div class="stat-label">Solde des r\u00e9serves disponibles</div></div></div>';
   html += '<div class="stat-card"><div class="stat-info"><div class="stat-value" style="color:var(--primary)">' + fmtMoney(cumulDeux) + '</div><div class="stat-label">Cumul demandes + r\u00e9serves</div></div></div>';
   html += '</div>';
+  /* Compte de réserve : solde + historique des mouvements */
+  var rrNow = DB.get('mdb_reportReserve') || {};
+  var rrMvs = rrNow.mouvements || [];
+  var _rrSolde = getReportReserveTotal();
+  html += '<div class="card" style="margin-bottom:16px"><div class="card-body">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">';
+  html += '<div><strong>Compte de r\u00e9serve</strong> <span style="font-size:12px;color:var(--gray-500)">(base ' + escH(rrNow.libelle || 'RAN') + ' : ' + fmtMoney(rrNow.montant || 0) + ' FCFA)</span></div>';
+  html += '<div style="display:flex;gap:10px;align-items:center"><span style="font-size:18px;font-weight:800;color:' + (_rrSolde < 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(_rrSolde) + ' FCFA</span>';
+  if (!readonly) html += '<button class="btn btn-sm btn-primary" onclick="openReportReserve()">+ Mouvement</button>';
+  html += '</div></div>';
+  if (rrMvs.length > 0) {
+    html += '<table style="width:100%;font-size:13px;border-collapse:collapse"><thead><tr style="color:var(--gray-500);font-size:11px"><th style="text-align:left;padding:4px">Date</th><th style="text-align:left;padding:4px">Libell\u00e9</th><th style="text-align:right;padding:4px">Montant</th>' + (readonly ? '' : '<th style="width:34px"></th>') + '</tr></thead><tbody>';
+    for (var rm2 = 0; rm2 < rrMvs.length; rm2++) {
+      var _rmm = rrMvs[rm2];
+      var _neg2 = _rmm.sens === '-';
+      html += '<tr><td style="padding:4px">' + escH(_rmm.date ? fmtDate(_rmm.date) : '') + '</td><td style="padding:4px">' + escH(_rmm.libelle || 'Mouvement') + '</td><td style="padding:4px;text-align:right;font-weight:600;color:' + (_neg2 ? 'var(--danger)' : 'var(--success)') + '">' + (_neg2 ? '- ' : '+ ') + fmtMoney(Math.abs(_rmm.montant || 0)) + '</td>';
+      if (!readonly) html += '<td style="text-align:right"><button class="btn-icon danger" onclick="deleteRrMouvementPage(\'' + _rmm.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += '<div style="font-size:11px;color:var(--gray-400);margin-top:5px">Solde = base + somme des mouvements. Une diminution sort d\u00e9finitivement le montant du compte de r\u00e9serve.</div>';
+  } else {
+    html += '<div style="font-size:12px;color:var(--gray-400)">Aucun mouvement enregistr\u00e9.</div>';
+  }
+  html += '</div></div>';
   html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>Client</th><th>BC</th><th>Date demande</th><th>Date accord</th><th>Taux (%)</th><th>Montant accord\u00e9</th><th>Rembours\u00e9</th><th>Reste \u00e0 rembourser</th><th>R\u00e9serve indispo</th><th>R\u00e9serve dispo</th><th>\u00c9ch\u00e9ance</th><th>Dur\u00e9e</th><th>Statut \u00e9ch\u00e9ance</th><th>Statut</th>';
   if (!readonly) html += '<th style="width:140px">Actions</th>';
   html += '</tr></thead><tbody>';
@@ -9513,24 +9538,51 @@ function openReportReserve() {
 function saveReportReserve() {
   persistReportReserveBase();
   markDirty('mdb_reportReserve');
+  schedulePush();
   closeModal();
-  toast('Report réserve enregistré');
+  toast('Report r\u00e9serve enregistr\u00e9');
+  _rrRefreshPages();
+}
+function _rrRefreshPages() {
   if (currentPage === 'actif') renderActif();
+  else if (currentPage === 'prefinancement') renderPrefinancement();
 }
 function addRrMouvement() {
-  var sens = document.getElementById('rrMvSens').value;
-  var date = document.getElementById('rrMvDate').value;
-  var libelle = document.getElementById('rrMvLibelle').value.trim();
-  var montant = parseFloat(document.getElementById('rrMvMontant').value) || 0;
-  if (!date) { toast('La date est obligatoire', 'error'); return; }
-  if (montant <= 0) { toast('Le montant doit être positif', 'error'); return; }
-  var rr = persistReportReserveBase();
-  rr.mouvements.push({ id: DB.genId(), date: date, sens: sens, montant: montant, libelle: libelle });
+  try {
+    var sens = document.getElementById('rrMvSens').value;
+    var date = document.getElementById('rrMvDate').value;
+    var libelle = document.getElementById('rrMvLibelle').value.trim();
+    var montant = parseFloat(document.getElementById('rrMvMontant').value) || 0;
+    if (!date) { toast('La date est obligatoire', 'error'); return; }
+    if (montant <= 0) { toast('Le montant doit être positif', 'error'); return; }
+    var rr = persistReportReserveBase();
+    rr.mouvements.push({ id: DB.genId(), date: date, sens: sens, montant: montant, libelle: libelle });
+    DB.set('mdb_reportReserve', rr);
+    markDirty('mdb_reportReserve');
+    schedulePush();
+    toast('Mouvement ajout\u00e9 \u2014 solde r\u00e9serve : ' + fmtMoney(getReportReserveTotal()) + ' FCFA');
+    _rrRefreshPages();
+    openReportReserve();
+  } catch (e) {
+    console.error('addRrMouvement:', e);
+    toast('Erreur lors de l\'enregistrement : ' + e.message, 'error');
+  }
+}
+function deleteRrMvInternal(id) {
+  var rr = DB.get('mdb_reportReserve') || { montant: 0, libelle: '', date: '', mouvements: [] };
+  var kept = [];
+  for (var i = 0; i < (rr.mouvements || []).length; i++) { if (rr.mouvements[i].id !== id) kept.push(rr.mouvements[i]); }
+  rr.mouvements = kept;
+  if (!rr.deletedMv) rr.deletedMv = [];
+  if (rr.deletedMv.indexOf(id) === -1) rr.deletedMv.push(id);
   DB.set('mdb_reportReserve', rr);
   markDirty('mdb_reportReserve');
-  toast('Mouvement ajouté');
-  if (currentPage === 'actif') renderActif();
-  openReportReserve();
+  schedulePush();
+}
+function deleteRrMouvementPage(id) {
+  deleteRrMvInternal(id);
+  toast('Mouvement supprim\u00e9');
+  _rrRefreshPages();
 }
 function onRrQuickPf() {
   var sel = document.getElementById('rrQuickPf');
@@ -9548,16 +9600,9 @@ function onRrQuickPf() {
   if (mtEl) mtEl.value = Math.round((pf.montantAccorde || 0) * 0.10);
 }
 function deleteRrMouvement(id) {
-  var rr = DB.get('mdb_reportReserve') || { montant: 0, libelle: '', date: '', mouvements: [] };
-  var kept = [];
-  for (var i = 0; i < (rr.mouvements || []).length; i++) { if (rr.mouvements[i].id !== id) kept.push(rr.mouvements[i]); }
-  rr.mouvements = kept;
-  if (!rr.deletedMv) rr.deletedMv = [];
-  if (rr.deletedMv.indexOf(id) === -1) rr.deletedMv.push(id);
-  DB.set('mdb_reportReserve', rr);
-  markDirty('mdb_reportReserve');
+  deleteRrMvInternal(id);
   toast('Mouvement supprimé');
-  if (currentPage === 'actif') renderActif();
+  _rrRefreshPages();
   openReportReserve();
 }
 
@@ -10509,7 +10554,7 @@ function renderActif() {
       for (var blfl = 0; blfl < bl.lignes.length; blfl++) {
         var ln = bl.lignes[blfl];
         var mt = (ln.quantite || 0) * (ln.prixUnitaire || 0);
-        blDetails.push({id:'bl_' + bl.id + '_' + blfl, designation: (blCl ? blCl.nom + ' - ' : '') + (ln.designation || getArticleLabel(ln.articleId)), montant: mt, signe: '+', qte: ln.quantite, prix: ln.prixUnitaire, date: bl.dateLivraison, numero: bl.numero || ''});
+        blDetails.push({id:'bl_' + bl.id + '_' + blfl, designation: (ln.designation || getArticleLabel(ln.articleId)), subLabel:(blCl ? blCl.nom : '') + (bl.dateLivraison ? ' \u2014 ' + fmtDate(bl.dateLivraison) : '') + (bl.numero ? ' \u00b7 BL ' + bl.numero : ''), montant: mt, signe: '+', qte: ln.quantite, prix: ln.prixUnitaire});
         blTotal += mt;
       }
     }
@@ -10687,16 +10732,14 @@ function renderActif() {
     html += '<div class="section-body" style="padding:0">';
     var _isSimple = (rub.key === 'tresorerie' || rub.key === 'factures_recouvrer' || rub.key === 'dette_fournisseur' || rub.key === 'creance_douteuse');
     var _showQtePrix = !_isSimple;
-    var _showDate = (rub.key === 'bl_facturer');
-    var _colCount = _showQtePrix ? (_showDate ? 6 : 5) : 3;
+    /* Colonnes identiques pour toutes les rubriques : la colonne Montant est alignée partout.
+       Pour les rubriques simples, Qté / Prix unit. sont des colonnes vides sans en-tête. */
+    var _colCount = 5;
     if (!readonly) _colCount += 1;
-    html += '<div class="table-responsive"><table class="actif-table" style="width:100%;table-layout:fixed"><colgroup><col style="width:auto">' + (_showQtePrix ? '<col style="width:60px"><col style="width:100px">' : '') + (_showDate ? '<col style="width:95px">' : '') + '<col style="width:170px"><col style="width:190px">' + (!readonly ? '<col style="width:90px">' : '') + '</colgroup><thead><tr>';
+    html += '<div class="table-responsive"><table class="actif-table" style="width:100%;table-layout:fixed"><colgroup><col style="width:auto"><col style="width:55px"><col style="width:95px"><col style="width:165px"><col style="width:185px">' + (!readonly ? '<col style="width:85px">' : '') + '</colgroup><thead><tr>';
     html += '<th>D\u00e9signation</th>';
-    if (_showQtePrix) {
-      html += '<th style="text-align:right">Qt\u00e9</th>';
-      html += '<th style="text-align:right">Prix unit.</th>';
-    }
-    if (_showDate) html += '<th>Date</th>';
+    html += '<th style="text-align:right">' + (_showQtePrix ? 'Qt\u00e9' : '') + '</th>';
+    html += '<th style="text-align:right">' + (_showQtePrix ? 'Prix unit.' : '') + '</th>';
     html += '<th style="text-align:right">Montant</th>';
     html += '<th>Observation</th>';
     if (!readonly) html += '<th>Actions</th>';
@@ -10711,12 +10754,9 @@ function renderActif() {
       if (d.isDashCreance) rowStyle += ';background:var(--warning-light)';
       var rowClick = isClickable ? ' onclick="toggleActifDetail(\'actifDetail_' + rub.key + '_' + di + '\')"' : '';
       html += '<tr style="' + rowStyle + '"' + rowClick + '>';
-      html += '<td style="white-space:normal;word-break:break-word">' + escH(d.designation) + (isClickable ? ' <span style="color:var(--gray-400);font-size:11px">\u25BC</span>' : '') + '</td>';
-      if (_showQtePrix) {
-        html += '<td style="text-align:right">' + (d.qte !== undefined ? d.qte : '-') + '</td>';
-        html += '<td style="text-align:right">' + (d.prix !== undefined ? fmtMoney(d.prix) : '-') + '</td>';
-      }
-      if (_showDate) html += '<td style="font-size:12px;color:var(--gray-500)">' + (d.date ? fmtDate(d.date) : '-') + '</td>';
+      html += '<td style="white-space:normal;word-break:break-word">' + escH(d.designation) + (d.subLabel ? '<div style="font-size:11px;color:var(--gray-500);margin-top:1px">' + escH(d.subLabel) + '</div>' : '') + (isClickable ? ' <span style="color:var(--gray-400);font-size:11px">\u25BC</span>' : '') + '</td>';
+      html += '<td style="text-align:right">' + (_showQtePrix && d.qte !== undefined ? d.qte : '') + '</td>';
+      html += '<td style="text-align:right">' + (_showQtePrix && d.prix !== undefined ? fmtMoney(d.prix) : '') + '</td>';
       html += '<td style="text-align:right;font-weight:600;white-space:nowrap;color:' + (montantVal < 0 ? 'var(--danger)' : 'var(--success)') + '">' + montantSigne + fmtMoney(Math.abs(d.montant)) + '</td>';
       var _savedComment = (actif.comments && actif.comments[d.id]) ? actif.comments[d.id] : (d.commentaire || '');
       if (readonly) {
@@ -10853,7 +10893,9 @@ function renderActif() {
     }
     html += '</div></div>';
     html += '<div class="section-body" style="padding:0">';
-    html += '<div class="table-responsive"><table class="actif-table" style="width:100%;table-layout:fixed"><colgroup><col style="width:auto"><col style="width:170px"><col style="width:190px">' + (!readonly ? '<col style="width:90px">' : '') + '</colgroup><thead><tr><th>D\u00e9signation</th><th style="text-align:right">Montant</th><th>Observation</th>' + (!readonly ? '<th>Actions</th>' : '') + '</tr></thead><tbody>';
+    var _mHasQte = !!mRub.hasQte;
+    var _mHasPrix = !!mRub.hasPrix;
+    html += '<div class="table-responsive"><table class="actif-table" style="width:100%;table-layout:fixed"><colgroup><col style="width:auto"><col style="width:55px"><col style="width:95px"><col style="width:165px"><col style="width:185px">' + (!readonly ? '<col style="width:85px">' : '') + '</colgroup><thead><tr><th>D\u00e9signation</th><th style="text-align:right">' + (_mHasQte ? 'Qt\u00e9' : '') + '</th><th style="text-align:right">' + (_mHasPrix ? 'Prix unit.' : '') + '</th><th style="text-align:right">Montant</th><th>Observation</th>' + (!readonly ? '<th>Actions</th>' : '') + '</tr></thead><tbody>';
     var mLignes = mRub.lignes || [];
     var mLignesVis = mLignes;
     if (hideZero) { mLignesVis = []; for (var hz = 0; hz < mLignes.length; hz++) { if (mLignes[hz].montant !== 0) mLignesVis.push(mLignes[hz]); } }
@@ -10863,6 +10905,8 @@ function renderActif() {
       var mlMontantVal = ms3 === '-' ? -Math.abs(ml3.montant || 0) : Math.abs(ml3.montant || 0);
       html += '<tr>';
       html += '<td>' + escH(ml3.designation) + '</td>';
+      html += '<td style="text-align:right">' + (_mHasQte && ml3.qte !== undefined ? ml3.qte : '') + '</td>';
+      html += '<td style="text-align:right">' + (_mHasPrix && ml3.prixUnitaire !== undefined ? fmtMoney(ml3.prixUnitaire) : '') + '</td>';
       html += '<td class="text-right fw-600" style="color:' + (mlMontantVal < 0 ? 'var(--danger)' : 'var(--success)') + '">' + (ms3 === '-' ? '- ' : '+ ') + fmtMoney(Math.abs(ml3.montant || 0)) + '</td>';
       var _savedCommentM = (actif.comments && actif.comments[ml3.id]) ? actif.comments[ml3.id] : '';
       if (readonly) {
@@ -10880,7 +10924,7 @@ function renderActif() {
       }
       html += '</tr>';
     }
-    if (mLignesVis.length === 0) html += '<tr><td colspan="' + (readonly ? 3 : 4) + '" class="text-center text-muted">Aucune ligne</td></tr>';
+    if (mLignesVis.length === 0) html += '<tr><td colspan="' + (readonly ? 5 : 6) + '" class="text-center text-muted">Aucune ligne</td></tr>';
     html += '</tbody></table></div></div></div>';
   }
 
@@ -11065,6 +11109,10 @@ function openRubriqueModal(id) {
   var html = '<div class="form-group"><label>Nom de la rubrique *</label><input type="text" id="rubNom" value="' + escH(rub ? rub.nom : '') + '" list="rubSuggestions" placeholder="Ex: Tr\u00e9sorerie, Stock..."><datalist id="rubSuggestions">';
   for (var s = 0; s < suggestions.length; s++) html += '<option value="' + escH(suggestions[s]) + '">';
   html += '</datalist></div>';
+  html += '<div class="form-group"><label>Colonnes des lignes</label><div style="display:flex;gap:16px;flex-wrap:wrap">';
+  html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="rubHasQte"' + (rub && rub.hasQte ? ' checked' : '') + '> Colonne Quantit\u00e9</label>';
+  html += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="rubHasPrix"' + (rub && rub.hasPrix ? ' checked' : '') + '> Colonne Prix unitaire</label>';
+  html += '</div><div style="font-size:11px;color:var(--gray-400);margin-top:3px">Sans coche : lignes simples (libell\u00e9 + montant).</div></div>';
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-primary" onclick="saveRubrique(\'' + (id || '') + '\')">Enregistrer</button>';
   openFormModal(title, html, footer);
@@ -11073,11 +11121,13 @@ function openRubriqueModal(id) {
 function saveRubrique(id) {
   var nom = document.getElementById('rubNom').value.trim();
   if (!nom) { toast('Le nom est obligatoire', 'error'); return; }
+  var hasQte = document.getElementById('rubHasQte') ? document.getElementById('rubHasQte').checked : false;
+  var hasPrix = document.getElementById('rubHasPrix') ? document.getElementById('rubHasPrix').checked : false;
   var actif = getActif();
   if (id) {
-    for (var i = 0; i < actif.rubriques.length; i++) { if (actif.rubriques[i].id === id) { actif.rubriques[i].nom = nom; break; } }
+    for (var i = 0; i < actif.rubriques.length; i++) { if (actif.rubriques[i].id === id) { actif.rubriques[i].nom = nom; actif.rubriques[i].hasQte = hasQte; actif.rubriques[i].hasPrix = hasPrix; break; } }
   } else {
-    actif.rubriques.push({id:DB.genId(), nom:nom, lignes:[]});
+    actif.rubriques.push({id:DB.genId(), nom:nom, lignes:[], hasQte:hasQte, hasPrix:hasPrix});
   }
   DB.set('mdb_actif', actif);
   closeModal();
@@ -11098,11 +11148,16 @@ function deleteRubrique(id) {
 
 function openLigneModal(rubId, lineId) {
   var line = null;
+  var _rubFlags = {hasQte:false, hasPrix:false};
   var actif = getActif();
   for (var i = 0; i < actif.rubriques.length; i++) {
-    if (actif.rubriques[i].id === rubId && actif.rubriques[i].lignes) {
-      for (var j = 0; j < actif.rubriques[i].lignes.length; j++) {
-        if (actif.rubriques[i].lignes[j].id === lineId) { line = actif.rubriques[i].lignes[j]; break; }
+    if (actif.rubriques[i].id === rubId) {
+      _rubFlags.hasQte = !!actif.rubriques[i].hasQte;
+      _rubFlags.hasPrix = !!actif.rubriques[i].hasPrix;
+      if (actif.rubriques[i].lignes) {
+        for (var j = 0; j < actif.rubriques[i].lignes.length; j++) {
+          if (actif.rubriques[i].lignes[j].id === lineId) { line = actif.rubriques[i].lignes[j]; break; }
+        }
       }
       break;
     }
@@ -11113,6 +11168,12 @@ function openLigneModal(rubId, lineId) {
   html += '<div class="form-group"><label>Signe</label><select id="ligneSigne"><option value="+"' + (!line || (line.signe || '+') === '+' ? ' selected' : '') + '>+ (ajout)</option><option value="-"' + (line && line.signe === '-' ? ' selected' : '') + '>- (d\u00e9duction)</option></select></div>';
   html += '<div class="form-group"><label>Montant *</label><input type="number" id="ligneMontant" value="' + (line ? Math.abs(line.montant || 0) : '') + '" min="0"></div>';
   html += '</div>';
+  if (_rubFlags.hasQte || _rubFlags.hasPrix) {
+    html += '<div class="form-row">';
+    if (_rubFlags.hasQte) html += '<div class="form-group"><label>Quantit\u00e9</label><input type="number" id="ligneQte" value="' + (line && line.qte !== undefined ? line.qte : '') + '" min="0"></div>';
+    if (_rubFlags.hasPrix) html += '<div class="form-group"><label>Prix unitaire</label><input type="number" id="lignePrix" value="' + (line && line.prixUnitaire !== undefined ? line.prixUnitaire : '') + '" min="0"></div>';
+    html += '</div>';
+  }
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-primary" onclick="saveLigne(\'' + rubId + '\',\'' + (lineId || '') + '\')">Enregistrer</button>';
   openFormModal(title, html, footer);
@@ -11124,6 +11185,11 @@ function saveLigne(rubId, lineId) {
   var signe = document.getElementById('ligneSigne').value;
   if (montant < 0) { signe = '-'; montant = Math.abs(montant); }
   if (!desig) { toast('La d\u00e9signation est obligatoire', 'error'); return; }
+  var qteEl = document.getElementById('ligneQte');
+  var prixEl = document.getElementById('lignePrix');
+  var extra = {};
+  if (qteEl) extra.qte = parseFloat(qteEl.value) || 0;
+  if (prixEl) extra.prixUnitaire = parseFloat(prixEl.value) || 0;
   var actif = getActif();
   for (var i = 0; i < actif.rubriques.length; i++) {
     if (actif.rubriques[i].id === rubId) {
@@ -11134,11 +11200,12 @@ function saveLigne(rubId, lineId) {
             actif.rubriques[i].lignes[j].designation = desig;
             actif.rubriques[i].lignes[j].montant = montant;
             actif.rubriques[i].lignes[j].signe = signe;
+            for (var ek in extra) { if (extra.hasOwnProperty(ek)) actif.rubriques[i].lignes[j][ek] = extra[ek]; }
             break;
           }
         }
       } else {
-        actif.rubriques[i].lignes.push({id:DB.genId(), designation:desig, montant:montant, signe:signe});
+        actif.rubriques[i].lignes.push(Object.assign({id:DB.genId(), designation:desig, montant:montant, signe:signe}, extra));
       }
       break;
     }
@@ -11185,6 +11252,15 @@ function _findActifRubriqueByKey(key, nom) {
   return actif.rubriques.length - 1;
 }
 
+function _getActifRubriqueFlags(key, nom) {
+  var actif = getActif();
+  for (var i = 0; i < actif.rubriques.length; i++) {
+    var r = actif.rubriques[i];
+    if (r.key === key || r.id === key || r.nom.toLowerCase() === (nom || '').toLowerCase()) return {hasQte: !!r.hasQte, hasPrix: !!r.hasPrix};
+  }
+  return {hasQte: false, hasPrix: false};
+}
+
 function openLigneModalForRubrique(key, nom, lineId) {
   var actif = getActif();
   var rubIdx = _findActifRubriqueByKey(key, nom);
@@ -11194,12 +11270,19 @@ function openLigneModalForRubrique(key, nom, lineId) {
       if (actif.rubriques[rubIdx].lignes[j].id === lineId) { line = actif.rubriques[rubIdx].lignes[j]; break; }
     }
   }
+  var _flags = _getActifRubriqueFlags(key, nom);
   var title = line ? 'Modifier la ligne' : 'Nouvelle ligne - ' + nom;
   var html = '<div class="form-group"><label>D\u00e9signation *</label><input type="text" id="ligneDesig" value="' + escH(line ? line.designation : '') + '"></div>';
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Signe</label><select id="ligneSigne"><option value="+"' + (!line || (line.signe || '+') === '+' ? ' selected' : '') + '>+ (ajout)</option><option value="-"' + (line && line.signe === '-' ? ' selected' : '') + '>- (d\u00e9duction)</option></select></div>';
   html += '<div class="form-group"><label>Montant (FCFA) *</label><input type="number" id="ligneMontant" value="' + (line ? Math.abs(line.montant || 0) : '') + '" min="0"></div>';
   html += '</div>';
+  if (_flags.hasQte || _flags.hasPrix) {
+    html += '<div class="form-row">';
+    if (_flags.hasQte) html += '<div class="form-group"><label>Quantit\u00e9</label><input type="number" id="ligneQte" value="' + (line && line.qte !== undefined ? line.qte : '') + '" min="0"></div>';
+    if (_flags.hasPrix) html += '<div class="form-group"><label>Prix unitaire</label><input type="number" id="lignePrix" value="' + (line && line.prixUnitaire !== undefined ? line.prixUnitaire : '') + '" min="0"></div>';
+    html += '</div>';
+  }
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-primary" onclick="saveLigneForRubrique(\'' + key + '\',\'' + escH(nom) + '\',\'' + (lineId || '') + '\')">Enregistrer</button>';
   openFormModal(title, html, footer);
@@ -11211,6 +11294,11 @@ function saveLigneForRubrique(key, nom, lineId) {
   var signe = document.getElementById('ligneSigne').value;
   if (montant < 0) { signe = '-'; montant = Math.abs(montant); }
   if (!desig) { toast('La d\u00e9signation est obligatoire', 'error'); return; }
+  var qteEl2 = document.getElementById('ligneQte');
+  var prixEl2 = document.getElementById('lignePrix');
+  var extra2 = {};
+  if (qteEl2) extra2.qte = parseFloat(qteEl2.value) || 0;
+  if (prixEl2) extra2.prixUnitaire = parseFloat(prixEl2.value) || 0;
   var actif = getActif();
   var rubIdx = _findActifRubriqueByKey(key, nom);
   if (!actif.rubriques[rubIdx].lignes) actif.rubriques[rubIdx].lignes = [];
@@ -11220,11 +11308,12 @@ function saveLigneForRubrique(key, nom, lineId) {
         actif.rubriques[rubIdx].lignes[j].designation = desig;
         actif.rubriques[rubIdx].lignes[j].montant = montant;
         actif.rubriques[rubIdx].lignes[j].signe = signe;
+        for (var ek2 in extra2) { if (extra2.hasOwnProperty(ek2)) actif.rubriques[rubIdx].lignes[j][ek2] = extra2[ek2]; }
         break;
       }
     }
   } else {
-    actif.rubriques[rubIdx].lignes.push({id:DB.genId(), designation:desig, montant:montant, signe:signe});
+    actif.rubriques[rubIdx].lignes.push(Object.assign({id:DB.genId(), designation:desig, montant:montant, signe:signe}, extra2));
   }
   DB.set('mdb_actif', actif);
   closeModal();
@@ -11371,19 +11460,39 @@ function openPrintActifModal() {
   modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center';
   var inner = '<div style="background:#fff;border-radius:12px;padding:24px;max-width:520px;width:90%;max-height:80vh;overflow-y:auto">';
   inner += '<h3 style="margin:0 0 16px;color:var(--primary)">Imprimer l\'Actif</h3>';
-  inner += '<p style="font-size:13px;color:var(--gray-500);margin:0 0 12px">Pour chaque rubrique : <strong>Exclue</strong> (non imprim\u00e9e), <strong>Total seul</strong> (rubrique et son total, sans les lignes) ou <strong>Avec d\u00e9tail</strong> (toutes les lignes).</p>';
+  inner += '<p style="font-size:13px;color:var(--gray-500);margin:0 0 12px">Pour chaque rubrique : <strong>Exclue</strong>, <strong>Total seul</strong> ou <strong>Avec d\u00e9tail</strong> (les lignes). Les d\u00e9tails de lignes (r\u00e9serve dispo, indispo, pr\u00e9financements...) ne sortent que si vous cochez la case correspondante.</p>';
   inner += '<div style="display:flex;gap:8px;margin-bottom:12px">';
   inner += '<button class="btn btn-sm btn-outline" onclick="setAllPrintModes(\'detail\')">Tout avec détail</button>';
   inner += '<button class="btn btn-sm btn-outline" onclick="setAllPrintModes(\'total\')">Tout en totaux seuls</button>';
   inner += '</div>';
   for (var j = 0; j < sectionNames.length; j++) {
-    inner += '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px solid var(--gray-200);font-size:13px">';
+    var secEl = sections[j];
+    var detRows = [];
+    var tbodyEls = secEl.querySelectorAll('tbody tr[id^="actifDetail_"]');
+    for (var dr = 0; dr < tbodyEls.length; dr++) {
+      var detTr = tbodyEls[dr];
+      if (!detTr.id || detTr.id.indexOf('actifDetail_') !== 0) continue;
+      var mainTr = detTr.previousElementSibling;
+      var lbl2 = mainTr && mainTr.cells && mainTr.cells.length > 0 ? mainTr.cells[0].textContent.trim() : detTr.id;
+      lbl2 = lbl2.split('\u25BC').join('').split('\u25B2').join('').trim();
+      detRows.push({id: detTr.id, lbl: lbl2});
+    }
+    inner += '<div style="padding:6px 0;border-bottom:1px solid var(--gray-200);font-size:13px">';
+    inner += '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px">';
     inner += '<span style="flex:1">' + escH(sectionNames[j]) + '</span>';
     inner += '<select class="printActifSel" data-section="' + j + '" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:6px;font-size:12px;background:#fff">';
     inner += '<option value="exclure">Exclue</option>';
     inner += '<option value="total">Total seul</option>';
     inner += '<option value="detail" selected>Avec détail</option>';
     inner += '</select>';
+    inner += '</div>';
+    if (detRows.length > 0) {
+      for (var dr2 = 0; dr2 < detRows.length; dr2++) {
+        inner += '<label style="display:flex;align-items:center;gap:6px;padding:3px 0 0 14px;font-size:12px;color:var(--gray-600);cursor:pointer">';
+        inner += '<input type="checkbox" class="printDetSel" data-det="' + escH(detRows[dr2].id) + '"> D\u00e9tail : ' + escH(detRows[dr2].lbl);
+        inner += '</label>';
+      }
+    }
     inner += '</div>';
   }
   inner += '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">';
@@ -11409,6 +11518,9 @@ function doPrintActif() {
   printActifWithSelection(modes);
 }
 function printActifWithSelection(modes) {
+  var includeDet = {};
+  var detSels = document.querySelectorAll('.printDetSel');
+  for (var ds2 = 0; ds2 < detSels.length; ds2++) { if (detSels[ds2].checked) includeDet[detSels[ds2].getAttribute('data-det')] = true; }
   var printHtml = '<!DOCTYPE html><html><head><title>Actif - Bilan</title>';
   printHtml += '<style>@page{size:A4;margin:12mm 15mm}body{font-family:Arial,sans-serif;font-size:11px;color:#333;margin:0;padding:0}';
   printHtml += 'table{width:100%;border-collapse:collapse;margin:6px 0;table-layout:fixed}';
@@ -11438,25 +11550,35 @@ function printActifWithSelection(modes) {
     }
     var tbl = sections[i].querySelector('.table-responsive table') || sections[i].querySelector('table');
     if (tbl) {
-      var headLabels = [];
-      var thEls = tbl.querySelectorAll('thead th');
-      for (var h2 = 0; h2 < thEls.length; h2++) headLabels.push(thEls[h2].textContent.trim());
-      var _lblIdx = function(nm) { for (var z2 = 0; z2 < headLabels.length; z2++) { if (headLabels[z2].indexOf(nm) >= 0) return z2; } return -1; };
-      var iDesig = _lblIdx('signation'), iQte = _lblIdx('Qt'), iPrix = _lblIdx('Prix'), iDate = _lblIdx('Date'), iMt = _lblIdx('Montant'), iObs = _lblIdx('bserv');
+      /* Colonnes identiques pour toutes les rubriques : le Montant est aligné partout */
+      var iDesig = 0, iQte = 1, iPrix = 2, iMt = 3, iObs = 4;
       printHtml += '<table>';
-      printHtml += '<thead><tr><th style="text-align:left;width:auto">D\u00e9signation</th>';
-      if (iQte >= 0) printHtml += '<th style="text-align:right;width:50px">Qt\u00e9</th>';
-      if (iPrix >= 0) printHtml += '<th style="text-align:right;width:80px">Prix unit.</th>';
-      if (iDate >= 0) printHtml += '<th style="width:70px">Date</th>';
-      printHtml += '<th style="text-align:right;width:130px">Montant</th>';
-      if (iObs >= 0) printHtml += '<th style="width:auto">Observation</th>';
-      printHtml += '</tr></thead><tbody>';
+      printHtml += '<thead><tr><th style="text-align:left;width:auto">D\u00e9signation</th><th style="text-align:right;width:40px">Qt\u00e9</th><th style="text-align:right;width:80px">Prix unit.</th><th style="text-align:right;width:130px">Montant</th><th style="width:auto">Observation</th></tr></thead><tbody>';
       var bodies = tbl.tBodies;
       for (var b2 = 0; b2 < bodies.length; b2++) {
         var trs = bodies[b2].children;
         for (var r2 = 0; r2 < trs.length; r2++) {
           var row = trs[r2];
           if (!row || row.tagName !== 'TR') continue;
+          if (row.id && row.id.indexOf('actifDetail_') === 0) {
+            if (includeDet[row.id]) {
+              var nt = row.querySelector('table');
+              if (nt) {
+                for (var nb = 0; nb < nt.tBodies.length; nb++) {
+                  var ntrs = nt.tBodies[nb].children;
+                  for (var nr = 0; nr < ntrs.length; nr++) {
+                    var ntr = ntrs[nr];
+                    if (!ntr || ntr.tagName !== 'TR' || !ntr.cells || ntr.cells.length < 2) continue;
+                    var nlbl = ntr.cells[0].textContent.trim();
+                    var nmt = ntr.cells[1].textContent.trim();
+                    var isTot = nlbl.toLowerCase() === 'total';
+                    printHtml += '<tr><td style="padding-left:16px;' + (isTot ? 'font-weight:700' : 'font-style:italic;color:#555') + '">' + escH(nlbl) + '</td><td></td><td></td><td style="text-align:right;' + (isTot ? 'font-weight:700' : 'color:#555') + '">' + escH(nmt) + '</td><td></td></tr>';
+                  }
+                }
+              }
+            }
+            continue;
+          }
           if (row.style.display === 'none') continue;
           var rowText = row.textContent || '';
           if (rowText.indexOf('Solde externe') >= 0) continue;
@@ -11464,21 +11586,30 @@ function printActifWithSelection(modes) {
           if (rowText.indexOf('Ajouter') >= 0 || rowText.indexOf('Effacer') >= 0) continue;
           var tds = row.children;
           if (!tds || tds.length <= 1) continue;
-          var vals = {};
-          for (var c2 = 0; c2 < tds.length && c2 < headLabels.length; c2++) {
-            var tx = tds[c2].textContent.trim();
-            tx = tx.split('\u25BC').join('').split('\u25B2').join('').trim();
-            vals[c2] = tx;
+          var vals = {}, subLbl = '';
+          for (var c2 = 0; c2 < tds.length; c2++) {
+            var tdEl = tds[c2];
+            if (c2 === iDesig) {
+              var mainTxt = '';
+              for (var cn2 = 0; cn2 < tdEl.childNodes.length; cn2++) {
+                var nd2 = tdEl.childNodes[cn2];
+                if (nd2.nodeType === 3 || (nd2.nodeType === 1 && nd2.tagName === 'SPAN')) mainTxt += nd2.textContent;
+              }
+              vals[c2] = mainTxt.split('\u25BC').join('').split('\u25B2').join('').trim();
+              var subDiv = tdEl.querySelector('div');
+              if (subDiv) subLbl = subDiv.textContent.trim();
+            } else {
+              vals[c2] = tdEl.textContent.trim();
+            }
           }
           var mtVal = vals[iMt] || '';
           if (!mtVal) continue;
           printHtml += '<tr>';
-          printHtml += '<td>' + escH(vals[iDesig] || '') + '</td>';
-          if (iQte >= 0) printHtml += '<td style="text-align:right">' + escH(vals[iQte] || '-') + '</td>';
-          if (iPrix >= 0) printHtml += '<td style="text-align:right">' + escH(vals[iPrix] || '-') + '</td>';
-          if (iDate >= 0) printHtml += '<td>' + escH(vals[iDate] || '-') + '</td>';
+          printHtml += '<td>' + escH(vals[iDesig] || '') + (subLbl ? '<br><span style="font-size:9px;color:#777">' + escH(subLbl) + '</span>' : '') + '</td>';
+          printHtml += '<td style="text-align:right">' + escH(vals[iQte] || '') + '</td>';
+          printHtml += '<td style="text-align:right">' + escH(vals[iPrix] || '') + '</td>';
           printHtml += '<td style="text-align:right;font-weight:600">' + escH(mtVal) + '</td>';
-          if (iObs >= 0) printHtml += '<td>' + escH(vals[iObs] || '') + '</td>';
+          printHtml += '<td>' + escH(vals[iObs] || '') + '</td>';
           printHtml += '</tr>';
         }
       }
