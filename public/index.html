@@ -10716,7 +10716,10 @@ function renderActif() {
       var _lNet = 0;
       for (var lmv = 0; lmv < _lMvs.length; lmv++) { _lNet += (_lMvs[lmv].sens === 'sortie' ? -1 : 1) * Math.abs(_lMvs[lmv].montant || 0); }
       var _lEff = _lBase + _lNet;
-      allDetails.push({id:'man_' + manualLignes[ml].id, designation:manualLignes[ml].designation, subLabel:(rub.key === 'tresorerie' && manualLignes[ml].baseDate) ? ('Solde au ' + fmtDate(manualLignes[ml].baseDate)) : '', montant:Math.abs(_lEff), signe:_lEff < 0 ? '-' : '+', isManual:true, rubIdx:ri, hasMvts:_lMvs.length > 0});
+      var _mlSub = '';
+      if (rub.key === 'tresorerie' && manualLignes[ml].baseDate) _mlSub = 'Solde au ' + fmtDate(manualLignes[ml].baseDate);
+      else if (rub.key === 'bl_facturer' && manualLignes[ml].clientId) { var _mlCl = getClientById(manualLignes[ml].clientId); _mlSub = _mlCl ? _mlCl.nom : ''; }
+      allDetails.push({id:'man_' + manualLignes[ml].id, designation:manualLignes[ml].designation, subLabel:_mlSub, montant:Math.abs(_lEff), signe:_lEff < 0 ? '-' : '+', isManual:true, rubIdx:ri, hasMvts:_lMvs.length > 0});
     }
 
     var visibleDetails = [];
@@ -11301,6 +11304,30 @@ function openLigneModalForRubrique(key, nom, lineId) {
   }
   var _flags = _getActifRubriqueFlags(key, nom);
   var title = line ? 'Modifier la ligne' : 'Nouvelle ligne - ' + nom;
+  if (key === 'bl_facturer') {
+    var _clsB = getClients();
+    var _artsB = getArticles();
+    var htmlB = '<div class="form-group"><label>Client *</label><select id="ligneClient"><option value="">\u2014 S\u00e9lectionner \u2014</option>';
+    for (var cb = 0; cb < _clsB.length; cb++) { htmlB += '<option value="' + _clsB[cb].id + '"' + (line && line.clientId === _clsB[cb].id ? ' selected' : '') + '>' + escH(_clsB[cb].nom) + '</option>'; }
+    htmlB += '</select></div>';
+    htmlB += '<div class="form-group"><label>Article (nomenclature) *</label><select id="ligneArticle" onchange="_blArtFillPrix()"><option value="">\u2014 S\u00e9lectionner \u2014</option>';
+    for (var ab = 0; ab < _artsB.length; ab++) {
+      var _aB = _artsB[ab];
+      if (_aB.commercialise === false) continue;
+      var _pxB = getPrixForDate(_aB) || _aB.prixVente || _aB.prixUnitaire || _aB.prix || 0;
+      var _lblB = (_aB.code ? _aB.code + ' \u2014 ' : '') + (_aB.designation || '');
+      htmlB += '<option value="' + _aB.id + '" data-prix="' + _pxB + '"' + (line && line.articleId === _aB.id ? ' selected' : '') + '>' + escH(_lblB) + '</option>';
+    }
+    htmlB += '</select></div>';
+    htmlB += '<div class="form-row">';
+    htmlB += '<div class="form-group"><label>Quantit\u00e9 *</label><input type="number" id="ligneQte" min="0" value="' + (line && line.qte !== undefined ? line.qte : '') + '"></div>';
+    htmlB += '<div class="form-group"><label>Prix unitaire <span style="font-size:11px;color:var(--gray-500)">auto, modifiable</span></label><input type="number" id="lignePrix" min="0" value="' + (line && line.prixUnitaire !== undefined ? line.prixUnitaire : '') + '"></div>';
+    htmlB += '</div>';
+    var footerB = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
+    footerB += '<button class="btn btn-primary" onclick="saveLigneForRubrique(\'' + key + '\',\'' + escH(nom) + '\',\'' + (lineId || '') + '\')">Enregistrer</button>';
+    openFormModal(title, htmlB, footerB);
+    return;
+  }
   var html = '<div class="form-group"><label>D\u00e9signation *</label><input type="text" id="ligneDesig" value="' + escH(line ? line.designation : '') + '"></div>';
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Signe</label><select id="ligneSigne"><option value="+"' + (!line || (line.signe || '+') === '+' ? ' selected' : '') + '>+ (ajout)</option><option value="-"' + (line && line.signe === '-' ? ' selected' : '') + '>- (d\u00e9duction)</option></select></div>';
@@ -11320,7 +11347,16 @@ function openLigneModalForRubrique(key, nom, lineId) {
   openFormModal(title, html, footer);
 }
 
+function _blArtFillPrix() {
+  var sel = document.getElementById('ligneArticle');
+  if (!sel || !sel.value) return;
+  var px = sel.options[sel.selectedIndex].getAttribute('data-prix');
+  var pEl = document.getElementById('lignePrix');
+  if (px !== null && pEl) pEl.value = px;
+}
+
 function saveLigneForRubrique(key, nom, lineId) {
+  if (document.getElementById('ligneClient')) { return _saveBlFactLigne(key, nom, lineId); }
   var desig = document.getElementById('ligneDesig').value.trim();
   var montant = parseFloat(document.getElementById('ligneMontant').value) || 0;
   var signe = document.getElementById('ligneSigne').value;
@@ -11353,6 +11389,39 @@ function saveLigneForRubrique(key, nom, lineId) {
   } else {
     if (extra2._clearBaseDate) { delete extra2._clearBaseDate; }
     actif.rubriques[rubIdx].lignes.push(Object.assign({id:DB.genId(), designation:desig, montant:montant, signe:signe}, extra2));
+  }
+  DB.set('mdb_actif', actif);
+  closeModal();
+  toast('Ligne enregistr\u00e9e');
+  renderActif();
+}
+
+function _saveBlFactLigne(key, nom, lineId) {
+  var clSel = document.getElementById('ligneClient');
+  var artSel = document.getElementById('ligneArticle');
+  var clientIdB = clSel ? clSel.value : '';
+  var artIdB = artSel ? artSel.value : '';
+  var qteB = parseFloat((document.getElementById('ligneQte') || {}).value) || 0;
+  var prixB = parseFloat((document.getElementById('lignePrix') || {}).value) || 0;
+  if (!clientIdB) { toast('S\u00e9lectionnez un client', 'error'); return; }
+  if (!artIdB) { toast('S\u00e9lectionnez un article de la nomenclature', 'error'); return; }
+  if (qteB <= 0) { toast('La quantit\u00e9 est obligatoire', 'error'); return; }
+  var desigB = artSel.options[artSel.selectedIndex].textContent.trim();
+  var actif = getActif();
+  var rubIdx = _findActifRubriqueByKey(key, nom);
+  if (!actif.rubriques[rubIdx].lignes) actif.rubriques[rubIdx].lignes = [];
+  var dataB = {clientId: clientIdB, articleId: artIdB, designation: desigB, qte: qteB, prixUnitaire: prixB, montant: Math.round(qteB * prixB * 100) / 100, signe: '+'};
+  if (lineId) {
+    for (var jb = 0; jb < actif.rubriques[rubIdx].lignes.length; jb++) {
+      if (actif.rubriques[rubIdx].lignes[jb].id === lineId) {
+        for (var kb in dataB) { if (dataB.hasOwnProperty(kb)) actif.rubriques[rubIdx].lignes[jb][kb] = dataB[kb]; }
+        delete actif.rubriques[rubIdx].lignes[jb].mouvements;
+        break;
+      }
+    }
+  } else {
+    dataB.id = DB.genId();
+    actif.rubriques[rubIdx].lignes.push(dataB);
   }
   DB.set('mdb_actif', actif);
   closeModal();
