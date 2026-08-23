@@ -1,0 +1,83 @@
+const fs = require('fs');
+const NL = '\r\n';
+let f = fs.readFileSync('public/index.html', 'utf8');
+
+const L = [];
+const push = (s) => L.push(s);
+
+push("_mdbBootSplash() {");
+push("  var ent = {};");
+push("  try { ent = (typeof getEntreprise === 'function' && getEntreprise()) || {}; } catch (e) {}");
+push("  var nomSoc = String(ent.nom || '').trim();");
+push("  var uNom = '';");
+push("  try { uNom = String((typeof currentUser !== 'undefined' && currentUser && currentUser.nom) || '').trim(); } catch (eU) {}");
+push("");
+push("  /* Rampe or unique : tous les textes partagent la meme harmonie que le fond */");
+push("  var _golds = [{ r: 244, g: 229, b: 184 }, { r: 212, g: 175, b: 55 }, { r: 158, g: 116, b: 32 }];");
+push("  function _mixGold(tx) {");
+push("    var seg = (_golds.length - 1) * tx;");
+push("    var i0 = Math.min(_golds.length - 2, Math.floor(seg));");
+push("    var f2 = seg - i0;");
+push("    var a = _golds[i0], b = _golds[i0 + 1];");
+push("    return 'rgb(' + Math.round(a.r + (b.r - a.r) * f2) + ',' + Math.round(a.g + (b.g - a.g) * f2) + ',' + Math.round(a.b + (b.b - a.b) * f2) + ')';");
+push("  }");
+push("  function _lettres(txt, t0, step) {");
+push("    var h = '';");
+push("    for (var li = 0; li < txt.length; li++) {");
+push("      var chL = txt.charAt(li);");
+push("      h += '<span style=\"display:inline-block;color:' + _mixGold(txt.length > 1 ? li / (txt.length - 1) : 0) + ';opacity:0;animation:mdbLetIn .5s ease both ' + (t0 + li * step).toFixed(2) + 's\">' + (chL === ' ' ? '&nbsp;' : escH(chL)) + '</span>';");
+push("    }");
+push("    return h;");
+push("  }");
+push("");
+push("  /* Logo : cercle nu, sans bordure, halo doux */");
+push("  var logoHtml = ent.logo ? '<div style=\"width:min(140px,34vw);height:min(140px,34vw);margin:0 auto;border-radius:50%;overflow:hidden;box-shadow:0 22px 70px rgba(0,0,0,.55),0 0 90px rgba(212,175,55,.20)\"><img src=\"' + ent.logo + '\" alt=\"\" style=\"width:100%;height:100%;object-fit:cover;display:block\"></div>' : '';");
+push("  var socHtml = nomSoc ? '<div style=\"margin-top:26px;font-size:clamp(15px,3.4vw,24px);font-weight:700;letter-spacing:.42em;text-transform:uppercase;font-family:\\'Cinzel\\',Georgia,serif\">' + _lettres(nomSoc, 0.9, 0.13) + '</div>' : '';");
+push("  var dUser = nomSoc ? (0.9 + nomSoc.length * 0.13 + 0.35) : 1.1;");
+push("  var userHtml = uNom ? '<div style=\"margin-top:4px;font-family:\\'Cinzel\\',Georgia,serif;font-size:clamp(28px,7vw,52px);font-weight:700;letter-spacing:.26em;text-transform:uppercase;color:#f5efe2;text-shadow:0 2px 34px rgba(0,0,0,.5)\">' + _lettres(uNom, dUser, 0.11) + '</div>' : '';");
+push("  var css = document.createElement('style');");
+push("  if (!document.getElementById('mdbFontCinzel')) {");
+push("    var lk = document.createElement('link');");
+push("    lk.id = 'mdbFontCinzel';");
+push("    lk.rel = 'stylesheet';");
+push("    lk.href = 'https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&display=swap';");
+push("    document.head.appendChild(lk);");
+push("  }");
+push("  css.textContent = '@keyframes mdbLetIn{0%{opacity:0;transform:translateY(16px)}100%{opacity:1;transform:none}}'");
+push("    + '@keyframes mdbBdIn{0%{opacity:0;transform:translateY(30px) scale(.96)}100%{opacity:1;transform:none}}'");
+push("    + '@keyframes mdbLogoIn{0%{opacity:0;transform:scale(.6)}60%{opacity:1;transform:scale(1.06)}100%{opacity:1;transform:none}}'");
+push("    + '@keyframes mdbBarFill{0%{width:0}100%{width:100%}}'");
+push("    + '@keyframes mdbFadeOut{to{opacity:0;visibility:hidden}}';");
+push("  document.head.appendChild(css);");
+push("  var d = document.createElement('div');");
+push("  d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:100000'");
+push("    + ';background:radial-gradient(ellipse 62% 46% at 50% 31%,rgba(212,175,55,.13),transparent 70%),linear-gradient(165deg,#0d1017 0%,#141a26 52%,#191510 100%)'");
+push("    + ';display:flex;flex-direction:column;align-items:center;justify-content:center'");
+push("    + ';animation:mdbBdIn .5s ease both';");
+push("  d.innerHTML = '<div style=\"animation:mdbBdIn .75s .15s ease both;text-align:center;padding:0 24px\">'");
+push("    + '<div style=\"font-family:\\'Cinzel\\',Georgia,serif;font-size:clamp(12px,2.2vw,15px);font-weight:600;color:#caa64b;letter-spacing:.72em;text-transform:uppercase;margin-bottom:26px;opacity:0;animation:mdbLetIn .5s ease both .45s\">Bonjour</div>'");
+push("    + '<div style=\"animation:mdbLogoIn 1s .2s cubic-bezier(.34,1.56,.64,1) both\">' + logoHtml + '</div>'");
+push("    + '<div style=\"margin-top:30px;font-family:\\'Cinzel\\',Georgia,serif;font-size:clamp(12px,2.4vw,17px);font-weight:600;color:#ded5c2;letter-spacing:.4em;text-transform:uppercase;opacity:0;animation:mdbLetIn .5s ease both .72s\">Bienvenue sur le tableau de bord' + (nomSoc ? ' de' : '') + '</div>'");
+push("    + socHtml");
+push("    + (userHtml ? '<div style=\"width:64px;height:1px;margin:24px auto;background:linear-gradient(90deg,transparent,#caa64b,transparent)\"></div>' : '')");
+push("    + userHtml");
+push("    + '<div style=\"margin:32px auto 0;height:3px;width:min(320px,68vw);background:rgba(245,239,226,.10);border-radius:99px;overflow:hidden\">'");
+push("    + '<div style=\"height:100%;background:linear-gradient(90deg,#a67c1e,#d4af37,#f4e5b8);box-shadow:0 0 14px rgba(212,175,55,.5);border-radius:99px;animation:mdbBarFill 4.6s cubic-bezier(.4,0,.2,1) both\"></div>'");
+push("    + '</div></div>';");
+push("  document.body.appendChild(d);");
+push("  try { _mdbParle('Bonjour ! Bienvenue sur le tableau de bord' + (nomSoc ? ' de ' + nomSoc : '') + (uNom ? ', ' + uNom : '')); } catch (eP) {}");
+push("  setTimeout(function() { d.style.animation = 'mdbFadeOut .6s ease both'; }, 4850);");
+push("  setTimeout(function() { if (d.parentNode) d.parentNode.removeChild(d); }, 5500);");
+push("}");
+
+const newFn = L.join(NL);
+
+const fnStart = f.indexOf("_mdbBootSplash() {");
+const showIdx = f.indexOf("function showApp()");
+if (fnStart < 0 || showIdx < 0 || showIdx < fnStart) { console.error('Bornes introuvables'); process.exit(1); }
+/* Remonter au \r\n} precedent showApp */
+let endCut = f.lastIndexOf(NL + "}", showIdx);
+if (endCut < fnStart) { console.error('Fin de fonction introuvable'); process.exit(1); }
+f = f.slice(0, fnStart) + newFn + f.slice(endCut + 1 + NL.length - 1);
+fs.writeFileSync('public/index.html', f);
+console.log('Splash redesign OK');

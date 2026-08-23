@@ -1,23 +1,24 @@
-$ErrorActionPreference = "Stop"
+param(
+  [string]$Message = "Mise a jour application",
+  [switch]$NoCommit
+)
+$ErrorActionPreference = 'Continue'
 Set-Location -LiteralPath $PSScriptRoot
-$env:PATH = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")
 
-$changed = git status --porcelain
-if ($changed) {
+if (-not $NoCommit) {
   git add -A
-  git commit -m "autodeploy: $(Get-Date -Format 'yyyy-MM-dd HH:mm')" --quiet
-  Write-Host "Commite cree"
-} else {
-  Write-Host "Aucun changement a commiter"
+  $staged = git diff --cached --name-only
+  if ($staged) {
+    git commit -m $Message
+  } else {
+    Write-Host "[deploy] Rien de nouveau a committer."
+  }
 }
 
-git push --quiet
-Write-Host "Push OK"
+Write-Host "[deploy] git push..."
+git push origin main
 
-& .\node_modules\.bin\firebase.cmd deploy --only hosting
-if ($LASTEXITCODE -eq 0) {
-  Write-Host "Deploiement reussi !"
-} else {
-  Write-Host "ERREUR lors du deploiement" -ForegroundColor Red
-  exit $LASTEXITCODE
-}
+Write-Host "[deploy] Firebase hosting..."
+cmd /c "npx --yes firebase-tools@latest deploy --only hosting --project montabbord"
+
+Write-Host "[deploy] Termine : https://montabbord.web.app"
