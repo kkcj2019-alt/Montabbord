@@ -11,11 +11,16 @@ var cp = require('child_process');
 var ROOT = __dirname;
 var LOG = path.join(ROOT, 'auto-deploy.log');
 
-/* Git doit etre accessible ; sinon on ajoute le chemin standard d'installation */
+/* Git et Node doivent etre accessibles ; sinon on ajoute les chemins standards d'installation */
 try { cp.execSync('git --version', { stdio: 'pipe', windowsHide: true }); }
 catch (e) {
   var GITCMD = 'C:\\Program Files\\Git\\cmd';
   if (fs.existsSync(path.join(GITCMD, 'git.exe'))) process.env.PATH = GITCMD + ';' + process.env.PATH;
+}
+try { cp.execSync('node --version', { stdio: 'pipe', windowsHide: true }); }
+catch (e2) {
+  var NODEJS = 'C:\\Program Files\\nodejs';
+  if (fs.existsSync(path.join(NODEJS, 'node.exe'))) process.env.PATH = NODEJS + ';' + process.env.PATH;
 }
 var DEBOUNCE_MS = 90 * 1000;
 var IGNORE = ['node_modules', '.git', '.firebase', 'supabase-migration', 'firestore-export-fresh.json'];
