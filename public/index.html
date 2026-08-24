@@ -3300,6 +3300,23 @@ var MENU_TABS = {
   actif: ['actif', 'rubriques', 'patrimoine'],
   taches: ['taches']
 };
+/* ===== Reordonnancement des menus (glisser-deposer, sauvegarde par utilisateur) ===== */
+function getMenuOrder() { try { return DB.get('mdb_menuOrder_' + (currentUser ? currentUser.id : 'anon')) || []; } catch (eMO) { return []; } }
+function setMenuOrder(arr) { DB.set('mdb_menuOrder_' + (currentUser ? currentUser.id : 'anon'), arr); }
+var _menuDragKey = null;
+function menuDragStart(ev, key) { _menuDragKey = key; ev.dataTransfer.effectAllowed = 'move'; try { ev.dataTransfer.setData('text/plain', key); } catch (eDS) {} }
+function menuDragOver(ev) { ev.preventDefault(); }
+function menuDrop(ev, targetKey) {
+  ev.preventDefault(); ev.stopPropagation();
+  var src = _menuDragKey; _menuDragKey = null;
+  if (!src || src === targetKey) { buildSidebar(); return; }
+  var cur = getMenuOrder().filter(function(k){ return k !== src; });
+  var ti = cur.indexOf(targetKey);
+  if (ti === -1) cur.push(src); else cur.splice(ti, 0, src);
+  setMenuOrder(cur);
+  window._pinDragActive = true; setTimeout(function(){ window._pinDragActive = false; }, 350);
+  buildSidebar(); toast('Ordre des menus mis \u00e0 jour');
+}
 function buildSidebar() {
   var nav = document.getElementById('sidebarNav');
   var html = '';
@@ -3370,7 +3387,7 @@ function buildSidebar() {
     } else {
       var key = item.key;
       var navKey = key.indexOf(':') !== -1 ? key.split(':')[0] : key;
-      html += '<div class="' + cls + '" style="' + pl + '" data-search="' + (escH(item.label) + ' ' + (MENU_TABS[baseKey] || []).join(' ')).toLowerCase() + '" data-module="' + baseKey + '" onclick="closeSidebar();navigateTo(\'' + key + '\')">';
+      html += '<div class="' + cls + '" style="' + pl + '" data-search="' + (escH(item.label) + ' ' + (MENU_TABS[baseKey] || []).join(' ')).toLowerCase() + '" data-module="' + baseKey + '" draggable="true" ondragstart="menuDragStart(event,\'' + key + '\')" ondragover="menuDragOver(event)" ondrop="menuDrop(event,\'' + key + '\')" onclick="if(window._pinDragActive)return;closeSidebar();navigateTo(\'' + key + '\')" title="Glisser pour r\u00e9ordonner">';
       html += I[navKey] || I[key] || '';
       html += '<span>' + escH(item.label) + '</span>';
       if (badge > 0) html += '<span class="nav-badge">' + badge + '</span>';
@@ -3436,10 +3453,22 @@ function buildSidebar() {
       }
     }
     if (visibleItems.length === 0) continue;
+    var _mo = getMenuOrder(), _moIdx = {};
+    for (var oi = 0; oi < _mo.length; oi++) _moIdx[_mo[oi]] = oi;
+    var _wi = [];
+    for (var vi2 = 0; vi2 < visibleItems.length; vi2++) _wi.push({ it: visibleItems[vi2], orig: vi2 });
+    _wi.sort(function(aA, bA) {
+      if (aA.it.sep || bA.it.sep) return aA.orig - bA.orig;
+      var ia = _moIdx[aA.it.key], ib = _moIdx[bA.it.key];
+      if (ia === undefined && ib === undefined) return aA.orig - bA.orig;
+      if (ia === undefined) return 1;
+      if (ib === undefined) return -1;
+      return ia - ib;
+    });
     html += '<div class="nav-group">';
-    html += '<div class="nav-group-title">' + escH(group.title) + '</div>';
-    for (var j = 0; j < visibleItems.length; j++) {
-      var item = visibleItems[j];
+    html += '<div class="nav-group-title">' + escH(group.title) + ' <span style="font-weight:400;font-size:10px;color:var(--gray-400)">(⇅ glisser pour trier)</span></div>';
+    for (var j2 = 0; j2 < _wi.length; j2++) {
+      var item = _wi[j2].it;
       if (item.sep) { html += '<div style="height:1px;background:rgba(0,0,0,.10);margin:6px 24px"></div>'; continue; }
       renderNavItem(item, 0);
     }
@@ -3959,7 +3988,9 @@ function updateDetteFournisseur(fournisseurId, fournisseurNom, montantPaiement, 
 function getPrevisions() { return DB.get('mdb_previsions') || []; }
 function getStocks() { return DB.get('mdb_stocks') || []; }
 function getCreancesDouteuses() { return DB.get('mdb_creancesDouteuses') || []; }
-function getEmployes() { return DB.get('mdb_employes') || []; }
+function _matKey(m) { var n = parseInt(String(m == null ? '' : m).replace(/[^0-9]/g, ''), 10); return isNaN(n) ? Number.MAX_SAFE_INTEGER : n; }
+function _matCompareE(a, b) { var ka = _matKey(a && a.matricule), kb = _matKey(b && b.matricule); if (ka !== kb) return ka - kb; return String((a && a.matricule) || '').localeCompare(String((b && b.matricule)) || ''); }
+function getEmployes() { return (DB.get('mdb_employes') || []).slice().sort(_matCompareE); }
 function getPayeDataI() { var p = DB.get('mdb_paye'); return (p && typeof p === 'object') ? p : {}; }
 function getPayeSectionI(section, def) { var p = getPayeDataI(); return p[section] !== undefined ? p[section] : def; }
 function woodSectorGridDataI() {
@@ -16840,8 +16871,8 @@ function renderEmployesPage() {
     html += '</div>';
   } else {
     var cats = getCategoriesI();
-    var svcs = getServicesI().slice().sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
-    var fncs = getFonctionsI().slice().sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+    var svcs = getServicesI().map(function(s){ return typeof s === 'object' ? (s.nom || '') : s; }).filter(Boolean).slice().sort(function(a,b){ return String(a).toLowerCase().localeCompare(String(b).toLowerCase()); });
+    var fncs = getFonctionsI().map(function(f){ return typeof f === 'object' ? (f.nom || '') : f; }).filter(Boolean).slice().sort(function(a,b){ return String(a).toLowerCase().localeCompare(String(b).toLowerCase()); });
     var fType = window._empTypeFilter || '';
     var fFonction = window._empFonctionFilter || '';
     var fService = window._empServiceFilter || '';
