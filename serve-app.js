@@ -28,7 +28,7 @@ http.createServer(function(req, res) {
   if (filePath.indexOf(ROOT) !== 0) { res.writeHead(403); res.end(); return; }
   fs.readFile(filePath, function(err, data) {
     if (err) { res.writeHead(404); res.end('Fichier introuvable'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0' });
     res.end(data);
   });
 }).listen(PORT, function() {
