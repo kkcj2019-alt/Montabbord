@@ -4177,12 +4177,16 @@ function fmtPeriodLabelFR(dFrom, dTo) {
 }
 /* ==================== REUNIONS -> TACHES AUTOMATIQUES ==================== */
 var _reunionsProp = [];
-var _REU_KW = ['doit', 'devra', 'faire', 'preparer', 'envoyer', 'valider', 'mettre en place', 'contacter', 'planifier', 'rappeler', 'acheter', 'payer', 'verifier', 'creer', 'organiser', 'terminer', 'corriger', 'signer', 'publier', 'former', 'recruter', 'livrer', 'commander', 'regler', 'effectuer', 'suivre', 'finaliser', 'traiter', 'mettre a jour', 'etablir'];
+var _currentReuFile = null;
+var _REU_KW = ['doit', 'devra', 'faire', 'preparer', 'envoyer', 'valider', 'mettre en place', 'contacter', 'planifier', 'rappeler', 'acheter', 'payer', 'verifier', 'creer', 'organiser', 'terminer', 'corriger', 'signer', 'publier', 'former', 'recruter', 'livrer', 'commander', 'regler', 'effectuer', 'suivre', 'finaliser', 'traiter', 'mettre a jour', 'etablir', 'rediger', 'relancer', 'transmettre'];
 
 function _extractTextFromPDF(file, cb) {
   var reader = new FileReader();
   reader.onload = function(e) {
-    var typedarray = new Uint8Array(e.target.result);
+    var buffer = e.target.result;
+    var typedarray = new Uint8Array(buffer);
+    
+    // 1. Try PDF.js if available
     if (typeof pdfjsLib !== 'undefined') {
       try {
         var loadingTask = pdfjsLib.getDocument({ data: typedarray });
@@ -4212,24 +4216,52 @@ function _extractTextFromPDF(file, cb) {
           }
           Promise.all(pagePromises).then(function(pagesText) {
             var fullText = pagesText.join('\n\n').trim();
-            cb(fullText);
-          }).catch(function(err) {
-            console.error('PDF text extraction error:', err);
-            cb('');
+            if (fullText && fullText.length > 5) {
+              cb(fullText);
+            } else {
+              _fallbackExtractPDFText(buffer, cb);
+            }
+          }).catch(function() {
+            _fallbackExtractPDFText(buffer, cb);
           });
-        }).catch(function(err) {
-          console.error('PDF document load error:', err);
-          cb('');
+        }).catch(function() {
+          _fallbackExtractPDFText(buffer, cb);
         });
         return;
       } catch(e) {
-        console.error('pdfjsLib error:', e);
+        _fallbackExtractPDFText(buffer, cb);
+        return;
       }
     }
-    cb('');
+    _fallbackExtractPDFText(buffer, cb);
   };
   reader.onerror = function() { cb(''); };
   reader.readAsArrayBuffer(file);
+}
+
+function _fallbackExtractPDFText(arrayBuffer, cb) {
+  try {
+    var arr = new Uint8Array(arrayBuffer);
+    var raw = '';
+    for (var i = 0; i < arr.length; i++) {
+      var c = arr[i];
+      if ((c >= 32 && c <= 126) || c === 10 || c === 13 || (c >= 192 && c <= 255)) {
+        raw += String.fromCharCode(c);
+      }
+    }
+    var cleanWords = [];
+    var matches = raw.match(/\(([^()]{2,})\)/g) || [];
+    for (var j = 0; j < matches.length; j++) {
+      var w = matches[j].replace(/^\(|\)$/g, '').trim();
+      if (w.length > 1 && !/^[0-9a-fA-F]{6,}$/.test(w)) cleanWords.push(w);
+    }
+    if (!cleanWords.length) {
+      cleanWords = raw.match(/[A-ZÀ-ÿa-z0-9,;.:'’"\-]{3,}\s+[A-ZÀ-ÿa-z0-9,;.:'’"\-]{3,}/g) || [];
+    }
+    cb(cleanWords.join(' '));
+  } catch(err) {
+    cb('');
+  }
 }
 
 function _extractTextFromWord(file, cb) {
@@ -4241,8 +4273,7 @@ function _extractTextFromWord(file, cb) {
         .then(function(result) {
           cb(result.value ? result.value.trim() : '');
         })
-        .catch(function(err) {
-          console.error('Mammoth error:', err);
+        .catch(function() {
           cb('');
         });
       return;
@@ -4283,7 +4314,7 @@ function _suggestTasksFromText(txt) {
   var lines = _splitSentences(txt);
   for (var li = 0; li < lines.length; li++) {
     var l = (lines[li] || '').trim();
-    if (l.length < 12 || l.length > 250) continue;
+    if (l.length < 10 || l.length > 250) continue;
     var low = l.toLowerCase();
     var hit = '';
     for (var kI = 0; kI < _REU_KW.length; kI++) { if (low.indexOf(_REU_KW[kI]) !== -1) { hit = _REU_KW[kI]; break; } }
@@ -4319,39 +4350,50 @@ function _suggestTasksFromText(txt) {
 
 function renderReunions() {
   var elC = document.getElementById('content');
-  var hR = '<div class="section" style="max-width:960px;margin:0 auto"><div class="section-header" style="display:flex;justify-content:space-between;align-items:center"><h3>📋 Réunions — Compte-rendu & Génération de tâches</h3></div><div class="section-body">';
-  hR += '<div class="form-group"><label style="font-weight:700;color:var(--gray-800);margin-bottom:6px">Compte-rendu de la réunion :</label>';
-  hR += '<textarea id="reuText" rows="12" placeholder="Tapez ou collez ici le compte-rendu de votre réunion, ou importez un document PDF / Word ci-dessous..." style="width:100%;padding:14px;border:1px solid var(--gray-300);border-radius:10px;font-size:13.5px;line-height:1.6;background:#fff"></textarea></div>';
+  var hR = '<div class="section" style="max-width:960px;margin:0 auto"><div class="section-header" style="display:flex;justify-content:space-between;align-items:center"><h3>📋 Réunions — Compte-rendu & Génération automatique de tâches</h3></div><div class="section-body">';
   
-  hR += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#f8fafc;padding:14px 18px;border-radius:10px;border:1px dashed #cbd5e1;margin-bottom:18px">';
-  hR += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
-  hR += '<label style="display:inline-flex;align-items:center;gap:8px;padding:8px 16px;background:#fff;border:1.5px solid #2563eb;color:#2563eb;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;box-shadow:0 2px 4px rgba(37,99,235,.1)">📄 Charger un fichier PDF ou Word (.docx)<input type="file" id="reuFile" accept=".pdf,.docx,.doc,.txt,.md" style="display:none"></label>';
-  hR += '<span id="reuFileStatus" style="font-size:12px;color:var(--gray-600);font-weight:600"></span>';
-  hR += '</div>';
-  hR += '<button class="btn btn-primary" id="reuAnalyzeBtn" style="padding:8px 20px;font-weight:700;font-size:13.5px;box-shadow:0 3px 10px rgba(37,99,235,.25)">🔍 Analyser et extraire les tâches</button>';
+  hR += '<div class="form-group" style="margin-bottom:14px"><label style="font-weight:700;color:var(--gray-800);margin-bottom:6px">Compte-rendu (texte ou document PDF / Word) :</label>';
+  hR += '<textarea id="reuText" rows="10" placeholder="Tapez ou collez ici le compte-rendu de votre réunion, ou déposez votre fichier PDF / Word ci-dessous..." style="width:100%;padding:14px;border:1px solid var(--gray-300);border-radius:10px;font-size:13.5px;line-height:1.6;background:#fff">' + escH(_currentReuFile ? _currentReuFile.text : '') + '</textarea></div>';
+  
+  hR += '<div style="background:#f8fafc;padding:16px 20px;border-radius:10px;border:1px dashed #cbd5e1;margin-bottom:20px">';
+  hR += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">';
+  hR += '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
+  hR += '<label style="display:inline-flex;align-items:center;gap:8px;padding:8px 18px;background:#2563eb;color:#fff;border-radius:8px;cursor:pointer;font-weight:700;font-size:13px;box-shadow:0 2px 6px rgba(37,99,235,.2)">📁 Choisir un fichier PDF ou Word<input type="file" id="reuFile" accept=".pdf,.docx,.doc,.txt,.md" style="display:none"></label>';
+  hR += '<span id="reuFileStatus" style="font-size:13px;color:var(--gray-700)">' + (_currentReuFile ? ('📄 <strong>' + escH(_currentReuFile.name) + '</strong> (' + Math.round(_currentReuFile.size / 1024) + ' Ko)') : 'Aucun fichier sélectionné') + '</span>';
   hR += '</div>';
   
-  hR += '<div id="reuResults" style="margin-top:20px"></div></div></div>';
+  hR += '<div style="display:flex;align-items:center;gap:8px">';
+  if (_currentReuFile && _currentReuFile.url) {
+    hR += '<a href="' + _currentReuFile.url + '" download="' + escH(_currentReuFile.name) + '" class="btn btn-outline btn-sm" style="font-weight:600">📥 Télécharger</a>';
+  }
+  hR += '<button class="btn btn-primary" id="reuAnalyzeBtn" style="padding:8px 22px;font-weight:700;font-size:13.5px;box-shadow:0 3px 10px rgba(37,99,235,.25)">🔍 Analyser et extraire les tâches</button>';
+  hR += '</div></div></div>';
+  
+  hR += '<div id="reuResults"></div></div></div>';
   elC.innerHTML = hR;
   
   var fileInp = document.getElementById('reuFile');
   if (fileInp) {
     fileInp.addEventListener('change', function(ev) {
       var f = this.files[0]; if (!f) return;
+      var blobUrl = URL.createObjectURL(f);
+      _currentReuFile = { file: f, name: f.name, size: f.size, url: blobUrl, text: '' };
+      
       var stEl = document.getElementById('reuFileStatus');
-      if (stEl) stEl.innerHTML = '⏳ <em>Extraction du texte de « ' + escH(f.name) + ' »...</em>';
-      toast('Lecture et extraction du document en cours...');
+      if (stEl) stEl.innerHTML = '⏳ <em>Extraction du contenu de « ' + escH(f.name) + ' »...</em>';
+      toast('Lecture et extraction du fichier « ' + f.name + ' » en cours...');
       
       _extractTextFromFile(f, function(tx) {
         var elT = document.getElementById('reuText');
-        if (tx && tx.trim()) {
-          var cleanTx = tx.trim();
+        var cleanTx = (tx || '').trim();
+        _currentReuFile.text = cleanTx;
+        if (cleanTx) {
           elT.value = cleanTx;
-          if (stEl) stEl.innerHTML = '✅ <strong style="color:var(--success)">' + escH(f.name) + '</strong> (' + cleanTx.length + ' caractères extraits)';
-          toast('Fichier « ' + f.name + ' » extrait avec succès !', 'success');
+          if (stEl) stEl.innerHTML = '📄 <strong>' + escH(f.name) + '</strong> (' + Math.round(f.size / 1024) + ' Ko — ' + cleanTx.length + ' caractères)';
+          toast('Fichier chargé avec succès ! Vous pouvez maintenant cliquer sur « Analyser ».', 'success');
         } else {
-          if (stEl) stEl.innerHTML = '⚠️ <span style="color:var(--danger)">Aucun texte extrait du fichier</span>';
-          toast('Fichier vide ou texte non extractible', 'warning');
+          if (stEl) stEl.innerHTML = '📄 <strong>' + escH(f.name) + '</strong> (' + Math.round(f.size / 1024) + ' Ko)';
+          toast('Fichier chargé. Cliquez sur Analyser.', 'info');
         }
       });
     });
@@ -4367,12 +4409,12 @@ function renderReunions() {
 }
 
 function analyzeReunion() {
-  var txA = (document.getElementById('reuText') || {}).value || '';
-  if (txA.trim().length < 15) { toast('Veuillez saisir ou charger un compte-rendu d\'au moins 15 caractères', 'warning'); return; }
+  var txA = (document.getElementById('reuText') || {}).value || (_currentReuFile ? _currentReuFile.text : '') || '';
+  if (txA.trim().length < 10) { toast('Veuillez saisir ou charger un compte-rendu avant d\'analyser', 'warning'); return; }
   _reunionsProp = _suggestTasksFromText(txA);
   var box = document.getElementById('reuResults');
   if (!_reunionsProp.length) {
-    box.innerHTML = '<div class="empty-state" style="background:#fff;border:1px solid var(--gray-200);border-radius:10px;padding:24px;text-align:center"><div style="font-size:28px;margin-bottom:8px">ℹ️</div><h4 style="font-size:15px;color:var(--gray-800);margin-bottom:4px">Aucune action détectée automatiquement</h4><p style="color:var(--gray-500);font-size:13px">Assurez-vous que le texte contient des verbes d\'action (ex: <em>doit préparer</em>, <em>envoyer</em>, <em>valider</em>, <em>rappeler avant le 30/08</em>...).</p></div>';
+    box.innerHTML = '<div class="empty-state" style="background:#fff;border:1px solid var(--gray-200);border-radius:10px;padding:24px;text-align:center"><div style="font-size:28px;margin-bottom:8px">ℹ️</div><h4 style="font-size:15px;color:var(--gray-800);margin-bottom:4px">Aucune action avec verbe détectée automatiquement</h4><p style="color:var(--gray-500);font-size:13px">Assurez-vous que le texte mentionne des actions précises (ex: <em>doit préparer</em>, <em>envoyer les devis</em>, <em>valider la facture</em>, <em>rappeler avant le 30/08</em>...).</p></div>';
     return;
   }
   var hP = '<table style="width:100%"><thead><tr><th style="width:36px;text-align:center">✓</th><th>Tâche / Action proposée</th><th style="width:130px">Priorité</th><th style="width:150px">Échéance</th></tr></thead><tbody>';
@@ -4392,22 +4434,25 @@ function analyzeReunion() {
   var pubBtn = document.getElementById('reuPublishBtn');
   if (pubBtn) pubBtn.addEventListener('click', publishReunionTasks);
 }
+
 function publishReunionTasks() {
   var cbs = [].slice.call(document.querySelectorAll('.reu-cb:checked'));
-  if (!cbs.length) { toast('Cochez au moins une tache', 'error'); return; }
+  if (!cbs.length) { toast('Cochez au moins une tâche', 'error'); return; }
   var tasks = getTaches();
   var nP2 = 0;
   cbs.forEach(function(cb) {
     var iX = parseInt(cb.getAttribute('data-i'), 10);
     var pX = _reunionsProp[iX]; if (!pX) return;
+    var titE = document.querySelector('.reu-titre[data-i="' + iX + '"]');
     var selP = document.querySelector('.reu-prio[data-i="' + iX + '"]');
     var dlE = document.querySelector('.reu-dl[data-i="' + iX + '"]');
-    tasks.push({ id: DB.genId(), titre: pX.titre, priorite: (selP ? selP.value : pX.priorite) || 'moyenne', dateLimite: ((dlE && dlE.value) || '') || pX.dateLimite || '', statut: 'ouverte', userId: '', allUsers: true, sourceReunion: getToday() });
+    var titreVal = (titE && titE.value) ? titE.value.trim() : pX.titre;
+    tasks.push({ id: DB.genId(), titre: titreVal, priorite: (selP ? selP.value : pX.priorite) || 'moyenne', dateLimite: ((dlE && dlE.value) || '') || pX.dateLimite || '', statut: 'ouverte', userId: '', allUsers: true, sourceReunion: getToday() });
     nP2++;
   });
   setTaches(tasks);
-  toast(nP2 + ' tache(s) publiee(s) a tous les utilisateurs', 'success');
-  document.getElementById('reuResults').innerHTML = '<div class="empty-state" style="color:var(--success)">Publie ! Les taches apparaissent chez tous les utilisateurs.</div>';
+  toast(nP2 + ' tâche(s) enregistrée(s) et publiée(s) avec succès !', 'success');
+  document.getElementById('reuResults').innerHTML = '<div class="empty-state" style="color:var(--success);background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:20px;text-align:center"><div style="font-size:28px;margin-bottom:6px">🎉</div><h4 style="color:#15803d;margin-bottom:4px">Tâches enregistrées avec succès !</h4><p style="color:#166534;font-size:13px">Elles sont maintenant disponibles dans le menu <strong>Tâches</strong> et sur le Tableau de bord.</p></div>';
 }
 function alertBellUpdate() {
   try {
