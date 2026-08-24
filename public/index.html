@@ -3782,6 +3782,54 @@ function navigateTo(page) {
   }
 }
 
+/* ===== Notifications : factures echues, taches en retard, pre-financements echus ===== */
+function collectAlertes() {
+  var out = { factures: [], taches: [], prefins: [] };
+  var today = getToday();
+  var fxs = getFactures() || [];
+  for (var ix = 0; ix < fxs.length; ix++) { var fN = fxs[ix]; if (fN.statut !== 'payee' && fN.echeance && fN.echeance < today) out.factures.push(fN); }
+  var txs = getTaches() || [];
+  for (var jx = 0; jx < txs.length; jx++) { var tN = txs[jx]; if (tN.statut !== 'termine' && tN.dateLimite && tN.dateLimite < today) out.taches.push(tN); }
+  var pxs = getPrefinancements() || [];
+  for (var kx = 0; kx < pxs.length; kx++) { var pN = pxs[kx]; if (pN.statut === 'approuve' && pN.echeanceRemboursement && pN.echeanceRemboursement < today && ((pN.montantAccorde || 0) - (pN.montantRembourse || 0)) > 0) out.prefins.push(pN); }
+  return out;
+}
+function showNotifBanner(al) {
+  var oldB = document.getElementById('alerteNotifBox'); if (oldB) oldB.remove();
+  var box = document.createElement('div');
+  box.id = 'alerteNotifBox';
+  box.style.cssText = 'position:fixed;top:70px;right:16px;z-index:9998;background:#fff;border:1px solid #fecaca;border-left:4px solid var(--danger);border-radius:10px;box-shadow:0 10px 30px rgba(15,23,42,.18);padding:12px 14px;width:300px;font-size:13px;color:var(--gray-700)';
+  var hh = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><strong style="color:var(--danger)">&#9888; Alertes en cours</strong><span title="Fermer" onclick="this.closest(\'#alerteNotifBox\').remove()" style="cursor:pointer;color:var(--gray-400);font-weight:700;padding:0 4px">&times;</span></div>';
+  if (al.factures.length) hh += '<div style="padding:4px 0;cursor:pointer" onclick="navigateToFacturation(\'factures\')">&#128196; <strong>' + al.factures.length + '</strong> facture(s) \u00e9chue(s) non pay\u00e9e(s)</div>';
+  if (al.taches.length) hh += '<div style="padding:4px 0;cursor:pointer" onclick="navigateTo(\'taches\')">&#128221; <strong>' + al.taches.length + '</strong> t\u00e2che(s) \u00e0 faire en retard</div>';
+  if (al.prefins.length) hh += '<div style="padding:4px 0;cursor:pointer" onclick="navigateTo(\'prefinancement\')">&#128181; <strong>' + al.prefins.length + '</strong> remboursement(s) pr\u00e9-financement \u00e9chu(s)</div>';
+  box.innerHTML = hh;
+  document.body.appendChild(box);
+  setTimeout(function(){ var bN = document.getElementById('alerteNotifBox'); if (bN) bN.remove(); }, 90000);
+}
+function maybeAskNotifPermission() {
+  try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (eP) {}
+}
+function sendBrowserNotif(total, al) {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    var parts = [];
+    if (al.factures.length) parts.push(al.factures.length + ' facture(s) \u00e9chue(s)');
+    if (al.taches.length) parts.push(al.taches.length + ' t\u00e2che(s) en retard');
+    if (al.prefins.length) parts.push(al.prefins.length + ' remboursement(s) \u00e9chu(s)');
+    new Notification('Montabbord \u2014 Rappels', { body: parts.join(' \u2022 ') });
+  } catch (eBN) {}
+}
+function runNotifCheck(withBrowser) {
+  try {
+    var al = collectAlertes();
+    var totN = al.factures.length + al.taches.length + al.prefins.length;
+    if (totN > 0) { showNotifBanner(al); if (withBrowser) sendBrowserNotif(totN, al); }
+  } catch (eNC) {}
+}
+setTimeout(maybeAskNotifPermission, 5000);
+setTimeout(function(){ runNotifCheck(false); }, 12000);
+setInterval(function(){ runNotifCheck(true); }, 3600000);
 function toast(msg, type) {
   var c = document.getElementById('toastContainer');
   var el = document.createElement('div');
@@ -4196,6 +4244,7 @@ function populateClientSelect(selId, selected) {
         listDiv.style.display = 'none';
         if (typeof onFacClientChange === 'function') onFacClientChange();
         if (typeof onPFClientChange === 'function') onPFClientChange();
+        if (typeof onBLClientChange === 'function') onBLClientChange();
       }; })(matches[i3]);
       listDiv.appendChild(item);
     }
@@ -4221,6 +4270,7 @@ function populateClientSelect(selId, selected) {
           this.focus();
           if (typeof onFacClientChange === 'function') onFacClientChange();
           if (typeof onPFClientChange === 'function') onPFClientChange();
+          if (typeof onBLClientChange === 'function') onBLClientChange();
           break;
         }
       }
@@ -6749,7 +6799,7 @@ function onBLClientChange(preserveBcId) {
   var bcHtml = '<option value="">-- Aucun BC --</option>';
   for (var bi = 0; bi < bcs.length; bi++) {
     if (bcs[bi].clientId !== clientId) continue;
-    if (bcs[bi].statut === 'livre' && bcs[bi].id !== preserveBcId) continue;
+    if ((bcs[bi].statut === 'livre' || bcs[bi].statut === 'annule') && bcs[bi].id !== preserveBcId) continue;
     var sel = (preserveBcId && bcs[bi].id === preserveBcId) ? ' selected' : '';
     bcHtml += '<option value="' + bcs[bi].id + '"' + sel + '>' + escH(bcs[bi].numero) + '</option>';
   }
@@ -20565,9 +20615,16 @@ function renderStock() {
   var stocks = (DB.get('mdb_stocks') || []).slice();
   var readonly = isReadonly('stock');
   var filtre = document.getElementById('stockFiltreQte') ? document.getElementById('stockFiltreQte').value : 'pos';
+  var filtreType = document.getElementById('stockFiltreType') ? document.getElementById('stockFiltreType').value : 'produit_fini';
   stocks.sort(function(a, b) { return ((a.quantite || 0) > 0 ? 0 : 1) - ((b.quantite || 0) > 0 ? 0 : 1); });
   var html = '<div class="toolbar">';
   html += '<input type="text" id="stockSearch" placeholder="Rechercher..." oninput="filterStock()" style="width:220px">';
+  html += '<select id="stockFiltreType" onchange="renderStock()" style="padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:13px;background:#fff">';
+  html += '<option value="produit_fini"' + (filtreType === 'produit_fini' ? ' selected' : '') + '>Produits finis</option>';
+  html += '<option value="semi_fini"' + (filtreType === 'semi_fini' ? ' selected' : '') + '>Semi-finis</option>';
+  html += '<option value="marchandise"' + (filtreType === 'marchandise' ? ' selected' : '') + '>Marchandises</option>';
+  html += '<option value="all"' + (filtreType === 'all' ? ' selected' : '') + '>Tout afficher</option>';
+  html += '</select>';
   html += '<select id="stockFiltreQte" onchange="filterStock()" style="padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius-sm);font-size:13px;background:#fff">';
   html += '<option value="pos"' + (filtre === 'pos' ? ' selected' : '') + '>En stock (&gt; 0)</option>';
   html += '<option value="zero"' + (filtre === 'zero' ? ' selected' : '') + '>Quantit\u00e9 \u00e0 0</option>';
@@ -20578,9 +20635,14 @@ function renderStock() {
   html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>Article</th><th>Code</th><th style="text-align:right">Quantit\u00e9</th><th style="text-align:right">Prix unitaire</th><th style="text-align:right">Montant</th>';
   if (!readonly) html += '<th style="width:120px">Actions</th>';
   html += '</tr></thead><tbody id="stockBody">';
-  var total = 0;
+   var total = 0;
   for (var i = 0; i < stocks.length; i++) {
     var st = stocks[i];
+    if (filtreType !== 'all') {
+      var _artT = st.articleId ? getArticleById(st.articleId) : null;
+      var _tA = _artT ? (_artT.typeArticle || 'produit_fini') : 'produit_fini';
+      if (_tA !== filtreType) continue;
+    }
     var montant = (st.quantite || 0) * (st.prixUnitaire || 0);
     total += montant;
     var artLabel = st.articleNom || '-';
