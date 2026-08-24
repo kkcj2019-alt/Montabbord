@@ -19,6 +19,6 @@ Write-Host "[deploy] git push..."
 git push origin main
 
 Write-Host "[deploy] Firebase hosting..."
-cmd /c "npx --yes firebase-tools@latest deploy --only hosting --project montabbord"
+cmd /c "npx.cmd --yes firebase-tools@latest deploy --only hosting --project montabbord"
 
 Write-Host "[deploy] Termine : https://montabbord.web.app"
