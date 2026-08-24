@@ -7,7 +7,24 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-08-24-08';try{var _v=localStorage.getItem('app_version_paye');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_paye',window.__APP_VERSION); location.reload(true);}else if(!_v){localStorage.setItem('app_version_paye',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-08-24-09';try{var _v=localStorage.getItem('app_version_paye');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_paye',window.__APP_VERSION); location.reload(true);}else if(!_v){localStorage.setItem('app_version_paye',window.__APP_VERSION);}}catch(e){}</script>
+<script>
+(function(){
+function _mdbCheckVersion(){
+  try{
+    fetch(location.pathname+'?vchk='+Date.now(),{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){
+      var m=t.match(/__APP_VERSION='([^']+)'/);
+      if(!m||!m[1])return;
+      if(m[1]===window.__APP_VERSION){try{localStorage.setItem('mdb_vreload_p','0');}catch(e){}return;}
+      var n=0;try{n=parseInt(localStorage.getItem('mdb_vreload_p')||'0',10);}catch(e){}
+      if(n<2){try{localStorage.setItem('mdb_vreload_p',String(n+1));}catch(e){}location.reload();}
+    }).catch(function(){});
+  }catch(e){}
+}
+setInterval(_mdbCheckVersion,120000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(_mdbCheckVersion,1500);});
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -977,23 +994,97 @@ function getFormatHeures() {
   return (f === 'hhmm' || f === 'decimal') ? f : 'decimal';
 }
 function setFormatHeures(v) { setPayeSection('format_heures', v); }
+
+/* ===== Fusion anti-perte : union par id, le tableau prioritaire gagne ===== */
+function _payeUnion(prim, sec) {
+  var a = Array.isArray(prim) ? prim : [];
+  var b = Array.isArray(sec) ? sec : [];
+  var out = [], seen = {}, i, r;
+  for (i = 0; i < a.length; i++) { r = a[i]; out.push(r); if (r && r.id) seen[r.id] = true; }
+  for (i = 0; i < b.length; i++) {
+    r = b[i];
+    if (r && r.id && !seen[r.id]) { out.push(r); seen[r.id] = true; }
+  }
+  return out;
+}
+var PAYE_ARR_SECTIONS = ['categories','services','fonctions','primesSpec','pointage'];
+function _payeMergeObj(cur, inc, localFirst) {
+  var merged = {}, kk;
+  for (kk in inc) if (inc.hasOwnProperty(kk)) merged[kk] = inc[kk];
+  for (kk in cur) if (cur.hasOwnProperty(kk)) merged[kk] = cur[kk];
+  if (!localFirst) { for (kk in inc) if (inc.hasOwnProperty(kk)) merged[kk] = inc[kk]; }
+  for (var i = 0; i < PAYE_ARR_SECTIONS.length; i++) {
+    var k = PAYE_ARR_SECTIONS[i];
+    var pA = Array.isArray(cur[k]) ? cur[k] : null;
+    var sA = Array.isArray(inc[k]) ? inc[k] : null;
+    var prim = localFirst ? pA : sA;
+    var sec = localFirst ? sA : pA;
+    if (prim && prim.length > 0) merged[k] = _payeUnion(prim, sec);
+    else if (prim) merged[k] = [];
+    else if (sec && sec.length > 0) merged[k] = sec;
+  }
+  if (cur.grilleWood === true || inc.grilleWood === true) merged.grilleWood = true;
+  return merged;
+}
+function _payeRecvSharedKeys(data) {
+  ['mdb_employes','mdb_acomptesPrets','mdb_salairesPaiements','mdb_caisses','mdb_banques','mdb_operationsCaisse','mdb_banqueOperations'].forEach(function(kX) {
+    var inc = data[kX];
+    if (inc === undefined || inc === null) return;
+    var cur = DB.getMain(kX);
+    if (Array.isArray(inc)) {
+      var cu = Array.isArray(cur) ? cur : [];
+      /* Garde anti-effacement : un tableau vide entrant ne vide jamais un local non vide */
+      if (inc.length === 0 && cu.length > 0) return;
+      DB.setMain(kX, _payeUnion(inc, cu));
+    } else {
+      DB.setMain(kX, inc);
+    }
+  });
+  if (data.mdb_entreprise && data.mdb_entreprise.nom) DB.setMain('mdb_entreprise', data.mdb_entreprise);
+}
+
+var payePushBusy = false, payePushQueued = false;
 function pushPayeCloud() {
   var uid = getEnterpriseUid();
   if (!uid || !firebaseDbP) return;
-  var payload = {};
-  var p = getPayeData();
-  if (p && Object.keys(p).length > 0) payload[PAYE_KEY] = p;
-  var emps = DB.getMain('mdb_employes');
-  if (emps) payload.mdb_employes = emps;
-  var aps = DB.getMain('mdb_acomptesPrets');
-  if (aps) payload.mdb_acomptesPrets = aps;
-  var ent = DB.getMain('mdb_entreprise');
-  if (ent && ent.nom) payload.mdb_entreprise = ent;
-  ['mdb_salairesPaiements','mdb_caisses','mdb_banques','mdb_operationsCaisse','mdb_banqueOperations'].forEach(function(kX) { var vX = DB.getMain(kX); if (vX) payload[kX] = vX; });
-  if (Object.keys(payload).length === 0) return;
-  firebaseDbP.collection('enterprises').doc(uid).set(payload, {merge:true}).then(function() {
+  if (payeBootstrapping || payePushBusy) { payePushQueued = true; return; }
+  payePushBusy = true;
+  /* Convergence : lire le cloud AVANT d'écrire et fusionner (union par id),
+     pour qu'une copie locale périmée ne puisse plus écraser des données récentes. */
+  firebaseDbP.collection('enterprises').doc(uid).get().then(function(doc) {
+    var cloud = (doc && doc.exists) ? doc.data() : {};
+    var payload = {};
+    var p = getPayeData();
+    var cp = (cloud[PAYE_KEY] && typeof cloud[PAYE_KEY] === 'object' && !Array.isArray(cloud[PAYE_KEY])) ? cloud[PAYE_KEY] : {};
+    var mp = _payeMergeObj(p, cp, true);
+    if (mp && Object.keys(mp).length > 0) payload[PAYE_KEY] = mp;
+    var simpleKeys = ['mdb_employes','mdb_acomptesPrets','mdb_salairesPaiements','mdb_caisses','mdb_banques','mdb_operationsCaisse','mdb_banqueOperations'];
+    for (var si = 0; si < simpleKeys.length; si++) {
+      var kX = simpleKeys[si];
+      var lv = DB.getMain(kX);
+      if (!lv) continue;
+      if (Array.isArray(lv)) {
+        var cv = Array.isArray(cloud[kX]) ? cloud[kX] : [];
+        if (lv.length > 0) payload[kX] = _payeUnion(lv, cv);
+        else if (cv.length === 0) payload[kX] = lv; /* vide ici ET là-bas : rien à protéger */
+        /* sinon : ne JAMAIS écraser un cloud non vide par un tableau vide */
+      } else {
+        payload[kX] = lv;
+      }
+    }
+    var ent = DB.getMain('mdb_entreprise');
+    if (ent && ent.nom) payload.mdb_entreprise = ent;
+    if (Object.keys(payload).length === 0) { payePushBusy = false; return; }
+    return firebaseDbP.collection('enterprises').doc(uid).set(payload, {merge:true});
+  }).then(function() {
+    payePushBusy = false;
     console.log('[Paye] Sync cloud OK');
-  }).catch(function(e) { console.warn('[Paye] Sync cloud error:', e); });
+    if (payePushQueued) { payePushQueued = false; pushPayeCloud(); }
+  }).catch(function(e) {
+    console.warn('[Paye] Sync cloud error:', e);
+    payePushBusy = false;
+    if (payePushQueued) { payePushQueued = false; setTimeout(pushPayeCloud, 2000); }
+  });
 }
 function pullPayeCloud() {
   var uid = getEnterpriseUid();
@@ -1011,21 +1102,8 @@ function pullPayeCloud() {
 function applyCloudSnapshot(data) {
   var _cur = DB.getMain(PAYE_KEY) || {};
   var _inc = (data && data[PAYE_KEY] && typeof data[PAYE_KEY] === 'object' && !Array.isArray(data[PAYE_KEY])) ? data[PAYE_KEY] : {};
-  var _merged = Object.assign({}, _cur, _inc);
-  var KEYS = ['categories','services','fonctions','primesSpec','pointage'];
-  for (var ki2 = 0; ki2 < KEYS.length; ki2++) {
-    var k3 = KEYS[ki2];
-    var _cArr = Array.isArray(_cur[k3]) ? _cur[k3] : [];
-    var _iArr = Array.isArray(_inc[k3]) ? _inc[k3] : [];
-    if (_iArr.length > 0) { _merged[k3] = _iArr; }
-    else if (_cArr.length > 0) { _merged[k3] = _cArr; }
-  }
-  if (_cur.grilleWood === true || _inc.grilleWood === true) { _merged.grilleWood = true; }
-  DB.setMain(PAYE_KEY, _merged);
-  if (data.mdb_employes) DB.setMain('mdb_employes', data.mdb_employes);
-  if (data.mdb_acomptesPrets) DB.setMain('mdb_acomptesPrets', data.mdb_acomptesPrets);
-  if (data.mdb_entreprise && data.mdb_entreprise.nom) DB.setMain('mdb_entreprise', data.mdb_entreprise);
-  ['mdb_salairesPaiements','mdb_caisses','mdb_banques','mdb_operationsCaisse','mdb_banqueOperations'].forEach(function(kX) { if (data[kX]) DB.setMain(kX, data[kX]); });
+  DB.setMain(PAYE_KEY, _payeMergeObj(_cur, _inc, false));
+  _payeRecvSharedKeys(data || {});
 }
 /* Écoute en temps réel : les modifications depuis l'app principale se propagent ici (vice-versa) */
 var payeSnapshotUnsub = null;
@@ -1038,23 +1116,10 @@ function startRealtimeSync() {
     var data = doc.data();
     var prevPaye = JSON.stringify(getPayeData() || {});
     var prevEmps = JSON.stringify(DB.getMain('mdb_employes') || []);
-    if (data.mdb_employes) DB.setMain('mdb_employes', data.mdb_employes);
-    if (data.mdb_acomptesPrets) DB.setMain('mdb_acomptesPrets', data.mdb_acomptesPrets);
-    if (data.mdb_entreprise && data.mdb_entreprise.nom) DB.setMain('mdb_entreprise', data.mdb_entreprise);
-    ['mdb_salairesPaiements','mdb_caisses','mdb_banques','mdb_operationsCaisse','mdb_banqueOperations'].forEach(function(kX) { if (data[kX]) DB.setMain(kX, data[kX]); });
+    _payeRecvSharedKeys(data || {});
     var _cur = DB.getMain(PAYE_KEY) || {};
     var _inc = (data && data[PAYE_KEY] && typeof data[PAYE_KEY] === 'object' && !Array.isArray(data[PAYE_KEY])) ? data[PAYE_KEY] : {};
-    var _merged = Object.assign({}, _cur, _inc);
-    var KEYS = ['categories','services','fonctions','primesSpec','pointage'];
-    for (var ki2 = 0; ki2 < KEYS.length; ki2++) {
-      var k3 = KEYS[ki2];
-      var _cArr = Array.isArray(_cur[k3]) ? _cur[k3] : [];
-      var _iArr = Array.isArray(_inc[k3]) ? _inc[k3] : [];
-      if (_iArr.length > 0) { _merged[k3] = _iArr; }
-      else if (_cArr.length > 0) { _merged[k3] = _cArr; }
-    }
-    if (_cur.grilleWood === true || _inc.grilleWood === true) { _merged.grilleWood = true; }
-    DB.setMain(PAYE_KEY, _merged);
+    DB.setMain(PAYE_KEY, _payeMergeObj(_cur, _inc, false));
     syncFromMain();
     var payeChanged = JSON.stringify(getPayeData() || {}) !== prevPaye;
     var empsChanged = JSON.stringify(DB.getMain('mdb_employes') || []) !== prevEmps;
