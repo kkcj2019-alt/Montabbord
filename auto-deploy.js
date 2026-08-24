@@ -23,7 +23,7 @@ catch (e2) {
   if (fs.existsSync(path.join(NODEJS, 'node.exe'))) process.env.PATH = NODEJS + ';' + process.env.PATH;
 }
 var DEBOUNCE_MS = 90 * 1000;
-var IGNORE = ['node_modules', '.git', '.firebase', 'supabase-migration', 'firestore-export-fresh.json'];
+var IGNORE = ['node_modules', '.git', '.firebase', 'supabase-migration', 'firestore-export-fresh.json', 'backups'];
 var timer = null;
 var deploying = false;
 var lastDeployEnd = Date.now();
@@ -47,7 +47,44 @@ function watched(p) {
   return true;
 }
 
+/* Miroir Git : recupere la derniere sauvegarde cloud (Supabase) dans backups/latest.json */
+var SB_URL = 'pywacfwhwsvidkhqsjqv.supabase.co';
+var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5d2FjZndod3N2aWRraHFzanF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczMDMyMTksImV4cCI6MjEwMjg3OTIxOX0.wmt5vKo189wxQ9loIYprj8PE-Xd3y0Xs_-n61UJjbls';
+function fetchLatestBackupToRepo(done) {
+  try {
+    var https = require('https');
+    var opts = { hostname: SB_URL, path: '/rest/v1/backups?select=ts,data&order=ts.desc&limit=1', headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, timeout: 15000 };
+    var req = https.get(opts, function(res) {
+      var buf = '';
+      res.on('data', function(ch) { buf += ch; });
+      res.on('end', function() {
+        try {
+          var rows = JSON.parse(buf);
+          if (Array.isArray(rows) && rows.length && rows[0].data) {
+            var dir = path.join(ROOT, 'backups');
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+            var f = path.join(dir, 'latest.json');
+            var out = JSON.stringify({ ts: rows[0].ts, savedAt: new Date().toISOString(), data: rows[0].data });
+            if (!fs.existsSync(f) || fs.readFileSync(f, 'utf8') !== out) { fs.writeFileSync(f, out); console.log('[backup] latest.json mis a jour'); }
+          }
+        } catch (eP) {}
+        done();
+      });
+    });
+    req.on('error', function() { done(); });
+    req.setTimeout(16000, function() { req.destroy(); done(); });
+  } catch (eFB) { done(); }
+}
+
 function run() {
+  if (deploying) { schedule(); return; }
+  deploying = true;
+  fetchLatestBackupToRepo(function() {
+    deploying = false;
+    runInner();
+  });
+}
+function runInner() {
   if (deploying) { schedule(); return; }
   var status = '';
   try { status = sh('git status --porcelain'); } catch (e) { log('ERREUR git status: ' + e.message); schedule(); return; }
@@ -92,6 +129,8 @@ fs.watch(ROOT, { recursive: true }, function(ev, filename) {
 
 log('=== Auto-deploy demarre (delai ' + (DEBOUNCE_MS / 1000) + 's apres derniere modification) ===');
 schedule();
+/* Miroir periodique des sauvegardes cloud vers Git (toutes les 11 min) */
+setInterval(run, 11 * 60 * 1000);
 
 /* Mini heartbeat HTTP pour verifier que le service tourne */
 http.createServer(function(req, res) { res.writeHead(200); res.end('auto-deploy actif'); }).listen(8790);
