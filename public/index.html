@@ -5077,8 +5077,22 @@ function _setBCClientColor(clientId, hexColor) {
     colors[clientId] = hexColor;
     localStorage.setItem('mdb_bc_colors', JSON.stringify(colors));
     toast('Couleur enregistrée pour ce client !', 'success');
-    renderBC();
-    if (typeof renderDashboard === 'function' && currentPage === 'dashboard') renderDashboard();
+    /* Mettre a jour les cartes du client dans le DOM en live (sans reconstruire renderBC) */
+    var hex = hexColor.replace('#','');
+    var r = parseInt(hex.substr(0,2),16)||37, g = parseInt(hex.substr(2,2),16)||99, b = parseInt(hex.substr(4,2),16)||235;
+    var cards = document.querySelectorAll('#bcBody .section[data-clientid="' + clientId + '"]');
+    for (var ci = 0; ci < cards.length; ci++) {
+      cards[ci].style.borderColor = hexColor;
+      cards[ci].style.background = 'rgba('+r+','+g+','+b+',0.12)';
+      var hdr = cards[ci].querySelector('div');
+      if (hdr) hdr.style.background = 'rgba('+r+','+g+','+b+',0.25)';
+    }
+    /* Recharger renderBC apres un delai pour ne pas fermer le color picker en cours d'utilisation */
+    clearTimeout(window._bcColorRenderTimer);
+    window._bcColorRenderTimer = setTimeout(function() {
+      if (typeof renderBC === 'function') renderBC();
+      if (typeof renderDashboard === 'function' && currentPage === 'dashboard') renderDashboard();
+    }, 800);
   } catch(e) {}
 }
 
@@ -5125,18 +5139,32 @@ function _clientColorBC(key) {
   };
 }
 
+function _updateColorSwatchInModal(clientId, hex, labelEl, swatchEl, inputEl) {
+  _setBCClientColor(clientId, hex);
+  if (swatchEl) swatchEl.style.background = hex;
+  if (labelEl) labelEl.textContent = hex.toUpperCase();
+  if (inputEl) inputEl.value = hex;
+}
+
 function openClientColorModal() {
   var clients = getClients() || [];
   var colors = _getBCClientColors();
   var html = '<div style="max-height:400px;overflow-y:auto;padding:8px 0">';
   html += '<p style="font-size:13px;color:var(--gray-600);margin-bottom:14px">Choisissez la couleur de chaque client. Elle s\'appliquera automatiquement à toutes ses cartes de bons de commande (fond, entête et bordure).</p>';
-  html += '<table style="width:100%"><thead><tr><th>Client</th><th style="width:120px;text-align:center">Couleur</th><th style="width:90px;text-align:center">Action</th></tr></thead><tbody>';
+  html += '<table style="width:100%"><thead><tr><th>Client</th><th style="width:140px;text-align:center">Couleur</th><th style="width:100px;text-align:center">Action</th></tr></thead><tbody>';
   for (var ci = 0; ci < clients.length; ci++) {
     var cl = clients[ci];
     var curCol = colors[cl.id] || '';
     var defInfo = _clientColorBC(cl.id);
+    var swatchId = 'swatchBC_' + ci;
+    var labelId = 'labelBC_' + ci;
+    var inputId = 'inputBC_' + ci;
     html += '<tr><td><strong>' + escH(cl.nom) + '</strong>' + (cl.type ? ' <span style="font-size:11px;color:var(--gray-500)">(' + escH(cl.type) + ')</span>' : '') + '</td>';
-    html += '<td style="text-align:center"><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff"><span style="display:inline-block;width:18px;height:18px;border-radius:4px;background:' + (curCol || defInfo.badgeBg) + ';border:1px solid rgba(0,0,0,0.2)"></span><input type="color" value="' + (curCol || '#2563eb') + '" onchange="_setBCClientColor(\'' + escH(cl.id) + '\', this.value);openClientColorModal()" style="opacity:0;position:absolute;width:0;height:0"><span style="font-size:11px;font-weight:700">' + (curCol ? curCol.toUpperCase() : 'Auto') + '</span></label></td>';
+    html += '<td style="text-align:center"><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff">';
+    html += '<span id="' + swatchId + '" style="display:inline-block;width:18px;height:18px;border-radius:4px;background:' + (curCol || defInfo.badgeBg) + ';border:1px solid rgba(0,0,0,0.2)"></span>';
+    html += '<input id="' + inputId + '" type="color" value="' + (curCol || '#2563eb') + '" onchange="event.stopPropagation();_setBCClientColor(\'' + escH(cl.id) + '\', this.value);document.getElementById(\'' + swatchId + '\').style.background=this.value;document.getElementById(\'' + labelId + '\').textContent=this.value.toUpperCase()" style="opacity:0;position:absolute;width:0;height:0">';
+    html += '<span id="' + labelId + '" style="font-size:11px;font-weight:700">' + (curCol ? curCol.toUpperCase() : 'Auto') + '</span>';
+    html += '</label></td>';
     html += '<td style="text-align:center">' + (curCol ? '<button class="btn btn-sm btn-outline" style="font-size:10px;padding:3px 8px;color:var(--danger)" onclick="_resetBCClientColor(\'' + escH(cl.id) + '\');openClientColorModal()">Réinitialiser</button>' : '<span style="font-size:11px;color:var(--gray-400)">Défaut</span>') + '</td></tr>';
   }
   html += '</tbody></table></div>';
@@ -17845,14 +17873,32 @@ function fncNameInputI() {
   var fnEl = document.getElementById('fnc-name');
   var svcEl = document.getElementById('fnc-service');
   if (!fnEl || !svcEl) return;
+  /* Ne jamais appeler loadOrgI() ici - ca reconstruirait le DOM et ferait perdre le focus */
   var sug = _suggestDeptI(fnEl.value);
   if (!sug) return;
-  var svcs = getServicesI();
-  var found = '';
-  for (var i = 0; i < svcs.length; i++) { if (String(svcs[i]).toLowerCase() === sug.toLowerCase()) { found = svcs[i]; break; } }
-  if (!found) { svcs.push(sug); setPayeSectionI('services', svcs); loadOrgI(); svcEl = document.getElementById('fnc-service'); toast('D\u00e9partement \u00ab ' + sug + ' \u00bb cr\u00e9\u00e9 automatiquement'); }
-  /* Ecraser seulement si vide ou si la derniere valeur venait aussi de l'auto-suggestion */
-  if (svcEl && (!svcEl.value || svcEl.getAttribute('data-autosug') !== null)) { svcEl.value = found || sug; svcEl.setAttribute('data-autosug', '1'); }
+  /* Chercher si option existe deja dans le select (sans toucher au DOM principal) */
+  var foundOpt = null;
+  for (var i = 0; i < svcEl.options.length; i++) {
+    if (svcEl.options[i].value.toLowerCase() === sug.toLowerCase()) { foundOpt = svcEl.options[i]; break; }
+  }
+  /* Si pas d'option : l'ajouter directement au select SANS appeler loadOrgI */
+  if (!foundOpt) {
+    var newOpt = document.createElement('option');
+    newOpt.value = sug;
+    newOpt.textContent = sug;
+    svcEl.appendChild(newOpt);
+    foundOpt = newOpt;
+    /* Persiste en arriere-plan sans reconstruire le DOM */
+    var svcs = getServicesI();
+    var alreadySaved = false;
+    for (var j = 0; j < svcs.length; j++) { if (String(svcs[j]).toLowerCase() === sug.toLowerCase()) { alreadySaved = true; break; } }
+    if (!alreadySaved) { svcs.push(sug); setPayeSectionI('services', svcs); }
+  }
+  /* Selectionner seulement si champ vide ou derniere valeur venait d'auto-suggestion */
+  if (!svcEl.value || svcEl.getAttribute('data-autosug') !== null) {
+    svcEl.value = foundOpt.value;
+    svcEl.setAttribute('data-autosug', '1');
+  }
 }
 function _empCommitEmp(empId, patch, label) {  var employes = getEmployes();  for (var i = 0; i < employes.length; i++) {    if (employes[i].id !== empId) continue;    for (var k in patch) employes[i][k] = patch[k];    if ("salaire_base" in patch) {      var d = new Date(); var ym = d.getFullYear() + "-" + (d.getMonth() < 9 ? "0" : "") + (d.getMonth() + 1);      if (!employes[i].salaire_history || !employes[i].salaire_history.length) employes[i].salaire_history = [{ montant: patch.salaire_base, dateEffet: ym }];      else employes[i].salaire_history[employes[i].salaire_history.length - 1].montant = patch.salaire_base;    }    break;  }  DB.set("mdb_employes", employes);  window._empRefocus = 1;  if (currentPage === "employes") renderEmployesPage();  toast(label || "Modifié");}
 function _empInline(ev, empId, field, isNum) {  ev.stopPropagation();  var td = ev.currentTarget;  if (!td || td.dataset.editing === "1") return;  var cur = td.getAttribute("data-cur") || "";  td.dataset.editing = "1";  var old = td.innerHTML;  td.innerHTML = "";  var inp = document.createElement("input");  inp.type = "text"; inp.value = cur;  inp.style.cssText = "width:" + Math.max(80, Math.min(240, cur.length * 9 + 34)) + "px;padding:2px 6px;border:1px solid var(--primary);border-radius:6px;font-size:12px;outline:none";  if (isNum) inp.style.textAlign = "right";  td.appendChild(inp); inp.focus(); inp.select();  function done(save) {    if (td.dataset.editing !== "1") return;    td.dataset.editing = "0";    var v = inp.value.trim();    if (!save || v === cur) { td.innerHTML = old; return; }    if (isNum) {      var nn = parseFloat(v.replace(/\s/g, "").replace(",", "."));      if (isNaN(nn)) { td.innerHTML = old; toast("Montant invalide", "error"); return; }      _empCommitEmp(empId, { salaire_base: nn }, "Salaire modifié");      return;    }    var patch = {}; patch[field] = v;    _empCommitEmp(empId, patch);  }  inp.onblur = function () { done(true); };  inp.onkeydown = function (e) { if (e.key === "Enter") { e.preventDefault(); inp.onblur = null; done(true); } else if (e.key === "Escape") { e.preventDefault(); inp.onblur = null; done(false); } };}
