@@ -268,7 +268,9 @@
       default:
         return Promise.resolve(new DocSnapshot(docId, false, null));
     }
+    try { if (window._mdbFatal && table === 'enterprises') window._mdbFatal('[NET] requ\u00eate ' + table + '/' + String(docId).slice(0, 12) + '... envoy\u00e9e'); } catch (eNS) {}
     return _tmo(q.then(function(res) {
+      try { if (window._mdbFatal && table === 'enterprises') window._mdbFatal('[NET] r\u00e9ponse ' + table + ' re\u00e7ue (' + ((res.data || []).length) + ' ligne(s), ' + Math.round(JSON.stringify(res.data || []).length / 1024) + ' Ko)'); } catch (eNT) {}
       if (res.error) throw res.error;
       return res.data && res.data.length > 0 ? docFromRow(table, res.data[0]) : new DocSnapshot(docId, false, null);
     }));
