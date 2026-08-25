@@ -950,6 +950,15 @@ function pushToCloud() {
     return;
   }
   _isPushing = true;
+  /* Limiteur de débit : jamais plus d'une \u00e9criture cloud par 1,2s */
+  var _nowW = Date.now();
+  var _waitMs = Math.max(0, 1200 - (_nowW - (window._lastCloudSet || 0)));
+  if (_waitMs > 0) {
+    _isPushing = false;
+    clearTimeout(_pushTimer);
+    _pushTimer = setTimeout(pushToCloud, _waitMs + 60);
+    return;
+  }
   var batch = keys.slice();
   var sentRaw = {};
   for (var si = 0; si < batch.length; si++) { try { sentRaw[batch[si]] = localStorage.getItem(batch[si]); } catch(se) {} }
@@ -985,6 +994,13 @@ function pushToCloud() {
       } else {
         data[k] = lv;
       }
+      /* Coupe-boucle : si la valeur fusionnée est IDENTIQUE au cloud, inutile d'\u00e9crire */
+      try {
+        if (JSON.stringify(data[k]) === JSON.stringify(cloud[k] === undefined ? null : cloud[k])) {
+          delete _dirtyKeys[k]; var _ckIdx = batch.indexOf(k); if (_ckIdx !== -1) clearPendingSync([k]);
+          delete data[k];
+        }
+      } catch(eEQ) {}
     }
     if (Object.keys(data).length === 0) {
       for (var ei = 0; ei < batch.length; ei++) delete _dirtyKeys[batch[ei]];
@@ -994,6 +1010,7 @@ function pushToCloud() {
       return;
     }
     return firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
+      window._lastCloudSet = Date.now();
       var cleared = [];
       for (var bi = 0; bi < batch.length; bi++) {
         var bk = batch[bi];
@@ -2456,6 +2473,12 @@ function doFirebaseLoginInner() {
   var login = document.getElementById('loginEmail').value.trim();
   var pass = document.getElementById('loginPass').value.trim();
   var errEl = document.getElementById('loginError');
+  /* Nettoyage défensif : tuer tout état/canal résiduel d'une session précédente */
+  try { clearTimeout(_pushTimer); } catch(ePC1) {}
+  _receivingSnapshot = false;
+  try { _isPushing = false; } catch(ePC2) {}
+  try { stopRealtimeSync(); } catch(ePC3) {}
+  try { stopUniqueSession(); } catch(ePC4) {}
   try{ if(localStorage.getItem('mdb_loginPageReload')==='1'){ localStorage.removeItem('mdb_loginPageReload'); if(window._mdbFatal) _mdbFatal('\u26a0\ufe0f RECHARGEMENT: la page s\'est recharg\u00e9e pendant la tentative pr\u00e9c\u00e9dente.'); } }catch(eLR){}
   if (!entIdRaw || !login || !pass) { errEl.textContent = 'Veuillez remplir tous les champs'; errEl.style.display = 'block'; return; }
   if (!firebaseDb) { errEl.textContent = 'Application en cours de chargement, r\u00e9essayez dans quelques secondes'; errEl.style.color = 'var(--danger)'; errEl.style.display = 'block'; return; }
@@ -3321,7 +3344,9 @@ function startRealtimeSync(uid) {
   if (!firebaseDb || !uid) return;
   var dataRef = firebaseDb.collection('enterprises').doc(uid);
   _snapshotUnsubscribe = dataRef.onSnapshot(function(doc) {
+    if (window._syncApplying) return; /* anti-réentrance : ignorer les snapshots pendant le traitement */
     if (!doc.exists) return;
+    window._syncApplying = true;
     var data = doc.data();
     _receivingSnapshot = true;
     try {
@@ -3377,21 +3402,26 @@ function startRealtimeSync(uid) {
     } finally {
       /* Jamais bloquer la synchro : le flag doit \u00eatre rel\u00e2ch\u00e9 m\u00eame en cas d'erreur */
       _receivingSnapshot = false;
+      window._syncApplying = false;
     }
     if (changed) {
       var ind = document.getElementById('syncIndicator');
       if (ind) { ind.textContent = '\u2713 Sync'; setTimeout(function() { ind.textContent = ''; }, 2000); }
-      var isFormActive = false;
-      var _aeF = document.activeElement;
-      if (_aeF && (_aeF.tagName === 'INPUT' || _aeF.tagName === 'TEXTAREA' || _aeF.tagName === 'SELECT' || _aeF.isContentEditable)) isFormActive = true;
-      if (window._modalOpen) isFormActive = true;
-      if (document.getElementById('formOverlay') && document.getElementById('formOverlay').style.display !== 'none') isFormActive = true;
-      if (document.getElementById('payeAuthOverlay') && document.getElementById('payeAuthOverlay').style.display !== 'none') isFormActive = true;
-      if (currentPage === 'tresorerie' && _tresorerieTab === 'caisse' && document.getElementById('csCodeContainerInput')) isFormActive = true;
-      if (!isFormActive && currentPage) {
-        if (window._skipNavigate) { window._skipNavigate = false; }
-        else { navigateTo(currentPage); }
-      }
+      /* Re-rendu avec debounce : au maximum 1 re-rendu par 400ms m\u00eame si les snapshots pleuvent */
+      clearTimeout(window._rtNavTimer);
+      window._rtNavTimer = setTimeout(function() {
+        var isFormActive = false;
+        var _aeF = document.activeElement;
+        if (_aeF && (_aeF.tagName === 'INPUT' || _aeF.tagName === 'TEXTAREA' || _aeF.tagName === 'SELECT' || _aeF.isContentEditable)) isFormActive = true;
+        if (window._modalOpen) isFormActive = true;
+        if (document.getElementById('formOverlay') && document.getElementById('formOverlay').style.display !== 'none') isFormActive = true;
+        if (document.getElementById('payeAuthOverlay') && document.getElementById('payeAuthOverlay').style.display !== 'none') isFormActive = true;
+        if (currentPage === 'tresorerie' && _tresorerieTab === 'caisse' && document.getElementById('csCodeContainerInput')) isFormActive = true;
+        if (!isFormActive && currentPage && !document.hidden) {
+          if (window._skipNavigate) { window._skipNavigate = false; }
+          else { navigateTo(currentPage); }
+        }
+      }, 400);
     }
   }, function(e) {
     console.warn('Snapshot error:', e);
