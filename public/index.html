@@ -461,12 +461,49 @@ table tbody tr{transition:background .14s ease}
 <body>
 <script>
 (function(){
+  /* --- Boîte noire: tracer les gels du thread principal (Worker = thread separé, jamais gelé) --- */
+  function _idbPut(rec){
+    try{
+      var rq=indexedDB.open('mdbDiag',1);
+      rq.onupgradeneeded=function(ev){ try{ ev.target.result.createObjectStore('fz',{autoIncrement:true}); }catch(e){} };
+      rq.onsuccess=function(){ try{ var tx=rq.result.transaction('fz','readwrite'); tx.objectStore('fz').add(rec); }catch(e){} };
+    }catch(e){}
+  }
+  function _idbLast(n,cb){
+    try{
+      var rq=indexedDB.open('mdbDiag',1);
+      rq.onsuccess=function(){
+        try{
+          var db=rq.result;
+          if(!db.objectStoreNames || db.objectStoreNames.indexOf('fz')===-1){ cb([]); return; }
+          var tx=db.transaction('fz','readonly');
+          var cur=tx.objectStore('fz').openCursor(null,'prev');
+          var out=[];
+          cur.onsuccess=function(){ var c=cur.result; if(c){ out.push(c.value); if(out.length<n) c.continue(); } else cb(out); };
+          cur.onerror=function(){ cb([]); };
+        }catch(e){ cb([]); }
+      };
+      rq.onerror=function(){ cb([]); };
+    }catch(e){ cb([]); }
+  }
+  try{
+    var wsrc='var last=0;onmessage=function(e){last=e.data;};setInterval(function(){var n=Date.now();if(last&&n-last>6000){try{var rq=indexedDB.open("mdbDiag",1);rq.onupgradeneeded=function(ev){try{ev.target.result.createObjectStore("fz",{autoIncrement:true})}catch(e){}};rq.onsuccess=function(){try{var tx=rq.result.transaction("fz","readwrite");tx.objectStore("fz").add({at:n,gap:n-last})}catch(e){}}}catch(e){}last=n;}},2000);';
+    var _w=new Worker(URL.createObjectURL(new Blob([wsrc],{type:'text/javascript'})));
+    setInterval(function(){ try{ _w.postMessage(Date.now()); }catch(e){} },1000);
+  }catch(eWK){}
+
   var _lastMsg='',_lastT=0,_n=0;
   function _mdbFatal(msg){
     try{
       var now=Date.now();
-      if(msg===_lastMsg && now-_lastT<3000) return;
+      var dup=(msg===_lastMsg && now-_lastT<3000);
       _lastMsg=msg;_lastT=now;
+      try{
+        var tl=[]; try{ tl=JSON.parse(localStorage.getItem('mdb_diag_trace')||'[]'); }catch(eJ){ }
+        if(!dup){ tl.push('['+new Date(now).toLocaleTimeString()+'] '+msg); while(tl.length>80)tl.shift(); }
+        localStorage.setItem('mdb_diag_trace',JSON.stringify(tl));
+      }catch(eL){}
+      if(dup) return;
       var b=document.getElementById('mdbFatalBar');
       if(!b){
         b=document.createElement('div'); b.id='mdbFatalBar';
@@ -480,14 +517,35 @@ table tbody tr{transition:background .14s ease}
         b.appendChild(t);
         (document.body||document.documentElement).appendChild(b);
       }
-      if(_n>40) return;
+      if(_n>80) return;
       _n++;
       var txt=document.getElementById('mdbFatalTxt');
-      var h=new Date().toLocaleTimeString();
-      txt.textContent+='['+h+'] '+msg+'\n';
+      txt.textContent+='['+new Date(now).toLocaleTimeString()+'] '+msg+'\n';
       b.scrollTop=b.scrollHeight;
     }catch(e){}
   }
+
+  /* --- Au demarrage: afficher ce que la session precedente a laisse dans la boite noire --- */
+  try{
+    var prev=[]; try{ prev=JSON.parse(localStorage.getItem('mdb_diag_trace')||'[]'); }catch(eP){ }
+    try{ localStorage.removeItem('mdb_diag_trace'); }catch(eP2){}
+    if(prev.length){
+      var lastPrev=prev[prev.length-1]||'';
+      if(lastPrev.indexOf('CONNEXION R\u00c9USSIE')===-1 && lastPrev.indexOf('incorrect')===-1 && lastPrev.indexOf('Erreur')===-1){
+        _mdbFatal('\u26a0\ufe0f SESSION PR\u00c9C\u00c9DENTE interrompue \u2014 derni\u00e8res \u00e9tapes:');
+        for(var pi=Math.max(0,prev.length-6); pi<prev.length; pi++) _mdbFatal('   ' + prev[pi].replace(/^\[[^\]]*\]\s*/,''));
+      }
+    }
+  }catch(ePP){}
+  _idbLast(5,function(recs){
+    if(recs && recs.length){
+      for(var ri=0; ri<recs.length; ri++){
+        var rr=recs[ri];
+        _mdbFatal('\ud83e\uddca GEL THREAD d\u00e9tect\u00e9 \u00e0 ' + new Date(rr.at).toLocaleTimeString() + ' (blocage ~' + Math.round(rr.gap/1000) + 's)');
+      }
+    }
+  });
+
   window._mdbFatal=_mdbFatal;
   window.addEventListener('error',function(ev){ _mdbFatal('ERREUR JS: '+(ev.message||'?')+' @ '+String(ev.filename||'').split('/').pop()+':'+ev.lineno+':'+ev.colno); });
   window.addEventListener('unhandledrejection',function(ev){ var r=ev.reason||{}; _mdbFatal('PROMESSE REJETEE: '+String((r&&(r.stack||r.message))||r).slice(0,600)); });
