@@ -230,6 +230,22 @@
 
   /* ---------- Lectures ---------- */
 
+  function _tmo(p, ms) {
+    ms = ms || 12000;
+    return new Promise(function(res, rej) {
+      var done = false;
+      var t = setTimeout(function() {
+        if (done) return; done = true;
+        rej(new Error('D\u00e9lai r\u00e9seau d\u00e9pass\u00e9 (' + ms + 'ms) \u2014 v\u00e9rifiez Internet ou d\u00e9sactivez l\'adblocker'));
+      }, ms);
+      Promise.resolve(p).then(function(v) {
+        if (done) return; done = true; clearTimeout(t); res(v);
+      }, function(e) {
+        if (done) return; done = true; clearTimeout(t); rej(e);
+      });
+    });
+  }
+
   function fetchDoc(parentTable, parentId, table, docId) {
     var q;
     switch (table) {
@@ -252,10 +268,10 @@
       default:
         return Promise.resolve(new DocSnapshot(docId, false, null));
     }
-    return q.then(function(res) {
+    return _tmo(q.then(function(res) {
       if (res.error) throw res.error;
       return res.data && res.data.length > 0 ? docFromRow(table, res.data[0]) : new DocSnapshot(docId, false, null);
-    });
+    }));
   }
 
   function fetchQuery(table, modifiers) {
@@ -266,12 +282,12 @@
       else if (m.type === 'order') sel = sel.order(m.field, { ascending: m.dir !== 'desc' });
       else if (m.type === 'limit') sel = sel.limit(m.n);
     }
-    return sel.then(function(res) {
+    return _tmo(sel.then(function(res) {
       if (res.error) throw res.error;
       var docs = [];
       for (var j = 0; j < (res.data || []).length; j++) docs.push(docFromRow(table, res.data[j]));
       return new QuerySnapshot(docs);
-    });
+    }));
   }
 
   /* ---------- Temps réel ---------- */
