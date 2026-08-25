@@ -3812,7 +3812,17 @@ function canAccessSection(page, subKey) {
     return true;
   }
   if (!currentUser.sections) return false;
-  var hasParent = (currentUser.sections[page] === 'read' || currentUser.sections[page] === 'write' || currentUser.sections[basePageS] === 'read' || currentUser.sections[basePageS] === 'write');
+  var secC = currentUser.sections;
+  /* Accès DIRECT à la sous-page (clé avec deux-points, ex: 'tresorerie:caisse') */
+  var vDirect = secC[basePageS + ':' + subKey];
+  if (vDirect === true || vDirect === 'read' || vDirect === 'write') return true;
+  if (page !== basePageS) { var vDP = secC[page + ':' + subKey]; if (vDP === true || vDP === 'read' || vDP === 'write') return true; }
+  var hasParent = (secC[page] === 'read' || secC[page] === 'write' || secC[basePageS] === 'read' || secC[basePageS] === 'write');
+  if (!hasParent) {
+    for (var kPS in secC) {
+      if ((kPS.indexOf(basePageS + ':') === 0 || kPS.indexOf(page + ':') === 0) && (secC[kPS] === 'read' || secC[kPS] === 'write' || secC[kPS] === true)) { hasParent = true; break; }
+    }
+  }
   if (!hasParent) return false;
   
   var val = currentUser.sections[page + '.' + subKey];
@@ -4856,6 +4866,18 @@ function alertBellUpdate() {
     if (!elB) return;
     if (tot) { elB.style.display = 'inline-block'; elB.textContent = tot > 99 ? '99+' : tot; if(bell) bell.classList.add('has-alerts'); }
     else { elB.style.display = 'none'; if(bell) bell.classList.remove('has-alerts'); }
+    /* Annonce vocale quand le nombre de notifications AUGMENTE */
+    try {
+      var _prev = (typeof window._lastAlertTotal === 'number') ? window._lastAlertTotal : tot;
+      window._lastAlertTotal = tot;
+      if (tot > _prev && typeof _mdbParle === 'function' && _mdbVoixActive()) {
+        var nowV = Date.now();
+        if (!window._lastVoiceNotif || nowV - window._lastVoiceNotif > 60000) {
+          window._lastVoiceNotif = nowV;
+          setTimeout(function(){ try { _mdbParle('Vous avez une nouvelle notification. Regardez s\'il vous pla\u00eet, \u00e7a peut \u00eatre urgent.'); } catch(eVP){} }, 300);
+        }
+      }
+    } catch(eVC) {}
     // notification discrete toutes les 30 min
     try{ if(tot && window.Notification && Notification.permission==='granted'){ var nowN=Date.now(); if(!window._lastNotifAt || nowN - window._lastNotifAt > 30*60*1000){ window._lastNotifAt=nowN; sendBrowserNotif(tot,aL); } } }catch(eN){}
   } catch (eAB) {}
@@ -14286,7 +14308,16 @@ function filterTaches() {
     var taskUsers = getUsers();
     for (var cui = 0; cui < taskUsers.length; cui++) { if (taskUsers[cui].id === t.userId) { creatorName = taskUsers[cui].nom || taskUsers[cui].login || t.userId; break; } }
     if (t.userId === getTaskUserId() && currentUser) creatorName = currentUser.nom || currentUser.login || creatorName;
-    html += '<td><strong>' + escH(t.titre) + '</strong>' + (t.description ? '<br><small class="text-muted">' + escH(t.description.substring(0, 40)) + '</small>' : '') + ((t.userId && t.userId !== userId) ? '<br><small style="color:var(--purple);font-size:10px">Partag\u00e9e</small>' : '') + '</td>';
+    /* Noms des personnes avec qui la tache est partagee */
+    var sharedNames = [];
+    if (t.visibleTo && t.visibleTo.length > 0) {
+      for (var svI = 0; svI < t.visibleTo.length; svI++) {
+        for (var suI = 0; suI < taskUsers.length; suI++) {
+          if (taskUsers[suI].id === t.visibleTo[svI]) { sharedNames.push(taskUsers[suI].nom || taskUsers[suI].login || t.visibleTo[svI]); break; }
+        }
+      }
+    }
+    html += '<td><strong>' + escH(t.titre) + '</strong>' + (t.description ? '<br><small class="text-muted">' + escH(t.description.substring(0, 40)) + '</small>' : '') + ((t.userId && t.userId !== userId) ? '<br><small style="color:var(--purple);font-size:10px">Cr\u00e9\u00e9e par ' + escH(creatorName) + '</small>' : '') + (sharedNames.length ? '<br><small style="color:var(--purple);font-size:10px">\ud83d\udce4 Partag\u00e9e avec : ' + escH(sharedNames.join(', ')) + '</small>' : '') + '</td>';
     html += '<td style="font-size:11px;font-weight:600">' + escH(creatorName) + '</td>';
     html += '<td>' + fmtDate(t.dateDebut) + '</td>';
     html += '<td>' + fmtDate(t.dateLimite) + (ov ? '<br><small style="color:var(--danger);font-weight:600">En retard !</small>' : '') + '</td>';
@@ -14326,15 +14357,32 @@ function updateTacheStatus(id, status) {
   toast('Statut de la tache mis a jour');
   filterTaches();
 }
+var _JOURS_FR = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
+function nomJour(dateStr) {
+  if (!dateStr) return "";
+  var d = new Date(dateStr + "T12:00:00");
+  if (isNaN(d.getTime())) return "";
+  return _JOURS_FR[d.getDay()];
+}
+function majJourTache() {
+  try {
+    var pairs = [["fDateDebut","jourDateDebut"],["fDateLimite","jourDateLimite"],["fDateFin","jourDateFin"]];
+    for (var i = 0; i < pairs.length; i++) {
+      var inp = document.getElementById(pairs[i][0]);
+      var out = document.getElementById(pairs[i][1]);
+      if (inp && out) out.textContent = inp.value ? ("\u{1F4C5} " + nomJour(inp.value)) : "";
+    }
+  } catch (eJT) {}
+}
 function openTacheModal(id) {
   var t = null;
   if (id) { var list = getTaches(); for (var i = 0; i < list.length; i++) { if (list[i].id === id) { t = list[i]; break; } } }
   var body = '';
   body += '<div class="form-group"><label>Titre *</label><input type="text" id="fTitre" value="' + escH(t ? t.titre : '') + '"></div>';
   body += '<div class="form-group"><label>Description</label><textarea id="fDesc">' + escH(t ? t.description || '' : '') + '</textarea></div>';
-  body += '<div class="form-row"><div class="form-group"><label>Date d\u00e9but *</label><input type="date" id="fDateDebut" value="' + (t ? t.dateDebut : getToday()) + '"></div>';
-  body += '<div class="form-group"><label>Date limite *</label><input type="date" id="fDateLimite" value="' + (t ? t.dateLimite : '') + '"></div></div>';
-  body += '<div class="form-row"><div class="form-group"><label>Date fin</label><input type="date" id="fDateFin" value="' + (t ? t.dateFin || '' : '') + '"></div>';
+  body += '<div class="form-row"><div class="form-group"><label>Date début *</label><input type="date" id="fDateDebut" onchange="majJourTache()" oninput="majJourTache()" value="' + (t ? t.dateDebut : getToday()) + '"><div id="jourDateDebut" style="font-size:10px;color:var(--gray-500);margin-top:2px;font-weight:600"></div></div>';
+    body += '<div class="form-group"><label>Date limite (chéance) *</label><input type="date" id="fDateLimite" onchange="majJourTache()" oninput="majJourTache()" value="' + (t ? t.dateLimite : '') + '"><div id="jourDateLimite" style="font-size:10px;color:var(--gray-500);margin-top:2px;font-weight:600"></div></div></div>';
+    body += '<div class="form-row"><div class="form-group"><label>Date fin <small style="color:var(--gray-400)">(remplie automatiquement quand Terminée)</small></label><input type="date" id="fDateFin" onchange="majJourTache()" oninput="majJourTache()" value="' + (t ? t.dateFin || '' : '') + '"><div id="jourDateFin" style="font-size:10px;color:var(--gray-500);margin-top:2px;font-weight:600"></div></div>';
   body += '<div class="form-group"><label>Statut</label><select id="fStatut"><option value="a_faire"' + (t && t.statut === 'a_faire' ? ' selected' : '') + '>\u00c0 faire</option><option value="en_cours"' + (t && t.statut === 'en_cours' ? ' selected' : '') + '>En cours</option><option value="termine"' + (t && t.statut === 'termine' ? ' selected' : '') + '>Termin\u00e9e</option></select></div></div>';
   body += '<div class="form-group"><label>Priorit\u00e9</label><select id="fPriorite"><option value="basse"' + (t && t.priorite === 'basse' ? ' selected' : '') + '>Basse</option><option value="moyenne"' + (!t || t.priorite === 'moyenne' ? ' selected' : '') + '>Moyenne</option><option value="haute"' + (t && t.priorite === 'haute' ? ' selected' : '') + '>Haute</option><option value="urgente"' + (t && t.priorite === 'urgente' ? ' selected' : '') + '>Urgente</option></select></div>';
   /* Partager avec */
@@ -14359,6 +14407,7 @@ function openTacheModal(id) {
   }
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button> <button class="btn btn-primary" onclick="saveTache(\'' + (id || '') + '\')">Enregistrer</button>';
   openFormModal(t ? 'Modifier la t\u00e2che' : 'Nouvelle t\u00e2che', body, footer);
+  setTimeout(majJourTache, 60);
 }
 function saveTache(id) {
   var titre = document.getElementById('fTitre').value.trim();
