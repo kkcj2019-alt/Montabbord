@@ -182,7 +182,7 @@ main{flex:1;padding:1.5rem 2rem;overflow-y:auto;background:#fdfdfd}
       <input type="month" id="payeTopMonth" onchange="syncPayeMonth(this.value);refreshPayeSection()" style="border:none;background:transparent;padding:2px;font-size:.75rem;font-weight:700;color:var(--text);outline:none;cursor:pointer">
     </div>
     <span id="payeTopUser" style="display:none">Utilisateur</span>
-    <button onclick="try{if(typeof refreshPayeSection==='function')refreshPayeSection();else location.reload();}catch(e){location.reload();}" title="Actualiser" class="btn" style="padding:5px 10px;font-size:.7rem;background:#f1f5f9;color:var(--text);border:1px solid var(--border);gap:4px">↻ Actualiser</button>
+    <button id="payeRefreshBtn" onclick="payeRefreshData()" title="Actualiser les données" style="padding:5px 7px;background:#fff;border:1px solid var(--border);border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;color:var(--text)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
     <button onclick="excelExportCurrentP()" title="Exporter en Excel (.xlsx)" class="btn" style="padding:5px 10px;font-size:.7rem;background:#0284c7;gap:4px">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
       <span>Excel</span>
@@ -1006,11 +1006,13 @@ function setFormatHeures(v) { setPayeSection('format_heures', v); }
 function _payeUnion(prim, sec) {
   var a = Array.isArray(prim) ? prim : [];
   var b = Array.isArray(sec) ? sec : [];
-  var out = [], seen = {}, i, r;
-  for (i = 0; i < a.length; i++) { r = a[i]; out.push(r); if (r && r.id) seen[r.id] = true; }
+  var out = [], seen = {}, i, r, key;
+  for (i = 0; i < a.length; i++) { r = a[i]; out.push(r); key = (r && typeof r === 'object' && r.id) ? r.id : (typeof r === 'string' ? r : String(r||'')); if (key) seen[key] = true; }
   for (i = 0; i < b.length; i++) {
     r = b[i];
-    if (r && r.id && !seen[r.id]) { out.push(r); seen[r.id] = true; }
+    key = (r && typeof r === 'object' && r.id) ? r.id : (typeof r === 'string' ? r : String(r||''));
+    if (key && !seen[key]) { out.push(r); seen[key] = true; }
+    else if (!key && r) { out.push(r); }
   }
   return out;
 }
@@ -1031,6 +1033,16 @@ function _payeMergeObj(cur, inc, localFirst) {
     else if (sec && sec.length > 0) merged[k] = sec;
   }
   if (cur.grilleWood === true || inc.grilleWood === true) merged.grilleWood = true;
+  // Tombstones primes : union toujours (jamais perdu)
+  var _tA = Array.isArray(cur['primesSpec_tombstones']) ? cur['primesSpec_tombstones'] : [];
+  var _tB = Array.isArray(inc['primesSpec_tombstones']) ? inc['primesSpec_tombstones'] : [];
+  merged['primesSpec_tombstones'] = _payeUnion(_tA, _tB);
+  // Primes supprimées ne reviennent jamais
+  var _tomb = merged['primesSpec_tombstones'] || [];
+  if (Array.isArray(_tomb) && _tomb.length && Array.isArray(merged['primesSpec'])) {
+    var _tombSet = {}; for (var _ti = 0; _ti < _tomb.length; _ti++) _tombSet[_tomb[_ti]] = true;
+    merged['primesSpec'] = merged['primesSpec'].filter(function(pr){ return !_tombSet[pr && pr.id]; });
+  }
   return merged;
 }
 function _payeRecvSharedKeys(data) {
@@ -1210,7 +1222,13 @@ function setPointageData(v) { setPayeSection('pointage', v); }
    ]
    employes = liste des emp.id qui bénéficient de la prime
 */
-function getPrimesSpec() { return getPayeSection('primesSpec', []); }
+function getPrimesSpec() {
+  var arr = getPayeSection('primesSpec', []) || [];
+  var tomb = getPayeSection('primesSpec_tombstones', []) || [];
+  if (!tomb.length) return arr;
+  var tset = {}; for (var ti=0; ti<tomb.length; ti++) tset[tomb[ti]] = true;
+  return arr.filter(function(p){ return !tset[p && p.id]; });
+}
 function setPrimesSpec(v) { setPayeSection('primesSpec', v); }
 
 /* Retourne le montant total des primes spéciales pour un employé et un type donné */
@@ -1384,6 +1402,10 @@ function editPrimeConfig(id) { openPrimeModal(id); }
 function deletePrimeConfig(id) {
   if (!confirm('Supprimer cette prime ?')) return;
   setPrimesSpec(getPrimesSpec().filter(function(x){ return x.id !== id; }));
+  try{
+    var _tomb = getPayeSection('primesSpec_tombstones', []) || [];
+    if (_tomb.indexOf(id) === -1) { _tomb.push(id); setPayeSection('primesSpec_tombstones', _tomb); }
+  }catch(eT){}
   loadPrimesSpec();
   document.getElementById('prime-detail-card').style.display = 'none';
   toast('Prime supprimée', 'success');
@@ -2041,6 +2063,22 @@ function refreshPayeSection() {
   if (!cs) return;
   _secBack = true;
   try { showSection(cs); } finally { _secBack = false; }
+}
+function payeRefreshData(){
+  var uid=getEnterpriseUid();
+  if(!uid||!firebaseDbP){ toast('Non connecté','error'); return; }
+  var btn=document.getElementById('payeRefreshBtn');
+  if(btn){ btn.disabled=true; btn.style.opacity='.5'; btn.style.pointerEvents='none'; }
+  toast('Actualisation...','success');
+  firebaseDbP.collection('enterprises').doc(uid).get().then(function(doc){
+    if(!doc.exists){ toast('Aucune donnée cloud','error'); return; }
+    applyCloudSnapshot(doc.data());
+    syncFromMain();
+    var cs2=null; try{ cs2=localStorage.getItem('paye_currentSection'); }catch(e){}
+    if(cs2){ _secBack=true; try{ showSection(cs2);}finally{ _secBack=false; } } else { try{ loadDashboard(); }catch(e2){} }
+    toast('Données actualisées','success');
+  }).catch(function(e){ console.warn('payeRefresh error',e); toast('Erreur actualisation','error'); })
+  .then(function(){ if(btn){ btn.disabled=false; btn.style.opacity=''; btn.style.pointerEvents=''; } });
 }
 var _secHistory = [];
 var _secBack = false;
