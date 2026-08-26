@@ -789,12 +789,20 @@ function _payeExitToApp(){
 <option value="non_effectue">Non Effectué (Indemnité compensatrice)</option>
 <option value="dispense">Dispensé (Sans indemnité)</option>
 </select></div>
+<div class="form-group"><label>Jours travaillés du mois de sortie (0-30)</label><input type="number" name="jours_mois" min="0" max="30" value="0"></div>
+<div class="form-group"><label>Congés déjà pris sur la période (jours ouvrables)</label><input type="number" name="jours_conges_pris" min="0" step="0.5" value="0"></div>
+<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.78rem;margin-bottom:.8rem"><input type="checkbox" name="incl_grat" checked style="width:15px;height:15px"> Inclure la gratification conventionnelle (prorata année de sortie)</label>
 <button type="submit" class="btn" style="width:100%">Calculer les Indemnités</button>
 </form>
 </div>
 <div class="card" id="stc-result">
 <div style="text-align:center;padding:2rem;color:var(--dim)">Les résultats du calcul s'afficheront ici.</div>
 </div>
+</div>
+<div class="card" style="margin-top:1.2rem">
+<h3 style="margin-bottom:.8rem;font-size:.9rem">📁 Historique des Soldes de Tout Compte</h3>
+<div style="font-size:.72rem;color:var(--dim);margin-bottom:.6rem">Chaque STC calculé est sauvegardé automatiquement (cloud) pour consultation et réimpression ultérieure.</div>
+<div style="overflow-x:auto" id="stc-history"></div>
 </div>
 </section>
 
@@ -2233,7 +2241,7 @@ function showSection(id) {
   if (id === 'societe') loadSocieteForm();
   if (id === 'categories') loadCategories();
   if (id === 'ecritures') loadEcritures();
-  if (id === 'stc') fillEmpSelects();
+  if (id === 'stc') { fillEmpSelects(); loadSTCHistory(); }
   if (id === 'documents') loadDocs();
   if (id === 'actualites') loadActualites();
   if (id === 'explication') loadExplication();
@@ -6433,6 +6441,95 @@ function exportEcritures() {
 }
 
 /* ==================== STC & DEPARTS ==================== */
+function _stcMoisService(dE, dF){
+  try{
+    var a=new Date(dE), b=new Date(dF);
+    if(isNaN(a)||isNaN(b)) return 0;
+    var m=(b.getFullYear()-a.getFullYear())*12 + (b.getMonth()-a.getMonth());
+    if(b.getDate() < a.getDate()) m--;
+    return Math.max(0,m);
+  }catch(e){ return 0; }
+}
+function _stcMoyenne12Brut(emp, dateFin){
+  var tot=0, nb=0;
+  try{
+    var d=new Date(dateFin);
+    for(var k=0;k<12;k++){
+      var mk=d.getFullYear()+'-'+(d.getMonth()<9?'0':'')+(d.getMonth()+1);
+      var ent=(emp.date_entree||'').slice(0,7);
+      if(!ent || mk>=ent){
+        try{ var c=calculatePayroll(emp, mk); var b=(c.totals&&c.totals.brut)||0; if(b>0){ tot+=b; nb++; } }catch(eC){}
+      }
+      d.setMonth(d.getMonth()-1);
+    }
+  }catch(e){}
+  if(nb>0) return Math.round(tot/nb);
+  return parseFloat(emp.salaire_base)||0;
+}
+function _stcDureePreavisMois(emp, annees){
+  /* Décret n°96-200 du 07/03/1996 (art. 18.4 Code du travail) */
+  var cat=(typeof empCategorie==='function')?empCategorie(emp):'titulaire';
+  var catObj=(getCategories()||[]).find(function(c){ return c.code===emp.categorie_id; });
+  var lib=(((catObj&&(catObj.libelle||catObj.code))||'')+'').toLowerCase();
+  var cadre = lib.indexOf('cadre')>-1 || lib.indexOf('ingenieur')>-1 || lib.indexOf('ingénieur')>-1;
+  if(cadre) return annees>16 ? 4 : 3;
+  if(cat==='titulaire'){
+    if(annees<=6) return 1;
+    if(annees<=11) return 2;
+    if(annees<=16) return 3;
+    return 4;
+  }
+  if(annees<0.5) return 8/30;
+  if(annees<1) return 0.5;
+  if(annees<=6) return 1;
+  if(annees<=11) return 2;
+  if(annees<=16) return 3;
+  return 4;
+}
+function _stcJoursCongesAcquis(moisServ, annees){
+  /* Art. 25.1 : 2,2 j ouvrables/mois ; art. 25.2 : majorations ancienneté */
+  var maj=0;
+  if(annees>=30) maj=8; else if(annees>=25) maj=7; else if(annees>=20) maj=5; else if(annees>=15) maj=3; else if(annees>=10) maj=2; else if(annees>=5) maj=1;
+  var acquis = 2.2*moisServ + (maj*(moisServ/12));
+  return Math.round(acquis*10)/10;
+}
+function loadSTCHistory(){
+  var el=document.getElementById('stc-history');
+  if(!el) return;
+  var recs=(getPayeSection('stcRecords',[])||[]).slice();
+  if(!recs.length){ el.innerHTML='<div style="text-align:center;padding:1.2rem;color:var(--dim)">Aucun STC enregistré pour le moment.</div>'; return; }
+  var h='<table><thead><tr><th>Date</th><th>Matricule</th><th>Employé</th><th>Motif</th><th>Sortie</th><th style="text-align:right">Net à payer</th><th style="width:130px">Actions</th></tr></thead><tbody>';
+  recs.forEach(function(rc){
+    h+='<tr><td>'+escH((rc.createdAt||'').slice(0,10))+'</td><td class="fw-700">'+escH(rc.matricule||'-')+'</td><td>'+escH(rc.nom||'-')+'</td><td>'+escH((rc.motif||'').replace(/_/g,' '))+'</td><td>'+escH(rc.dateFin||'-')+'</td><td style="text-align:right;font-weight:800;color:var(--green)">'+fmtF(rc.total||0)+' F</td>'
+      +'<td style="white-space:nowrap"><button class="btn-sec" style="padding:3px 8px;margin-right:4px" onclick="printSTCRecord(\''+rc.id+'\')">🖨️ Imprimer</button><button class="btn btn-red" style="padding:3px 6px" onclick="deleteSTCRecord(\''+rc.id+'\')">X</button></td></tr>';
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+function deleteSTCRecord(id){
+  if(!confirm('Supprimer ce STC de l\'historique ?')) return;
+  setPayeSection('stcRecords',(getPayeSection('stcRecords',[])||[]).filter(function(x){return x.id!==id;}));
+  loadSTCHistory(); toast('STC supprimé','success');
+}
+function printSTCRecord(id){
+  var rec=(getPayeSection('stcRecords',[])||[]).find(function(x){return x.id===id;});
+  if(!rec){ toast('Introuvable','error'); return; }
+  var w=window.open('','_blank','width=900,height=800');
+  if(!w){ toast('Autorisez les popups','error'); return; }
+  var h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>STC - '+escH(rec.matricule||'')+'</title><style>@page{size:A4;margin:16mm 13mm}body{font-family:Roboto,Calibri,Arial,sans-serif;color:#0f172a;font-size:10.5pt;line-height:1.5;margin:0;padding:22px}@media print{body{padding:0}.no-print{display:none}}h1{text-align:center;font-size:16pt;letter-spacing:1.5px;margin:12px 0 2px;text-transform:uppercase;color:#0b1526}.sub{text-align:center;font-size:8pt;color:#64748b;margin-bottom:14px}.info{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;font-size:9.5pt;margin-bottom:12px}table{width:100%;border-collapse:collapse;font-size:9.5pt}th{background:#1e293b;color:#fff;padding:6px 8px;text-align:left;font-size:8.5pt;text-transform:uppercase}td{padding:5px 8px;border-bottom:1px solid #e2e8f0}td.r,th.r{text-align:right}tfoot td{font-weight:800;background:#f1f5f9;border-top:2px solid #0b1526}.refs{margin-top:12px;padding:8px 10px;background:#f8fafc;border-left:3px solid #94a3b8;font-size:7.5pt;color:#475569}.libre{margin-top:12px;padding:10px;background:#f0fdf4;border:1px solid #86efac;font-size:9pt;color:#14532d}</style></head><body>';
+  h+='<div class="no-print" style="position:sticky;top:0;background:#fff;z-index:10;display:flex;gap:8px;padding:10px 0;border-bottom:1px solid #e2e8f0;margin-bottom:12px"><button onclick="try{window.close()}catch(e){}; setTimeout(function(){try{history.back()}catch(e){}},200)" style="padding:8px 14px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;cursor:pointer;font-weight:700">\u2190 Retour</button><button onclick="window.print()" style="padding:8px 14px;background:#0b1526;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">\uD83D\uDDA8\uFE0F Imprimer / PDF</button></div>';
+  h+=_socHeaderHTML();
+  h+='<h1>Solde de Tout Compte</h1><div class="sub">Réf. STC/'+escH(rec.matricule||'')+'/'+(rec.dateFin||'').slice(0,4)+' — édité le '+new Date(rec.createdAt||Date.now()).toLocaleDateString('fr-FR')+(rec.createdBy?' par '+escH(rec.createdBy):'')+'</div>';
+  h+='<div class="info"><div><b>Matricule :</b> '+escH(rec.matricule||'-')+'</div><div><b>Nom & Prénoms :</b> '+escH(rec.nom||'-')+'</div><div><b>Emploi :</b> '+escH(rec.fonction||'-')+'</div><div><b>Catégorie :</b> '+escH(rec.categorie||'-')+'</div><div><b>Date d\'entrée :</b> '+escH(rec.dateEntree||'-')+'</div><div><b>Date de sortie :</b> '+escH(rec.dateFin||'-')+'</div><div><b>Motif :</b> '+escH((rec.motif||'').replace(/_/g,' '))+'</div><div><b>Ancienneté :</b> '+escH(rec.anciennete||'-')+'</div></div>';
+  h+='<table><thead><tr><th>Rubrique</th><th class="r">Base / Référence</th><th class="r">Montant (FCFA)</th></tr></thead><tbody>';
+  (rec.items||[]).forEach(function(it){ h+='<tr><td>'+escH(it.label)+'</td><td class="r" style="color:#64748b;font-size:8.5pt">'+escH(it.ref||'-')+'</td><td class="r">'+fmt(it.amount||0)+'</td></tr>'; });
+  h+='</tbody><tfoot><tr><td colspan="2">NET À PAYER (brut, avant retenues CNPS/ITS sur les éléments imposables)</td><td class="r">'+fmt(rec.total||0)+'</td></tr></tfoot></table>';
+  h+='<div class="libre">✔ La présente décomposition couvre l\'ensemble des sommes dues au titre de la rupture du contrat de travail. Le paiement du présent solde vaut reçu final, sans préjudice des dispositions d\'ordre public.</div>';
+  h+='<div class="refs"><b>Base légale :</b> Loi n°2015-532 du 20/07/2015 portant Code du travail — art. 18.4/18.7 (préavis), art. 18.16 (indemnité de rupture), art. 25.1, 25.2 & 25.9 (congés : 2,2 j ouvrables/mois + majorations ancienneté, indemnité compensatrice), art. 15.8 (CDD : 3 % du brut total) • Décret n°96-200 du 07/03/1996 (durées de préavis par catégorie et ancienneté) • Décret n°96-201 du 07/03/1996 (licenciement : 30 % jusqu\'à 5 ans, 35 % de 6 à 10 ans, 40 % au-delà, sur le salaire global mensuel moyen des 12 mois, fractions d\'année arrondies au mois inférieur, condition ≥ 1 an de service) • Convention collective sectorielle applicable (gratification, dispositions plus favorables).</div>';
+  h+=_docFooterHTML();
+  h+='</body></html>';
+  w.document.write(h); w.document.close();
+}
 function calculateSTC(e) {
   e.preventDefault();
   var f = e.target;
@@ -6440,42 +6537,83 @@ function calculateSTC(e) {
   var dateFin = f.elements['date_fin'].value;
   var motif = f.elements['motif'].value;
   var preavis = f.elements['preavis_status'].value;
+  var joursMois = parseFloat(f.elements['jours_mois'] ? f.elements['jours_mois'].value : 0) || 0;
+  var joursPris = parseFloat(f.elements['jours_conges_pris'] ? f.elements['jours_conges_pris'].value : 0) || 0;
+  var inclGrat = f.elements['incl_grat'] ? f.elements['incl_grat'].checked : true;
   var emp = getPersonnel().find(function(p){ return p.id === empId; });
   var out = document.getElementById('stc-result');
   if (!emp) { out.innerHTML = '<div style="color:var(--danger)">Employé introuvable</div>'; return; }
-  var start = new Date(emp.date_entree || dateFin);
-  var end = new Date(dateFin);
-  var years = Math.max(0, (end - start) / (1000*60*60*24*365.25));
+  if(!dateFin){ toast('Date de fin obligatoire','error'); return; }
   var salaire = parseFloat(emp.salaire_base) || 0;
+  var moy12 = _stcMoyenne12Brut(emp, dateFin);
+  var moisServ = _stcMoisService(emp.date_entree, dateFin);
+  var annees = moisServ/12;
   var items = [], total = 0;
-  /* 1. Indemnité de licenciement */
-  if (motif.indexOf('licenciement') === 0 && motif !== 'licenciement_faute_grave' && years >= 1) {
-    var amount = 0, rem = years;
-    var first5 = Math.min(5, rem); amount += first5 * salaire * 0.30; rem -= first5;
-    if (rem > 0) { var next5 = Math.min(5, rem); amount += next5 * salaire * 0.35; rem -= next5; }
-    if (rem > 0) amount += rem * salaire * 0.40;
-    items.push({ label: 'Indemnité de Licenciement', amount: Math.floor(amount) });
-    total += amount;
+  function add(label, ref, amount){ amount=Math.max(0,Math.round(amount)); if(amount>0){ items.push({label:label,ref:ref,amount:amount}); total+=amount; } }
+  /* 1. Solde de salaire — jours travaillés du mois de sortie */
+  add('Solde de salaire (jours travaillés du mois de sortie)', joursMois+' j × '+fmt(salaire)+'/30', (salaire/30)*joursMois);
+  /* 2. Indemnité compensatrice de préavis — Décret 96-200 + art. 18.7 */
+  var dureeP = 0;
+  if(motif!=='fin_cdd' && motif!=='licenciement_faute_grave'){
+    dureeP = _stcDureePreavisMois(emp, annees);
+    if(preavis==='non_effectue'){
+      add('Indemnité compensatrice de préavis ('+(dureeP<1?Math.round(dureeP*30)+' jours':dureeP+' mois')+' — Décret 96-200)', 'salaire moyen 12 m : '+fmt(moy12), moy12*dureeP);
+    }
   }
-  /* 2. Préavis */
-  if (preavis === 'non_effectue' && motif !== 'licenciement_faute_grave') {
-    var moisPreavis = emp.categorie_id && parseInt(emp.categorie_id) >= 4 ? 3 : 1;
-    var val = salaire * moisPreavis;
-    items.push({ label: 'Indemnité de Préavis (' + moisPreavis + ' mois)', amount: Math.floor(val) });
-    total += val;
+  /* 3. Indemnité compensatrice de congés payés — art. 25.1/25.2/25.9 */
+  var joursAcquis = _stcJoursCongesAcquis(moisServ, annees);
+  var joursNonPris = Math.max(0, joursAcquis - joursPris);
+  add('Indemnité compensatrice de congés payés ('+joursNonPris+' j ouvrables non pris / acquis '+joursAcquis+' j — art. 25.1 & 25.2)', 'salaire moyen 12 m ÷ 30', (moy12/30)*joursNonPris);
+  /* 4. Indemnité de licenciement OU départ à la retraite — Décret 96-201 (30/35/40 %, ≥ 12 mois) */
+  if((motif==='licenciement_simple'||motif==='retraite') && moisServ>=12){
+    var m5=Math.min(moisServ,60), m10=Math.min(Math.max(moisServ-60,0),60), mR=Math.max(moisServ-120,0);
+    var indem=(m5/12)*0.30*moy12 + (m10/12)*0.35*moy12 + (mR/12)*0.40*moy12;
+    add(motif==='retraite'?'Indemnité de départ à la retraite (barème 30/35/40 %)':'Indemnité de licenciement (30 % ≤ 5 ans, 35 % 6-10 ans, 40 % > 10 ans — Décret 96-201)', moisServ+' mois × '+fmt(moy12)+' (moyenne 12 m)', indem);
   }
-  /* 3. Congés payés restants (estimation 15 jours) */
-  var congeVal = (salaire / 30) * 15;
-  items.push({ label: 'Indemnité de Congés (15 jours)', amount: Math.floor(congeVal) });
-  total += congeVal;
+  /* 5. Indemnité de fin de CDD — art. 15.8 : 3 % du brut total du contrat */
+  if(motif==='fin_cdd'){
+    var moisCdd = parseInt(emp.duree_contrat)>0 ? parseInt(emp.duree_contrat) : moisServ;
+    add('Indemnité de fin de contrat CDD (3 % du brut total — art. 15.8)', '3 % × '+fmt(salaire)+' × '+moisCdd+' mois', 0.03*salaire*moisCdd);
+  }
+  /* 6. Gratification conventionnelle prorata (convention collective — ex. secteur bois 75 %) */
+  if(inclGrat && motif!=='licenciement_faute_grave'){
+    var dF=new Date(dateFin);
+    var annee=dF.getFullYear();
+    var debutPeriode=new Date(annee,0,1);
+    var dE=new Date(emp.date_entree);
+    if(!isNaN(dE) && dE>debutPeriode) debutPeriode=dE;
+    var moisAnnee=Math.max(1,_stcMoisService(debutPeriode.toISOString().slice(0,10), dateFin)+1);
+    var annuelle = 0.75*moy12;
+    if(empCategorie(emp)==='journalier') annuelle = 0.75*Math.min(moy12,75000);
+    add('Gratification conventionnelle — prorata '+moisAnnee+'/12 ('+annee+')', '75 % × '+fmt(moy12), annuelle*(moisAnnee/12));
+  }
   var html = '<h3 style="color:var(--green);border-bottom:1px solid var(--border);padding-bottom:.5rem;margin-bottom:1rem">Résultat du Calcul STC</h3>';
-  html += '<div style="margin-bottom:1rem;font-size:.85rem"><strong>Employé :</strong> ' + escH(emp.nom) + ' ' + escH(emp.prenoms || '') + '<br><strong>Ancienneté :</strong> ' + years.toFixed(2) + ' ans<br><strong>Motif :</strong> ' + motif.replace(/_/g, ' ') + '</div>';
-  html += '<table><thead><tr><th>Nature de l\'indemnité</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
-  items.forEach(function(i) { html += '<tr><td>' + i.label + '</td><td style="text-align:right;font-weight:700">' + fmtF(i.amount) + '</td></tr>'; });
-  html += '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:800;color:var(--green)"><td>NET À PAYER STC</td><td style="text-align:right">' + fmtF(total) + '</td></tr></tfoot></table>';
+  html += '<div style="margin-bottom:1rem;font-size:.85rem"><strong>Employé :</strong> '+escH(emp.nom)+' '+escH(emp.prenoms||'')+' ('+escH(emp.matricule||'-')+')<br><strong>Ancienneté :</strong> '+_calcAncienneteDetail(emp.date_entree, dateFin)+'<br><strong>Salaire moyen 12 mois (brut) :</strong> '+fmt(moy12)+' F — <strong>Mois de service :</strong> '+moisServ+'<br><strong>Congés :</strong> acquis '+joursAcquis+' j — non pris '+joursNonPris+' j<br><strong>Motif :</strong> '+motif.replace(/_/g,' ')+'</div>';
+  html += '<table><thead><tr><th>Rubrique</th><th style="text-align:right">Base / Référence</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
+  items.forEach(function(i) { html += '<tr><td>'+i.label+'</td><td style="text-align:right;font-size:.7rem;color:var(--dim)">'+escH(i.ref||'')+'</td><td style="text-align:right;font-weight:700">'+fmtF(i.amount)+'</td></tr>'; });
+  html += '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:800;color:var(--green)"><td colspan="2">NET À PAYER STC</td><td style="text-align:right">'+fmtF(total)+'</td></tr></tfoot></table>';
+  html += '<div style="margin-top:.6rem;font-size:.7rem;color:var(--dim)">Base légale : Code du travail 2015-532 (art. 18.4/18.7, 18.16, 25.1/25.2/25.9, 15.8) • Décrets 96-200 (préavis) & 96-201 (licenciement) • Convention collective applicable.</div>';
   html += '<div class="no-print" style="margin-top:1rem;display:flex;gap:.6rem;flex-wrap:wrap"><button class="btn" onclick="window.print()">Imprimer le STC</button><button class="btn btn-sec" onclick="generateCertificatTravail(\''+emp.id+'\',\''+dateFin+'\')">📄 Certificat de Travail</button><button class="btn btn-sec" onclick="generateAttestationTravail(\''+emp.id+'\')">📋 Attestation de Travail</button></div>';
   out.innerHTML = html;
   try{ out.scrollIntoView({behavior:'smooth'}); }catch(e){}
+  /* Sauvegarde automatique pour consultation future */
+  try{
+    var cats=getCategories()||[]; var cat=cats.find(function(c){ return c.code===emp.categorie_id; });
+    var cu=null; try{ cu=JSON.parse(localStorage.getItem('mdb_currentUser')||'{}'); }catch(eU){}
+    var rec={
+      id: DB.id(), empId: emp.id, matricule: emp.matricule||'', nom: (emp.nom||'')+' '+(emp.prenoms||''),
+      fonction: emp.fonction||'', categorie: cat?(cat.libelle||cat.code):(emp.categorie_id||''),
+      dateEntree: emp.date_entree||'', dateFin: dateFin, motif: motif, preavis: preavis,
+      anciennete: _calcAncienneteDetail(emp.date_entree, dateFin),
+      moy12: moy12, moisServ: moisServ, items: items, total: total,
+      createdAt: new Date().toISOString(), createdBy: (cu&&(cu.nom||cu.login))||''
+    };
+    var recs=getPayeSection('stcRecords',[])||[];
+    recs.unshift(rec); if(recs.length>300) recs.length=300;
+    setPayeSection('stcRecords',recs);
+    loadSTCHistory();
+    toast('STC sauvegardé dans l\'historique','success');
+  }catch(eS){ console.warn('save stc',eS); }
 }
 function _fmtDateLong(dStr){
   if(!dStr) return '-';
