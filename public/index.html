@@ -9060,30 +9060,62 @@ function onBLBCChange() {
   toast('Lignes du BC ' + bc.numero + ' chargées (quantités restantes)', 'success');
 }
 
+function _adjustStockForBLLines(lignes, multiplier) {
+  if (!lignes || !lignes.length) return;
+  var stocks = DB.get('mdb_stocks') || [];
+  var changed = false;
+  for (var i = 0; i < lignes.length; i++) {
+    var l = lignes[i];
+    var qte = parseFloat(l.quantite) || 0;
+    if (qte === 0) continue;
+    var delta = qte * multiplier;
+    var found = false;
+    for (var s = 0; s < stocks.length; s++) {
+      if ((l.articleId && stocks[s].articleId === l.articleId) || (!l.articleId && l.designation && stocks[s].articleNom === l.designation)) {
+        stocks[s].quantite = Math.max(0, (stocks[s].quantite || 0) + delta);
+        found = true;
+        changed = true;
+        break;
+      }
+    }
+    if (!found && l.articleId) {
+      var art = getArticleById(l.articleId);
+      stocks.push({
+        id: DB.genId(),
+        articleId: l.articleId,
+        articleNom: art ? art.designation : (l.designation || 'Article'),
+        articleCode: art ? art.code : '',
+        quantite: Math.max(0, delta > 0 ? delta : 0),
+        prixUnitaire: l.prixUnitaire || (art ? (art.prixVente || 0) : 0) || 0
+      });
+      changed = true;
+    }
+  }
+  if (changed) {
+    DB.set('mdb_stocks', stocks);
+    if (typeof markDirty === 'function') markDirty('mdb_stocks');
+  }
+}
+
 function saveBL(id) {
   var clientId = document.getElementById('blClient').value;
-  if (!clientId) { toast('Veuillez s\u00e9lectionner un client', 'error'); return; }
+  if (!clientId) { toast('Veuillez sélectionner un client', 'error'); return; }
   if (!formLignes || formLignes.length === 0) { toast('Un BL doit avoir au moins un article', 'error'); return; }
-  if (!_blEditId) {
-  var stocks = DB.get('mdb_stocks') || [];
-  for (var sv = 0; sv < formLignes.length; sv++) {
-    if (!formLignes[sv].articleId) continue;
-    var stockQte = 0;
-    for (var si = 0; si < stocks.length; si++) {
-      if (stocks[si].articleId === formLignes[sv].articleId) { stockQte = stocks[si].quantite || 0; break; }
-    }
-    if (stockQte < (formLignes[sv].quantite || 0)) {
-      var artObj = getArticleById(formLignes[sv].articleId);
-      toast('Stock insuffisant pour "' + (artObj ? artObj.designation : formLignes[sv].articleId) + '" : disponible ' + stockQte + ', demand\u00e9 ' + formLignes[sv].quantite, 'error');
-      return;
-    }
-  }
-  }
+  
+  var cleanLignes = (formLignes || []).filter(function(l) { return (l.articleId && l.articleId.trim() !== '') || (l.designation && l.designation.trim() !== '') || (l.prixUnitaire > 0); });
+  
   var bls = getBLs();
+  var oldBL = null;
+  if (id) {
+    for (var oi = 0; oi < bls.length; oi++) {
+      if (bls[oi].id === id) { oldBL = bls[oi]; break; }
+    }
+  }
+  
   var data = {
     numero: document.getElementById('blNumero').value.trim(), clientId: clientId,
     dateLivraison: document.getElementById('blDate').value,
-    statut: 'livree', lignes: (formLignes || []).filter(function(l) { return (l.articleId && l.articleId.trim() !== '') || (l.designation && l.designation.trim() !== '') || (l.prixUnitaire > 0); }),
+    statut: 'livree', lignes: cleanLignes,
     bcId: document.getElementById('blBC').value || null,
     raisonNonFacture: (document.getElementById('blRaisonNonFacture') || {}).value || ''
   };
@@ -9094,12 +9126,19 @@ function saveBL(id) {
   } else {
     data.id = DB.genId(); data.factureId = null; bls.push(data);
   }
+  
+  // Stock update: Revert old delivery if editing, then deduct new delivery lines
+  if (oldBL && oldBL.lignes) {
+    _adjustStockForBLLines(oldBL.lignes, 1);
+  }
+  _adjustStockForBLLines(data.lignes, -1);
+  
   DB.set('mdb_bl', bls);
   if (data.bcId) updateBCStatusFromBLs(data.bcId);
   _blEditId = '';
   closeModal();
   clearDraft('bl');
-  toast('BL enregistr\u00e9');
+  toast('BL enregistré et stock mis à jour');
   if (typeof currentPage !== 'undefined' && currentPage === 'facturation' && typeof _facturationTab !== 'undefined' && _facturationTab === 'bc') {
     renderBC();
   } else {
@@ -9109,17 +9148,26 @@ function saveBL(id) {
 }
 
 function deleteBL(id) {
-  openConfirm('\u00cates-vous s\u00fbr de vouloir supprimer ce BL ?', function() {
+  openConfirm('Êtes-vous sûr de vouloir supprimer ce BL ?', function() {
     var bls = getBLs(); var result = [];
     var deletedBcId = null;
+    var deletedBL = null;
     for (var i = 0; i < bls.length; i++) {
-      if (bls[i].id !== id) result.push(bls[i]);
-      else deletedBcId = bls[i].bcId;
+      if (bls[i].id !== id) {
+        result.push(bls[i]);
+      } else {
+        deletedBL = bls[i];
+        deletedBcId = bls[i].bcId;
+      }
+    }
+    // Re-credit stock when deleting BL
+    if (deletedBL && deletedBL.lignes) {
+      _adjustStockForBLLines(deletedBL.lignes, 1);
     }
     rememberDeletedIds('mdb_deletedBLs', [id]);
     DB.set('mdb_bl', result);
     if (deletedBcId) updateBCStatusFromBLs(deletedBcId);
-    toast('BL supprim\u00e9');
+    toast('BL supprimé et stock réintégré');
     if (typeof currentPage !== 'undefined' && currentPage === 'facturation' && typeof _facturationTab !== 'undefined' && _facturationTab === 'bc') {
       renderBC();
     } else {
@@ -9131,18 +9179,24 @@ function deleteBL(id) {
 
 function deleteSelectedBLs() {
   var cbs = document.querySelectorAll('.bl-list-select:checked');
-  if (cbs.length === 0) { toast('Aucun BL s\u00e9lectionn\u00e9', 'error'); return; }
+  if (cbs.length === 0) { toast('Aucun BL sélectionné', 'error'); return; }
   var ids = [];
   for (var i = 0; i < cbs.length; i++) ids.push(cbs[i].value);
-  openConfirm('\u00cates-vous s\u00fbr de vouloir supprimer ' + ids.length + ' BL(s) ?', function() {
+  openConfirm('Êtes-vous sûr de vouloir supprimer ' + ids.length + ' BL(s) ?', function() {
     var bls = getBLs();
     var idMap = {};
     for (var j = 0; j < ids.length; j++) idMap[ids[j]] = true;
     var result = [];
-    for (var k = 0; k < bls.length; k++) { if (!idMap[bls[k].id]) result.push(bls[k]); }
+    for (var k = 0; k < bls.length; k++) {
+      if (!idMap[bls[k].id]) {
+        result.push(bls[k]);
+      } else if (bls[k].lignes) {
+        _adjustStockForBLLines(bls[k].lignes, 1);
+      }
+    }
     rememberDeletedIds('mdb_deletedBLs', ids);
     DB.set('mdb_bl', result);
-    toast(ids.length + ' BL(s) supprim\u00e9(s)');
+    toast(ids.length + ' BL(s) supprimé(s) et stocks réintégrés');
     renderBL();
     buildSidebar();
   });
