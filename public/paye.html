@@ -794,7 +794,13 @@ function _payeExitToApp(){
 <div class="form-group"><label>Jours travaillés du mois de sortie (0-30)</label><input type="number" name="jours_mois" min="0" max="30" value="0"></div>
 <div class="form-group"><label>Congés déjà pris sur la période (jours ouvrables)</label><input type="number" name="jours_conges_pris" min="0" step="0.5" value="0"></div>
 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.78rem;margin-bottom:.8rem"><input type="checkbox" name="incl_grat" checked style="width:15px;height:15px"> Inclure la gratification conventionnelle (prorata année de sortie)</label>
-<button type="submit" class="btn" style="width:100%">Calculer les Indemnités</button>
+<div style="margin-top:1rem;border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--card)">
+<div style="font-weight:700;font-size:.85rem;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">💳 Dettes à déduire (acomptes / prêts / autres) <button type="button" class="btn btn-sec" style="font-size:.7rem;padding:4px 8px" onclick="addStcDetteRow()">+ Ajouter une ligne</button></div>
+<div style="font-size:.7rem;color:var(--dim);margin-bottom:6px">Les acomptes & prêts <em>en cours</em> sont automatiquement reconnus (reste = montant initial − déjà remboursé) et rappelés dans le STC. Vous pouvez aussi saisir ici d'autres dettes manuelles (avance, matériel, etc.) : montant, motif, date, remis par, moyen.</div>
+<div style="overflow-x:auto"><table style="width:100%;font-size:.75rem;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:4px;border:1px solid var(--border)">Montant</th><th style="text-align:left;padding:4px;border:1px solid var(--border)">Motif</th><th style="text-align:left;padding:4px;border:1px solid var(--border)">Date</th><th style="text-align:left;padding:4px;border:1px solid var(--border)">Remis par</th><th style="text-align:left;padding:4px;border:1px solid var(--border)">Moyen</th><th style="text-align:left;padding:4px;border:1px solid var(--border)">Observation</th><th style="padding:4px;border:1px solid var(--border)"></th></tr></thead><tbody id="stc-dettes-body"><tr><td colspan="7" style="text-align:center;padding:10px;color:var(--dim)">Aucune dette manuelle — cliquez + Ajouter</td></tr></tbody></table></div>
+<div id="stc-ap-auto" style="margin-top:8px;font-size:.72rem;color:var(--dim)"></div>
+</div>
+<button type="submit" class="btn" style="width:100%;margin-top:10px">Calculer les Indemnités</button>
 </form>
 </div>
 <div class="card" id="stc-result">
@@ -6612,11 +6618,32 @@ function calculateSTC(e) {
     if(empCategorie(emp)==='journalier') annuelle = 0.75*Math.min(moy12,75000);
     add('Gratification conventionnelle — prorata '+moisAnnee+'/12 ('+annee+')', '75 % × '+fmt(moy12), annuelle*(moisAnnee/12));
   }
+  /* 7. Retenues - Dettes à la société : acomptes & prêts en cours (reconnaissance automatique) + dettes manuelles saisies */
+  try{
+    var _apRaw=[]; try{ if(typeof getAPList==='function') _apRaw=getAPList(); else if(typeof DB!=='undefined' && DB.getMain) _apRaw=DB.getMain('mdb_acomptesPrets')||[]; else if(typeof DB!=='undefined' && DB.get) _apRaw=DB.get('mdb_acomptesPrets')||[]; }catch(eA){}
+    var _apNorm=[]; for(var _ai=0; _ai<_apRaw.length; _ai++){ var _av=_apRaw[_ai]; try{ _av= (typeof normalizeAP==='function'?normalizeAP(_av):_av); }catch(eN){} _apNorm.push(_av); }
+    var _dettesAP=_apNorm.filter(function(a){ return String(a.employee_id)===String(empId) && a.statut!=='termine' && ((a.montant||0)-(a.rembourse||a.montantRembourse||0))>0.5; });
+    _dettesAP.forEach(function(ap){
+      var remb=ap.rembourse!=null?ap.rembourse:(ap.montantRembourse||0);
+      var reste=Math.round((ap.montant||0)-remb);
+      if(reste<=0) return;
+      var refDette='Prise: '+escH(ap.date||'-')+' • Pièce: '+escH(ap.numeroPiece||ap.id.slice(-4))+' • Initial: '+fmt(ap.montant)+' • Déjà remboursé: '+fmt(remb)+(ap.preleve?' (prélevé '+(ap.moisPreleve||'')+')':'')+' • Reste dû: '+fmt(reste)+' • Mensualité: '+(ap.mensualite?fmt(ap.mensualite):'-')+' • Mois déduction: '+escH(ap.moisDeduction||'-')+' • Motif: '+escH(ap.motif||'-')+' • Remis par: '+escH(ap.remettant||ap.remisPar||'-')+' • Moyen: '+escH(ap.moyen||'-')+' • Obs: '+escH(ap.notes||ap.observation||'-');
+      items.push({label:'Retenue — '+(ap.type==='pret'?'Prêt':'Acompte')+' '+(ap.numeroPiece||ap.id.slice(-6)), ref:refDette, amount:-reste});
+      total-=reste;
+    });
+    var _manualDettes=getStcManualDettes();
+    _manualDettes.forEach(function(md){
+      var mm=parseFloat(md.montant)||0; if(mm<=0) return;
+      var refM='Saisie manuelle • Date: '+escH(md.date||'-')+' • Remis par: '+escH(md.remisPar||'-')+' • Moyen: '+escH(md.moyen||'-')+' • Motif: '+escH(md.motif||'-')+' • Obs: '+escH(md.observation||'-');
+      items.push({label:'Retenue — Dette manuelle ('+escH(md.motif||'sans motif')+')', ref:refM, amount:-Math.round(mm)});
+      total-=Math.round(mm);
+    });
+  }catch(eD){ console.warn('STC dettes',eD); }
   var html = '<h3 style="color:var(--green);border-bottom:1px solid var(--border);padding-bottom:.5rem;margin-bottom:1rem">Résultat du Calcul STC</h3>';
   html += '<div style="margin-bottom:1rem;font-size:.85rem"><strong>Employé :</strong> '+escH(emp.nom)+' '+escH(emp.prenoms||'')+' ('+escH(emp.matricule||'-')+')<br><strong>Ancienneté :</strong> '+_calcAncienneteDetail(emp.date_entree, dateFin)+'<br><strong>Salaire moyen 12 mois (brut) :</strong> '+fmt(moy12)+' F — <strong>Mois de service :</strong> '+moisServ+'<br><strong>Congés :</strong> acquis '+joursAcquis+' j — non pris '+joursNonPris+' j<br><strong>Motif :</strong> '+motif.replace(/_/g,' ')+'</div>';
   html += '<table><thead><tr><th>Rubrique</th><th style="text-align:right">Base / Référence</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
-  items.forEach(function(i) { html += '<tr><td>'+i.label+'</td><td style="text-align:right;font-size:.7rem;color:var(--dim)">'+escH(i.ref||'')+'</td><td style="text-align:right;font-weight:700">'+fmtF(i.amount)+'</td></tr>'; });
-  html += '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:800;color:var(--green)"><td colspan="2">NET À PAYER STC</td><td style="text-align:right">'+fmtF(total)+'</td></tr></tfoot></table>';
+  items.forEach(function(i){ var neg=i.amount<0; var col=neg?'var(--danger)':'inherit'; html+='<tr><td style="color:'+col+'">'+escH(i.label)+'</td><td style="text-align:right;font-size:.7rem;color:var(--dim)">'+escH(i.ref||'')+'</td><td style="text-align:right;font-weight:700;color:'+col+'">'+(neg?'-':'')+fmtF(Math.abs(i.amount))+'</td></tr>'; });
+  html += '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:800;color:'+(total<0?'var(--danger)':'var(--green)')+'"><td colspan="2">NET À PAYER STC</td><td style="text-align:right">'+fmtF(total)+'</td></tr></tfoot></table>';
   html += '<div style="margin-top:.6rem;font-size:.7rem;color:var(--dim)">Base légale : Code du travail 2015-532 (art. 18.4/18.7, 18.16, 25.1/25.2/25.9, 15.8) • Décrets 96-200 (préavis) & 96-201 (licenciement) • Convention collective applicable.</div>';
   html += '<div class="no-print" style="margin-top:1rem;display:flex;gap:.6rem;flex-wrap:wrap"><button class="btn" onclick="window.print()">Imprimer le STC</button><button class="btn btn-sec" onclick="generateCertificatTravail(\''+emp.id+'\',\''+dateFin+'\')">📄 Certificat de Travail</button><button class="btn btn-sec" onclick="generateAttestationTravail(\''+emp.id+'\')">📋 Attestation de Travail</button></div>';
   out.innerHTML = html;
@@ -6640,6 +6667,63 @@ function calculateSTC(e) {
     toast('STC sauvegardé dans l\'historique','success');
   }catch(eS){ console.warn('save stc',eS); }
 }
+/* ===== STC Dettes manuelles + AP auto ===== */
+window._stcManualDettes = window._stcManualDettes||[];
+function addStcDetteRow(data){
+  var id = 'stcDette_'+Date.now()+'_'+Math.floor(Math.random()*999);
+  var d = data||{montant:'',motif:'',date:'',remisPar:'',moyen:'Espece',observation:''};
+  var tbody=document.getElementById('stc-dettes-body');
+  if(!tbody) return;
+  if(tbody.querySelector('td[colspan]')) tbody.innerHTML='';
+  var tr=document.createElement('tr'); tr.dataset.id=id;
+  tr.innerHTML='<td style="padding:4px;border:1px solid var(--border)"><input type="number" data-k="montant" value="'+escH(d.montant)+'" placeholder="0" style="width:90px"></td>'
+    +'<td style="padding:4px;border:1px solid var(--border)"><input type="text" data-k="motif" value="'+escH(d.motif)+'" placeholder="Motif" style="width:110px"></td>'
+    +'<td style="padding:4px;border:1px solid var(--border)"><input type="date" data-k="date" value="'+escH(d.date)+'" style="width:130px"></td>'
+    +'<td style="padding:4px;border:1px solid var(--border)"><input type="text" data-k="remisPar" value="'+escH(d.remisPar)+'" placeholder="Qui a remis" style="width:100px"></td>'
+    +'<td style="padding:4px;border:1px solid var(--border)"><select data-k="moyen" style="width:90px"><option'+(d.moyen==='Espece'?' selected':'')+'>Espece</option><option'+(d.moyen==='Virement'?' selected':'')+'>Virement</option><option'+(d.moyen==='Cheque'?' selected':'')+'>Cheque</option><option'+(d.moyen==='Mobile'?' selected':'')+'>Mobile</option></select></td>'
+    +'<td style="padding:4px;border:1px solid var(--border)"><input type="text" data-k="observation" value="'+escH(d.observation)+'" placeholder="Observation" style="width:130px"></td>'
+    +'<td style="padding:4px;border:1px solid var(--border);text-align:center"><button type="button" onclick="this.closest(\'tr\').remove(); if(!document.querySelector(\'#stc-dettes-body tr\')) document.getElementById(\'stc-dettes-body\').innerHTML=\'<tr><td colspan=7 style=text-align:center;padding:10px;color:var(--dim)>Aucune dette manuelle — cliquez + Ajouter</td></tr>\'" style="color:var(--danger);border:none;background:none;cursor:pointer">✕</button></td>';
+  tbody.appendChild(tr);
+}
+function getStcManualDettes(){
+  var rows=document.querySelectorAll('#stc-dettes-body tr');
+  var out=[];
+  rows.forEach(function(tr){
+    if(tr.querySelector('td[colspan]')) return;
+    var o={};
+    tr.querySelectorAll('[data-k]').forEach(function(inp){
+      o[inp.getAttribute('data-k')]=inp.value;
+    });
+    var m=parseFloat(o.montant)||0;
+    if(m>0) out.push(o);
+  });
+  return out;
+}
+function updateStcApAutoPreview(){
+  var empId=document.getElementById('stc-select-emp')?document.getElementById('stc-select-emp').value:'';
+  var box=document.getElementById('stc-ap-auto');
+  if(!box) return;
+  if(!empId){ box.innerHTML=''; return; }
+  try{
+    var list=(typeof getAPList==='function'?getAPList():(DB.getMain?DB.getMain('mdb_acomptesPrets'):[],[]))||[];
+    var norm=(typeof normalizeAP==='function'?function(a){return normalizeAP(a)}:function(a){return a});
+    var fil=list.map(norm).filter(function(a){ return String(a.employee_id)===String(empId) && a.statut!=='termine' && ((a.montant||0)-(a.rembourse||a.montantRembourse||0))>0.5; });
+    if(fil.length===0){ box.innerHTML='<span style="color:var(--green)">Aucun acompte/prêt en cours pour cet employé.</span>'; return; }
+    var h='<div style="font-weight:700;margin-bottom:4px">Acomptes/Prêts en cours détectés ('+fil.length+') — seront déduits automatiquement :</div>';
+    fil.forEach(function(ap){
+      var remb=ap.rembourse||ap.montantRembourse||0;
+      var reste=(ap.montant||0)-remb;
+      h+='<div style="border:1px solid var(--border);border-radius:6px;padding:6px;margin-bottom:4px;background:var(--bg)">'
+        +'<strong>'+escH(ap.type==='pret'?'Prêt':'Acompte')+' '+escH(ap.numeroPiece||ap.id.slice(-4))+'</strong> — '+fmt(ap.montant)+' pris le '+escH(ap.date||'-')
+        +' • Déjà remboursé: '+fmt(remb)+' • <span style="color:var(--danger);font-weight:700">Reste dû: '+fmt(reste)+'</span>'
+        +' • Mensualité: '+(ap.mensualite?fmt(ap.mensualite):'-')+' • Mois déduction: '+escH(ap.moisDeduction||'-')
+        +' • Motif: '+escH(ap.motif||'-')+' • Remis par: '+escH(ap.remettant||'-')+' • Moyen: '+escH(ap.moyen||'-')
+        +'</div>';
+    });
+    box.innerHTML=h;
+  }catch(e){ box.innerHTML=''; }
+}
+document.addEventListener('DOMContentLoaded',function(){ var sel=document.getElementById('stc-select-emp'); if(sel) sel.addEventListener('change',updateStcApAutoPreview); });
 function _fmtDateLong(dStr){
   if(!dStr) return '-';
   try{ var d=new Date(dStr); if(isNaN(d)) return dStr; return d.toLocaleDateString('fr-FR',{day:'2-digit',month:'long',year:'numeric'}); }catch(e){ return dStr; }
