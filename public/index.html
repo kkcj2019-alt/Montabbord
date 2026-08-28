@@ -11925,24 +11925,32 @@ function onPfFilterChange() {
 }
 
 function renderAcomptesPrets() {
-  // Nettoyage orphelins : si un acompte a un caisseOpId qui n'existe plus (pièce supprimée en caisse), on le supprime aussi ici (évite flash BR2608032/KKCJ2608033)
-  (function(){
-    var _opsAll = getOperationsCaisse() || [];
-    var _opsById = {}; for(var _oi=0; _oi<_opsAll.length; _oi++) _opsById[_opsAll[_oi].id]=true;
-    var _opsByPiece = {}; for(var _opi=0; _opi<_opsAll.length; _opi++) if(_opsAll[_opi].numeroPiece) _opsByPiece[_opsAll[_opi].numeroPiece]=true;
-    var _acs = DB.get('mdb_acomptesPrets') || [];
-    var _toRemove = [];
-    for(var _ai=0; _ai<_acs.length; _ai++){
-      var _a=_acs[_ai];
-      if(_a.caisseOpId && !_opsById[_a.caisseOpId]) _toRemove.push(_a);
-      else if((_a.numeroPiece==='BR2608032' || _a.numeroPiece==='KKCJ2608033') && !_opsByPiece[_a.numeroPiece]) _toRemove.push(_a);
-    }
-    if(_toRemove.length){
-      var _newAcs = _acs.filter(function(x){ return _toRemove.indexOf(x)===-1; });
-      DB.set('mdb_acomptesPrets', _newAcs);
-      try{ _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(e){}
-    }
-  })();
+  // Nettoyage orphelins GÉNÉRIQUE : si un acompte référence une pièce de caisse (par id OU numeroPiece) qui n'existe plus dans mdb_operationsCaisse, on le supprime.
+  // (évite les fantômes type BR2608032 / KKCJ2608033 / ADE2608002 et toute nouvelle pièce supprimée)
+  try{ _purgeOrphanAcomptes(); }catch(e){}
+}
+
+// Purge générique des acomptes dont la pièce de caisse d'origine a disparu (index.html / RH)
+function _purgeOrphanAcomptes(){
+  var _opsAll = getOperationsCaisse() || [];
+  var _opsById = {}; for(var _oi=0; _oi<_opsAll.length; _oi++) if(_opsAll[_oi].id) _opsById[_opsAll[_oi].id]=true;
+  var _opsByPiece = {}; for(var _opi=0; _opi<_opsAll.length; _opi++) if(_opsAll[_opi].numeroPiece) _opsByPiece[_opsAll[_opi].numeroPiece]=true;
+  var _acs = DB.get('mdb_acomptesPrets') || [];
+  var _toRemove = [];
+  for(var _ai=0; _ai<_acs.length; _ai++){
+    var _a=_acs[_ai];
+    if(!_a) continue;
+    // règle 1 : la pièce référencée par id n'existe plus
+    if(_a.caisseOpId && !_opsById[_a.caisseOpId]){ _toRemove.push(_a); continue; }
+    // règle 2 : la pièce référencée par numeroPiece n'existe plus
+    if(_a.numeroPiece && !_opsByPiece[_a.numeroPiece]){ _toRemove.push(_a); continue; }
+  }
+  if(_toRemove.length){
+    var _newAcs = _acs.filter(function(x){ return _toRemove.indexOf(x)===-1; });
+    DB.set('mdb_acomptesPrets', _newAcs);
+    try{ _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(e){}
+  }
+}
   var acomptes = DB.get('mdb_acomptesPrets') || [];
   var employes = getEmployes();
   var empMap = {};
@@ -14557,6 +14565,19 @@ function computeActifData() {
       allDetailsD.push({id:'man_' + manualLignesD[mlD].id, designation:manualLignesD[mlD].designation, subLabel:_mlSubD, qte:(manualLignesD[mlD].qte !== undefined ? manualLignesD[mlD].qte : undefined), prix:(manualLignesD[mlD].prixUnitaire !== undefined ? manualLignesD[mlD].prixUnitaire : undefined), montant:Math.abs(_lEffD), signe:_lEffD < 0 ? '-' : '+', isManual:true, rubIdx:riD, hasMvts:_lMvsD.length > 0});
     }
     var visibleDetailsD = [];
+    // Masquer toute la rubrique si l'utilisateur a cliqué l'œil (flag persisté dans mdb_actif_hiddenRubriques)
+    var _rubIsHidden = false;
+    try{
+      var _hiddenMap = DB.get('mdb_actif_hiddenRubriques') || {};
+      _rubIsHidden = !!(rubD.key && _hiddenMap[rubD.key]) || !!(rubD.nom && _hiddenMap[rubD.nom]);
+    }catch(e){}
+    if (_rubIsHidden) {
+      // Rubrique entièrement cachée : on ne pousse aucune ligne et le total reste à 0
+      rubD.visibleDetails = [];
+      rubD.rubTotal = 0;
+      grandTotal += 0;
+      continue;
+    }
     if (rubD.key === 'tresorerie') {
       /* Dédoublonnage des libellés système + filtres classiques */
       var _seenSysT = {};
@@ -14868,11 +14889,16 @@ function renderActif() {
     }
     var rubTotal = rub.rubTotal;
 
-    html += '<div class="section mb-16" style="border-left:4px solid ' + rub.color + ';position:relative">';
+    var _rubHiddenNow = isRubriqueHidden(rub.key, rub.nom);
+    html += '<div class="section mb-16" style="border-left:4px solid ' + rub.color + ';position:relative' + (_rubHiddenNow ? ';opacity:0.55' : '') + '">';
     html += '<div class="section-header" data-rkey="' + escH(rub.key || rub.nom) + '" style="cursor:pointer" onclick="toggleRubrique(this)">';
     html += '<h3 style="display:flex;align-items:center"><span>' + escH(rub.nom) + '</span></h3>';
     html += '<span class="rub-total-align" style="position:absolute;top:18px;left:0;width:120px;font-weight:700;white-space:nowrap;color:' + (rubTotal < 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(rubTotal) + '</span>';
     html += '<div>';
+    // Bouton œil : masquer/afficher toute la rubrique dans le tableau Actif
+    var _eyeTitle = _rubHiddenNow ? 'Afficher cette rubrique dans le tableau' : 'Masquer cette rubrique du tableau';
+    var _eyeIcon = _rubHiddenNow ? '🙈' : '👁';
+    html += '<button class="btn btn-sm btn-outline" title="' + _eyeTitle + '" onclick="event.stopPropagation();toggleHideRubrique(\'' + escH(rub.key || '') + '\',\'' + escH(rub.nom || '') + '\')" style="margin-right:4px;font-size:14px;line-height:1;padding:4px 8px">' + _eyeIcon + '</button>';
     if (!readonly) {
       var _quickAdd = (rub.key === 'bl_facturer' || rub.key === 'stock');
       html += '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();' + (_quickAdd ? 'quickAddActifLigne' : 'openLigneModalForRubrique') + '(\'' + rub.key + '\',\'' + escH(rub.nom) + '\')" style="margin-right:4px">+ Ligne</button>';
@@ -15558,6 +15584,28 @@ function toggleHideZero() {
   var chk = document.getElementById('hideZeroCheck');
   DB.set('mdb_actif_hideZero', chk ? chk.checked : false);
   renderActif();
+}
+
+// Masquer/afficher une rubrique entière du tableau Actif (œil par rubrique).
+// L'état est persisté dans localStorage (mdb_actif_hiddenRubriques = { [key|nom]: true }).
+function toggleHideRubrique(key, nom){
+  try{
+    var hidden = DB.get('mdb_actif_hiddenRubriques') || {};
+    var id = key || nom;
+    if(!id) return;
+    hidden[id] = !hidden[id];
+    if(!hidden[id]) delete hidden[id];
+    DB.set('mdb_actif_hiddenRubriques', hidden);
+    try{ _dirtyKeys['mdb_actif_hiddenRubriques']=true; persistPendingSync(); schedulePush(); }catch(e){}
+    renderActif();
+  }catch(e){ console.warn('toggleHideRubrique', e); }
+}
+function isRubriqueHidden(key, nom){
+  try{
+    var hidden = DB.get('mdb_actif_hiddenRubriques') || {};
+    var id = key || nom;
+    return !!(id && hidden[id]);
+  }catch(e){ return false; }
 }
 
 function _findActifRubriqueByKey(key, nom) {

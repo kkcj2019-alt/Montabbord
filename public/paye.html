@@ -1240,24 +1240,31 @@ function initData() {
       if (!getPayeSection('societe', null)) setPayeSection('societe', {nom:'MA SOCIETE',sigle:'',adresse:'ABIDJAN, CI',cnps:'',ncc:''});
   loadTaxRules();
   syncFromMain();
-  // Nettoyage orphelins BR2608032/KKCJ2608033 : si la pièce caisse n'existe plus, supprimer l'acompte correspondant (évite incohérence paye vs RH)
-  try{
-    var _opsP = DB.getMain('mdb_operationsCaisse') || [];
-    var _byIdP = {}; for(var _oi=0; _oi<_opsP.length; _oi++) _byIdP[_opsP[_oi].id]=true;
-    var _byPieceP = {}; for(var _opi=0; _opi<_opsP.length; _opi++) if(_opsP[_opi].numeroPiece) _byPieceP[_opsP[_opi].numeroPiece]=true;
-    var _acsP = DB.getMain('mdb_acomptesPrets') || [];
-    var _toRemP = [];
-    for(var _ai=0; _ai<_acsP.length; _ai++){
-      var _a=_acsP[_ai];
-      if(_a.caisseOpId && !_byIdP[_a.caisseOpId]) _toRemP.push(_a);
-      else if((_a.numeroPiece==='BR2608032' || _a.numeroPiece==='KKCJ2608033') && !_byPieceP[_a.numeroPiece]) _toRemP.push(_a);
-    }
-    if(_toRemP.length){
-      var _newAcsP = _acsP.filter(function(x){ return _toRemP.indexOf(x)===-1; });
-      DB.setMain('mdb_acomptesPrets', _newAcsP);
-      try{ pushPayeCloud(); }catch(e){}
-    }
-  }catch(e){}
+  // Nettoyage orphelins GÉNÉRIQUE : si la pièce de caisse (par id OU par numeroPiece) n'existe plus dans mdb_operationsCaisse,
+  // on supprime l'acompte correspondant (évite fantômes type BR2608032/KKCJ2608033/ADE2608002, etc.)
+  try{ _purgeOrphanAcomptesP(); }catch(e){}
+}
+
+// Supprime tous les acomptes dont la pièce de caisse d'origine a disparu côté caisse (paye.html)
+function _purgeOrphanAcomptesP(){
+  var _opsP = DB.getMain('mdb_operationsCaisse') || [];
+  var _byIdP = {}; for(var _oi=0; _oi<_opsP.length; _oi++) if(_opsP[_oi].id) _byIdP[_opsP[_oi].id]=true;
+  var _byPieceP = {}; for(var _opi=0; _opi<_opsP.length; _opi++) if(_opsP[_opi].numeroPiece) _byPieceP[_opsP[_opi].numeroPiece]=true;
+  var _acsP = DB.getMain('mdb_acomptesPrets') || [];
+  var _toRemP = [];
+  for(var _ai=0; _ai<_acsP.length; _ai++){
+    var _a=_acsP[_ai];
+    if(!_a) continue;
+    // règle 1 : la pièce référencée par id n'existe plus
+    if(_a.caisseOpId && !_byIdP[_a.caisseOpId]){ _toRemP.push(_a); continue; }
+    // règle 2 : la pièce référencée par numeroPiece n'existe plus
+    if(_a.numeroPiece && !_byPieceP[_a.numeroPiece]){ _toRemP.push(_a); continue; }
+  }
+  if(_toRemP.length){
+    var _newAcsP = _acsP.filter(function(x){ return _toRemP.indexOf(x)===-1; });
+    DB.setMain('mdb_acomptesPrets', _newAcsP);
+    try{ pushPayeCloud(); }catch(e){}
+  }
 }
 
 /* ==================== HELPERS DONNEES PARTAGEES ==================== */
@@ -4648,6 +4655,8 @@ function apDeductionP(a, month) {
   return Math.min(a.mensualite || 0, apRestP(a));
 }
 function loadAP() {
+  // Purge auto des acomptes fantômes (pièce de caisse supprimée) avant rendu
+  try{ _purgeOrphanAcomptesP(); }catch(e){}
   var raw = getAPList() || [];
   var list = raw.map(normalizeAP);
   var personnel = getPersonnel();
