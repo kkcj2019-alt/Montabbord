@@ -7,7 +7,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-08-28-19';try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION); location.reload(true);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-08-28-20';try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION); location.reload(true);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbCheckVersion(){
@@ -8792,7 +8792,7 @@ function renderComptesClientsSection(el) {
   var fFiltered = factures.filter(function(f) { return inPeriod(f.date); });
   var rFiltered = reglements.filter(function(r) { return inPeriod(r.date); });
   var totalFacture = 0, totalRegle = 0;
-  for (var i = 0; i < fFiltered.length; i++) totalFacture += (fFiltered[i].total || 0);
+  for (var i = 0; i < fFiltered.length; i++) totalFacture += (fFiltered[i].totalTTC || fFiltered[i].total || 0);
   for (var i = 0; i < rFiltered.length; i++) totalRegle += (rFiltered[i].montant || 0);
   var html = '<div class="toolbar" style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
   html += '<label style="font-size:13px;font-weight:600;color:var(--gray-600)">P\u00e9riode :</label>';
@@ -8814,7 +8814,7 @@ function renderComptesClientsSection(el) {
   for (var i = 0; i < fFiltered.length; i++) {
     var cid = fFiltered[i].clientId || '';
     if (!clientStats[cid]) clientStats[cid] = {nom:fFiltered[i].clientNom||cid, facture:0, paid:0};
-    clientStats[cid].facture += (fFiltered[i].total || 0);
+    clientStats[cid].facture += (fFiltered[i].totalTTC || fFiltered[i].total || 0);
   }
   for (var i = 0; i < rFiltered.length; i++) {
     var cid2 = rFiltered[i].clientId || '';
@@ -14306,7 +14306,7 @@ function computeActifData() {
     var f = factures[fi];
     if (f.statut === 'payee') continue;
     if (f.douteuse) continue;
-    var reste = (f.total || 0) - (f.montantPaye || 0);
+    var reste = (f.totalTTC || f.total || 0) - (f.montantPaye || 0);
     if (reste <= 0) continue;
     var clObj = getClientById(f.clientId);
     facturesRecouvrerDetails.push({id:'frc_' + f.id, factureId: f.id, designation: (clObj ? clObj.nom : 'Inconnu') + ' - ' + (f.numero || ''), montant: reste, signe: reste >= 0 ? '+' : '-', clientId: f.clientId});
@@ -17849,6 +17849,43 @@ function showExtraitCompte(clientId) {
       operations.push({date: co.date, libelle: (co.libelle || 'Op\u00e9ration caisse') + (co.numeroPiece ? ' [' + co.numeroPiece + ']' : ''), numero: co.numeroPiece || '', debit: isEntree ? 0 : (co.montant || 0), credit: isEntree ? (co.montant || 0) : 0, bcRef: '', blRef: ''});
     }
   }
+  // Lettrage : facture et ses règlements partagent même lettre/couleur
+  var lettrageMap = {};
+  var lettrageColors = ['#dbeafe','#fef3c7','#dcfce7','#ede9fe','#fce7f3','#e0e7ff','#fef9c3','#f3e8ff','#ffedd5','#ecfdf5'];
+  var nextLettre = 65;
+  function nextLettrage(){ var l=String.fromCharCode(nextLettre); nextLettre++; if(nextLettre>90) nextLettre=65; return l; }
+  var factureLettrage = {};
+  var reglementLettrage = {};
+  for(var _fi=0; _fi<factures.length; _fi++){
+    var _f=factures[_fi];
+    if(_f.clientId!==clientId) continue;
+    var _paye = (_f.montantPaye||0) >= (_f.totalTTC||_f.total||0) || _f.statut==='payee';
+    var _partiel = (_f.montantPaye||0) > 0;
+    if(_paye || _partiel){
+      var _let = nextLettrage();
+      factureLettrage[_f.id]=_let;
+      lettrageMap[_let]=lettrageColors[Object.keys(lettrageMap).length % lettrageColors.length];
+      for(var _rj=0; _rj<reglements.length; _rj++){
+        if(reglements[_rj].factureId===_f.id) reglementLettrage[reglements[_rj].id]=_let;
+      }
+    }
+  }
+  // Associer lettrage aux opérations
+  for(var _oi=0; _oi<operations.length; _oi++){
+    var _op=operations[_oi];
+    if(_op.libelle && _op.libelle.indexOf('Facture ')===0){
+      for(var _fk in factureLettrage){ if(_op.numero && _op.libelle.indexOf(_op.numero)!==-1) { _op.lettrage=factureLettrage[_fk]; _op.lettColor=lettrageMap[factureLettrage[_fk]]; break; } }
+      // fallback via factureId
+      if(!_op.lettrage){
+        for(var _fi2=0; _fi2<factures.length; _fi2++){ if(factures[_fi2].numero===_op.numero && factureLettrage[factures[_fi2].id]){ _op.lettrage=factureLettrage[factures[_fi2].id]; _op.lettColor=lettrageMap[_op.lettrage]; break; } }
+      }
+    } else if(_op.libelle && _op.libelle.indexOf('Règlement')===0){
+      for(var _rk in reglementLettrage){ 
+        // trouver reglement correspondant par montant/date approximatif
+        for(var _rgi=0; _rgi<reglements.length; _rgi++){ if(reglements[_rgi].id===_rk && _op.credit===(reglements[_rgi].montant||0) && _op.date===reglements[_rgi].date){ _op.lettrage=reglementLettrage[_rk]; _op.lettColor=lettrageMap[_op.lettrage]; break; } }
+      }
+    }
+  }
   operations.sort(function(a, b) { return (a.date || '').localeCompare(b.date || ''); });
   var solde = 0;
   for (var m = 0; m < operations.length; m++) { solde += operations[m].debit - operations[m].credit; operations[m].solde = solde; }
@@ -17859,6 +17896,7 @@ function showExtraitCompte(clientId) {
   html += '<div class="section"><div class="section-body"><div class="table-wrap"><div class="table-responsive">';
   html += '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:var(--gray-50)">';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left">Date</th>';
+  html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:center;width:45px">Lett.</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left;min-width:200px">Libell\u00e9</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left">N\u00b0 Facture</th>';
   html += '<th style="padding:8px;border:1px solid var(--gray-200);text-align:left">Bon de commande</th>';
@@ -17869,8 +17907,11 @@ function showExtraitCompte(clientId) {
   html += '</tr></thead><tbody>';
   for (var n = 0; n < operations.length; n++) {
     var o = operations[n];
-    html += '<tr>';
+    var _letColor = o.lettColor || '';
+    var _letStyle = _letColor ? 'background:'+_letColor+';' : '';
+    html += '<tr style="'+_letStyle+'">';
     html += '<td style="padding:6px;border:1px solid var(--gray-200)">' + fmtDate(o.date) + '</td>';
+    html += '<td style="padding:6px;border:1px solid var(--gray-200);text-align:center;font-weight:800;color:var(--primary)">' + escH(o.lettrage||'') + '</td>';
     html += '<td style="padding:6px;border:1px solid var(--gray-200)">' + escH(o.libelle) + '</td>';
     html += '<td style="padding:6px;border:1px solid var(--gray-200)">' + escH(o.numero) + '</td>';
     html += '<td style="padding:6px;border:1px solid var(--gray-200)">' + escH(o.bcRef || '-') + '</td>';
@@ -17880,48 +17921,11 @@ function showExtraitCompte(clientId) {
     html += '<td style="padding:6px;border:1px solid var(--gray-200);text-align:right;font-weight:700;white-space:nowrap;color:' + (o.solde > 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(o.solde) + '</td>';
     html += '</tr>';
   }
-  if (operations.length === 0) html += '<tr><td colspan="11" style="padding:12px;border:1px solid var(--gray-200);text-align:center;color:var(--gray-400)">Aucune op\u00e9ration</td></tr>';
+  if (operations.length === 0) html += '<tr><td colspan="9" style="padding:12px;border:1px solid var(--gray-200);text-align:center;color:var(--gray-400)">Aucune op\u00e9ration</td></tr>';
   html += '</tbody></table>';
   html += '</div></div></div></div>'; // Close table-responsive, table-wrap, section-body, section
   html += '<div style="text-align:right;margin-top:12px;font-size:16px"><strong>Solde final : </strong><span style="color:' + (solde > 0 ? 'var(--danger)' : 'var(--success)') + ';font-weight:700">' + fmtMoney(solde) + '</span></div>';
-  var bls = getBLs();
-  var blNF = [];
-  for (var bi5 = 0; bi5 < bls.length; bi5++) { if (bls[bi5].clientId === clientId && !bls[bi5].factureId) blNF.push(bls[bi5]); }
-  if (blNF.length > 0) {
-    var totalBLNF = 0;
-    html += '<div style="margin-top:24px"><h3 style="color:var(--primary);margin-bottom:8px">BL \u00e0 facturer (' + blNF.length + ')</h3><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:var(--gray-50)"><th style="padding:8px;border:1px solid var(--gray-200)">N\u00b0 BL</th><th style="padding:8px;border:1px solid var(--gray-200)">Date</th><th style="padding:8px;border:1px solid var(--gray-200);text-align:right">Montant</th></tr></thead><tbody>';
-    for (var bl6 = 0; bl6 < blNF.length; bl6++) {
-      var blMt = 0;
-      if (blNF[bl6].lignes) { for (var blj2 = 0; blj2 < blNF[bl6].lignes.length; blj2++) { blMt += (blNF[bl6].lignes[blj2].quantite || 0) * (blNF[bl6].lignes[blj2].prixUnitaire || 0); } }
-      totalBLNF += blMt;
-      html += '<tr><td style="padding:6px;border:1px solid var(--gray-200)">' + escH(blNF[bl6].numero || '-') + '</td><td style="padding:6px;border:1px solid var(--gray-200)">' + fmtDate(blNF[bl6].dateLivraison || blNF[bl6].date) + '</td><td style="padding:6px;border:1px solid var(--gray-200);text-align:right;font-weight:600">' + fmtMoney(blMt) + '</td></tr>';
-    }
-    html += '</tbody></table><div style="text-align:right;margin-top:8px;font-size:14px"><strong>Total BL \u00e0 facturer : </strong><span style="color:var(--primary);font-weight:700">' + fmtMoney(totalBLNF) + '</span></div></div>';
-  }
-  var facImpayees = [];
-  for (var fi2 = 0; fi2 < factures.length; fi2++) {
-    var fi = factures[fi2];
-    if (fi.clientId === clientId) {
-      var reste = (fi.total || 0) - (fi.montantPaye || 0);
-      if (reste > 0) facImpayees.push({facture: fi, reste: reste});
-    }
-  }
-  if (facImpayees.length > 0) {
-    var totalImp = 0;
-    html += '<div style="margin-top:24px"><h3 style="color:var(--danger);margin-bottom:8px">Factures \u00e0 r\u00e9gler (' + facImpayees.length + ')</h3><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:var(--gray-50)"><th style="padding:8px;border:1px solid var(--gray-200)">N\u00b0 Facture</th><th style="padding:8px;border:1px solid var(--gray-200)">Date</th><th style="padding:8px;border:1px solid var(--gray-200);text-align:right">Total</th><th style="padding:8px;border:1px solid var(--gray-200);text-align:right">D\u00e9j\u00e0 r\u00e9gl\u00e9</th><th style="padding:8px;border:1px solid var(--gray-200);text-align:right">Reste</th><th style="padding:8px;border:1px solid var(--gray-200);text-align:center">Action</th></tr></thead><tbody>';
-    for (var fi3 = 0; fi3 < facImpayees.length; fi3++) {
-      var fii = facImpayees[fi3];
-      totalImp += fii.reste;
-      html += '<tr><td style="padding:6px;border:1px solid var(--gray-200)">' + escH(fii.facture.numero || '-') + '</td>';
-      html += '<td style="padding:6px;border:1px solid var(--gray-200)">' + fmtDate(fii.facture.dateEmission) + '</td>';
-      html += '<td style="padding:6px;border:1px solid var(--gray-200);text-align:right">' + fmtMoney(fii.facture.total || 0) + '</td>';
-      html += '<td style="padding:6px;border:1px solid var(--gray-200);text-align:right;color:var(--success)">' + fmtMoney(fii.facture.montantPaye || 0) + '</td>';
-      html += '<td style="padding:6px;border:1px solid var(--gray-200);text-align:right;font-weight:700;color:var(--danger)">' + fmtMoney(fii.reste) + '</td>';
-      html += '<td style="padding:6px;border:1px solid var(--gray-200);text-align:center"><button class="btn btn-sm btn-success" onclick="reglerFactureDepuisCompte(\'' + clientId + '\',\'' + fii.facture.id + '\')">R\u00e9gler</button></td>';
-      html += '</tr>';
-    }
-    html += '</tbody></table><div style="text-align:right;margin-top:8px;font-size:14px"><strong>Total \u00e0 r\u00e9gler : </strong><span style="color:var(--danger);font-weight:700">' + fmtMoney(totalImp) + '</span></div></div>';
-  }
+  // Tableau unique : BL à facturer et factures à régler inclus via lettrage, pas de 2 tableaux séparés
   var previsions = getPrevisions();
   var pvNF = [];
   for (var pi2 = 0; pi2 < previsions.length; pi2++) { if (previsions[pi2].clientId === clientId && previsions[pi2].statut !== 'annule') pvNF.push(previsions[pi2]); }
