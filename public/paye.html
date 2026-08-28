@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Traitement Salaire - Module Paie</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
@@ -37,7 +37,8 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)setT
 <style>
 :root{--bg:#f5f5f4;--surface:#fff;--text:#1e293b;--dim:#64748b;--border:#e2e8f0;--orange:#f97316;--orange-dark:#ea580c;--gold:#f59e0b;--danger:#ef4444;--green:#10b981;--blue:#3b82f6}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden;font-size:.8rem}
+body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden;font-size:.8rem;touch-action:manipulation;text-size-adjust:100%;-webkit-text-size-adjust:100%}
+@media(max-width:768px){input,select,textarea{font-size:16px}}
 aside{width:240px;background:linear-gradient(180deg,#0b1526 0%,#101f38 100%);color:#e8dcae;border-right:1px solid #24344f;display:flex;flex-direction:column;padding:1.2rem 1rem;overflow-y:auto;transition:width .25s ease;position:relative}
 aside.pinned{box-shadow:2px 0 12px rgba(0,0,0,.18)}
 aside h1{font-size:1rem;font-weight:800;color:#ecc95f;margin-bottom:1.5rem;display:flex;align-items:center;gap:.5rem}
@@ -1063,6 +1064,50 @@ function _payeUnion(prim, sec) {
   }
   return out;
 }
+/* ===== Travaux funéraires (tombstones) partagés =====
+   On réutilise la même clé localStorage que l'app principale (mdb_tombstones) pour que
+   les suppressions d'acomptes faites ici ne soient jamais ressuscitées par le cloud. */
+function _payeGetTombstones() {
+  try { return JSON.parse(localStorage.getItem('mdb_tombstones')) || {}; } catch(e) { return {}; }
+}
+function _payeSetTombstones(t) { try { localStorage.setItem('mdb_tombstones', JSON.stringify(t)); } catch(e) {} }
+function _payeAddTombstones(entityKey, ids) {
+  if (!entityKey || !ids || !ids.length) return;
+  var t = _payeGetTombstones();
+  if (!t[entityKey]) t[entityKey] = {};
+  var now = Date.now();
+  for (var i = 0; i < ids.length; i++) if (ids[i]) t[entityKey][ids[i]] = now;
+  _payeSetTombstones(t);
+}
+function _payeStripTombstoned(entityKey, arr) {
+  var t = _payeGetTombstones()[entityKey];
+  if (!t || !Array.isArray(arr)) return arr;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var r = arr[i];
+    if (r && r.id && t[r.id]) continue;
+    out.push(r);
+  }
+  return out;
+}
+function _payeMergeTombstonesFromCloud(cloudT) {
+  if (!cloudT || typeof cloudT !== 'object' || Array.isArray(cloudT)) return;
+  var local = _payeGetTombstones();
+  var cloudReset = cloudT.__resetAt || 0;
+  var localReset = local.__resetAt || 0;
+  if (cloudReset > localReset) { _payeSetTombstones(cloudT); return; }
+  var changed = false;
+  for (var k in cloudT) {
+    if (!cloudT.hasOwnProperty(k) || k === '__resetAt') continue;
+    if (!local[k]) local[k] = {};
+    for (var id in cloudT[k]) {
+      if (cloudT[k].hasOwnProperty(id) && !local[k][id]) { local[k][id] = cloudT[k][id]; changed = true; }
+    }
+  }
+  if (changed) _payeSetTombstones(local);
+}
+/* Préfixe des clés simples devant respecter les tombstones (acomptes + opérations caisse) */
+var _payeTOMB_KEYS = ['mdb_acomptesPrets','mdb_operationsCaisse'];
 var PAYE_ARR_SECTIONS = ['categories','services','fonctions','primesSpec','pointage'];
 function _payeMergeObj(cur, inc, localFirst) {
   var merged = {}, kk;
@@ -1093,6 +1138,7 @@ function _payeMergeObj(cur, inc, localFirst) {
   return merged;
 }
 function _payeRecvSharedKeys(data) {
+  if (data.mdb_tombstones) _payeMergeTombstonesFromCloud(data.mdb_tombstones);
   ['mdb_employes','mdb_acomptesPrets','mdb_salairesPaiements','mdb_caisses','mdb_banques','mdb_operationsCaisse','mdb_banqueOperations'].forEach(function(kX) {
     var inc = data[kX];
     if (inc === undefined || inc === null) return;
@@ -1103,7 +1149,7 @@ function _payeRecvSharedKeys(data) {
       if (inc.length === 0 && cu.length > 0) return;
       if (kX==='mdb_acomptesPrets' || kX==='mdb_operationsCaisse') {
         // Pour acomptes et opérations caisse, le cloud fait foi (suppressions via tombstones) - pas d'union qui ressuscite les supprimés
-        DB.setMain(kX, inc);
+        DB.setMain(kX, _payeStripTombstoned(kX, inc));
       } else {
         DB.setMain(kX, _payeUnion(inc, cu));
       }
@@ -1136,13 +1182,27 @@ function pushPayeCloud() {
       if (!lv) continue;
       if (Array.isArray(lv)) {
         var cv = Array.isArray(cloud[kX]) ? cloud[kX] : [];
-        if (lv.length > 0) payload[kX] = _payeUnion(lv, cv);
-        else if (cv.length === 0) payload[kX] = lv; /* vide ici ET là-bas : rien à protéger */
-        /* sinon : ne JAMAIS écraser un cloud non vide par un tableau vide */
+        if (_payeTOMB_KEYS.indexOf(kX) !== -1) {
+          /* Clés à tombstones (acomptes / opérations caisse) : une suppression ne doit
+             JAMAIS être ressuscitée par le cloud. On retire du local ET du cloud les
+             enregistrements marqués supprimés, puis on publie l'union "propre". */
+          var lvClean = _payeStripTombstoned(kX, lv);
+          var cvClean = _payeStripTombstoned(kX, cv);
+          if (lvClean.length > 0) payload[kX] = _payeUnion(lvClean, cvClean);
+          else if (cvClean.length > 0) payload[kX] = cvClean;
+          else payload[kX] = [];
+        } else {
+          if (lv.length > 0) payload[kX] = _payeUnion(lv, cv);
+          else if (cv.length === 0) payload[kX] = lv; /* vide ici ET là-bas : rien à protéger */
+          /* sinon : ne JAMAIS écraser un cloud non vide par un tableau vide */
+        }
       } else {
         payload[kX] = lv;
       }
     }
+    /* Propager les tombstones (suppressions) au cloud pour que tout appareil les respecte. */
+    var _pTom = _payeGetTombstones();
+    if (_pTom && typeof _pTom === 'object' && Object.keys(_pTom).length) payload.mdb_tombstones = _pTom;
     var ent = DB.getMain('mdb_entreprise');
     if (ent && ent.nom) payload.mdb_entreprise = ent;
     if (Object.keys(payload).length === 0) { payePushBusy = false; return; }
@@ -1262,8 +1322,7 @@ function _purgeOrphanAcomptesP(){
   }
   if(_toRemP.length){
     var _newAcsP = _acsP.filter(function(x){ return _toRemP.indexOf(x)===-1; });
-    DB.setMain('mdb_acomptesPrets', _newAcsP);
-    try{ pushPayeCloud(); }catch(e){}
+    setAPList(_newAcsP);
   }
 }
 
@@ -1791,8 +1850,19 @@ function setFonctions(v) { setPayeSection('fonctions', v); }
 function getSocieteP() { return getPayeSection('societe', {}); }
 function setSocieteP(v) { setPayeSection('societe', v); }
 /* Acomptes/Prêts : source unique = mdb_acomptesPrets (partagé) */
-function getAPList() { return DB.getMain('mdb_acomptesPrets') || []; }
-function setAPList(v) { DB.setMain('mdb_acomptesPrets', v); pushPayeCloud(); }
+function getAPList() { return _payeStripTombstoned('mdb_acomptesPrets', DB.getMain('mdb_acomptesPrets') || []); }
+function setAPList(v) {
+  /* Toute ligne présente avant et absente après = suppression définitive (tombstone),
+     pour que le cloud ne la ressuscite jamais à la ré-ouverture / à l'actualisation. */
+  var old = DB.getMain('mdb_acomptesPrets') || [];
+  var newArr = Array.isArray(v) ? v : [];
+  var present = {}; for (var i = 0; i < newArr.length; i++) if (newArr[i] && newArr[i].id) present[newArr[i].id] = true;
+  var removed = [];
+  for (var j = 0; j < old.length; j++) if (old[j] && old[j].id && !present[old[j].id]) removed.push(old[j].id);
+  if (removed.length) _payeAddTombstones('mdb_acomptesPrets', removed);
+  DB.setMain('mdb_acomptesPrets', _payeStripTombstoned('mdb_acomptesPrets', newArr));
+  pushPayeCloud();
+}
 
 /* ==================== HISTORIQUE DES SALAIRES ==================== */
 /* salaire_history = [{montant, dateEffet (YYYY-MM)}] trié par dateEffet croissant.
@@ -4892,8 +4962,6 @@ function printAP() {
 function delAP(id) {
   if (!confirm('Supprimer cette opération ?')) return;
   setAPList(getAPList().filter(function(a){ return a.id !== id; }));
-  var mainAP = DB.getMain('mdb_acomptesPrets') || [];
-  DB.setMain('mdb_acomptesPrets', mainAP.filter(function(a){ return a.id !== id; }));
   loadAP();
 }
 
