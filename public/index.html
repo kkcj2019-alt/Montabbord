@@ -11310,7 +11310,24 @@ function validateJournalImport(id) {
   for (var i = 0; i < imports.length; i++) {
     if (imports[i].id === id) { _importData = JSON.parse(JSON.stringify(imports[i])); break; }
   }
-  if (_importData) saveJournalImport('valide');
+  if (!_importData) return;
+  if (_importData.statut === 'valide' && _importData.createdIds) {
+    var oldBcs = getBCs(), oldBls = getBLs(), oldFacs = getFactures();
+    var cid = _importData.createdIds;
+    if (cid.bc && cid.bc.length) {
+      var bcSet = {}; for (var obi = 0; obi < cid.bc.length; obi++) bcSet[cid.bc[obi]] = true;
+      DB.set('mdb_bc', oldBcs.filter(function(b){ return !bcSet[b.id]; }));
+    }
+    if (cid.bl && cid.bl.length) {
+      var blSet = {}; for (var obl = 0; obl < cid.bl.length; obl++) blSet[cid.bl[obl]] = true;
+      DB.set('mdb_bl', oldBls.filter(function(b){ return !blSet[b.id]; }));
+    }
+    if (cid.fac && cid.fac.length) {
+      var facSet = {}; for (var ofi = 0; ofi < cid.fac.length; ofi++) facSet[cid.fac[ofi]] = true;
+      DB.set('mdb_factures', oldFacs.filter(function(f){ return !facSet[f.id]; }));
+    }
+  }
+  saveJournalImport('valide');
 }
 function ajaxUpdateRow(idx) { /* no-op: live edits handled by direct DOM updates */ }
 function ajaxInsertRow(idx) { renderJournalImport(_importTarget); }
@@ -11842,12 +11859,14 @@ function saveJournalImport(statut) {
 }
 function validateImportData(data) {
   var result = { clientsCreated: 0, bcsCreated: 0, bcsMerged: 0, blsCreated: 0, facsCreated: 0, lignesImported: 0, stockWarnings: [] };
+  var createdIds = { bc: [], bl: [], fac: [] };
   var clients = getClients();
   var bcs = getBCs();
   var bls = getBLs();
   var facs = getFactures();
   var stocks = getStocks();
   var clientCache = {};
+  var importId = data.id || '';
   var lignesByClient = {};
   for (var i = 0; i < data.lignes.length; i++) {
     var l = data.lignes[i];
@@ -11919,7 +11938,8 @@ function validateImportData(data) {
             bcLignesData.push({ articleId: factLignes[blj].articleId || '', designation: factLignes[blj].designation, quantite: factLignes[blj].quantite || 0, prixUnitaire: factLignes[blj].prixUnitaire || 0 });
             if (factLignes[blj].hasTVA) hasTVA2 = true;
           }
-          bcs.push({ id: bcId, numero: actualBCNum, clientId: cid2, dateBC: factLignes[0].date || getToday(), delaiLivraison: 30, statut: 'valide', tvaActive: hasTVA2, tauxTva: 18, observations: 'Import journal de vente', lignes: bcLignesData, dateCreation: getToday(), _fromImport: true });
+          bcs.push({ id: bcId, numero: actualBCNum, clientId: cid2, dateBC: factLignes[0].date || getToday(), delaiLivraison: 30, statut: 'valide', tvaActive: hasTVA2, tauxTva: 18, observations: 'Import journal de vente', lignes: bcLignesData, dateCreation: getToday(), _fromImport: true, _importId: importId });
+          createdIds.bc.push(bcId);
           result.bcsCreated++;
         }
       }
@@ -11943,8 +11963,10 @@ function validateImportData(data) {
       var facId = DB.genId();
       var facNumero = getNumero('FAC');
       for (var fn = 0; fn < factLignes.length; fn++) { if (factLignes[fn].numeroFact) { facNumero = factLignes[fn].numeroFact; break; } }
-      facs.push({ id: facId, numero: facNumero, clientId: cid2, dateEmission: factLignes[0].date || getToday(), echeance: '', statut: 'validee', lignes: facLignesData, total: Math.round(facTotalHT * 100) / 100, tva: facTotalTVA > 0 ? 'oui' : 'non', tvaAmount: Math.round(facTotalTVA * 100) / 100, totalTTC: Math.round((facTotalHT + facTotalTVA) * 100) / 100, tauxTvaDefaut: 18, blIds: [blId], bcIds: bcId ? [bcId] : [], montantPaye: 0 });
-      bls.push({ id: blId, numero: getNumero('BL'), clientId: cid2, dateLivraison: factLignes[0].date || getToday(), statut: 'facture', lignes: blLignesData, bcId: bcId, factureId: facId, raisonNonFacture: '' });
+      facs.push({ id: facId, numero: facNumero, clientId: cid2, dateEmission: factLignes[0].date || getToday(), echeance: '', statut: 'validee', lignes: facLignesData, total: Math.round(facTotalHT * 100) / 100, tva: facTotalTVA > 0 ? 'oui' : 'non', tvaAmount: Math.round(facTotalTVA * 100) / 100, totalTTC: Math.round((facTotalHT + facTotalTVA) * 100) / 100, tauxTvaDefaut: 18, blIds: [blId], bcIds: bcId ? [bcId] : [], montantPaye: 0, _importId: importId });
+      createdIds.fac.push(facId);
+      bls.push({ id: blId, numero: getNumero('BL'), clientId: cid2, dateLivraison: factLignes[0].date || getToday(), statut: 'facture', lignes: blLignesData, bcId: bcId, factureId: facId, raisonNonFacture: '', _importId: importId });
+      createdIds.bl.push(blId);
       result.blsCreated++;
       result.facsCreated++;
     }
@@ -11968,6 +11990,7 @@ function validateImportData(data) {
   for (var blk2 = 0; blk2 < bls.length; blk2++) {
     if (bls[blk2].bcId) updateBCStatusFromBLs(bls[blk2].bcId);
   }
+  data.createdIds = createdIds;
   return result;
 }
 function editJournalImport(id) {
