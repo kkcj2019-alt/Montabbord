@@ -7262,6 +7262,7 @@ function bulkBLClientChange() {
   if (!box) return;
   if (!cid) { box.innerHTML = '<p style="color:var(--gray-400);font-size:12px;margin:0">Sélectionnez un client.</p>'; return; }
   var bcs = getBCs() || [];
+  var bls = getBLs() || [];
   var out = '';
   var has = false;
   for (var i = 0; i < bcs.length; i++) {
@@ -7272,13 +7273,41 @@ function bulkBLClientChange() {
     var reste = bulkBCReste(bc);
     if (reste <= 0) continue;
     has = true;
-    out += '<label style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--gray-200);border-radius:6px;margin-bottom:6px;cursor:pointer;background:#fff">';
-    out += '<input type="checkbox" class="bulkBLBC" value="' + bc.id + '" checked style="width:16px;height:16px">';
+    var deliveredQty = {};
+    for (var di = 0; di < bls.length; di++) {
+      if (bls[di].bcId !== bc.id || !bls[di].lignes) continue;
+      for (var dl = 0; dl < bls[di].lignes.length; dl++) {
+        var ak = bls[di].lignes[dl].articleId || bls[di].lignes[dl].designation || '';
+        deliveredQty[ak] = (deliveredQty[ak] || 0) + (bls[di].lignes[dl].quantite || 0);
+      }
+    }
+    out += '<div style="border:1px solid var(--gray-200);border-radius:6px;margin-bottom:8px;overflow:hidden">';
+    out += '<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;background:#f9fafb;border-bottom:1px solid var(--gray-100)">';
+    out += '<input type="checkbox" class="bulkBLBC" value="' + bc.id + '" checked style="width:16px;height:16px" onchange="toggleBCLines(this)">';
     out += '<span style="flex:1;font-size:13px"><strong>BC ' + escH(bc.numero || '') + '</strong>' + (bc.dateBC ? ' — ' + fmtDate(bc.dateBC) : '') + '</span>';
     out += '<span style="font-size:12px;color:var(--gray-500)">Reste : <strong>' + fmt(reste) + '</strong></span>';
     out += '</label>';
+    out += '<div class="bc-article-lines" style="padding:6px 10px">';
+    for (var j = 0; j < bc.lignes.length; j++) {
+      var line = bc.lignes[j];
+      var ak2 = line.articleId || line.designation || '';
+      var lineReste = Math.max(0, (line.quantite || 0) - (deliveredQty[ak2] || 0));
+      if (lineReste <= 0) continue;
+      var artLabel = line.designation || getArticleLabel(line.articleId) || '-';
+      out += '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:12px;border-bottom:1px solid var(--gray-50)">';
+      out += '<span style="flex:1;color:var(--gray-700)">' + escH(artLabel) + '</span>';
+      out += '<span style="color:var(--gray-400)">Qté BC: ' + (line.quantite || 0) + '</span>';
+      out += '<span style="color:var(--primary);font-weight:600">Reste: ' + lineReste + '</span>';
+      out += '<input type="number" class="bulkBLLigneQte" data-bc="' + bc.id + '" data-article="' + escH(ak2) + '" value="' + lineReste + '" min="0" max="' + lineReste + '" style="width:60px;padding:2px 4px;border:1px solid var(--gray-300);border-radius:4px;font-size:12px;text-align:right">';
+      out += '</div>';
+    }
+    out += '</div></div>';
   }
   box.innerHTML = has ? out : '<p style="color:var(--gray-400);font-size:12px;margin:0">Aucun bon de commande actif avec quantité restante pour ce client.</p>';
+}
+function toggleBCLines(cb) {
+  var lines = cb.closest('div').querySelector('.bc-article-lines');
+  if (lines) lines.style.display = cb.checked ? '' : 'none';
 }
 function bulkBCReste(bc) {
   var done = 0;
@@ -7319,7 +7348,12 @@ function saveBulkBLs() {
       var ak2 = line.articleId || line.designation || '';
       var reste = Math.max(0, (line.quantite || 0) - (deliveredQty[ak2] || 0));
       if (reste <= 0) continue;
-      lignes.push({ articleId: line.articleId || '', designation: line.designation || '', quantite: reste, prixUnitaire: line.prixUnitaire || 0 });
+      var inputEl = document.querySelector('.bulkBLLigneQte[data-bc="' + bcId + '"][data-article="' + CSS.escape(ak2) + '"]');
+      var userQte = inputEl ? parseInt(inputEl.value, 10) : reste;
+      if (isNaN(userQte) || userQte < 0) userQte = reste;
+      if (userQte > reste) userQte = reste;
+      if (userQte <= 0) continue;
+      lignes.push({ articleId: line.articleId || '', designation: line.designation || '', quantite: userQte, prixUnitaire: line.prixUnitaire || 0 });
     }
     if (lignes.length === 0) continue;
     var data = { numero: getNumero('BL', bls), clientId: cid, dateLivraison: dateLiv, statut: 'livree', lignes: lignes, bcId: bcId, factureId: null, raisonNonFacture: '' };
@@ -9551,6 +9585,7 @@ function deleteNomenclature(id) {
   } catch(e) { toast('Erreur: ' + e.message, 'error'); }
 }
 var _blSubTab = 'non_facture';
+var _blSort = 'date';
 var _blFocusIds = null;
 function switchBLSubTab(tab) { _blSubTab = tab; renderBL(); }
 function focusBLsFromActif(ids) {
@@ -9592,6 +9627,19 @@ function renderBL() {
     else notInvoiced.push(allBls[si]);
   }
   var bls = _blSubTab === 'facture' ? invoiced : notInvoiced;
+  bls.sort(function(a, b) {
+    if (_blSort === 'article') {
+      var aArt = (a.lignes && a.lignes[0]) ? (a.lignes[0].designation || getArticleLabel(a.lignes[0].articleId) || '') : '';
+      var bArt = (b.lignes && b.lignes[0]) ? (b.lignes[0].designation || getArticleLabel(b.lignes[0].articleId) || '') : '';
+      return aArt.localeCompare(bArt);
+    }
+    if (_blSort === 'client') {
+      var aCl = getClientById(a.clientId);
+      var bCl = getClientById(b.clientId);
+      return (aCl ? aCl.nom : '').localeCompare(bCl ? bCl.nom : '');
+    }
+    return (a.dateLivraison || '').localeCompare(b.dateLivraison || '');
+  });
   
   // Precompute totals per client and per article
   var clientArtTotals = {};
@@ -9663,6 +9711,7 @@ function renderBL() {
     html += '<option value="' + _blClients[ci].id + '">' + escH(_blClients[ci].nom) + '</option>';
   }
   html += '</select>';
+  html += '<select id="blSort" onchange="_blSort=this.value;renderBL()" style="width:150px"><option value="date"' + (_blSort === 'date' ? ' selected' : '') + '>Trier par date</option><option value="article"' + (_blSort === 'article' ? ' selected' : '') + '>Trier par article</option><option value="client"' + (_blSort === 'client' ? ' selected' : '') + '>Trier par client</option></select>';
   html += '<div id="blFactureBtnWrap" style="display:none;margin-left:auto"><span id="blFactureWarning" style="color:var(--danger);font-size:13px;font-weight:600;display:none">Clients diff\u00e9rents</span> <button class="btn btn-primary btn-sm" onclick="factureFromBLList()" id="btnFactureFromBL">Cr\u00e9er facture</button> <button class="btn btn-danger btn-sm" onclick="deleteSelectedBLs()" id="btnDeleteSelectedBL" style="background:var(--danger);color:#fff;border:none;padding:5px 12px;border-radius:6px;font-size:13px;cursor:pointer;font-weight:600">Supprimer</button></div>';
   if (!readonly) html += '<button class="btn btn-primary" onclick="openBLModal()">+ Nouveau BL</button>';
   if (!readonly) html += '<button class="btn btn-outline" onclick="openBulkBLModal()" style="color:var(--primary);border-color:var(--primary)">+ Plusieurs BL (par client)</button>';
