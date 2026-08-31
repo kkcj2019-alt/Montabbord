@@ -326,7 +326,7 @@ function _payeExitToApp(){
 <button onclick="switchCatTab('taxes')">Taxes & Impôts</button>
 <button onclick="switchCatTab('org')">Organisation</button>
 <button onclick="switchCatTab('montage')">Articles Montage</button>
-<button id="cat-tab-primes" onclick="switchCatTab('primes')">Primes Spéciales</button>
+<button id="cat-tab-primes" onclick="switchCatTab('primes')">Éléments de paie</button>
 </div>
 <div id="tab-grille">
 <div class="card">
@@ -454,8 +454,8 @@ function _payeExitToApp(){
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem;margin-bottom:1rem">
       <div>
-        <h3 style="margin-bottom:.3rem;font-size:.9rem">Gestion des Primes &amp; Indemnités Spéciales</h3>
-        <div style="font-size:.72rem;color:var(--dim)">Art. 116 CGI — Exonérées d'ITS dans la limite de 10% de la rémunération brute. Ces primes restent soumises aux cotisations CNPS.</div>
+        <h3 style="margin-bottom:.3rem;font-size:.9rem">Gestion des Éléments de paie</h3>
+        <div style="font-size:.72rem;color:var(--dim)">Créez ici primes, indemnités, sursalaire ou toute ligne du bulletin. Montant vide = à saisir par employé. Cochez la prime puis saisissez le montant spécifique si différent du montant global (ex: 10 par défaut, 9 pour un employé).</div>
       </div>
       <button class="btn" onclick="openPrimeModal()">+ Nouvelle Prime</button>
     </div>
@@ -1307,9 +1307,9 @@ function initData() {
   if (!getPayeSection('primesSpec', null)) {
     var allEmps = getPersonnel().map(function(e){ return e.id; });
     setPayeSection('primesSpec', [
-      { id: 'prime_salissure_def', type: 'ind_salissure', label: 'Prime de salissure', num: '32', montant: 15000, dept: '', employes: allEmps },
-      { id: 'prime_tenue_def', type: 'ind_tenue', label: 'Prime de tenue', num: '33', montant: 15000, dept: '', employes: allEmps },
-      { id: 'prime_panier_def', type: 'custom', label: 'Prime de panier (mensuelle)', num: '29', montant: 25000, dept: '', employes: allEmps }
+      { id: 'prime_salissure_def', type: 'ind_salissure', label: 'Prime de salissure', num: '32', montant: 15000, dept: '', employes: allEmps, overrides: {} },
+      { id: 'prime_tenue_def', type: 'ind_tenue', label: 'Prime de tenue', num: '33', montant: 15000, dept: '', employes: allEmps, overrides: {} },
+      { id: 'prime_panier_def', type: 'custom', label: 'Prime de panier (mensuelle)', num: '29', montant: 25000, dept: '', employes: allEmps, overrides: {} }
     ]);
   }
   if (!getPayeSection('externJours', null)) setPayeSection('externJours', {});
@@ -1408,27 +1408,34 @@ function getPrimesSpec() {
 }
 function setPrimesSpec(v) { setPayeSection('primesSpec', v); }
 
-/* Retourne le montant total des primes spéciales pour un employé et un type donné */
+/* Retourne le montant total des primes spéciales pour un employé et un type donné - gère overrides */
 function getIndSpecForEmp(empId, type) {
   var primes = getPrimesSpec();
   var total = 0;
   primes.forEach(function(p) {
     if ((type ? p.type === type : true) && p.employes && p.employes.indexOf(empId) !== -1) {
-      total += parseFloat(p.montant) || 0;
+      var m = (p.overrides && p.overrides[empId] != null && p.overrides[empId] !== '') ? parseFloat(p.overrides[empId]) : parseFloat(p.montant);
+      total += m || 0;
     }
   });
   return total;
 }
 
-/* Retourne toutes les primes actives pour un employé (pour le bulletin) */
+/* Retourne toutes les primes actives pour un employé (pour le bulletin) - gère overrides */
 function getPrimesSpecEmp(empId) {
   var primes = getPrimesSpec();
-  var fromCatalog = primes.filter(function(p) { return p.employes && p.employes.indexOf(empId) !== -1; });
+  var fromCatalog = primes.filter(function(p) { return p.employes && p.employes.indexOf(empId) !== -1; }).map(function(p){
+    var m = (p.overrides && p.overrides[empId] != null && p.overrides[empId] !== '') ? parseFloat(p.overrides[empId]) : parseFloat(p.montant);
+    var copy = Object.assign({}, p);
+    copy.montant = m || 0;
+    copy._hasOverride = !!(p.overrides && p.overrides[empId] != null && p.overrides[empId] !== '');
+    return copy;
+  });
   var indivPrimes = getEmpIndivPrimesList(empId);
   var allPrimes = fromCatalog.slice();
   indivPrimes.forEach(function(ip) {
     var alreadyIn = allPrimes.find(function(p){ return p.id === ip.primeId; });
-    if (alreadyIn) { alreadyIn.montant = ip.montant; }
+    if (alreadyIn) { alreadyIn.montant = ip.montant; alreadyIn._individual = true; }
     else {
       var catalogPrime = primes.find(function(p){ return p.id === ip.primeId; });
       allPrimes.push({
@@ -1548,12 +1555,16 @@ function savePrimeConfig(e) {
   var existing = primes.find(function(x){ return x.id === id; });
   var dept = document.getElementById('prime-dept-default').value;
 
+  if (!primes.find(function(x){ return x.id === id && x.overrides; })) {
+    primes.forEach(function(x){ if(!x.overrides) x.overrides = {}; });
+  }
   if (existing) {
     existing.type = type; existing.label = label;
     existing.num = document.getElementById('prime-num').value;
     existing.montant = parseFloat(document.getElementById('prime-montant').value)||0;
     existing.dept = dept;
     existing.type_employe = document.getElementById('prime-type-employe').value || '';
+    if (!existing.overrides) existing.overrides = {};
   } else {
     var typeEmp = document.getElementById('prime-type-employe').value || '';
     var empList = getPersonnelActifs().filter(function(p){ return empCategorie(p) !== 'externe'; });
@@ -1561,7 +1572,7 @@ function savePrimeConfig(e) {
     var assigned = empList
       .filter(function(p){ return !dept || p.service === dept; })
       .map(function(p){ return p.id; });
-    primes.push({ id: id, type: type, label: label, num: document.getElementById('prime-num').value, montant: parseFloat(document.getElementById('prime-montant').value)||0, dept: dept, employes: assigned, type_employe: typeEmp });
+    primes.push({ id: id, type: type, label: label, num: document.getElementById('prime-num').value, montant: parseFloat(document.getElementById('prime-montant').value)||0, dept: dept, employes: assigned, type_employe: typeEmp, overrides: {} });
   }
   setPrimesSpec(primes);
   closePrimeModal();
@@ -1623,14 +1634,21 @@ function renderPrimeEmpGrid(p) {
     h += '<div style="grid-column:1/-1;font-size:.72rem;font-weight:700;color:var(--dim);border-bottom:1px solid var(--border);padding-bottom:3px;margin-top:.4rem">' + escH(svc) + '</div>';
     groups[svc].forEach(function(emp) {
       var isChecked = assigned.indexOf(emp.id) !== -1;
-      h += '<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:.78rem;' + (isChecked ? 'background:#f0fdf4;border-color:#86efac' : '') + '">';
+      var ovVal = (p.overrides && p.overrides[emp.id] != null) ? p.overrides[emp.id] : '';
+      h += '<label style="display:flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:.78rem;' + (isChecked ? 'background:#f0fdf4;border-color:#86efac' : '') + '">';
       h += '<input type="checkbox" class="prime-emp-cb" data-empid="' + emp.id + '"' + (isChecked ? ' checked' : '') + ' style="width:15px;height:15px" onchange="onPrimeEmpChange(this)">';
-      h += '<span><strong>' + escH(emp.nom) + '</strong> ' + escH(emp.prenoms||'') + '</span>';
+      h += '<span style="flex:1"><strong>' + escH(emp.nom) + '</strong> ' + escH(emp.prenoms||'') + '</span>';
+      h += '<input type="number" class="prime-emp-montant" data-empid="' + emp.id + '" value="' + escH(String(ovVal)) + '" placeholder="' + fmtF(p.montant) + '" style="width:90px;padding:2px 6px;border:1px solid var(--border);border-radius:4px;font-size:.75rem;text-align:right" title="Montant spécifique (vide = ' + fmtF(p.montant) + ')" onchange="onPrimeMontantChange(this)" oninput="onPrimeMontantChange(this)">';
       h += '</label>';
     });
   });
   if (!h) h = '<div style="color:var(--dim);font-size:.8rem">Aucun employé dans ce département.</div>';
   grid.innerHTML = h;
+}
+function onPrimeMontantChange(inp){
+  var cb = inp.closest('label').querySelector('.prime-emp-cb');
+  if(inp.value !== '' && inp.value != null) cb.checked = true;
+  onPrimeEmpChange(cb);
 }
 
 function onPrimeEmpChange(cb) {
@@ -1662,13 +1680,24 @@ function savePrimeAttribution() {
   // Fusionner avec les employés d'autres départements non affichés
   var deptFilter = (document.getElementById('prime-dept-filter')||{}).value || '';
   if (deptFilter) {
-    // Garder les assignés hors du filtre
     var empIds = getPersonnelActifs().filter(function(e){ return e.service === deptFilter; }).map(function(e){ return e.id; });
     var keep = (p.employes||[]).filter(function(id){ return empIds.indexOf(id) === -1; });
     p.employes = keep.concat(checked);
   } else {
     p.employes = checked;
   }
+  if (!p.overrides) p.overrides = {};
+  // Sauver les montants spécifiques
+  document.querySelectorAll('.prime-emp-montant').forEach(function(inp){
+    var eid = inp.dataset.empid;
+    var cb = document.querySelector('.prime-emp-cb[data-empid="' + eid + '"]');
+    var isChecked = cb && cb.checked;
+    var v = inp.value.trim();
+    if (isChecked && v !== '' && !isNaN(parseFloat(v))) p.overrides[eid] = parseFloat(v);
+    else delete p.overrides[eid];
+  });
+  // Nettoyer overrides des non cochés
+  Object.keys(p.overrides).forEach(function(eid){ if(p.employes.indexOf(eid)===-1) delete p.overrides[eid]; });
   setPrimesSpec(primes);
   loadPrimesSpec();
   // Mettre à jour la carte
