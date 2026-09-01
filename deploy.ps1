@@ -16,7 +16,7 @@ if (-not $NoCommit) {
 }
 
 Write-Host "[deploy] git push..."
-git push origin main
+git push origin ma-version-deployee
 
 Write-Host "[deploy] Firebase hosting..."
 cmd /c "npx.cmd --yes firebase-tools@latest deploy --only hosting --project montabbord"
