@@ -6210,6 +6210,20 @@ function getSalaireAuMoisI(emp, mois) {
 }
 function getCodesCaisse() { return DB.get('mdb_codesCaisse') || []; }
 function hasCaisseCentralisee() { return currentUser && currentUser.caisseCentralisee; }
+function canUserAccessCaisse(u, caisseId) {
+  if (!u) return false;
+  if (u.caisseCentralisee) return true;
+  if (u.caisseId && u.caisseId === caisseId) return true;
+  var ca = u.caissesAutorisees || [];
+  return ca.indexOf(caisseId) !== -1;
+}
+function getAccessibleCaisses() {
+  var all = getCaisses() || [];
+  if (currentUser && currentUser.caisseCentralisee) return all;
+  var out = [];
+  for (var i = 0; i < all.length; i++) { if (canUserAccessCaisse(currentUser, all[i].id)) out.push(all[i]); }
+  return out;
+}
 function getOperationsCaisse() { return DB.get('mdb_operationsCaisse') || []; }
 function getModelesCaisse() { return DB.get('mdb_modelesCaisse') || []; }
 function getCaisses() { return DB.get('mdb_caisses') || []; }
@@ -8320,8 +8334,8 @@ function _qceCaisseId() {
 }
 function openCaisseQuickEntry() {
   var cid = _qceCaisseId();
+  if (!canUserAccessCaisse(currentUser, cid)) { var _accC = getAccessibleCaisses(); if (_accC.length) cid = _accC[0].id; else { toast('Aucune caisse disponible pour cet utilisateur', 'error'); return; } }
   if (!cid) { toast('Aucune caisse disponible pour cet utilisateur', 'error'); return; }
-  if (!(currentUser && currentUser.isSuperAdmin) && !hasCaisseCentralisee() && currentUser && currentUser.caisseId && cid !== currentUser.caisseId) { toast('Vous ne pouvez enregistrer que dans votre caisse', 'error'); return; }
   try { if (!canAccessSection('tresorerie', 'caisse')) { toast('Acc\u00e8s caisse non autoris\u00e9', 'error'); return; } } catch(e){}
   /* Ouvre le formulaire de saisie caisse directement dans une fen\u00eatre (sans changer de page) */
   window._csModalMode = true;
@@ -13967,10 +13981,10 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
   var groupOps = [];
   var pieceTotal = 0;
   for (var gpi = 0; gpi < ops.length; gpi++) { if (ops[gpi].groupeId === groupeId) { groupOps.push(ops[gpi]); pieceTotal += (ops[gpi].montant || 0); } }
-  /* \u00c9quilibre : pour une r\u00e9partition d'une pi\u00e8ce existante, le total doit \u00e9galer le montant de la pi\u00e8ce */
-  if (groupOps.length > 0 && pieceTotal > 0 && Math.abs(total - pieceTotal) > 0.009) {
-    toast('\u00c9quilibre requis : la r\u00e9partition (' + fmtMoney(total) + ') doit \u00e9galer le montant de la pi\u00e8ce (' + fmtMoney(pieceTotal) + ')', 'error');
-    return;
+  /* \u00c9quilibre : pour une r\u00e9partition d'une pi\u00e8ce existante, on signale le d\u00e9s\u00e9quilibre mais on permet quand m\u00eame de valider */
+  var repartitionDesequilibree = groupOps.length > 0 && pieceTotal > 0 && Math.abs(total - pieceTotal) > 0.009;
+  if (repartitionDesequilibree) {
+    toast('R\u00e9partition d\u00e9s\u00e9quilibr\u00e9e : ' + fmtMoney(total) + ' r\u00e9parti / pi\u00e8ce ' + fmtMoney(pieceTotal) + ' \u2014 valid\u00e9e quand m\u00eame', 'error');
   }
   var moyenPaiementEl = document.getElementById('csMoyen');
   var moyenPaiement = (moyenPaiementEl && moyenPaiementEl.value) ? moyenPaiementEl.value : (masterOp ? (masterOp.moyenPaiement || '') : 'Esp\u00e8ce');
@@ -14097,6 +14111,14 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
     newOps.push(curOp);
   }
   ops = newOps;
+  /* Alerte persistante de r\u00e9partition d\u00e9s\u00e9quilibr\u00e9e : conserv\u00e9e tant que la pi\u00e8ce n'est pas r\u00e9\u00e9quilibr\u00e9e */
+  var alrtes = DB.get('mdb_alertesRepartition') || {};
+  if (repartitionDesequilibree) {
+    alrtes[groupeId] = {groupeId: groupeId, numeroPiece: np, pieceTotal: pieceTotal, total: total, ecart: Math.round((pieceTotal - total) * 100) / 100};
+  } else {
+    if (alrtes[groupeId]) delete alrtes[groupeId];
+  }
+  DB.set('mdb_alertesRepartition', alrtes);
   DB.set('mdb_operationsCaisse', ops);
   DB.set('mdb_acomptesPrets', list);
   if (skipCount) {
@@ -17960,7 +17982,13 @@ function openUserModal(id) {
     for(var _ciT=0; _ciT<_caissesTop.length; _ciT++){ var _selT=(_ucIdTop===_caissesTop[_ciT].id)?' selected':''; body+='<option value="'+_caissesTop[_ciT].id+'"'+_selT+'>'+escH(_caissesTop[_ciT].nom)+' ('+escH(_caissesTop[_ciT].agentNom||'')+')</option>'; }
     body += '</select><small style="color:#92400e;display:block;margin-top:4px;">Obligatoire pour que ses op\u00e9rations n\'aillent pas dans la caisse KKCJ.</small></div>';
     var _uccTop = u && u.caisseCentralisee ? true : false;
-    body += '<div class="form-group"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="fUCaisseCentralisee"'+(_uccTop?' checked':'')+'> Acc\u00e8s \u00e0 la caisse centralis\u00e9e (voir toutes les caisses)</label></div>';
+    body += '<div class="form-group"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="fUCaisseCentralisee"'+(_uccTop?' checked':'')+' onchange="toggleUserCaissesDispo()"> Acc\u00e8s \u00e0 la caisse centralis\u00e9e (voir toutes les caisses)</label></div>';
+    var _ucaTop = (u && u.caissesAutorisees) || [];
+    body += '<div class="form-group" style="background:#f0fdf4;border:1px solid #bbf7d0;padding:10px;border-radius:8px;margin-top:8px;"><label style="font-weight:700;color:#166534;margin-bottom:4px;">Caisses autoris\u00e9es (voir + saisir)</label>';
+    body += '<small style="display:block;color:#166534;margin-bottom:6px;">Cochez les caisses d\u2019autres personnes auxquelles cet utilisateur a le droit d\u2019acc\u00e9der : il verra leurs op\u00e9rations et pourra y faire des saisies. Si une caisse n\u2019est pas coch\u00e9e, il ne la verra pas.</small>';
+    body += '<div id="fUCaissesAutoriseesWrap" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:180px;overflow-y:auto;">';
+    for(var _caT=0; _caT<_caissesTop.length; _caT++){ var _ckA=(_ucaTop.indexOf(_caissesTop[_caT].id)!==-1)?' checked':''; var _isOwn=(_caissesTop[_caT].id===_ucIdTop); body+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;background:#fff;border:1px solid #d1fae5;border-radius:6px;padding:4px 8px;"><input type="checkbox" class="fUCaisseAut" value="'+_caissesTop[_caT].id+'"'+_ckA+(_isOwn?' disabled checked':'')+'> '+escH(_caissesTop[_caT].nom)+' ('+escH(_caissesTop[_caT].agentNom||'')+')</label>'; }
+    body += '</div></div>';
   })();
   body += '<div class="form-row"><div class="form-group"><label>Nom complet *</label><input type="text" id="fUNom" value="' + escH(u ? u.nom : '') + '" list="fUNomList">';
   body += '<datalist id="fUNomList">';
@@ -17993,7 +18021,7 @@ body += '<div id="permTreeRoot"></div></div>';
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button> <button class="btn btn-primary" onclick="saveUser(\'' + (id || '') + '\')">Enregistrer</button>';
   
   openFormModal(u ? 'Modifier l\'utilisateur' : 'Nouvel utilisateur', body, footer);
-  setTimeout(function(){ try { buildPermTree(u || {}); } catch (eBT) { console.error(eBT); } }, 80);
+  setTimeout(function(){ try { buildPermTree(u || {}); toggleUserCaissesDispo(); } catch (eBT) { console.error(eBT); } }, 80);
 }
 function buildPermTree(uP) {
   var root = document.getElementById('permTreeRoot'); if (!root) return;
@@ -18101,6 +18129,19 @@ function setUserType(type) {
   var lbl = wrap ? wrap.querySelector('label') : null;
   if (lbl) lbl.textContent = type === 'petit_admin' ? 'Menus auxquels l\'accès est INTERDIT :' : 'Droits d\'accès par section :';
 }
+function toggleUserCaissesDispo() {
+  var ccCb = document.getElementById('fUCaisseCentralisee');
+  var wrap = document.getElementById('fUCaissesAutoriseesWrap');
+  if (!wrap || !ccCb) return;
+  var disabled = !!ccCb.checked;
+  if (disabled) {
+    wrap.querySelectorAll('input.fUCaisseAut').forEach(function(cb) { if (!cb.disabled) { cb.disabled = true; } });
+    wrap.style.opacity = '0.5';
+  } else {
+    wrap.querySelectorAll('input.fUCaisseAut').forEach(function(cb) { if (!cb.dataset.own) { cb.disabled = false; } });
+    wrap.style.opacity = '1';
+  }
+}
 function saveUser(id) {
   var nom = document.getElementById('fUNom').value.trim();
   var login = document.getElementById('fULogin').value.trim();
@@ -18149,6 +18190,9 @@ function saveUser(id) {
   data.caisseId = caisseSelect ? caisseSelect.value : '';
   var ccCb = document.getElementById('fUCaisseCentralisee');
   data.caisseCentralisee = ccCb ? ccCb.checked : false;
+  var caissesAut = [];
+  document.querySelectorAll('input.fUCaisseAut').forEach(function(cbA) { if (cbA.checked && !cbA.disabled) caissesAut.push(cbA.value); });
+  data.caissesAutorisees = data.caisseCentralisee ? [] : caissesAut;
   var empSelect = document.getElementById('fUEmployee');
   data.employeeId = empSelect ? empSelect.value : '';
   if (!data.caisseId && data.employeeId) {
@@ -20609,12 +20653,33 @@ function renderTresorerieVue(el) {
     html += '</tbody></table></div></div></div>';
     } else {
       var myCaisseId = currentUser && currentUser.caisseId ? currentUser.caisseId : '';
+      var accCaisses = getAccessibleCaisses();
+      if (accCaisses.length > 1) {
+        html += '<div class="section" style="margin-top:20px"><div class="section-header"><h3>Soldes par caisse</h3></div><div class="section-body"><div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>Caisse</th><th>Agent</th><th style="text-align:right">Recettes</th><th style="text-align:right">D\u00e9penses</th><th style="text-align:right">Solde</th></tr></thead><tbody>';
+        var totalGen = 0;
+        for (var ci2 = 0; ci2 < accCaisses.length; ci2++) {
+          var ca2 = accCaisses[ci2];
+          var rec2 = 0, dep2 = 0;
+          for (var oi2 = 0; oi2 < ops.length; oi2++) {
+            if (ops[oi2].caisseId === ca2.id) {
+              if (ops[oi2].sens === 'entree') rec2 += ops[oi2].montant || 0;
+              else dep2 += ops[oi2].montant || 0;
+            }
+          }
+          var sd2 = rec2 - dep2;
+          totalGen += sd2;
+          html += '<tr><td>' + escH(ca2.nom) + '</td><td>' + escH(ca2.agentNom || '-') + '</td><td class="text-right" style="color:var(--success)">' + fmtMoney(rec2) + '</td><td class="text-right" style="color:var(--danger)">' + fmtMoney(dep2) + '</td><td class="text-right fw-600" style="color:' + (sd2 >= 0 ? 'var(--green-600)' : 'var(--red-600)') + '">' + fmtMoney(sd2) + '</td></tr>';
+        }
+        html += '<tr style="font-weight:700"><td colspan="4" class="text-right">Total</td><td class="text-right" style="color:' + (totalGen >= 0 ? 'var(--green-600)' : 'var(--red-600)') + '">' + fmtMoney(totalGen) + '</td></tr>';
+        html += '</tbody></table></div></div></div>';
+      } else {
       var myCa = null;
       for (var mci = 0; mci < caisses.length; mci++) { if (caisses[mci].id === myCaisseId) { myCa = caisses[mci]; break; } }
+      if (!myCa && accCaisses.length > 0) { for (var mci2 = 0; mci2 < caisses.length; mci2++) { if (caisses[mci2].id === accCaisses[0].id) { myCa = caisses[mci2]; break; } } }
       if (myCa) {
         var rec = 0, dep = 0;
         for (var oi = 0; oi < ops.length; oi++) {
-          if (ops[oi].caisseId === myCaisseId) {
+          if (ops[oi].caisseId === myCa.id) {
             if (ops[oi].sens === 'entree') rec += ops[oi].montant || 0;
             else dep += ops[oi].montant || 0;
           }
@@ -20625,6 +20690,7 @@ function renderTresorerieVue(el) {
         html += '<div class="stat-card"><div class="stat-icon red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div><div class="stat-info"><div class="stat-value">' + fmtMoney(dep) + '</div><div class="stat-label">D\u00e9penses</div></div></div>';
         html += '<div class="stat-card"><div class="stat-icon ' + (sd >= 0 ? 'blue' : 'yellow') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg></div><div class="stat-info"><div class="stat-value" style="color:' + (sd >= 0 ? 'var(--green-600)' : 'var(--red-600)') + '">' + fmtMoney(sd) + '</div><div class="stat-label">Solde</div></div></div>';
         html += '</div></div></div>';
+      }
       }
     }
   }
@@ -21299,6 +21365,9 @@ function renderCaisseIn(el) {
   var allOps = getOperationsCaisse();
   var modeles = getModelesCaisse();
   var canSeeAll = hasCaisseCentralisee();
+  var accessibleCaisses = getAccessibleCaisses();
+  var canSeeOthers = !canSeeAll && currentUser && (currentUser.caissesAutorisees || []).length > 0;
+  var multiCaisse = accessibleCaisses.length > 1;
   var myCaisseId = currentUser && currentUser.caisseId ? currentUser.caisseId : '';
   var now = new Date();
   var defMonth = (now.getMonth() < 9 ? '0' : '') + (now.getMonth() + 1);
@@ -21357,13 +21426,14 @@ function renderCaisseIn(el) {
   }
   var html = '<div data-sub="tresorerie.enregistrement">';
   var _modalOnly = !!window._csModalMode;
-  if (!myCaisseId && !canSeeAll) {
+  if (!myCaisseId && !canSeeAll && accessibleCaisses.length === 0) {
     html += '<div class="section"><div class="section-body text-center text-muted" style="padding:40px">Aucune caisse ne vous est assign\u00e9e. Contactez l\'administrateur.</div></div>';
     html += '</div>';
     el.innerHTML = html;
     return;
   }
-  if (!_modalOnly && !canSeeAll && caisseNom) html += '<h3 style="margin:0 0 10px 0;color:var(--gray-600);font-size:15px">Ma caisse : <strong style="color:var(--primary)">' + escH(caisseNom) + '</strong></h3>';
+  if (accessibleCaisses.length === 0) { accessibleCaisses = [{id: myCaisseId, nom: caisseNom, agentNom: caisseAgentNom}]; }
+  if (!_modalOnly && !multiCaisse && caisseNom) html += '<h3 style="margin:0 0 10px 0;color:var(--gray-600);font-size:15px">Ma caisse : <strong style="color:var(--primary)">' + escH(caisseNom) + '</strong></h3>';
 
   /* Auto-cleanup: remove exact fingerprint duplicates - DESACTIVE pour éviter disparition après actualisation (Boue Rosine) */
   if (!window._dedupDone) {
@@ -21421,6 +21491,20 @@ function renderCaisseIn(el) {
     if(_gen) html += '<option value="'+_gen.id+'"'+(window._csViewCaisseId===_gen.id?' selected':'')+'>Caisse G\u00e9n\u00e9rale'+(_gen.nom?' ('+escH(_gen.nom)+')':'')+' (reversements)</option>';
     for(var _oi=0; _oi<allCaisses.length; _oi++){ var _c=allCaisses[_oi]; if(_c.id===myCaisseId || (_gen && _c.id===_gen.id)) continue; html += '<option value="'+_c.id+'"'+(window._csViewCaisseId===_c.id?' selected':'')+'>'+escH(_c.nom)+'</option>'; }
     html += '</select>';
+  } else if (multiCaisse) {
+    var _curCV = caisseTargetId || myCaisseId;
+    var _cvOK = false;
+    for (var _cvk = 0; _cvk < accessibleCaisses.length; _cvk++) { if (accessibleCaisses[_cvk].id === _curCV) { _cvOK = true; break; } }
+    if (!_cvOK && accessibleCaisses.length > 0) { _curCV = accessibleCaisses[0].id; if (window._csViewCaisseId && window._csViewCaisseId !== 'all') window._csViewCaisseId = _curCV; }
+    html += '<select id="csCaisseView" onchange="onCaisseViewChange()" style="margin-left:4px;font-size:12px;padding:4px 8px;border:1px solid var(--gray-300);border-radius:var(--radius);background:#fff">';
+    for (var _cv = 0; _cv < accessibleCaisses.length; _cv++) {
+      var _cvC = accessibleCaisses[_cv];
+      var _cvSel = (_cvC.id === _curCV) ? ' selected' : '';
+      html += '<option value="' + _cvC.id + '"' + _cvSel + '>' + escH(_cvC.nom) + ' (' + escH(_cvC.agentNom || '') + ')</option>';
+    }
+    html += '</select>';
+    if (window._csViewCaisseId && window._csViewCaisseId !== 'all' && window._csViewCaisseId !== _curCV) window._csViewCaisseId = _curCV;
+    if (!window._csViewCaisseId && window._seeAllCaisses) { window._seeAllCaisses = false; }
   } else if (allCaisses.length > 1) {
     html += '<button id="csSeeAllBtn" class="btn btn-outline btn-sm" onclick="toggleSeeAllCaisses()" style="margin-left:4px;color:' + (window._seeAllCaisses ? 'var(--success)' : 'var(--warning)') + ';border-color:' + (window._seeAllCaisses ? 'var(--success)' : 'var(--warning)') + '" title="' + (window._seeAllCaisses ? 'Voir uniquement ma caisse' : 'Voir les op\u00e9rations de toutes les caisses') + '">' + (window._seeAllCaisses ? '&#x2713; Ma caisse' : '&#x1F50D; Toutes caisses') + '</button>';
   }
@@ -21442,6 +21526,7 @@ function renderCaisseIn(el) {
     var opDate = allOps[fi].date || '';
     var ocId2 = allOps[fi].caisseId || '';
     var caisseMatch = window._seeAllCaisses ? true : (caisseTargetId ? (ocId2 === caisseTargetId) : true);
+    if (!canSeeAll && !canUserAccessCaisse(currentUser, ocId2)) { continue; }
     if (!caisseMatch) continue;
     if (allPeriods) { ops.push(allOps[fi]); continue; }
     if (opDate.indexOf(prefix) === 0) ops.push(allOps[fi]);
@@ -21470,6 +21555,16 @@ function renderCaisseIn(el) {
   html += '<button class="btn btn-outline btn-sm" onclick="printFilteredCaisse()" title="Imprimer" style="white-space:nowrap"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg> Imprimer</button>';
   html += '<button class="btn btn-outline btn-sm" onclick="openPeriodeCaissePDF()" style="margin-left:4px">PDF p\u00e9riode</button>';
   html += '</div>';
+  var alrtesRep = DB.get('mdb_alertesRepartition') || {};
+  var disEqAlerte = null;
+  for (var _ak2 in alrtesRep) {
+    if (alrtesRep[_ak2] && alrtesRep[_ak2].ecart) { disEqAlerte = alrtesRep[_ak2]; break; }
+  }
+  if (disEqAlerte) {
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:10px 12px;background:#fef2f2;border:2px solid #dc2626;border-radius:var(--radius);font-size:12px">';
+    html += '<span style="font-size:16px">&#9888;&#65039;</span><div><strong style="color:#b91c1c">R\u00e9partition d\u00e9s\u00e9quilibr\u00e9e :</strong><span style="color:#7f1d1d"> une remise d\u2019acomptes/pr\u00eats n\u2019\u00e9gale pas son montant donn\u00e9 (pi\u00e8ce ' + escH(disEqAlerte.numeroPiece || '-') + ' \u2014 ' + fmtMoney(disEqAlerte.pieceTotal || 0) + ' donn\u00e9s / ' + fmtMoney(disEqAlerte.total || 0) + ' r\u00e9partis). Ouvrez la pi\u00e8ce et r\u00e9partissez le reliquat pour r\u00e9\u00e9quilibrer.</span></div>';
+    html += '</div>';
+  }
   html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
   html += '<div style="flex:1;min-width:140px;background:#fff;border:1px solid var(--gray-200);border-radius:8px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--gray-400);font-weight:600">Solde d\u00e9but</span><span style="font-size:18px;font-weight:700;color:' + (soldeBefore >= 0 ? 'var(--gray-700)' : 'var(--danger)') + '">' + fmtMoney(soldeBefore) + '</span></div>';
   html += '<div style="flex:1;min-width:140px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--green);font-weight:600">Recettes</span><span style="font-size:18px;font-weight:700;color:#16a34a">' + fmtMoney(totalEntrees) + '</span></div>';
@@ -21562,8 +21657,16 @@ function renderCaisseIn(el) {
     html += '<div style="margin-bottom:6px"><label style="' + lbl + '">Caisse</label><select id="csCaisseId" onchange="onStaticCaisseChange()" style="' + fld + '"><option value="">--</option>';
     for (var cs = 0; cs < allCaisses.length; cs++) html += '<option value="' + allCaisses[cs].id + '"' + (allCaisses[cs].id === _formCaisseId ? ' selected' : '') + '>' + escH(allCaisses[cs].nom) + '</option>';
     html += '</select></div>';
+  } else if (multiCaisse) {
+    var _fcId = (caisseTargetId && canUserAccessCaisse(currentUser, caisseTargetId)) ? caisseTargetId : myCaisseId;
+    if (!_fcId && accessibleCaisses.length > 0) _fcId = accessibleCaisses[0].id;
+    html += '<div style="margin-bottom:6px"><label style="' + lbl + '">Caisse</label><select id="csCaisseId" onchange="onStaticCaisseChange()" style="' + fld + '">';
+    for (var cs2 = 0; cs2 < accessibleCaisses.length; cs2++) html += '<option value="' + accessibleCaisses[cs2].id + '"' + (accessibleCaisses[cs2].id === _fcId ? ' selected' : '') + '>' + escH(accessibleCaisses[cs2].nom) + '</option>';
+    html += '</select></div>';
   } else if (myCaisseId) {
     html += '<input type="hidden" id="csCaisseId" value="' + escH(myCaisseId) + '">';
+  } else if (accessibleCaisses.length > 0) {
+    html += '<input type="hidden" id="csCaisseId" value="' + escH(accessibleCaisses[0].id) + '">';
   } else {
     html += '<input type="hidden" id="csCaisseId" value="">';
   }
@@ -25066,7 +25169,7 @@ function saveCaisse(id, asDraft) {
   var tiers = document.getElementById('csTiers') ? document.getElementById('csTiers').value.trim() : '';
   var remettant = document.getElementById('csRemettantContainerHidden') ? document.getElementById('csRemettantContainerHidden').value : '';
   var executant = document.getElementById('csExecutant') ? document.getElementById('csExecutant').value.trim() : '';
-  if (!hasCaisseCentralisee() && currentUser.caisseId && caisseId !== currentUser.caisseId) { toast('Vous ne pouvez enregistrer que dans votre caisse', 'error'); return; }
+  if (!canUserAccessCaisse(currentUser, caisseId)) { toast('Vous ne pouvez enregistrer que dans une caisse qui vous est autoris\u00e9e', 'error'); return; }
   if (typeOp === 'transfert') {
     if (montant <= 0) { toast('Le montant est obligatoire', 'error'); return; }
   } else {
@@ -25340,9 +25443,10 @@ function deleteCaisse(id) {
   for (var oi = 0; oi < ops.length; oi++) { if (ops[oi].id === id) { opToCheck = ops[oi]; break; } }
   if (!_requireAdminValidationForReversed(opToCheck)) return;
   if (!window.confirm('Supprimer cette op\u00e9ration ?')) return;
-  if (!hasCaisseCentralisee() && currentUser.caisseId) {
+  if (opToCheck && !canUserAccessCaisse(currentUser, opToCheck.caisseId)) {
+    // double-check par id pour robustesse
     var found = false;
-    for (var di = 0; di < ops.length; di++) { if (ops[di].id === id && ops[di].caisseId === currentUser.caisseId) { found = true; break; } }
+    for (var di = 0; di < ops.length; di++) { if (ops[di].id === id && canUserAccessCaisse(currentUser, ops[di].caisseId)) { found = true; break; } }
     if (!found) { toast('Op\u00e9ration non autoris\u00e9e', 'error'); return; }
   }
   /* Block deletion of received transfers unless admin validation code is provided */
@@ -25421,11 +25525,11 @@ function deleteSelectedCaisse(){
   var cbs = document.querySelectorAll('.cs-cb:checked');
   if(cbs.length===0) return;
   // Vérifier appartenance caisse avant suppression en masse
-  if(!hasCaisseCentralisee() && currentUser && currentUser.caisseId){
+  if(!hasCaisseCentralisee() && currentUser){
     for(var _chk=0; _chk<cbs.length; _chk++){
       var _id=cbs[_chk].getAttribute('data-id');
       var _op=null; var _all=getOperationsCaisse(); for(var _fi=0; _fi<_all.length; _fi++){ if(_all[_fi].id===_id){ _op=_all[_fi]; break; } }
-      if(_op && _op.caisseId && _op.caisseId!==currentUser.caisseId){ toast('Suppression refusée : certaines pièces n\'appartiennent pas à votre caisse', 'error'); return; }
+      if(_op && _op.caisseId && !canUserAccessCaisse(currentUser, _op.caisseId)){ toast('Suppression refusée : certaines pièces n\'appartiennent pas à une caisse autorisée', 'error'); return; }
     }
   }
   var bulkOps = getOperationsCaisse();
