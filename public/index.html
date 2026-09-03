@@ -284,6 +284,7 @@ tbody tr:hover{background:var(--gray-50)}
 .jv-td-date{white-space:nowrap;color:#475569;font-size:12px}
 .jv-td-num{white-space:nowrap}
 .jv-fact-num{font-weight:700;color:#2563eb;font-size:12px;background:#eff6ff;padding:2px 8px;border-radius:4px}
+.jv-bl-num{font-weight:600;color:#0f766e;font-size:11px;background:#f0fdfa;padding:2px 8px;border-radius:4px}
 .jv-td-art{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#475569;font-size:12px}
 .jv-td-right{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
 .jv-tva{color:#64748b;font-size:11.5px}
@@ -10861,6 +10862,14 @@ function printJournalVentess() { _exportJournalPDF(true); }
 function exportJournalVentess() { _exportJournalPDF(false); }
 function _exportJournalPDF(asPrint) {
   var factures = getFactures();
+  var bls = getBLs();
+  var blByFac = {};
+  for (var bi = 0; bi < bls.length; bi++) {
+    if (bls[bi].factureId) {
+      if (!blByFac[bls[bi].factureId]) blByFac[bls[bi].factureId] = [];
+      blByFac[bls[bi].factureId].push(bls[bi]);
+    }
+  }
   var fc = (document.getElementById('journClient') || document.getElementById('facFilterClient')) ? (document.getElementById('journClient') || document.getElementById('facFilterClient')).value : '';
   var curYr = new Date().getFullYear();
   var defaultFrom = curYr + '-01-01';
@@ -10875,49 +10884,127 @@ function _exportJournalPDF(asPrint) {
     if (dTo && f.dateEmission > dTo) continue;
     filtered.push(f);
   }
-  var totalHT = 0, totalTVA = 0, totalTTC = 0, totalPaid = 0, totalUnpaid = 0;
-  var rows = '';
-  for (var k = 0; k < filtered.length; k++) {
-    var f2 = filtered[k];
-    var cl2 = getClientById(f2.clientId);
-    var stTxt = f2.statut === 'payee' ? 'Pay\u00e9e' : (f2.statut === 'validee' ? 'Valid\u00e9e' : (f2.statut === 'partielle' ? 'Partielle' : 'Brouillon'));
-    var ttc = f2.total || 0;
-    var ht = f2.totalHT || (f2.tvaActive ? Math.round(ttc / (1 + (f2.tauxTvaDefaut || f2.tauxTva || 18) / 100)) : ttc);
-    var tva = Math.max(0, ttc - ht);
-    totalTTC += ttc; totalHT += ht; totalTVA += tva;
-    totalPaid += f2.montantPaye || 0;
-    totalUnpaid += Math.max(0, ttc - (f2.montantPaye || 0));
-    var artList = [];
-    var qteFact = 0;
-    if (f2.lignes && f2.lignes.length > 0) {
-      for (var li = 0; li < f2.lignes.length; li++) {
-        var l = f2.lignes[li];
-        var des = l.designation || getArticleLabel(l.articleId) || 'Article';
-        var q = l.quantite || 0;
-        qteFact += q;
-        artList.push(des + ' (x' + q + ')');
+  filtered.sort(function(a, b) { return (a.dateEmission || '').localeCompare(b.dateEmission || ''); });
+  var groups = {};
+  for (var gi = 0; gi < filtered.length; gi++) {
+    var key = (filtered[gi].dateEmission || '').substring(0, 7);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(filtered[gi]);
+  }
+  var MONTHS = ['Janvier','F\u00e9vrier','Mars','Avril','Mai','Juin','Juillet','Ao\u00fbt','Septembre','Octobre','Novembre','D\u00e9cembre'];
+  function monthLabel(key) {
+    var p = (key || '').split('-');
+    if (p.length !== 2) return key;
+    var mi = parseInt(p[1], 10) - 1;
+    return (MONTHS[mi] || key) + ' ' + p[0];
+  }
+  function factureBLs(f2) {
+    var nums = [];
+    var list = blByFac[f2.id] || [];
+    for (var x0 = 0; x0 < list.length; x0++) { var nb = list[x0].numero || '-'; if (nums.indexOf(nb) === -1) nums.push(nb); }
+    var ids = f2.blIds || (f2.blId ? [f2.blId] : []);
+    for (var x1 = 0; x1 < ids.length; x1++) {
+      for (var x2 = 0; x2 < bls.length; x2++) {
+        if (bls[x2].id === ids[x1]) { var nb2 = bls[x2].numero || '-'; if (nums.indexOf(nb2) === -1) nums.push(nb2); break; }
       }
     }
-    rows += '<tr>'
-      + '<td>' + escH(f2.numero) + '</td>'
-      + '<td>' + escH(cl2 ? cl2.nom : '-') + '</td>'
-      + '<td>' + fmtDate(f2.dateEmission) + '</td>'
-      + '<td>' + fmtDate(f2.echeance) + '</td>'
-      + '<td>' + escH(artList.join(', ') || '-') + '</td>'
-      + '<td style="text-align:right">' + qteFact + '</td>'
-      + '<td style="text-align:right">' + fmtMoney(ht) + '</td>'
-      + '<td style="text-align:right">' + fmtMoney(tva) + '</td>'
-      + '<td style="text-align:right">' + fmtMoney(ttc) + '</td>'
-      + '<td style="text-align:right">' + fmtMoney(f2.montantPaye || 0) + '</td>'
-      + '<td>' + escH(stTxt) + '</td>'
-      + '</tr>';
+    return nums.join(', ') || '-';
+  }
+  var totalHT = 0, totalTVA = 0, totalTTC = 0, totalPaid = 0, totalUnpaid = 0;
+  var totalQty = 0;
+  var rows = '';
+  var groupKeys = Object.keys(groups).sort();
+  for (var gk = 0; gk < groupKeys.length; gk++) {
+    var key = groupKeys[gk];
+    var gf = groups[key];
+    var pHT = 0, pTVA = 0, pTTC = 0, pPaid = 0, pUnpaid = 0, pQty = 0;
+    rows += '<tr class="period"><td colspan="12">' + escH(monthLabel(key)) + '</td></tr>';
+    for (var k = 0; k < gf.length; k++) {
+      var f2 = gf[k];
+      var cl2 = getClientById(f2.clientId);
+      var stClass = f2.statut === 'payee' ? 'st-payee' : (f2.statut === 'partielle' ? 'st-part' : (f2.statut === 'brouillon' ? 'st-brouillon' : 'st-val'));
+      var stTxt = f2.statut === 'payee' ? 'Pay\u00e9e' : (f2.statut === 'validee' ? 'Valid\u00e9e' : (f2.statut === 'partielle' ? 'Partielle' : 'Brouillon'));
+      var ttc = f2.total || 0;
+      var ht = f2.totalHT || (f2.tvaActive ? Math.round(ttc / (1 + (f2.tauxTvaDefaut || f2.tauxTva || 18) / 100)) : ttc);
+      var tva = Math.max(0, ttc - ht);
+      var artList = [];
+      var qteFact = 0;
+      if (f2.lignes && f2.lignes.length > 0) {
+        for (var li = 0; li < f2.lignes.length; li++) {
+          var l = f2.lignes[li];
+          var des = l.designation || getArticleLabel(l.articleId) || 'Article';
+          var q = l.quantite || 0;
+          qteFact += q;
+          artList.push(des + ' (x' + q + ')');
+        }
+      }
+      pHT += ht; pTVA += tva; pTTC += ttc; pPaid += (f2.montantPaye || 0); pQty += qteFact;
+      pUnpaid += Math.max(0, ttc - (f2.montantPaye || 0));
+      var blNums = factureBLs(f2);
+      rows += '<tr>'
+        + '<td style="font-weight:600;color:#1e3a8a">' + escH(f2.numero) + '</td>'
+        + '<td>' + escH(cl2 ? cl2.nom : '-') + '</td>'
+        + '<td style="color:#0f766e">' + escH(blNums) + '</td>'
+        + '<td>' + fmtDate(f2.dateEmission) + '</td>'
+        + '<td>' + fmtDate(f2.echeance) + '</td>'
+        + '<td>' + escH(artList.join(', ') || '-') + '</td>'
+        + '<td style="text-align:right">' + qteFact + '</td>'
+        + '<td style="text-align:right">' + fmtMoney(ht) + '</td>'
+        + '<td style="text-align:right">' + fmtMoney(tva) + '</td>'
+        + '<td style="text-align:right;font-weight:700">' + fmtMoney(ttc) + '</td>'
+        + '<td style="text-align:right">' + fmtMoney(f2.montantPaye || 0) + '</td>'
+        + '<td><span class="st ' + stClass + '">' + escH(stTxt) + '</span></td>'
+        + '</tr>';
+    }
+    totalHT += pHT; totalTVA += pTVA; totalTTC += pTTC; totalPaid += pPaid; totalUnpaid += pUnpaid; totalQty += pQty;
+    rows += '<tr class="subtotal"><td colspan="6">Sous-total ' + escH(monthLabel(key)) + '</td>'
+      + '<td style="text-align:right">' + pQty + '</td>'
+      + '<td style="text-align:right">' + fmtMoney(pHT) + '</td>'
+      + '<td style="text-align:right">' + fmtMoney(pTVA) + '</td>'
+      + '<td style="text-align:right;font-weight:700">' + fmtMoney(pTTC) + '</td>'
+      + '<td style="text-align:right">' + fmtMoney(pPaid) + '</td>'
+      + '<td style="text-align:right">' + fmtMoney(pUnpaid) + '</td></tr>';
   }
   var title = 'Journal des ventes' + (dFrom || dTo ? ' du ' + (dFrom ? fmtDate(dFrom) : '...') + ' au ' + (dTo ? fmtDate(dTo) : '...') : '');
   var header = getCompanyHeader();
-  var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + title + '</title><style>body{font-family:Arial,sans-serif;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse;border:1px solid #cbd5e1}th,td{border:1px solid #cbd5e1;padding:6px 8px;text-align:left;font-size:10px}th{background:#f1f5f9;font-weight:700}.totals{margin-top:14px;padding:10px;background:#f8fafc;border:1px solid #cbd5e1;font-weight:700;font-size:11px;display:flex;gap:16px;flex-wrap:wrap}.hdr{margin-bottom:16px}.hdr h2{margin:0 0 4px;font-size:14px}</style></head><body>';
+  var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + title + '</title><style>'
+    + 'body{font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Arial,sans-serif;font-size:12px;margin:18px;color:#1f2937}'
+    + 'h1,h2,h3{font-family:inherit}'
+    + '.hdr{margin-bottom:14px;border-bottom:2px solid #1d4ed8;padding-bottom:10px}'
+    + '.hdr h2{margin:8px 0 0;font-size:16px;color:#1d4ed8}'
+    + 'table{width:100%;border-collapse:collapse;box-shadow:0 1px 3px rgba(0,0,0,.08)}'
+    + 'th,td{border:1px solid #e2e8f0;padding:6px 7px;text-align:left;font-size:11px}'
+    + 'thead th{background:linear-gradient(180deg,#1e3a8a,#1d4ed8);color:#fff;font-weight:700;border-color:#1d4ed8}'
+    + 'tbody tr:nth-child(even){background:#f8fafc}'
+    + 'tr.period td{background:linear-gradient(180deg,#dbeafe,#bfdbfe);color:#1e3a8a;font-weight:700;font-size:12px;border-color:#bfdbfe}'
+    + 'tr.subtotal td{background:#eff6ff;color:#1e40af;font-weight:700;border-top:2px solid #93c5fd;border-bottom:2px solid #93c5fd}'
+    + 'tr.total td{background:linear-gradient(180deg,#1e3a8a,#1d4ed8);color:#fff;font-weight:700;font-size:12px}'
+    + 'span.st{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600}'
+    + 'span.st-payee{background:#d1fae5;color:#065f46}'
+    + 'span.st-val{background:#dbeafe;color:#1e40af}'
+    + 'span.st-part{background:#fef3c7;color:#92400e}'
+    + 'span.st-brouillon{background:#e2e8f0;color:#475569}'
+    + '.totals{margin-top:16px;padding:12px;background:linear-gradient(180deg,#eff6ff,#dbeafe);border:1px solid #bfdbfe;border-left:4px solid #1d4ed8;border-radius:6px;font-weight:700;font-size:12px;display:flex;gap:20px;flex-wrap:wrap;color:#1e3a8a}'
+    + '.totals span b{color:#111827}'
+    + '.foot{margin-top:8px;font-size:10px;color:#64748b;text-align:right}'
+    + '@media print{thead{display:table-header-group}tr{page-break-inside:avoid}}'
+    + '</style></head><body>';
   html += '<div class="hdr">' + header + '<h2>' + title + '</h2></div>';
-  html += '<table><thead><tr><th>N\u00fam\u00e9ro</th><th>Client</th><th>Date \u00e9mission</th><th>\u00c9ch\u00e9ance</th><th>Articles</th><th style="text-align:right">Qt\u00e9</th><th style="text-align:right">Total HT</th><th style="text-align:right">TVA</th><th style="text-align:right">Total TTC</th><th style="text-align:right">Pay\u00e9</th><th>Statut</th></tr></thead><tbody>' + rows + '</tbody></table>';
-  html += '<div class="totals"><span>Total HT : ' + fmtMoney(totalHT) + '</span> <span>Total TVA : ' + fmtMoney(totalTVA) + '</span> <span>Total TTC : ' + fmtMoney(totalTTC) + '</span> <span>Encaiss\u00e9 : ' + fmtMoney(totalPaid) + '</span> <span>\u00c0 encaisser : ' + fmtMoney(totalUnpaid) + '</span></div>';
+  html += '<table><thead><tr>'
+    + '<th>N\u00b0&nbsp;facture</th><th>Client</th><th>N\u00b0&nbsp;BL</th><th>Date&nbsp;\u00e9mission</th><th>\u00c9ch\u00e9ance</th>'
+    + '<th>Articles factur\u00e9s</th><th style="text-align:right">Qt\u00e9</th><th style="text-align:right">Total&nbsp;HT</th>'
+    + '<th style="text-align:right">TVA</th><th style="text-align:right">Total&nbsp;TTC</th><th style="text-align:right">Pay\u00e9</th><th>Statut</th>'
+    + '</tr></thead><tbody>' + rows
+    + '<tr class="total"><td colspan="6">TOTAL G\u00c9N\u00c9RAL</td>'
+    + '<td style="text-align:right">' + totalQty + '</td>'
+    + '<td style="text-align:right">' + fmtMoney(totalHT) + '</td>'
+    + '<td style="text-align:right">' + fmtMoney(totalTVA) + '</td>'
+    + '<td style="text-align:right">' + fmtMoney(totalTTC) + '</td>'
+    + '<td style="text-align:right">' + fmtMoney(totalPaid) + '</td>'
+    + '<td style="text-align:right">' + fmtMoney(totalUnpaid) + '</td></tr>'
+    + '</tbody></table>';
+  html += '<div class="totals"><span>Total HT : <b>' + fmtMoney(totalHT) + '</b></span> <span>Total TVA : <b>' + fmtMoney(totalTVA) + '</b></span> <span>Total TTC : <b>' + fmtMoney(totalTTC) + '</b></span> <span>Encaiss\u00e9 : <b>' + fmtMoney(totalPaid) + '</b></span> <span>\u00c0 encaisser : <b>' + fmtMoney(totalUnpaid) + '</b></span></div>';
+  html += '<div class="foot">G\u00e9n\u00e9r\u00e9 le ' + fmtDate(getToday()) + ' &mdash; Montabbord</div>';
   html += '<script>window.onload=function(){setTimeout(function(){window.print();},300);}</' + 'script></body></html>';
   if (asPrint) {
     var w = window.open('', '_blank');
@@ -11158,6 +11245,7 @@ function renderJournal() {
   html += '<thead><tr>';
   html += '<th class="jv-th-check"><input type="checkbox" id="journCheckAll" onchange="toggleAllJournalChecks()"></th>';
   html += '<th class="jv-th-client">Client</th>';
+  html += '<th class="jv-th-num">N° BL</th>';
   html += '<th class="jv-th-date">Date</th>';
   html += '<th class="jv-th-date">Échéance</th>';
   html += '<th class="jv-th-num">N° facture</th>';
@@ -11179,6 +11267,23 @@ function renderJournal() {
   if (fjEl) fjEl.innerHTML = html; else document.getElementById('content').innerHTML = html;
   populateClientSelect('journClient', '');
   filterJournal();
+}
+
+function factureBLOnScreen(f2) {
+  var bls = getBLs();
+  var nums = [];
+  var ids = f2.blIds || (f2.blId ? [f2.blId] : []);
+  for (var a = 0; a < ids.length; a++) {
+    for (var b = 0; b < bls.length; b++) {
+      if (bls[b].id === ids[a]) { var nb = bls[b].numero || '-'; if (nums.indexOf(nb) === -1) nums.push(nb); break; }
+    }
+  }
+  if (nums.length === 0) {
+    for (var c = 0; c < bls.length; c++) {
+      if (bls[c].factureId === f2.id) { var nb3 = bls[c].numero || '-'; if (nums.indexOf(nb3) === -1) nums.push(nb3); }
+    }
+  }
+  return nums.join(', ') || '-';
 }
 
 function filterJournal() {
@@ -11254,6 +11359,7 @@ function filterJournal() {
     bodyHtml += '<tr class="jv-row">';
     bodyHtml += '<td class="jv-td-check"><input type="checkbox" class="journ-check" data-id="' + f2.id + '" onchange="updateJournalDelBtn()"></td>';
     bodyHtml += '<td class="jv-td-client"><div class="jv-client-info"><div class="jv-client-avatar">' + (cl ? escH(cl.nom.charAt(0).toUpperCase()) : '?') + '</div><div><div class="jv-client-name">' + escH(cl ? cl.nom : '-') + '</div></div></div></td>';
+    bodyHtml += '<td class="jv-td-num"><span class="jv-bl-num">' + escH(factureBLOnScreen(f2)) + '</span></td>';
     bodyHtml += '<td class="jv-td-date">' + fmtDate(f2.dateEmission) + '</td>';
     bodyHtml += '<td class="jv-td-date">' + fmtDate(f2.echeance) + '</td>';
     bodyHtml += '<td class="jv-td-num"><span class="jv-fact-num">' + escH(f2.numero) + '</span></td>';
@@ -11266,7 +11372,7 @@ function filterJournal() {
     bodyHtml += '<td class="jv-td-status"><span class="jv-badge ' + stBadge + '">' + escH(f2.statut === 'payee' ? 'Payée' : (f2.statut === 'validee' ? 'Validée' : (f2.statut === 'partielle' ? 'Partielle' : f2.statut))) + '</span></td>';
     bodyHtml += '</tr>';
   }
-  if (filtered.length === 0) bodyHtml = '<tr><td colspan="12" class="jv-empty"><div class="jv-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div><div class="jv-empty-text">Aucune facture pour cette période</div></td></tr>';
+  if (filtered.length === 0) bodyHtml = '<tr><td colspan="13" class="jv-empty"><div class="jv-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div><div class="jv-empty-text">Aucune facture pour cette période</div></td></tr>';
   document.getElementById('journBody').innerHTML = bodyHtml;
 }
 
