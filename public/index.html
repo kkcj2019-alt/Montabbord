@@ -12349,35 +12349,96 @@ function splitBCField(bcVal) {
   if (trimmed.indexOf('/') !== -1) { return trimmed.split('/').map(function(p){ return p.trim(); }).filter(function(p){ return p; }); }
   return [bcVal];
 }
+function _normArtKey(s){
+  return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+}
+function _levDist(a,b){
+  if(a===b) return 0;
+  var al=a.length, bl=b.length;
+  if(al===0) return bl;
+  if(bl===0) return al;
+  if(Math.abs(al-bl)>3) return 99;
+  var dp=new Array(bl+1);
+  for(var j=0;j<=bl;j++) dp[j]=j;
+  for(var i=1;i<=al;i++){
+    var prev=dp[0]; dp[0]=i;
+    for(var j=1;j<=bl;j++){
+      var tmp=dp[j];
+      var cost=a.charCodeAt(i-1)===b.charCodeAt(j-1)?0:1;
+      dp[j]=Math.min(dp[j]+1, dp[j-1]+1, prev+cost);
+      prev=tmp;
+    }
+  }
+  return dp[bl];
+}
 function matchArticle(desig, articles) {
-  if (!desig || !articles) return null;
-  var dl = desig.toLowerCase().trim();
-  for (var i = 0; i < articles.length; i++) {
-    var a = articles[i];
-    if (a.code && dl === a.code.toLowerCase().trim()) return a;
-    if (a.designation && dl === a.designation.toLowerCase().trim()) return a;
+  if (!desig || !articles || !articles.length) return null;
+  var dl=_normArtKey(desig);
+  if(!dl) return null;
+  var dlTokens=dl.split(' ');
+  // 1. exact normalized
+  for(var i=0;i<articles.length;i++){
+    var a=articles[i];
+    var ac=_normArtKey(a.code||'');
+    var ad=_normArtKey(a.designation||'');
+    if(ac && dl===ac) return a;
+    if(ad && dl===ad) return a;
   }
-  for (var j = 0; j < articles.length; j++) {
-    var b = articles[j];
-    var bc = b.code ? b.code.toLowerCase().trim() : '';
-    var bd = b.designation ? b.designation.toLowerCase().trim() : '';
-    if (bc && dl.indexOf(bc) !== -1) return b;
-    if (bd && dl.indexOf(bd) !== -1) return b;
-    if (bd && bd.indexOf(dl) !== -1) return b;
+  // 2. substring normalized (code or desig contained)
+  for(var j=0;j<articles.length;j++){
+    var b=articles[j];
+    var bc=_normArtKey(b.code||'');
+    var bd=_normArtKey(b.designation||'');
+    if(bc && dl.indexOf(bc)!==-1) return b;
+    if(bd && dl.indexOf(bd)!==-1) return b;
+    if(bd && bd.indexOf(dl)!==-1) return b;
   }
-  var words = dl.split(/\s+/);
-  if (words.length >= 3) {
-    for (var wl = words.length; wl >= 2; wl--) {
-      for (var ws = 0; ws <= words.length - wl; ws++) {
-        var phrase = words.slice(ws, ws + wl).join(' ');
-        for (var x = 0; x < articles.length; x++) {
-          var c = articles[x];
-          var cc = c.code ? c.code.toLowerCase().trim() : '';
-          var cd = c.designation ? c.designation.toLowerCase().trim() : '';
-          if ((cc && phrase.indexOf(cc) !== -1) || (cd && phrase.indexOf(cd) !== -1)) return c;
+  // 3. token overlap (au moins 2 mots ou 70% des mots de l'article)
+  var best=null, bestScore=0;
+  for(var k=0;k<articles.length;k++){
+    var art=articles[k];
+    var ad2=_normArtKey(art.designation||'');
+    if(!ad2) continue;
+    var atoks=ad2.split(' ');
+    if(atoks.length===1 && atoks[0].length<3) continue;
+    var hit=0;
+    for(var t=0;t<atoks.length;t++) if(dl.indexOf(atoks[t])!==-1) hit++;
+    var ratio=hit/atoks.length;
+    if(atoks.length>=2 && hit>=2 && ratio>=0.66 && ratio>bestScore){ best=art; bestScore=ratio; }
+    else if(atoks.length===1 && hit===1 && ad2.length>=4){ best=art; bestScore=1; }
+    var ac2=_normArtKey(art.code||'');
+    if(ac2){
+      var ctoks=ac2.split(' ');
+      var chit=0;
+      for(var ct=0;ct<ctoks.length;ct++) if(dl.indexOf(ctoks[ct])!==-1) chit++;
+      var cratio=chit/ctoks.length;
+      if(cratio===1 && cratio>bestScore){ best=art; bestScore=cratio; }
+    }
+  }
+  if(best) return best;
+  // 4. phrase glissante mots >=2
+  if(dlTokens.length>=3){
+    for(var wl=dlTokens.length;wl>=2;wl--){
+      for(var ws=0;ws<=dlTokens.length-wl;ws++){
+        var phrase=dlTokens.slice(ws,ws+wl).join(' ');
+        for(var x=0;x<articles.length;x++){
+          var c=articles[x];
+          var cc=_normArtKey(c.code||'');
+          var cd2=_normArtKey(c.designation||'');
+          if((cc && phrase.indexOf(cc)!==-1) || (cd2 && phrase.indexOf(cd2)!==-1)) return c;
+          if(cc && _levDist(phrase, cc)<=1) return c;
+          if(cd2 && _levDist(phrase, cd2)<=2) return c;
         }
       }
     }
+  }
+  // 5. Levenshtein sur nom complet (typo legere)
+  for(var y=0;y<articles.length;y++){
+    var art2=articles[y];
+    var ad3=_normArtKey(art2.designation||'');
+    if(ad3 && _levDist(dl, ad3)<=2) return art2;
+    var ac3=_normArtKey(art2.code||'');
+    if(ac3 && _levDist(dl, ac3)<=1) return art2;
   }
   return null;
 }
@@ -12550,7 +12611,7 @@ function renderImportPreview() {
   for (var fi2 = 0; fi2 < _factOrder.length; fi2++) {
     var _groupKey = _factOrder[fi2];
     var _indices = _factGroups[_groupKey];
-    var _isFactGroup = _groupKey.indexOf('__noline_') === -1 && _indices.length > 1;
+    var _isFactGroup = _groupKey.indexOf('__noline_') === -1;
     var _groupHT = 0, _groupTVA = 0, _groupTTC = 0;
     for (var gi = 0; gi < _indices.length; gi++) {
       var _gl = lignes[_indices[gi]];
