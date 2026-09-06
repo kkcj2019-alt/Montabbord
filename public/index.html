@@ -945,6 +945,8 @@ table tbody tr{transition:background .14s ease}
 </div>
 </div>
 </div>
+<div id="offlineBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:linear-gradient(90deg,#d97706,#f59e0b);color:#fff;padding:10px 16px;text-align:center;font-weight:700;font-size:13px;z-index:10000;box-shadow:0 2px 8px rgba(0,0,0,0.15);letter-spacing:0.02em">⚠️ Mode hors-ligne — Quota Supabase dépassé (43Go/5Go). Vos saisies sont enregistrées localement et seront synchronisées au 21/09.<button onclick="localStorage.removeItem('mdb_offlineMode');window._offlineMode=false;document.getElementById('offlineBanner').style.display='none';document.getElementById('app').style.paddingTop='';location.reload()" style="margin-left:12px;background:#fff;color:#92400e;border:none;padding:5px 12px;border-radius:8px;font-weight:800;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,0.1)">🔄 Réessayer</button></div>
+<script>try{ if(localStorage.getItem('mdb_offlineMode')==='1' || window._offlineMode){ var b=document.getElementById('offlineBanner'); if(b){ b.style.display='block'; var app=document.getElementById('app'); if(app) app.style.paddingTop='44px'; } } window.addEventListener('load', function(){ try{ if(localStorage.getItem('mdb_offlineMode')==='1'){ var b2=document.getElementById('offlineBanner'); if(b2){ b2.style.display='block'; var app2=document.getElementById('app'); if(app2) app2.style.paddingTop='44px'; } } }catch(e){} }); }catch(e){}</script>
 <div id="app" style="display:none">
 <div id="sidebarOverlay" onclick="closeSidebar()"></div>
 <aside id="sidebar">
@@ -1363,6 +1365,7 @@ window.addEventListener('pagehide', function() {
 });
 
 function pushToCloud() {
+  if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') { /* Hors-ligne : file d'attente locale, synchro au 21/09 */ return; }
   if (!currentUser || !currentUser.id) {
     /* Pas encore connecté : on réessaie automatiquement après la connexion */
     if (Object.keys(_dirtyKeys).length > 0) { clearTimeout(_pushTimer); _pushTimer = setTimeout(pushToCloud, 2500); }
@@ -1715,6 +1718,7 @@ function pushBackupToCloud(slotIndex) {
 var _lastSilentBackup = 0;
 function silentCloudBackup() {
   try {
+    if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
     if (!currentUser || !currentUser.id || !firebaseDb) return;
     if (Date.now() - _lastSilentBackup < 55 * 60 * 1000) return;
     _lastSilentBackup = Date.now();
@@ -3609,6 +3613,7 @@ function doFirebaseLoginInner() {
         currentUser = {id: adminUid, nom: found.nom, email: found.email || '', login: found.login, isAdmin: found.isAdmin || false, adminType: found.adminType || (found.isAdmin ? 'admin' : 'user'), deniedPages: found.deniedPages || [], isSuperAdmin: false, sections: found.sections || {}, subUserId: found.id, caisseId: found.caisseId || '', employeeId: found.employeeId || '', caisseCentralisee: found.caisseCentralisee || false, caissesAutorisees: found.caissesAutorisees || []};
           DB.set('mdb_currentUser', found.id);
           DB.set('mdb_enterpriseUid', adminUid);
+          try{ localStorage.setItem('mdb_lastLogin', JSON.stringify({entId:entId, login:login, pass:pass, user:found})); localStorage.setItem('mdb_lastLoginUid', adminUid); localStorage.removeItem('mdb_offlineMode'); }catch(_eL){}
           if(window._mdbFatal) _mdbFatal('[6] Donn\u00e9es copi\u00e9es \u2192 enregistrement session...');
           startUniqueSession(adminUid, found.id, true);
           errEl.style.display = 'none';
@@ -3621,13 +3626,47 @@ function doFirebaseLoginInner() {
     }).catch(function(e) {
       clearTimeout(loginTimeout);
       console.error('[Login] Erreur promise:', e);
+      var isQuota = e && e.message && (e.message.indexOf('quota')!==-1 || e.message.indexOf('429')!==-1 || e.message.indexOf('Failed to fetch')!==-1 || e.message.indexOf('NetworkError')!==-1);
+      if (!isQuota && e && e.code && (e.code==='resource-exhausted' || e.code==='quota-exceeded')) isQuota = true;
+      // Fallback hors-ligne : essayer avec les données locales en cache
+      try {
+        var _localUsers = DB.get('mdb_users') || [];
+        var _foundLocal = null;
+        for(var _li=0; _li<_localUsers.length; _li++){ var _u=_localUsers[_li]; if((_u.login===login || (_u.login&&_u.login.toLowerCase()===login.toLowerCase()) || _u.email===login) && _u.password===pass){ _foundLocal=_u; break; } }
+        if(!_foundLocal){
+          var _last = null; try{ _last=JSON.parse(localStorage.getItem('mdb_lastLogin')||'null'); }catch(_eL){}
+          if(_last && _last.login===login && _last.entId===entId && _last.pass===pass && _last.user) _foundLocal=_last.user;
+        }
+        if(_foundLocal){
+          var _adminUidLocal = null; try{ _adminUidLocal = localStorage.getItem('mdb_lastLoginUid') || DB.get('mdb_enterpriseUid') || _foundLocal.enterpriseUid || entId; }catch(_eA){}
+          if(!_adminUidLocal) _adminUidLocal = entId || 'offline';
+          currentUser = {id: _adminUidLocal, nom: _foundLocal.nom, email: _foundLocal.email||'', login: _foundLocal.login, isAdmin: _foundLocal.isAdmin||false, adminType: _foundLocal.adminType||(_foundLocal.isAdmin?'admin':'user'), deniedPages: _foundLocal.deniedPages||[], isSuperAdmin:false, sections:_foundLocal.sections||{}, subUserId:_foundLocal.id, caisseId:_foundLocal.caisseId||'', employeeId:_foundLocal.employeeId||'', caisseCentralisee:_foundLocal.caisseCentralisee||false, caissesAutorisees:_foundLocal.caissesAutorisees||[]};
+          DB.set('mdb_currentUser', _foundLocal.id);
+          DB.set('mdb_enterpriseUid', _adminUidLocal);
+          window._offlineMode = true;
+          try{ localStorage.setItem('mdb_offlineMode','1'); }catch(_eO){}
+          try{ var _b=document.getElementById('offlineBanner'); if(_b){ _b.style.display='block'; var _app=document.getElementById('app'); if(_app) _app.style.paddingTop='44px'; } }catch(_eB){}
+          errEl.style.color = 'var(--warning)';
+          errEl.textContent = 'Mode hors-ligne activé — quota Supabase dépassé. Vos saisies seront synchronisées au 21/09.';
+          errEl.style.display = 'block';
+          setTimeout(function(){ try{ showApp(); startRealtimeSync = function(){}; }catch(_eS){} }, 600);
+          return;
+        }
+      } catch(_eLocal){}
       errEl.style.color = 'var(--danger)';
-      errEl.textContent = 'Erreur : ' + (e.message || 'inconnu');
+      var _msgQuota = isQuota ? 'Quota Supabase dépassé (43Go/5Go). Mode hors-ligne : reconnectez-vous avec des identifiants déjà utilisés sur ce poste, ou attendez le 21/09 / passez en Pro. Détail : ' : 'Erreur : ';
+      errEl.textContent = _msgQuota + (e.message || 'inconnu');
       errEl.style.display = 'block';
     });
     } else {
     errEl.textContent = 'Firebase non disponible';
     errEl.style.display = 'block';
+    // Fallback hors-ligne même si firebaseDb null
+    try{
+      var _lu2 = DB.get('mdb_users')||[];
+      var _fl2=null; for(var _k2=0;_k2<_lu2.length;_k2++){ if((_lu2[_k2].login===login||_lu2[_k2].email===login)&&_lu2[_k2].password===pass){_fl2=_lu2[_k2];break;}}
+      if(_fl2){ errEl.style.color='var(--warning)'; errEl.textContent='Mode hors-ligne : Firebase non disponible, mais identifiants locaux trouvés — connexion...'; setTimeout(function(){ currentUser={id: DB.get('mdb_enterpriseUid')||entId, nom:_fl2.nom, login:_fl2.login, isAdmin:_fl2.isAdmin, subUserId:_fl2.id}; DB.set('mdb_currentUser',_fl2.id); window._offlineMode=true; try{ localStorage.setItem('mdb_offlineMode','1'); var _b2=document.getElementById('offlineBanner'); if(_b2){ _b2.style.display='block'; var _app2=document.getElementById('app'); if(_app2) _app2.style.paddingTop='44px'; } }catch(_eO2){} showApp(); }, 500); }
+    }catch(_eF2){}
   }
 }
 
@@ -4316,6 +4355,7 @@ entRef.get().then(function(doc) {
 var _snapshotUnsubscribe = null;
 
 function startRealtimeSync(uid) {
+  if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
   if (_snapshotUnsubscribe) { try { _snapshotUnsubscribe(); } catch(e) {} _snapshotUnsubscribe = null; }
   if (!firebaseDb || !uid) return;
   var dataRef = firebaseDb.collection('enterprises').doc(uid);
