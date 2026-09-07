@@ -641,7 +641,8 @@ function _payeExitToApp(){
 <div class="form-group" style="flex:1;min-width:200px;max-width:300px"><label>Rechercher employé</label><input type="text" id="ap-search" list="ap-search-list" value="" placeholder="Nom, matricule..." oninput="window._apSearch=this.value;loadAP()" autocomplete="off" style="width:100%"><datalist id="ap-search-list"></datalist></div>
 <div class="form-group" style="max-width:170px"><label>Période (mois de déduction)</label><input type="month" id="ap-filter-month" value="" onchange="window._apMonthP=this.value;loadAP()"></div>
 <button class="btn-sec" onclick="window._apMonthP='';document.getElementById('ap-filter-month').value='';loadAP()">Tout</button>
- <div class="form-group" style="min-width:220px;max-width:280px"><label>États à imprimer</label><select id="ap-print-emp" style="display:none"></select><button class="btn-sec" onclick="openPrintAPDialog()" style="width:100%">🖨 Choisir l'impression</button></div>
+<div class="form-group" style="max-width:140px"><label>Statut</label><select id="ap-filter-statut" onchange="window._apStatutP=this.value;loadAP()"><option value="actif" selected>Actifs (non soldés)</option><option value="tous">Tous</option></select></div>
+  <div class="form-group" style="min-width:220px;max-width:280px"><label>États à imprimer</label><select id="ap-print-emp" style="display:none"></select><button class="btn-sec" onclick="openPrintAPDialog()" style="width:100%">🖨 Choisir l'impression</button></div>
 <button class="btn-sec" onclick="openPrintAPDialog()">Imprimer</button>
 </div>
 <div class="tab-pills" id="ap-tabs"></div>
@@ -4981,6 +4982,8 @@ function loadAP() {
   var month = window._apMonthP || '';
   var activeTab = window._apTabP || 'tous';
   var search = (window._apSearch || '').toLowerCase().trim();
+  var statutFilter = (function(){ var el=document.getElementById('ap-filter-statut'); var v= el ? el.value : (window._apStatutP || 'actif'); window._apStatutP=v; return v; })();
+  if(statutFilter!=='tous' && statutFilter!=='actif') statutFilter='actif';
 
   var peSel = document.getElementById('ap-print-emp');
   if (peSel) {
@@ -5023,6 +5026,7 @@ function loadAP() {
     if (activeTab === 'acompte' && a.type !== 'acompte') continue;
     if (activeTab === 'pret' && a.type !== 'pret') continue;
     if (month && !apInMonthP(a, month)) continue;
+    if (statutFilter==='actif' && apRestP(a) <= 0) continue;
     if (search) { if (empName(a.employee_id).toLowerCase().indexOf(search) === -1) continue; }
     filtered.push(a);
   }
@@ -5056,7 +5060,10 @@ function loadAP() {
     for (var ci = 0; ci < filtered.length; ci++) {
       var ca = filtered[ci];
       var eidC = ca.employee_id || '_x';
-      if (!empAgg[eidC]) empAgg[eidC] = {nom: empName(eidC), acc: 0, prets: 0, remb: 0, rest: 0, nb: 0, nbPrets: 0};
+      if (!empAgg[eidC]) {
+        var _pC = empById[eidC];
+        empAgg[eidC] = {nom: empName(eidC), acc: 0, prets: 0, remb: 0, rest: 0, nb: 0, nbPrets: 0, matricule: _pC ? (_pC.matricule||'') : '', typeContrat: _pC ? (_pC.type_contrat||'CDI') : 'CDI'};
+      }
       var ag = empAgg[eidC];
       var dedC = month ? apDeductionP(ca, month) : (ca.montant || 0);
       if (ca.type === 'acompte') ag.acc += dedC;
@@ -5065,20 +5072,34 @@ function loadAP() {
       ag.rest += apRestP(ca);
       ag.nb++;
     }
-    var eids = Object.keys(empAgg);
-    eids.sort(function(x, y) { return (empAgg[y].prets + empAgg[y].acc) - (empAgg[x].prets + empAgg[x].acc); });
+    // Tri par matricule et groupement par type CDI/CDD/Externe
+    var typeOrderC=['CDI','CDD','Journalier','Externe'];
+    var typeLabelsC={'CDI':'CDI - Titulaires','CDD':'CDD','Journalier':'Journaliers','Externe':'Prestataires externes'};
+    var eidsAllC=Object.keys(empAgg);
+    eidsAllC.sort(function(a,b){ return (empAgg[a].matricule||'').localeCompare(empAgg[b].matricule||''); });
+    var groupsC={}; for(var _tc=0;_tc<typeOrderC.length;_tc++) groupsC[typeOrderC[_tc]]=[];
+    for(var _ec=0;_ec<eidsAllC.length;_ec++){ var _eidC=eidsAllC[_ec]; var _tpC=empAgg[_eidC].typeContrat||'CDI'; if(typeOrderC.indexOf(_tpC)===-1) _tpC='CDI'; groupsC[_tpC].push(_eidC); }
     out += '<div style="overflow-x:auto"><table><thead><tr><th>Employ\u00e9</th><th>Op\u00e9rations</th><th>Pr\u00eats</th>' + (month ? '<th style="text-align:right">Acomptes (' + escH(fmtMoisAP(month)) + ')</th><th style="text-align:right">Pr\u00eats (' + escH(fmtMoisAP(month)) + ')</th><th style="text-align:right">Total \u00e0 d\u00e9duire</th>' : '<th style="text-align:right">Total acomptes</th><th style="text-align:right">Total pr\u00eats</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th>') + '</tr></thead><tbody>';
-    for (var ei = 0; ei < eids.length; ei++) {
-      var es2 = empAgg[eids[ei]];
-      if (month) {
-        var totM = es2.acc + es2.prets;
-        out += '<tr><td style="font-weight:700">' + escH(es2.nom) + '</td><td>' + es2.nb + '</td><td>' + es2.nbPrets + '</td><td style="text-align:right">' + fmtF(es2.acc) + '</td><td style="text-align:right">' + fmtF(es2.prets) + '</td><td style="text-align:right;font-weight:700;color:var(--orange-dark)">' + fmtF(totM) + '</td></tr>';
-      } else {
-        var resteDue = Math.max(0, es2.rest);
-        out += '<tr><td style="font-weight:700">' + escH(es2.nom) + '</td><td>' + es2.nb + '</td><td>' + es2.nbPrets + '</td><td style="text-align:right">' + fmtF(es2.acc) + '</td><td style="text-align:right">' + fmtF(es2.prets) + '</td><td style="text-align:right">' + fmtF(es2.remb) + '</td><td style="text-align:right;font-weight:700;color:' + (resteDue > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(resteDue) + '</td></tr>';
+    var _hasC=false;
+    for(var _tci=0;_tci<typeOrderC.length;_tci++){
+      var _tKeyC=typeOrderC[_tci];
+      var _tEidsC=groupsC[_tKeyC];
+      if(_tEidsC.length===0) continue;
+      _hasC=true;
+      out+='<tr style="background:#e0e7ff"><td colspan="'+(month?6:7)+'" style="font-weight:800;color:#3730a3;padding:6px 8px;border:1px solid #cbd5e1">'+typeLabelsC[_tKeyC]+' ('+_tEidsC.length+')</td></tr>';
+      for (var ei = 0; ei < _tEidsC.length; ei++) {
+        var es2 = empAgg[_tEidsC[ei]];
+        if (month) {
+          var totM = es2.acc + es2.prets;
+          out += '<tr><td style="font-weight:700">' + escH(es2.nom) + '</td><td>' + es2.nb + '</td><td>' + es2.nbPrets + '</td><td style="text-align:right">' + fmtF(es2.acc) + '</td><td style="text-align:right">' + fmtF(es2.prets) + '</td><td style="text-align:right;font-weight:700;color:var(--orange-dark)">' + fmtF(totM) + '</td></tr>';
+        } else {
+          var resteDue = Math.max(0, es2.rest);
+          out += '<tr><td style="font-weight:700">' + escH(es2.nom) + '</td><td>' + es2.nb + '</td><td>' + es2.nbPrets + '</td><td style="text-align:right">' + fmtF(es2.acc) + '</td><td style="text-align:right">' + fmtF(es2.prets) + '</td><td style="text-align:right">' + fmtF(es2.remb) + '</td><td style="text-align:right;font-weight:700;color:' + (resteDue > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(resteDue) + '</td></tr>';
+        }
+      }
       }
     }
-    if (eids.length === 0) out += '<tr><td colspan="' + (month ? 6 : 7) + '" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune donn\u00e9e</td></tr>';
+    if (!_hasC) out += '<tr><td colspan="' + (month ? 6 : 7) + '" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune donn\u00e9e</td></tr>';
     out += '</tbody></table></div>';
     document.getElementById('ap-month-summary').innerHTML = '';
   } else {
@@ -5088,22 +5109,38 @@ function loadAP() {
       for (var msi = 0; msi < filtered.length; msi++) {
         var ma = filtered[msi];
         var eidM = ma.employee_id || '_x';
-        if (!empSum[eidM]) empSum[eidM] = {nom: empName(eidM), acc: 0, prets: 0, deduit: 0, total: 0};
+        if (!empSum[eidM]) {
+          var _pM = empById[eidM];
+          empSum[eidM] = {nom: empName(eidM), acc: 0, prets: 0, deduit: 0, total: 0, matricule: _pM?(_pM.matricule||''):'', typeContrat: _pM?(_pM.type_contrat||'CDI'):'CDI'};
+        }
         var sm = empSum[eidM];
         var dedM = apDeductionP(ma, month);
         sm.total += dedM;
         if (ma.type === 'acompte') sm.acc += dedM; else sm.prets += dedM;
         if (ma.preleve && ma.moisPreleve === month) sm.deduit += dedM;
       }
-      var eidsM = Object.keys(empSum);
-      eidsM.sort(function(x, y) { return empSum[y].total - empSum[x].total; });
+      // Grouper par type et trier par matricule
+      var typeOrderM2=['CDI','CDD','Journalier','Externe'];
+      var typeLabelsM2={'CDI':'CDI - Titulaires','CDD':'CDD','Journalier':'Journaliers','Externe':'Prestataires externes'};
+      var eidsMAll=Object.keys(empSum);
+      eidsMAll.sort(function(a,b){ return (empSum[a].matricule||'').localeCompare(empSum[b].matricule||''); });
+      var groupsM2={}; for(var _tm2=0;_tm2<typeOrderM2.length;_tm2++) groupsM2[typeOrderM2[_tm2]]=[];
+      for(var _em2=0;_em2<eidsMAll.length;_em2++){ var _eidM2=eidsMAll[_em2]; var _tpM2=empSum[_eidM2].typeContrat||'CDI'; if(typeOrderM2.indexOf(_tpM2)===-1) _tpM2='CDI'; groupsM2[_tpM2].push(_eidM2); }
       var sumHtml = '<h3 style="font-size:.95rem;margin:.2rem 0 .6rem;color:var(--text)">D\u00e9ductions du mois de ' + escH(fmtMoisAP(month)) + ' par employ\u00e9</h3>';
       sumHtml += '<div style="overflow-x:auto"><table><thead><tr><th>Employ\u00e9</th><th style="text-align:right">Acomptes</th><th style="text-align:right">Pr\u00eats</th><th style="text-align:right">Total \u00e0 d\u00e9duire</th><th style="text-align:right">D\u00e9j\u00e0 d\u00e9duit</th><th style="text-align:right">\u00c0 d\u00e9duire</th></tr></thead><tbody>';
-      for (var mi = 0; mi < eidsM.length; mi++) {
-        var es3 = empSum[eidsM[mi]];
-        sumHtml += '<tr><td style="font-weight:700">' + escH(es3.nom) + '</td><td style="text-align:right">' + fmtF(es3.acc) + '</td><td style="text-align:right">' + fmtF(es3.prets) + '</td><td style="text-align:right;font-weight:700">' + fmtF(es3.total) + '</td><td style="text-align:right;font-weight:700;color:var(--green)">' + fmtF(es3.deduit) + '</td><td style="text-align:right;font-weight:700;color:' + (es3.total - es3.deduit > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(Math.max(0, es3.total - es3.deduit)) + '</td></tr>';
+      var _hasM2=false;
+      for(var _tM2=0;_tM2<typeOrderM2.length;_tM2++){
+        var _tKeyM2=typeOrderM2[_tM2];
+        var _tEidsM2=groupsM2[_tKeyM2];
+        if(_tEidsM2.length===0) continue;
+        _hasM2=true;
+        sumHtml+='<tr style="background:#e0e7ff"><td colspan="6" style="font-weight:800;color:#3730a3;padding:6px 8px;border:1px solid #cbd5e1">'+typeLabelsM2[_tKeyM2]+' ('+_tEidsM2.length+')</td></tr>';
+        for (var mi = 0; mi < _tEidsM2.length; mi++) {
+          var es3 = empSum[_tEidsM2[mi]];
+          sumHtml += '<tr><td style="font-weight:700">' + escH(es3.nom) + '</td><td style="text-align:right">' + fmtF(es3.acc) + '</td><td style="text-align:right">' + fmtF(es3.prets) + '</td><td style="text-align:right;font-weight:700">' + fmtF(es3.total) + '</td><td style="text-align:right;font-weight:700;color:var(--green)">' + fmtF(es3.deduit) + '</td><td style="text-align:right;font-weight:700;color:' + (es3.total - es3.deduit > 0 ? 'var(--danger)' : 'var(--green)') + '">' + fmtF(Math.max(0, es3.total - es3.deduit)) + '</td></tr>';
+        }
       }
-      if (eidsM.length === 0) sumHtml += '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune d\u00e9duction pour cette p\u00e9riode</td></tr>';
+      if (!_hasM2) sumHtml += '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune d\u00e9duction pour cette p\u00e9riode</td></tr>';
       sumHtml += '</tbody></table></div>';
       document.getElementById('ap-month-summary').innerHTML = '<div class="card" style="background:#fffbeb;border:1px solid #fde68a">' + sumHtml + '</div>';
     } else {
@@ -5216,6 +5253,7 @@ function printAP() {
   var month = window._apMonthP || '';
   var activeTab = window._apTabP || 'tous';
   var search = (window._apSearch || '').toLowerCase().trim();
+  var statutFilter = window._apStatutP || 'actif';
   var printEmpId = document.getElementById('ap-print-emp') ? document.getElementById('ap-print-emp').value : '';
   var rows = [];
   for (var i2 = 0; i2 < list.length; i2++) {
@@ -5223,6 +5261,7 @@ function printAP() {
     if (activeTab === 'acompte' && a.type !== 'acompte') continue;
     if (activeTab === 'pret' && a.type !== 'pret') continue;
     if (month && !apInMonthP(a, month)) continue;
+    if (statutFilter==='actif' && apRestP(a) <= 0) continue;
     if (printEmpId && a.employee_id !== printEmpId) continue;
     if (search) { var p = empById[a.employee_id]; var nm = (p ? p.nom + ' ' + (p.prenoms || '') : '?').toLowerCase(); if (nm.indexOf(search) === -1) continue; }
     rows.push(a);
@@ -5283,12 +5322,14 @@ function openPrintAPDialog(){
   var month = window._apMonthP || '';
   var activeTab = window._apTabP || 'tous';
   var search = (window._apSearch || '').toLowerCase().trim();
+  var statutFilter2 = window._apStatutP || 'actif';
   var rows = [];
   for(var i2=0;i2<list.length;i2++){
     var a=list[i2];
     if(activeTab==='acompte' && a.type!=='acompte') continue;
     if(activeTab==='pret' && a.type!=='pret') continue;
     if(month && !apInMonthP(a, month)) continue;
+    if(statutFilter2==='actif' && apRestP(a) <= 0) continue;
     if(search){ var p=empById[a.employee_id]; var nm=(p?p.nom+' '+(p.prenoms||''):'?').toLowerCase(); if(nm.indexOf(search)===-1) continue; }
     rows.push(a);
   }
@@ -5372,12 +5413,14 @@ function printAPGeneral(){
   var month = window._apMonthP || '';
   var activeTab = window._apTabP || 'tous';
   var search = (window._apSearch || '').toLowerCase().trim();
+  var statutFilter = window._apStatutP || 'actif';
   var rows=[];
   for(var i2=0;i2<list.length;i2++){
     var a=list[i2];
     if(activeTab==='acompte' && a.type!=='acompte') continue;
     if(activeTab==='pret' && a.type!=='pret') continue;
     if(month && !apInMonthP(a, month)) continue;
+    if(statutFilter==='actif' && apRestP(a) <= 0) continue;
     if(search){ var p=empById[a.employee_id]; var nm=(p?p.nom+' '+(p.prenoms||''):'?').toLowerCase(); if(nm.indexOf(search)===-1) continue; }
     rows.push(a);
   }
@@ -5411,15 +5454,39 @@ function printAPGeneral(){
     h+='<div class="date-head">📅 Date : '+escH(dLabel)+' — '+items.length+' opération(s)</div>';
     h+='<table><thead><tr><th>Employé</th><th>Matricule</th><th>Type</th><th>Pièce</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
     var totalDate=0;
-    items.sort(function(x,y){ var nx=empById[x.employee_id]?empById[x.employee_id].nom:'zzz'; var ny=empById[y.employee_id]?empById[y.employee_id].nom:'zzz'; return nx.localeCompare(ny); });
-    for(var j=0;j<items.length;j++){
-      var it=items[j];
-      var emp=empById[it.employee_id];
-      var nom=emp? emp.nom+' '+(emp.prenoms||'') : '?';
-      var mat=emp? emp.matricule||'-' : '-';
-      var mont = month ? apDeductionP(it, month) : it.montant;
-      totalDate+=mont;
-      h+='<tr><td>'+escH(nom)+'</td><td>'+escH(mat)+'</td><td>'+escH(it.type)+'</td><td>'+escH(it.numeroPiece||'-')+'</td><td style="text-align:right">'+fmt(mont)+'</td></tr>';
+    // Grouper par type CDI/CDD/Externe et trier par matricule
+    var byType={};
+    for(var _pi=0;_pi<items.length;_pi++){ var _it=items[_pi]; var _p=empById[_it.employee_id]; var _tt=_p?(_p.type_contrat||'CDI'):'CDI'; if(['CDI','CDD','Journalier','Externe'].indexOf(_tt)===-1) _tt='CDI'; if(!byType[_tt]) byType[_tt]=[]; _it._typeSort=_tt; _it._mat=_p?(_p.matricule||''):''; byType[_tt].push(_it); }
+    var typeOrderP2=['CDI','CDD','Journalier','Externe'];
+    var typeLabelsP2={'CDI':'CDI - Titulaires','CDD':'CDD','Journalier':'Journaliers','Externe':'Prestataires externes'};
+    var _hasType2=false;
+    for(var _ti2=0;_ti2<typeOrderP2.length;_ti2++){
+      var _arr2=byType[typeOrderP2[_ti2]]||[];
+      if(_arr2.length===0) continue;
+      _hasType2=true;
+      _arr2.sort(function(a,b){ return (a._mat||'').localeCompare(b._mat||''); });
+      h+='<tr style="background:#e0e7ff"><td colspan="5" style="font-weight:700;color:#3730a3;padding:4px 8px">'+typeLabelsP2[typeOrderP2[_ti2]]+' ('+_arr2.length+')</td></tr>';
+      for(var _aj2=0;_aj2<_arr2.length;_aj2++){
+        var it=_arr2[_aj2];
+        var emp=empById[it.employee_id];
+        var nom=emp? emp.nom+' '+(emp.prenoms||'') : '?';
+        var mat=emp? emp.matricule||'-' : '-';
+        var mont = month ? apDeductionP(it, month) : it.montant;
+        totalDate+=mont;
+        h+='<tr><td>'+escH(nom)+'</td><td>'+escH(mat)+'</td><td>'+escH(it.type)+'</td><td>'+escH(it.numeroPiece||'-')+'</td><td style="text-align:right">'+fmt(mont)+'</td></tr>';
+      }
+    }
+    if(!_hasType2){
+      items.sort(function(x,y){ var nx=empById[x.employee_id]?empById[x.employee_id].matricule:'zzz'; var ny=empById[y.employee_id]?empById[y.employee_id].matricule:'zzz'; return nx.localeCompare(ny); });
+      for(var j=0;j<items.length;j++){
+        var it=items[j];
+        var emp=empById[it.employee_id];
+        var nom=emp? emp.nom+' '+(emp.prenoms||'') : '?';
+        var mat=emp? emp.matricule||'-' : '-';
+        var mont = month ? apDeductionP(it, month) : it.montant;
+        totalDate+=mont;
+        h+='<tr><td>'+escH(nom)+'</td><td>'+escH(mat)+'</td><td>'+escH(it.type)+'</td><td>'+escH(it.numeroPiece||'-')+'</td><td style="text-align:right">'+fmt(mont)+'</td></tr>';
+      }
     }
     h+='<tr class="tot"><td colspan="4" style="text-align:right">Total du '+escH(dLabel)+'</td><td style="text-align:right">'+fmt(totalDate)+'</td></tr>';
     h+='</tbody></table>';
@@ -5437,6 +5504,7 @@ function printAPIndividuel(selectedIds){
   var month = window._apMonthP || '';
   var activeTab = window._apTabP || 'tous';
   var search = (window._apSearch || '').toLowerCase().trim();
+  var statutFilter = window._apStatutP || 'actif';
   var rows=[];
   for(var i2=0;i2<list.length;i2++){
     var a=list[i2];
@@ -5444,6 +5512,7 @@ function printAPIndividuel(selectedIds){
     if(activeTab==='acompte' && a.type!=='acompte') continue;
     if(activeTab==='pret' && a.type!=='pret') continue;
     if(month && !apInMonthP(a, month)) continue;
+    if(statutFilter==='actif' && apRestP(a) <= 0) continue;
     if(search){ var p=empById[a.employee_id]; var nm=(p?p.nom+' '+(p.prenoms||''):'?').toLowerCase(); if(nm.indexOf(search)===-1) continue; }
     rows.push(a);
   }
