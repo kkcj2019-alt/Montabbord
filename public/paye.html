@@ -14068,14 +14068,18 @@
           return a.numeroPiece || "";
         }
         var collDatesMap = {};
-        var collMoisDedMap = {};
+        var collHeadMap = {};
         rows.forEach(function (a) {
           if (!isCollPrintP(a)) return;
           var d = a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
           var key = (d ? d.slice(0, 10) : "Sans date") + "|" + collSuffixP(a);
           collDatesMap[key] = 1;
-          if (a.moisDeduction && !collMoisDedMap[key])
-            collMoisDedMap[key] = a.moisDeduction;
+          if (!collHeadMap[key])
+            collHeadMap[key] = { remettant: "", moyen: "" };
+          if (!collHeadMap[key].remettant && a.remettant)
+            collHeadMap[key].remettant = a.remettant;
+          if (!collHeadMap[key].moyen && a.moyen)
+            collHeadMap[key].moyen = a.moyen;
         });
         var dates = Object.keys(collDatesMap).sort(function (a, b) {
           return a.localeCompare(b);
@@ -14087,26 +14091,32 @@
           if (!byEmp[eid]) byEmp[eid] = [];
           byEmp[eid].push(a);
         });
-        // Prepare employee list sorted by type and matricule
-        var empList = Object.keys(byEmp).map(function (eid) {
-          var p = empById[eid];
-          return {
-            id: eid,
-            emp: p,
-            nom: p ? p.nom : "?",
-            matricule: p ? p.matricule : "",
-            type: p ? p.type_contrat || "CDI" : "CDI",
-            items: byEmp[eid],
-          };
-        });
-        var typeOrder = ["CDI", "CDD", "Journalier", "Externe"];
+        // Roster complet : tout le personnel (matricule 1 à +infini), trié par matricule.
+        // Ceux sans acompte/prêt affichent "-".
+        var empList = personnel
+          .filter(function (p) {
+            if (!search) return true;
+            return _dispNamePp(p).toLowerCase().indexOf(search) !== -1;
+          })
+          .map(function (p) {
+            return {
+              id: p.id,
+              emp: p,
+              nom: p ? p.nom : "?",
+              matricule: p ? p.matricule : "",
+              type: p ? p.type_contrat || "CDI" : "CDI",
+              items: byEmp[p.id] || [],
+            };
+          });
         empList.sort(function (a, b) {
-          var ta = typeOrder.indexOf(a.type);
-          if (ta === -1) ta = 0;
-          var tb = typeOrder.indexOf(b.type);
-          if (tb === -1) tb = 0;
-          if (ta !== tb) return ta - tb;
           return (a.matricule || "").localeCompare(b.matricule || "");
+        });
+        // 2 tableaux : CDI / autres (CDD, Journaliers, Externes)
+        var cdiEmps = empList.filter(function (e) {
+          return e.type === "CDI";
+        });
+        var otherEmps = empList.filter(function (e) {
+          return e.type !== "CDI";
         });
         // 2 - Individuels : nb max d'acomptes individuels par employé = nb de sous-colonnes
         var nIndivCols = 0;
@@ -14125,9 +14135,9 @@
         var h =
           '<html><head><meta charset="UTF-8"><title>État Général Acomptes & Prêts</title><style>';
         h +=
-          "@page{size:A4 landscape;margin:8mm}body{font-family:Arial;font-size:8px;padding:8px;color:#1e293b}h2{text-align:center;margin:4px 0;font-size:13px}h3{margin:6px 0 4px;font-size:10px;background:#0f172a;color:#fff;padding:4px 8px;border-radius:4px}";
+          "@page{size:A4 landscape;margin:7mm}body{font-family:Arial;font-size:7px;padding:6px;color:#1e293b}h2{text-align:center;margin:3px 0;font-size:12px}h3{margin:5px 0 3px;font-size:10px;background:#0f172a;color:#fff;padding:4px 8px;border-radius:4px}";
         h +=
-          "table{width:100%;border-collapse:collapse;margin-bottom:12px;table-layout:auto}td,th{padding:3px 4px;border:1px solid #94a3b8;font-size:7px;white-space:nowrap}th{background:#1e293b;color:#fff;font-weight:700;text-align:center;font-size:6px;text-transform:uppercase}td:first-child{position:sticky;left:0;background:#fff;font-weight:700}th:first-child{position:sticky;left:0;background:#1e293b;z-index:2}";
+          "table{width:100%;border-collapse:collapse;margin-bottom:8px;table-layout:auto}td,th{padding:2px 3px;border:1px solid #94a3b8;font-size:6px;white-space:nowrap}th{background:#1e293b;color:#fff;font-weight:700;text-align:center;font-size:6px;text-transform:uppercase}td:first-child{position:sticky;left:0;background:#fff;font-weight:700}th:first-child{position:sticky;left:0;background:#1e293b;z-index:2}";
         h +=
           ".date-col{background:#fffbeb;color:#0f172a} .total-col{background:#e0e7ff;font-weight:700} .pret-col{background:#fef2f2} .sticky-left{position:sticky;left:0;z-index:1} .type-header{background:#e0e7ff;color:#3730a3;font-weight:800}";
         h += "</style></head><body>";
@@ -14143,7 +14153,7 @@
         h += '<div style="overflow-x:auto">';
         // Header en 3 blocs : collectifs par date / individuels / prêts du mois + cumul à déduire
         h +=
-          '<table><thead><tr><th style="min-width:30px" rowspan="2">N°</th><th style="min-width:140px" rowspan="2">NOMS ET PRÉNOMS<br><span style="font-weight:400;text-transform:none;font-size:6px">Matricule</span></th>';
+          '<table><thead><tr><th style="min-width:150px" rowspan="2">MATRICULE - NOMS ET PRÉNOMS</th>';
         if (dates.length) {
           h +=
             '<th colspan="' +
@@ -14169,54 +14179,48 @@
           var label =
             (datePart === "Sans date" ? "Sans date" : fmtDate(datePart)) +
             (suf ? "/" + suf : "");
-          var moisDed = collMoisDedMap[d] ? fmtMoisAP(collMoisDedMap[d]) : "";
+          var hd = collHeadMap[d] || { remettant: "", moyen: "" };
           h +=
-            '<th class="date-col" style="min-width:65px;color:#0f172a;font-weight:800;font-size:7px">' +
+            '<th class="date-col" style="min-width:70px;color:#0f172a;font-weight:800;font-size:7px">' +
             escH(label) +
-            '<br><span style="font-weight:700;font-size:6px;color:#92400e">' +
-            escH(moisDed) +
-            "</span></th>";
+            (hd.remettant
+              ? '<br><span style="font-weight:400;font-size:5px;color:#475569">Remis par : ' +
+                escH(hd.remettant) +
+                "</span>"
+              : "") +
+            (hd.moyen
+              ? '<br><span style="font-weight:400;font-size:5px;color:#475569">Moyen : ' +
+                escH(hd.moyen) +
+                "</span>"
+              : "") +
+            "</th>";
         });
         for (var _ni = 0; _ni < nIndivCols; _ni++)
           h += '<th style="background:#1e40af;min-width:55px"></th>';
         h +=
           '<th class="pret-col">DATES</th><th class="pret-col">MONTANTS</th><th class="pret-col">TOTAL<br>PRÊTS</th></tr></thead><tbody>';
-        // Rows per employee
+        // Rows per employee : 2 tableaux (CDI / autres)
         var grandTotalColl = 0,
           grandTotalIndiv = 0,
           grandTotalPret = 0;
-        var typeOrder2 = ["CDI", "CDD", "Journalier", "Externe"];
-        var typeLabels2 = {
-          CDI: "CDI - Titulaires",
-          CDD: "CDD",
-          Journalier: "Journaliers",
-          Externe: "Prestataires externes",
-        };
-        var groupedEmps = {};
-        for (var _ti = 0; _ti < typeOrder2.length; _ti++)
-          groupedEmps[typeOrder2[_ti]] = [];
-        empList.forEach(function (e) {
-          var t = e.type;
-          if (typeOrder2.indexOf(t) === -1) t = "CDI";
-          groupedEmps[t].push(e);
-        });
-        var rowNum = 0;
-        for (var _tIdx = 0; _tIdx < typeOrder2.length; _tIdx++) {
-          var _tKey = typeOrder2[_tIdx];
-          var _emps = groupedEmps[_tKey];
+        var sectionsP = [
+          { label: "CDI - Titulaires", list: cdiEmps },
+          { label: "CDD, Journaliers et Externes", list: otherEmps },
+        ];
+        for (var _tIdx = 0; _tIdx < sectionsP.length; _tIdx++) {
+          var _emps = sectionsP[_tIdx].list;
           if (_emps.length === 0) continue;
           h +=
             '<tr class="type-header"><td colspan="' +
-            (8 + dates.length + nIndivCols) +
-            '" style="text-align:left;padding:4px 8px">' +
-            typeLabels2[_tKey] +
+            (7 + dates.length + nIndivCols) +
+            '" style="text-align:left;padding:3px 6px">' +
+            sectionsP[_tIdx].label +
             " (" +
             _emps.length +
             ")</td></tr>";
           for (var _ei = 0; _ei < _emps.length; _ei++) {
             var empData = _emps[_ei];
-            rowNum++;
-            var empRows = byEmp[empData.id];
+            var empRows = empData.items || [];
             // 1 - Collectifs : montant reçu par l'employé à chaque date de remise
             var mapColl = {};
             var totalCollEmp = 0;
@@ -14261,13 +14265,12 @@
             grandTotalIndiv += totalIndivEmp;
             grandTotalPret += totalPretEmp;
             h +=
-              '<tr><td style="text-align:center">' +
-              rowNum +
-              "</td><td><strong>" +
-              escH(empData.emp ? _dispNamePp(empData.emp) : empData.nom) +
-              '</strong><br><span style="font-size:6px;color:#64748b">' +
-              escH(empData.matricule || "") +
-              "</span></td>";
+              "<tr><td><strong>" +
+              escH(
+                (empData.matricule ? empData.matricule + " - " : "") +
+                  (empData.emp ? _dispNamePp(empData.emp) : empData.nom),
+              ) +
+              "</strong></td>";
             dates.forEach(function (d) {
               var amt = mapColl[d] || "";
               var style = amt ? "" : "background:#f8fafc";
@@ -14279,31 +14282,11 @@
                   '<span style="color:#0f172a;font-weight:600">' +
                   fmt(amt) +
                   "</span>";
-              var moisDedCell = "";
-              if (amt) {
-                var sample2 = empRows.find(function (r) {
-                  if (!isCollPrintP(r)) return false;
-                  var rd =
-                    r.date || (r.moisDeduction ? r.moisDeduction + "-01" : "");
-                  return (
-                    (rd ? rd.slice(0, 10) : "Sans date") +
-                      "|" +
-                      collSuffixP(r) ===
-                    d
-                  );
-                });
-                if (sample2 && sample2.moisDeduction)
-                  moisDedCell =
-                    '<br><span style="font-size:5px;color:#64748b">' +
-                    fmtMoisAP(sample2.moisDeduction) +
-                    "</span>";
-              }
               h +=
                 '<td class="date-col" style="text-align:right;' +
                 style +
                 '">' +
                 disp +
-                moisDedCell +
                 "</td>";
             });
             // Individuels : une sous-colonne par acompte (date, montant, remettant, moyen + n° transaction si mobile money)
@@ -14373,7 +14356,7 @@
               } else if (firstMois) pretPeriode = fmtMoisAP(firstMois);
             }
             h +=
-              '<td class="pret-col" style="text-align:center;font-size:7px">' +
+              '<td class="pret-col" style="text-align:center;font-size:6px">' +
               pretDateStr +
               '</td><td class="pret-col" style="text-align:right">' +
               pretMontStr +
@@ -14394,7 +14377,7 @@
         }
         // Footer total
         h +=
-          '<tr style="background:#0f172a;color:#fff;font-weight:800"><td colspan="2" style="text-align:right">TOTAUX</td>';
+          '<tr style="background:#0f172a;color:#fff;font-weight:800"><td style="text-align:right">TOTAUX</td>';
         dates.forEach(function (d) {
           var totD = 0;
           rows.forEach(function (a) {
