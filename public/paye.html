@@ -11277,7 +11277,7 @@
               (isJ ? '<th style="width:70px">Présent</th>' : "") +
               '<th style="width:120px">H. Jour</th><th style="width:120px">H. Nuit</th><th style="width:90px">Total</th>' +
               (!isExt
-                ? '<th style="width:50px" title="Transport payé ce jour (cocher = payé)">🚗</th>'
+                ? '<th style="width:50px" title="Transport payé ce jour (cocher = payé)">🚗</th><th style="width:50px" title="Absence due à l\'employeur — cochez si chômage technique (faute société) : salaire payé, transport non payé">🏢</th>'
                 : "") +
               "</tr></thead><tbody>";
             for (var di = 0; di < wk.days.length; di++) {
@@ -11358,6 +11358,13 @@
                   '" data-field="transport_paid"' +
                   (transportPaid ? " checked" : "") +
                   ' onchange="savePointage()" style="width:15px;height:15px" title="Transport payé ce jour"></td>';
+                var fauteSociete = rec.faute_societe === true;
+                html +=
+                  '<td style="text-align:center"><input type="checkbox" data-date="' +
+                  day.dk +
+                  '" data-field="faute_societe"' +
+                  (fauteSociete ? " checked" : "") +
+                  ' onchange="savePointage()" style="width:15px;height:15px;accent-color:var(--warning)" title="Faute société / Chômage technique — cochez si absence due à l\'employeur : salaire payé, transport non payé"></td>';
               }
               html += "</tr>";
             }
@@ -15442,6 +15449,12 @@
             if (rec.present === true || hJ > 0 || hN > 0) {
               if (isWeekday && (hJ > 0 || hN > 0)) businessPresent++;
             }
+            // Faute société (chômage technique) : absent mais payé comme présent pour salaire, pas pour transport
+            if (rec.faute_societe === true && isWeekday && hJ === 0 && hN === 0 && !rec.present) {
+              businessPresent++;
+              daysPresent++;
+              if (!isJ) totalBaseHours += 8;
+            }
             hJour += hJ;
             hNuit += hN;
             if (isSun) {
@@ -15460,10 +15473,10 @@
                 hs50 += rem - to15;
               }
             }
-            if (!isJ) totalBaseHours += hJ + hN > 0 ? 8 : 0;
+            if (!isJ && rec.faute_societe !== true) totalBaseHours += hJ + hN > 0 ? 8 : 0;
             /* Jours avec montage : compter comme présent pour transport/ancienneté */
             if (montageDaysSet[dk] === true) {
-              if (hJ === 0 && hN === 0) {
+              if (hJ === 0 && hN === 0 && rec.faute_societe !== true) {
                 daysPresent++;
                 if (isWeekday) businessPresent++;
               }
@@ -15475,17 +15488,24 @@
           }
         }
         if (!isJ) {
-          /* Aucun pointage saisi : traiter comme mois complet (sinon salaire = 0 → net 0) */
-          if (totalBaseHours === 0) totalBaseHours = 173.33;
+          /* Prorata : si aucun pointage saisi → mois complet, sinon au prorata des jours ouvrés présents (faute société comptée comme présent pour le salaire) */
+          if (totalBaseHours === 0 && businessPresent === 0 && businessDays > 0) {
+            // Aucun pointage du tout : considérer comme mois complet (éviter net 0)
+            totalBaseHours = 173.33;
+          } else if (businessDays > 0) {
+            var ratioSalaire = businessPresent / businessDays;
+            if (ratioSalaire > 1) ratioSalaire = 1;
+            totalBaseHours = 173.33 * ratioSalaire;
+            if (totalBaseHours > 173.33) totalBaseHours = 173.33;
+            if (totalBaseHours < 0) totalBaseHours = 0;
+          }
           if (businessPresent >= businessDays && businessDays > 0)
             totalBaseHours = 173.33;
           if (totalBaseHours > 173.33) totalBaseHours = 173.33;
-          if (totalBaseHours < 173.33 && totalBaseHours > 0)
-            totalBaseHours = 173.33;
         } else {
           totalBaseHours = normalHours;
         }
-        /* Transport : basé sur les cases cochées transport_paid (défaut = true si jornalier/présent) */
+        /* Transport : basé sur les cases cochées transport_paid (défaut = true si jornalier/présent) — faute société = transport non payé */
         var transportDays = 0;
         for (var d2 = 1; d2 <= daysInMonth; d2++) {
           var dk2 = mois + "-" + (d2 < 10 ? "0" : "") + d2;
@@ -15494,6 +15514,7 @@
           var rec2 = pts.find(function (p) {
             return p.date === dk2;
           });
+          if (rec2 && rec2.faute_societe === true) continue;
           if (
             rec2 &&
             rec2.transport_paid !== false &&
@@ -15783,14 +15804,22 @@
           stats.businessDays > 0 && isJ !== true
             ? stats.transportDays / stats.businessDays
             : 1;
+        var salaireRatio =
+          stats.businessDays > 0 && isJ !== true
+            ? stats.businessPresent / stats.businessDays
+            : 1;
         if (primeT > 0) {
-          var primeProRata = Math.round(primeT * primeRatio);
+          // Prime générique : considérée comme salaire, donc au prorata des jours ouvrés présents (faute société comptée), pas du transport
+          var _primeRatioEff = primeRatio;
+          // Si prime est de type salaire, utiliser le ratio salaire (qui inclut faute société)
+          _primeRatioEff = salaireRatio;
+          var primeProRata = Math.round(primeT * _primeRatioEff);
           items.push({
             n: "25",
             label: "Prime",
             base: primeT,
             taux:
-              primeRatio < 1 ? Math.round(primeRatio * 10000) / 100 + "%" : "",
+              _primeRatioEff < 1 ? Math.round(_primeRatioEff * 10000) / 100 + "%" : "",
             gain: primeProRata,
             ret: 0,
           });
@@ -15845,13 +15874,18 @@
             if (p.type === "sursalaire") isProrata = false;
             // Salissure : prorata jours réellement travaillés comme le transport (même taux)
             if (p.type === "ind_salissure") isProrata = true;
-            var pm = isProrata ? Math.round(montant * primeRatio) : montant;
+            // Logique faute société : pour les éléments considérés comme salaire (base, sursalaire, responsabilité, fonction...), si absence due à l'employeur, on paie au prorata des jours ouvrés présents incluant faute société (salaireRatio), pas du transport
+            var _isSalaireLike = p.type === "sursalaire" || p.type === "ind_responsabilite" || p.type === "ind_fonction" || p.type === "ind_representation" || p.type === "custom";
+            var _ratioEff = primeRatio;
+            if (_isSalaireLike && isProrata) _ratioEff = salaireRatio;
+            else if (p.type === "ind_salissure") _ratioEff = primeRatio;
+            var pm = isProrata ? Math.round(montant * _ratioEff) : montant;
             var tauxDisp = "";
-            if (isProrata && primeRatio < 1) {
+            if (isProrata && _ratioEff < 1) {
               tauxDisp =
                 p.type === "ind_salissure"
                   ? stats.businessPresent + "/" + stats.businessDays
-                  : Math.round(primeRatio * 10000) / 100 + "%";
+                  : Math.round(_ratioEff * 10000) / 100 + "%";
             }
             items.push({
               n: num,
@@ -17068,11 +17102,13 @@
                   '<span style="font-size:.68rem;color:#6b7280">F/mois</span>';
                 if (p._individual) {
                   h +=
-                    '<button class="btn btn-red" style="padding:2px 6px;font-size:.65rem" title="Revenir au montant du catalogue" onclick="removeEmpIndivPrimeUI(\'' +
+                    '<button class="btn btn-outline" style="padding:2px 6px;font-size:.65rem;border-color:#fbbf24;color:#92400e;background:#fffbeb" title="Mettre à 0 (masquer du bulletin) — la rubrique reste au catalogue" onclick="updateEmpIndivPrime(\'' +
                     empId +
                     "','" +
                     p.id +
-                    "')\">✕</button>";
+                    "',0,'" +
+                    escH(lbl).replace(/'/g, "\\'") +
+                    "')\">0</button>";
                 }
                 h += "</div>";
               });
