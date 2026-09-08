@@ -12927,6 +12927,38 @@
         }
         return false;
       }
+      /* Suffixe identifiant d'une remise collective (caisse, virement ou pièce) */
+      function apCollSuffixP(a, caissesMap) {
+        var cn = a.caisseId ? (caissesMap || {})[a.caisseId] || "" : "";
+        if (cn) return cn.replace(/^caisse\s+/i, "").toUpperCase();
+        if (a.provenance === "banque") return "VIREMENT";
+        return a.numeroPiece || "";
+      }
+      function apCollKeyP(a, caissesMap) {
+        var d = a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
+        return (
+          (d ? d.slice(0, 10) : "Sans date") +
+          "|" +
+          apCollSuffixP(a, caissesMap)
+        );
+      }
+      /* Période de prélèvement d'un prêt : début (mois déd.) - fin recalculée
+         d'après la mensualité / durée ACTUELLES (tient compte des modifications) */
+      function pretPeriodeP(a) {
+        var start = a.moisDeduction || (a.date || "").substring(0, 7);
+        if (!start) return "-";
+        var mens = parseFloat(a.mensualite) || 0;
+        var total = parseFloat(a.montant) || 0;
+        var nb = 0;
+        if (mens > 0 && total > 0) nb = Math.ceil(total / mens);
+        else nb = parseInt(a.dureeMois) || 1;
+        if (nb < 1) nb = 1;
+        var end = new Date(start + "-01");
+        end.setMonth(end.getMonth() + nb - 1);
+        var endM = end.toISOString().slice(0, 7);
+        if (endM === start) return fmtMoisAP(start);
+        return fmtMoisAP(start) + " - " + fmtMoisAP(endM);
+      }
       function apInMonthP(a, month) {
         if (!month) return true;
         var md = a.moisDeduction || "";
@@ -13585,39 +13617,308 @@
             h += "</tbody></table></div></div>";
             return h;
           }
-          var collectifs = filtered.filter(function (a) {
-            return apIsCollP(a, opsMap);
-          });
-          var individuels = filtered.filter(function (a) {
-            return a.type === "acompte" && !apIsCollP(a, opsMap);
-          });
-          var prets = filtered.filter(function (a) {
-            return a.type === "pret";
-          });
-          out += renderDetailTable(
-            "Acomptes Collectifs (remise collective)",
-            "👥",
-            "#f59e0b",
-            collectifs,
-            "Acompte",
-          );
-          out += renderDetailTable(
-            "Acomptes Individuels (direct)",
-            "👤",
-            "#3b82f6",
-            individuels,
-            "Acompte",
-          );
-          out += renderDetailTable(
-            "Pr\u00eats",
-            "🏦",
-            "#8b5cf6",
-            prets,
-            "Prêt",
-          );
-          if (filtered.length === 0)
-            out +=
-              '<div style="text-align:center;color:var(--dim);padding:1.5rem;border:1px dashed var(--border);border-radius:8px">Aucune op\u00e9ration pour cette p\u00e9riode / ces filtres</div>';
+          /* Onglet Tous : même tableau que l'impression (collectifs par date / individuels / prêts),
+             avec toutes les infos + actions (sélection, valider, modifier, supprimer) */
+          function renderUnifiedAPTable() {
+            if (filtered.length === 0) return "";
+            var keysMap = {};
+            var headMap = {};
+            filtered.forEach(function (a) {
+              if (!apIsCollP(a, opsMap)) return;
+              var k = apCollKeyP(a, caissesMap);
+              keysMap[k] = 1;
+              if (!headMap[k]) headMap[k] = { remettant: "", moyen: "" };
+              if (!headMap[k].remettant && a.remettant)
+                headMap[k].remettant = a.remettant;
+              if (!headMap[k].moyen && a.moyen) headMap[k].moyen = a.moyen;
+            });
+            var keys = Object.keys(keysMap).sort(function (a, b) {
+              return a.localeCompare(b);
+            });
+            var searchL = (window._apSearch || "").toLowerCase().trim();
+            var byE = {};
+            filtered.forEach(function (a) {
+              var eid = a.employee_id || "_x";
+              if (!byE[eid]) byE[eid] = [];
+              byE[eid].push(a);
+            });
+            var roster = personnel
+              .filter(function (p) {
+                if (!searchL) return true;
+                return _dispNamePp(p).toLowerCase().indexOf(searchL) !== -1;
+              })
+              .map(function (p) {
+                return {
+                  id: p.id,
+                  emp: p,
+                  matricule: p.matricule || "",
+                  type: p.type_contrat || "CDI",
+                  items: byE[p.id] || [],
+                };
+              });
+            roster.sort(function (a, b) {
+              return (a.matricule || "").localeCompare(b.matricule || "");
+            });
+            var cdiR = roster.filter(function (e) {
+              return e.type === "CDI";
+            });
+            var otherR = roster.filter(function (e) {
+              return e.type !== "CDI";
+            });
+            var nI = 0,
+              nP = 0;
+            roster.forEach(function (e) {
+              var ci = 0,
+                cp = 0;
+              (e.items || []).forEach(function (a) {
+                if (a.type === "pret") cp++;
+                else if (!apIsCollP(a, opsMap)) ci++;
+              });
+              if (ci > nI) nI = ci;
+              if (cp > nP) nP = cp;
+            });
+            function dedP(a) {
+              return month ? apDeductionP(a, month) : a.montant;
+            }
+            var h =
+              '<div style="overflow-x:auto"><table><thead><tr><th style="width:34px"><input type="checkbox" onchange="apValToggleAll(this)" title="Tout"></th><th>Employé</th>';
+            if (keys.length)
+              h +=
+                '<th colspan="' +
+                keys.length +
+                '" style="background:#f97316;color:#fff">1 - ACOMPTES COLLECTIFS</th>';
+            if (nI)
+              h +=
+                '<th colspan="' +
+                nI +
+                '" style="background:#1e40af;color:#fff">2 - ACOMPTES INDIVIDUELS</th>';
+            h +=
+              '<th style="background:#f97316;color:#fff">TOTAL<br>ACOMPTE</th>';
+            if (nP)
+              h +=
+                '<th colspan="' +
+                nP +
+                '" style="background:#7c3aed;color:#fff">3 - PRÊTS' +
+                (month ? " (" + escH(fmtMoisAP(month)) + ")" : "") +
+                "</th>";
+            h +=
+              '<th style="background:#7c3aed;color:#fff">TOTAL<br>PRÊTS</th><th style="background:#059669;color:#fff">TOTAL<br>À DÉDUIRE</th><th>PÉRIODE DE<br>PRÉLÈVEMENT</th></tr><tr><th></th><th></th>';
+            keys.forEach(function (k) {
+              var parts = k.split("|");
+              var dp = parts[0];
+              var suf = parts.slice(1).join("|");
+              var hd = headMap[k] || { remettant: "", moyen: "" };
+              h +=
+                '<th style="min-width:270px">' +
+                escH(
+                  (dp === "Sans date" ? "Sans date" : fmtDate(dp)) +
+                    (suf ? "/" + suf : ""),
+                ) +
+                (hd.remettant
+                  ? '<br><span style="font-weight:400;font-size:.65rem;color:var(--dim)">Remis par : ' +
+                    escH(hd.remettant) +
+                    "</span>"
+                  : "") +
+                (hd.moyen
+                  ? '<br><span style="font-weight:400;font-size:.65rem;color:var(--dim)">Moyen : ' +
+                    escH(hd.moyen) +
+                    "</span>"
+                  : "") +
+                "</th>";
+            });
+            for (var _ni = 0; _ni < nI; _ni++) h += "<th></th>";
+            h += "<th></th>";
+            for (var _np = 0; _np < nP; _np++) h += "<th></th>";
+            h += "<th></th><th></th><th></th></tr></thead><tbody>";
+            var gC = 0,
+              gI = 0,
+              gP = 0;
+            var secs = [
+              { label: "CDI - Titulaires", list: cdiR },
+              { label: "CDD, Journaliers et Externes", list: otherR },
+            ];
+            secs.forEach(function (sec) {
+              if (!sec.list.length) return;
+              h +=
+                '<tr style="background:#e0e7ff"><td colspan="' +
+                (6 + keys.length + nI + nP) +
+                '" style="font-weight:800;color:#3730a3;padding:6px 8px">' +
+                sec.label +
+                " (" +
+                sec.list.length +
+                ")</td></tr>";
+              sec.list.forEach(function (e) {
+                var items = e.items || [];
+                var mapC = {};
+                var tC = 0;
+                items.forEach(function (a) {
+                  if (!apIsCollP(a, opsMap)) return;
+                  var k = apCollKeyP(a, caissesMap);
+                  if (!mapC[k]) mapC[k] = [];
+                  mapC[k].push(a);
+                  tC += dedP(a);
+                });
+                var indivs = items
+                  .filter(function (a) {
+                    return a.type !== "pret" && !apIsCollP(a, opsMap);
+                  })
+                  .sort(function (x, y) {
+                    return (x.date || "").localeCompare(y.date || "");
+                  });
+                var tI = 0;
+                indivs.forEach(function (a) {
+                  tI += dedP(a);
+                });
+                var prets = items
+                  .filter(function (a) {
+                    return a.type === "pret";
+                  })
+                  .sort(function (x, y) {
+                    return (x.date || "").localeCompare(y.date || "");
+                  });
+                var tP = 0;
+                prets.forEach(function (a) {
+                  tP += dedP(a);
+                });
+                var tA = tC + tI;
+                var tT = tA + tP;
+                gC += tC;
+                gI += tI;
+                gP += tP;
+                var gp2 = e.emp;
+                var empLbl =
+                  (gp2.matricule ? gp2.matricule + " - " : "") +
+                  _dispNamePp(gp2);
+                h +=
+                  "<tr>" +
+                  '<td style="text-align:center;vertical-align:top"><input type="checkbox" onchange="apValToggleRow(this)" title="Tout cet employé"></td>' +
+                  '<td style="font-weight:700;vertical-align:top;white-space:nowrap">' +
+                  escH(empLbl) +
+                  '<br><span class="pill pill-gray">' +
+                  items.length +
+                  " op.</span></td>";
+                keys.forEach(function (k) {
+                  var arr = (mapC[k] || []).sort(function (x, y) {
+                    return (x.date || "").localeCompare(y.date || "");
+                  });
+                  if (!arr.length) {
+                    h +=
+                      '<td style="vertical-align:top;text-align:center;color:var(--dim)">-</td>';
+                    return;
+                  }
+                  h += '<td style="vertical-align:top;min-width:270px">';
+                  arr.forEach(function (a2, ix) {
+                    h += apItemBlock(a2, ix + 1, "Acompte");
+                  });
+                  h += "</td>";
+                });
+                for (var bi = 0; bi < nI; bi++) {
+                  if (bi < indivs.length)
+                    h +=
+                      '<td style="vertical-align:top;min-width:270px">' +
+                      apItemBlock(indivs[bi], bi + 1, "Acompte") +
+                      "</td>";
+                  else
+                    h +=
+                      '<td style="vertical-align:top;text-align:center;color:var(--dim)">-</td>';
+                }
+                h +=
+                  '<td style="text-align:right;vertical-align:top;font-weight:800;white-space:nowrap">' +
+                  fmtF(tA) +
+                  " F</td>";
+                for (var bp = 0; bp < nP; bp++) {
+                  if (bp < prets.length)
+                    h +=
+                      '<td style="vertical-align:top;min-width:270px">' +
+                      apItemBlock(prets[bp], bp + 1, "Prêt") +
+                      "</td>";
+                  else
+                    h +=
+                      '<td style="vertical-align:top;text-align:center;color:var(--dim)">-</td>';
+                }
+                h +=
+                  '<td style="text-align:right;vertical-align:top;font-weight:800;white-space:nowrap">' +
+                  fmtF(tP) +
+                  " F</td>";
+                h +=
+                  '<td style="text-align:right;vertical-align:top;font-weight:800;white-space:nowrap;color:var(--orange-dark)">' +
+                  fmtF(tT) +
+                  " F</td>";
+                h +=
+                  '<td style="vertical-align:top;font-size:.7rem">' +
+                  (prets.length
+                    ? prets
+                        .map(function (pa) {
+                          return pretPeriodeP(pa);
+                        })
+                        .join("<br>")
+                    : "-") +
+                  "</td></tr>";
+              });
+            });
+            h +=
+              '<tr style="background:#f1f5f9;font-weight:800"><td colspan="2" style="text-align:right">TOTAUX</td>';
+            keys.forEach(function (k) {
+              var totD = 0;
+              filtered.forEach(function (a) {
+                if (!apIsCollP(a, opsMap)) return;
+                if (apCollKeyP(a, caissesMap) === k) totD += dedP(a);
+              });
+              h += '<td style="text-align:right">' + fmtF(totD) + "</td>";
+            });
+            for (var _fi = 0; _fi < nI; _fi++) h += "<td></td>";
+            h += '<td style="text-align:right">' + fmtF(gC + gI) + " F</td>";
+            for (var _fj = 0; _fj < nP; _fj++) h += "<td></td>";
+            h +=
+              '<td style="text-align:right">' +
+              fmtF(gP) +
+              " F</td>" +
+              '<td style="text-align:right">' +
+              fmtF(gC + gI + gP) +
+              " F</td><td></td></tr>";
+            h += "</tbody></table></div>";
+            return h;
+          }
+          if (activeTab === "tous") {
+            out += renderUnifiedAPTable();
+            if (filtered.length === 0)
+              out +=
+                '<div style="text-align:center;color:var(--dim);padding:1.5rem;border:1px dashed var(--border);border-radius:8px">Aucune opération pour cette période / ces filtres</div>';
+          } else {
+            var collectifs = filtered.filter(function (a) {
+              return apIsCollP(a, opsMap);
+            });
+            var individuels = filtered.filter(function (a) {
+              return a.type === "acompte" && !apIsCollP(a, opsMap);
+            });
+            var prets = filtered.filter(function (a) {
+              return a.type === "pret";
+            });
+            out += renderDetailTable(
+              "Acomptes Collectifs (remise collective)",
+              "👥",
+              "#f59e0b",
+              collectifs,
+              "Acompte",
+            );
+            out += renderDetailTable(
+              "Acomptes Individuels (direct)",
+              "👤",
+              "#3b82f6",
+              individuels,
+              "Acompte",
+            );
+            out += renderDetailTable(
+              "Pr\u00eats",
+              "🏦",
+              "#8b5cf6",
+              prets,
+              "Prêt",
+            );
+            if (filtered.length === 0)
+              out +=
+                '<div style="text-align:center;color:var(--dim);padding:1.5rem;border:1px dashed var(--border);border-radius:8px">Aucune op\u00e9ration pour cette p\u00e9riode / ces filtres</div>';
+          }
         }
         document.getElementById("ap-table-container").innerHTML = out;
       }
@@ -13634,6 +13935,14 @@
       }
       function apValToggleAll(el) {
         var checks = document.querySelectorAll(".ap-val-check");
+        for (var i = 0; i < checks.length; i++)
+          checks[i].checked = !!el.checked;
+        apValCount();
+      }
+      function apValToggleRow(el) {
+        var tr = el && el.closest ? el.closest("tr") : null;
+        if (!tr) return;
+        var checks = tr.querySelectorAll(".ap-val-check");
         for (var i = 0; i < checks.length; i++)
           checks[i].checked = !!el.checked;
         apValCount();
@@ -14062,10 +14371,7 @@
           caissesMapP[c.id] = c.nom || "";
         });
         function collSuffixP(a) {
-          var cn = a.caisseId ? caissesMapP[a.caisseId] || "" : "";
-          if (cn) return cn.replace(/^caisse\s+/i, "").toUpperCase();
-          if (a.provenance === "banque") return "VIREMENT";
-          return a.numeroPiece || "";
+          return apCollSuffixP(a, caissesMapP);
         }
         var collDatesMap = {};
         var collHeadMap = {};
@@ -14139,7 +14445,7 @@
         h +=
           "table{width:100%;border-collapse:collapse;margin-bottom:8px;table-layout:auto}td,th{padding:2px 3px;border:1px solid #94a3b8;font-size:6px;white-space:nowrap}th{background:#1e293b;color:#fff;font-weight:700;text-align:center;font-size:6px;text-transform:uppercase}td:first-child{position:sticky;left:0;background:#fff;font-weight:700}th:first-child{position:sticky;left:0;background:#1e293b;z-index:2}";
         h +=
-          ".date-col{background:#fffbeb;color:#0f172a} .total-col{background:#e0e7ff;font-weight:700} .pret-col{background:#fef2f2} .sticky-left{position:sticky;left:0;z-index:1} .type-header{background:#e0e7ff;color:#3730a3;font-weight:800}";
+          ".date-col{background:#fffbeb;color:#0f172a} .total-col{background:#e0e7ff;font-weight:700} .pret-col{background:#fef2f2} .sticky-left{position:sticky;left:0;z-index:1} .type-header{background:#e0e7ff;color:#3730a3;font-weight:800} *{print-color-adjust:exact;-webkit-print-color-adjust:exact}";
         h += "</style></head><body>";
         var socP = getSocieteP() || {};
         var entP = DB.getMain("mdb_entreprise") || {};
@@ -14342,19 +14648,13 @@
             // Prêts colonnes
             var pretDateStr = pretDates.length ? pretDates.join("<br>") : "-";
             var pretMontStr = pretMonts.length ? pretMonts.join("<br>") : "-";
-            var pretPeriode = "";
-            if (prets.length) {
-              var firstMois = prets[0].moisDeduction || "";
-              var duree = prets[0].dureeMois || 0;
-              if (firstMois && duree) {
-                var end = new Date(firstMois + "-01");
-                end.setMonth(end.getMonth() + duree - 1);
-                pretPeriode =
-                  fmtMoisAP(firstMois) +
-                  " - " +
-                  fmtMoisAP(end.toISOString().slice(0, 7));
-              } else if (firstMois) pretPeriode = fmtMoisAP(firstMois);
-            }
+            var pretPeriode = prets.length
+              ? prets
+                  .map(function (pa) {
+                    return pretPeriodeP(pa);
+                  })
+                  .join("<br>")
+              : "";
             h +=
               '<td class="pret-col" style="text-align:center;font-size:6px">' +
               pretDateStr +
