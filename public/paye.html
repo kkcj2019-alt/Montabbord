@@ -13982,14 +13982,18 @@
           toast("Aucune donnée", "error");
           return;
         }
-        // Collect distinct dates for columns
-        var allDates = {};
+        // 1 - Collectifs : une colonne par date de remise collective (montant reçu par chacun à cette date)
+        function isCollPrintP(a) {
+          return a.type === "acompte" && (a.collective || a.groupeId);
+        }
+        var collDatesMap = {};
         rows.forEach(function (a) {
+          if (!isCollPrintP(a)) return;
           var d = a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
           var key = d ? d.slice(0, 10) : "Sans date";
-          allDates[key] = 1;
+          collDatesMap[key] = 1;
         });
-        var dates = Object.keys(allDates).sort(function (a, b) {
+        var dates = Object.keys(collDatesMap).sort(function (a, b) {
           return a.localeCompare(b);
         });
         // Group rows by employee
@@ -14044,19 +14048,25 @@
           (month ? " - " + fmtMoisAP(month) : "") +
           "</h2>";
         h += '<div style="overflow-x:auto">';
-        // Header
+        // Header en 3 blocs : collectifs par date / individuels / prêts du mois + cumul à déduire
         h +=
-          '<table><thead><tr><th style="min-width:30px">N°</th><th style="min-width:140px">NOMS ET PRÉNOMS<br><span style="font-weight:400;text-transform:none;font-size:6px">Matricule</span></th>';
+          '<table><thead><tr><th style="min-width:30px" rowspan="2">N°</th><th style="min-width:140px" rowspan="2">NOMS ET PRÉNOMS<br><span style="font-weight:400;text-transform:none;font-size:6px">Matricule</span></th>';
         if (dates.length) {
           h +=
             '<th colspan="' +
             dates.length +
             '" style="background:#f97316">1 - ACOMPTES COLLECTIFS</th>';
         }
-        h += '<th style="background:#1e40af">TOTAL<br>ACOMPTE</th>';
+        h += '<th style="background:#f97316" rowspan="2">TOTAL<br>COLL.</th>';
         h +=
-          '<th colspan="2" style="background:#7c3aed">3 - PRÊTS</th><th style="background:#059669">Total</th><th style="background:#0f172a">TOTAL À<br>DÉDUIRE</th><th style="background:#334155">PÉRIODE DE<br>PRÉLÈVEMENT</th></tr>';
-        h += "<tr><th></th><th></th>";
+          '<th colspan="3" style="background:#1e40af">2 - ACOMPTES INDIVIDUELS</th>';
+        h +=
+          '<th colspan="3" style="background:#7c3aed">3 - PRÊTS' +
+          (month ? " (" + escH(fmtMoisAP(month)) + ")" : "") +
+          "</th>";
+        h +=
+          '<th style="background:#059669" rowspan="2">TOTAL<br>À DÉDUIRE</th><th style="background:#334155" rowspan="2">PÉRIODE DE<br>PRÉLÈVEMENT</th></tr>';
+        h += "<tr>";
         dates.forEach(function (d) {
           var label = d === "Sans date" ? "Sans date" : fmtDate(d);
           var moisDed = "";
@@ -14074,11 +14084,11 @@
             escH(moisDed) +
             "</span></th>";
         });
-        h += '<th class="total-col"></th>';
         h +=
-          '<th class="pret-col">DATES</th><th class="pret-col">MONTANTS</th><th></th><th></th><th></th></tr></thead><tbody>';
+          '<th style="background:#1e40af">DATES</th><th style="background:#1e40af">MONTANTS</th><th style="background:#1e40af">TOTAL<br>INDIV.</th><th class="pret-col">DATES</th><th class="pret-col">MENSUALITÉ</th><th class="pret-col">TOTAL<br>PRÊTS</th></tr></thead><tbody>';
         // Rows per employee
-        var grandTotalAcompte = 0,
+        var grandTotalColl = 0,
+          grandTotalIndiv = 0,
           grandTotalPret = 0;
         var typeOrder2 = ["CDI", "CDD", "Journalier", "Externe"];
         var typeLabels2 = {
@@ -14102,7 +14112,7 @@
           if (_emps.length === 0) continue;
           h +=
             '<tr class="type-header"><td colspan="' +
-            (2 + dates.length + 1 + 2 + 3) +
+            (11 + dates.length) +
             '" style="text-align:left;padding:4px 8px">' +
             typeLabels2[_tKey] +
             " (" +
@@ -14112,19 +14122,32 @@
             var empData = _emps[_ei];
             rowNum++;
             var empRows = byEmp[empData.id];
-            // Map date -> amount for acomptes
-            var mapDate = {};
-            var totalAcompteEmp = 0;
+            // 1 - Collectifs : montant reçu par l'employé à chaque date de remise
+            var mapColl = {};
+            var totalCollEmp = 0;
             empRows.forEach(function (a) {
-              if (a.type !== "acompte") return;
+              if (!isCollPrintP(a)) return;
               var d =
                 a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
               var key = d ? d.slice(0, 10) : "Sans date";
               var mont = month ? apDeductionP(a, month) : a.montant;
-              mapDate[key] = (mapDate[key] || 0) + mont;
-              totalAcompteEmp += mont;
+              mapColl[key] = (mapColl[key] || 0) + mont;
+              totalCollEmp += mont;
             });
-            // Prêts
+            // 2 - Individuels : montant reçu par chacun, seul
+            var indivs = empRows.filter(function (a) {
+              return a.type === "acompte" && !a.collective && !a.groupeId;
+            });
+            var totalIndivEmp = 0;
+            var indivDates = [],
+              indivMonts = [];
+            indivs.forEach(function (a) {
+              var mont = month ? apDeductionP(a, month) : a.montant;
+              totalIndivEmp += mont;
+              indivDates.push(a.date ? fmtDate(a.date) : "-");
+              indivMonts.push(mont ? fmt(mont) : "-");
+            });
+            // 3 - Prêts : mensualité à déduire du mois sélectionné
             var prets = empRows.filter(function (a) {
               return a.type === "pret";
             });
@@ -14132,13 +14155,15 @@
             var pretDates = [],
               pretMonts = [];
             prets.forEach(function (a) {
-              var mont = a.montant;
+              var mont = month ? apDeductionP(a, month) : a.montant;
               totalPretEmp += mont;
               pretDates.push(a.date ? fmtDate(a.date) : "-");
-              pretMonts.push(fmt(a.montant));
+              pretMonts.push(mont ? fmt(mont) : "-");
             });
-            var totalADeduire = totalAcompteEmp + totalPretEmp;
-            grandTotalAcompte += totalAcompteEmp;
+            // Cumul des 3 = somme à déduire sur le salaire
+            var totalADeduire = totalCollEmp + totalIndivEmp + totalPretEmp;
+            grandTotalColl += totalCollEmp;
+            grandTotalIndiv += totalIndivEmp;
             grandTotalPret += totalPretEmp;
             h +=
               '<tr><td style="text-align:center">' +
@@ -14154,7 +14179,7 @@
               escH(empData.matricule || "") +
               "</span></td>";
             dates.forEach(function (d) {
-              var amt = mapDate[d] || "";
+              var amt = mapColl[d] || "";
               var style = amt ? "" : "background:#f8fafc";
               var disp = amt ? fmt(amt) : "-";
               if (amt && amt < 0)
@@ -14187,7 +14212,24 @@
             });
             h +=
               '<td class="total-col" style="text-align:right">' +
-              (totalAcompteEmp ? fmt(totalAcompteEmp) : "-") +
+              (totalCollEmp ? fmt(totalCollEmp) : "-") +
+              "</td>";
+            // Individuels colonnes
+            var indivDateStr = indivDates.length
+              ? indivDates.join("<br>")
+              : "-";
+            var indivMontStr = indivMonts.length
+              ? indivMonts.join("<br>")
+              : "-";
+            h +=
+              '<td style="text-align:center;font-size:7px">' +
+              indivDateStr +
+              '</td><td style="text-align:right">' +
+              indivMontStr +
+              "</td>";
+            h +=
+              '<td class="total-col" style="text-align:right">' +
+              (totalIndivEmp ? fmt(totalIndivEmp) : "-") +
               "</td>";
             // Prêts colonnes
             var pretDateStr = pretDates.length ? pretDates.join("<br>") : "-";
@@ -14231,7 +14273,7 @@
         dates.forEach(function (d) {
           var totD = 0;
           rows.forEach(function (a) {
-            if (a.type !== "acompte") return;
+            if (!isCollPrintP(a)) return;
             var rd = a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
             var key = rd ? rd.slice(0, 10) : "Sans date";
             if (key === d) totD += month ? apDeductionP(a, month) : a.montant;
@@ -14240,11 +14282,15 @@
         });
         h +=
           '<td style="text-align:right">' +
-          fmt(grandTotalAcompte) +
-          '</td><td></td><td></td><td style="text-align:right">' +
+          fmt(grandTotalColl) +
+          "</td><td></td><td></td>" +
+          '<td style="text-align:right">' +
+          fmt(grandTotalIndiv) +
+          "</td><td></td><td></td>" +
+          '<td style="text-align:right">' +
           fmt(grandTotalPret) +
           '</td><td style="text-align:right">' +
-          fmt(grandTotalAcompte + grandTotalPret) +
+          fmt(grandTotalColl + grandTotalIndiv + grandTotalPret) +
           "</td><td></td></tr>";
         h += "</tbody></table>";
         h += "</div>";
