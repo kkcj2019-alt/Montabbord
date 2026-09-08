@@ -13982,16 +13982,30 @@
           toast("Aucune donnée", "error");
           return;
         }
-        // 1 - Collectifs : une colonne par date de remise collective (montant reçu par chacun à cette date)
+        // 1 - Collectifs : une colonne par date de remise + identifiant (caisse/pièce),
+        // ex. 05/08/2026/KKCJ et 05/08/2026/ROSINE = 2 colonnes (montant reçu par chacun à cette remise)
         function isCollPrintP(a) {
           return a.type === "acompte" && (a.collective || a.groupeId);
         }
+        var caissesMapP = {};
+        (DB.getMain("mdb_caisses") || []).forEach(function (c) {
+          caissesMapP[c.id] = c.nom || "";
+        });
+        function collSuffixP(a) {
+          var cn = a.caisseId ? caissesMapP[a.caisseId] || "" : "";
+          if (cn) return cn.replace(/^caisse\s+/i, "").toUpperCase();
+          if (a.provenance === "banque") return "VIREMENT";
+          return a.numeroPiece || "";
+        }
         var collDatesMap = {};
+        var collMoisDedMap = {};
         rows.forEach(function (a) {
           if (!isCollPrintP(a)) return;
           var d = a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
-          var key = d ? d.slice(0, 10) : "Sans date";
+          var key = (d ? d.slice(0, 10) : "Sans date") + "|" + collSuffixP(a);
           collDatesMap[key] = 1;
+          if (a.moisDeduction && !collMoisDedMap[key])
+            collMoisDedMap[key] = a.moisDeduction;
         });
         var dates = Object.keys(collDatesMap).sort(function (a, b) {
           return a.localeCompare(b);
@@ -14023,6 +14037,15 @@
           if (tb === -1) tb = 0;
           if (ta !== tb) return ta - tb;
           return (a.matricule || "").localeCompare(b.matricule || "");
+        });
+        // 2 - Individuels : nb max d'acomptes individuels par employé = nb de sous-colonnes
+        var nIndivCols = 0;
+        empList.forEach(function (e) {
+          var c = 0;
+          (e.items || []).forEach(function (a) {
+            if (a.type === "acompte" && !a.collective && !a.groupeId) c++;
+          });
+          if (c > nIndivCols) nIndivCols = c;
         });
         var w = window.open("", "_blank");
         if (!w) {
@@ -14057,9 +14080,11 @@
             dates.length +
             '" style="background:#f97316">1 - ACOMPTES COLLECTIFS</th>';
         }
-        h += '<th style="background:#f97316" rowspan="2">TOTAL<br>COLL.</th>';
         h +=
-          '<th colspan="3" style="background:#1e40af">2 - ACOMPTES INDIVIDUELS</th>';
+          '<th colspan="' +
+          nIndivCols +
+          '" style="background:#1e40af">2 - ACOMPTES INDIVIDUELS</th>';
+        h += '<th style="background:#f97316" rowspan="2">TOTAL<br>ACOMPTE</th>';
         h +=
           '<th colspan="3" style="background:#7c3aed">3 - PRÊTS' +
           (month ? " (" + escH(fmtMoisAP(month)) + ")" : "") +
@@ -14068,15 +14093,13 @@
           '<th style="background:#059669" rowspan="2">TOTAL<br>À DÉDUIRE</th><th style="background:#334155" rowspan="2">PÉRIODE DE<br>PRÉLÈVEMENT</th></tr>';
         h += "<tr>";
         dates.forEach(function (d) {
-          var label = d === "Sans date" ? "Sans date" : fmtDate(d);
-          var moisDed = "";
-          // Find one row with this date to get moisDeduction
-          var sample = rows.find(function (r) {
-            var rd = r.date || (r.moisDeduction ? r.moisDeduction + "-01" : "");
-            return (rd ? rd.slice(0, 10) : "Sans date") === d;
-          });
-          if (sample && sample.moisDeduction)
-            moisDed = fmtMoisAP(sample.moisDeduction);
+          var parts = d.split("|");
+          var datePart = parts[0];
+          var suf = parts.slice(1).join("|");
+          var label =
+            (datePart === "Sans date" ? "Sans date" : fmtDate(datePart)) +
+            (suf ? "/" + suf : "");
+          var moisDed = collMoisDedMap[d] ? fmtMoisAP(collMoisDedMap[d]) : "";
           h +=
             '<th class="date-col" style="min-width:65px">' +
             escH(label) +
@@ -14084,8 +14107,10 @@
             escH(moisDed) +
             "</span></th>";
         });
+        for (var _ni = 0; _ni < nIndivCols; _ni++)
+          h += '<th style="background:#1e40af;min-width:55px"></th>';
         h +=
-          '<th style="background:#1e40af">DATES</th><th style="background:#1e40af">MONTANTS</th><th style="background:#1e40af">TOTAL<br>INDIV.</th><th class="pret-col">DATES</th><th class="pret-col">MENSUALITÉ</th><th class="pret-col">TOTAL<br>PRÊTS</th></tr></thead><tbody>';
+          '<th class="pret-col">DATES</th><th class="pret-col">MENSUALITÉ</th><th class="pret-col">TOTAL<br>PRÊTS</th></tr></thead><tbody>';
         // Rows per employee
         var grandTotalColl = 0,
           grandTotalIndiv = 0,
@@ -14112,7 +14137,7 @@
           if (_emps.length === 0) continue;
           h +=
             '<tr class="type-header"><td colspan="' +
-            (11 + dates.length) +
+            (8 + dates.length + nIndivCols) +
             '" style="text-align:left;padding:4px 8px">' +
             typeLabels2[_tKey] +
             " (" +
@@ -14129,23 +14154,23 @@
               if (!isCollPrintP(a)) return;
               var d =
                 a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
-              var key = d ? d.slice(0, 10) : "Sans date";
+              var key =
+                (d ? d.slice(0, 10) : "Sans date") + "|" + collSuffixP(a);
               var mont = month ? apDeductionP(a, month) : a.montant;
               mapColl[key] = (mapColl[key] || 0) + mont;
               totalCollEmp += mont;
             });
-            // 2 - Individuels : montant reçu par chacun, seul
-            var indivs = empRows.filter(function (a) {
-              return a.type === "acompte" && !a.collective && !a.groupeId;
-            });
+            // 2 - Individuels : montant reçu par chacun, seul (triés par date)
+            var indivs = empRows
+              .filter(function (a) {
+                return a.type === "acompte" && !a.collective && !a.groupeId;
+              })
+              .sort(function (x, y) {
+                return (x.date || "").localeCompare(y.date || "");
+              });
             var totalIndivEmp = 0;
-            var indivDates = [],
-              indivMonts = [];
             indivs.forEach(function (a) {
-              var mont = month ? apDeductionP(a, month) : a.montant;
-              totalIndivEmp += mont;
-              indivDates.push(a.date ? fmtDate(a.date) : "-");
-              indivMonts.push(mont ? fmt(mont) : "-");
+              totalIndivEmp += month ? apDeductionP(a, month) : a.montant;
             });
             // 3 - Prêts : mensualité à déduire du mois sélectionné
             var prets = empRows.filter(function (a) {
@@ -14192,9 +14217,15 @@
               var moisDedCell = "";
               if (amt) {
                 var sample2 = empRows.find(function (r) {
+                  if (!isCollPrintP(r)) return false;
                   var rd =
                     r.date || (r.moisDeduction ? r.moisDeduction + "-01" : "");
-                  return (rd ? rd.slice(0, 10) : "Sans date") === d;
+                  return (
+                    (rd ? rd.slice(0, 10) : "Sans date") +
+                      "|" +
+                      collSuffixP(r) ===
+                    d
+                  );
                 });
                 if (sample2 && sample2.moisDeduction)
                   moisDedCell =
@@ -14210,26 +14241,36 @@
                 moisDedCell +
                 "</td>";
             });
+            // Individuels : une sous-colonne par acompte (date + montant empilés, comme sur Excel)
+            for (var _ii = 0; _ii < nIndivCols; _ii++) {
+              if (_ii < indivs.length) {
+                var _ia = indivs[_ii];
+                var _imont = month ? apDeductionP(_ia, month) : _ia.montant;
+                var _imotif = _ia.motif || _ia.notes || "";
+                h +=
+                  '<td style="text-align:right;background:#eff6ff">' +
+                  '<span style="font-size:6px;color:#64748b">' +
+                  escH(_ia.date ? fmtDate(_ia.date) : "-") +
+                  "</span><br>" +
+                  '<span style="font-weight:700;color:#0f172a">' +
+                  (_imont ? fmt(_imont) : "-") +
+                  "</span>" +
+                  (_imotif
+                    ? '<br><span style="font-size:5px;color:#dc2626">' +
+                      escH(_imotif) +
+                      "</span>"
+                    : "") +
+                  "</td>";
+              } else {
+                h +=
+                  '<td style="text-align:center;color:#cbd5e1;background:#f8fafc">-</td>';
+              }
+            }
             h +=
               '<td class="total-col" style="text-align:right">' +
-              (totalCollEmp ? fmt(totalCollEmp) : "-") +
-              "</td>";
-            // Individuels colonnes
-            var indivDateStr = indivDates.length
-              ? indivDates.join("<br>")
-              : "-";
-            var indivMontStr = indivMonts.length
-              ? indivMonts.join("<br>")
-              : "-";
-            h +=
-              '<td style="text-align:center;font-size:7px">' +
-              indivDateStr +
-              '</td><td style="text-align:right">' +
-              indivMontStr +
-              "</td>";
-            h +=
-              '<td class="total-col" style="text-align:right">' +
-              (totalIndivEmp ? fmt(totalIndivEmp) : "-") +
+              (totalCollEmp + totalIndivEmp
+                ? fmt(totalCollEmp + totalIndivEmp)
+                : "-") +
               "</td>";
             // Prêts colonnes
             var pretDateStr = pretDates.length ? pretDates.join("<br>") : "-";
@@ -14275,17 +14316,16 @@
           rows.forEach(function (a) {
             if (!isCollPrintP(a)) return;
             var rd = a.date || (a.moisDeduction ? a.moisDeduction + "-01" : "");
-            var key = rd ? rd.slice(0, 10) : "Sans date";
+            var key =
+              (rd ? rd.slice(0, 10) : "Sans date") + "|" + collSuffixP(a);
             if (key === d) totD += month ? apDeductionP(a, month) : a.montant;
           });
           h += '<td style="text-align:right">' + fmt(totD) + "</td>";
         });
+        for (var _fi = 0; _fi < nIndivCols; _fi++) h += "<td></td>";
         h +=
           '<td style="text-align:right">' +
-          fmt(grandTotalColl) +
-          "</td><td></td><td></td>" +
-          '<td style="text-align:right">' +
-          fmt(grandTotalIndiv) +
+          fmt(grandTotalColl + grandTotalIndiv) +
           "</td><td></td><td></td>" +
           '<td style="text-align:right">' +
           fmt(grandTotalPret) +
