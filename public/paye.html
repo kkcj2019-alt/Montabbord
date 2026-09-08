@@ -5181,48 +5181,49 @@
         return total;
       }
 
-      /* Retourne toutes les primes actives pour un employé (pour le bulletin) - gère overrides */
+      /* Catalogue = base de rubriques : TOUTES visibles sur chaque bulletin avec montant saisissable.
+         Montant résolu : individuel (bulletin/pointage) > override > défaut catalogue si assigné > 0.
+         Les rubriques à 0 ne sortent pas sur le bulletin calculé ni à l'impression. */
       function getPrimesSpecEmp(empId) {
         var primes = getPrimesSpec();
-        var fromCatalog = primes
-          .filter(function (p) {
-            return p.employes && p.employes.indexOf(empId) !== -1;
-          })
-          .map(function (p) {
-            var m =
-              p.overrides &&
-              p.overrides[empId] != null &&
-              p.overrides[empId] !== ""
-                ? parseFloat(p.overrides[empId])
-                : parseFloat(p.montant);
-            var copy = Object.assign({}, p);
-            copy.montant = m || 0;
-            copy._hasOverride = !!(
-              p.overrides &&
-              p.overrides[empId] != null &&
-              p.overrides[empId] !== ""
-            );
-            return copy;
-          });
         var indivPrimes = getEmpIndivPrimesList(empId);
-        var allPrimes = fromCatalog.slice();
+        var indivById = {};
         indivPrimes.forEach(function (ip) {
-          var alreadyIn = allPrimes.find(function (p) {
+          indivById[ip.primeId] = ip;
+        });
+        var allPrimes = primes.map(function (p) {
+          var copy = Object.assign({}, p);
+          if (indivById[p.id] !== undefined) {
+            copy.montant = parseFloat(indivById[p.id].montant) || 0;
+            copy._individual = true;
+            copy._hasOverride = true;
+            if (indivById[p.id].label) copy.label = indivById[p.id].label;
+          } else if (
+            p.overrides &&
+            p.overrides[empId] != null &&
+            p.overrides[empId] !== ""
+          ) {
+            copy.montant = parseFloat(p.overrides[empId]) || 0;
+            copy._hasOverride = true;
+          } else if (p.employes && p.employes.indexOf(empId) !== -1) {
+            copy.montant = parseFloat(p.montant) || 0;
+          } else {
+            copy.montant = 0;
+          }
+          return copy;
+        });
+        // Montants individuels orphelins (rubrique catalogue supprimée) conservés en custom
+        indivPrimes.forEach(function (ip) {
+          var stillThere = allPrimes.some(function (p) {
             return p.id === ip.primeId;
           });
-          if (alreadyIn) {
-            alreadyIn.montant = ip.montant;
-            alreadyIn._individual = true;
-          } else {
-            var catalogPrime = primes.find(function (p) {
-              return p.id === ip.primeId;
-            });
+          if (!stillThere) {
             allPrimes.push({
               id: ip.primeId,
-              type: catalogPrime ? catalogPrime.type : "custom",
-              label: ip.label || (catalogPrime ? catalogPrime.label : "Prime"),
-              num: catalogPrime ? catalogPrime.num : "37",
-              montant: ip.montant,
+              type: "custom",
+              label: ip.label || "Prime",
+              num: "37",
+              montant: parseFloat(ip.montant) || 0,
               employes: [empId],
               _individual: true,
             });
@@ -5900,25 +5901,6 @@
         generateBulletin();
         toast("Prime retirée", "success");
       }
-      function addCatalogPrimeToEmp(empId) {
-        var sel = document.getElementById("bul-prime-catalog-" + empId);
-        if (!sel || !sel.value) {
-          toast("Sélectionnez une prime", "error");
-          return;
-        }
-        var primeId = sel.value;
-        var primes = getPrimesSpec();
-        var p = primes.find(function (x) {
-          return x.id === primeId;
-        });
-        if (!p) return;
-        // Add to employee assignment
-        if (!p.employes) p.employes = [];
-        if (p.employes.indexOf(empId) === -1) p.employes.push(empId);
-        setPrimesSpec(primes);
-        generateBulletin();
-        toast("Prime ajoutée à l'employé", "success");
-      }
       function addCustomPrimeToEmp(empId) {
         var label =
           (document.getElementById("bul-prime-custom-label-" + empId) || {})
@@ -5931,25 +5913,26 @@
         var num =
           (document.getElementById("bul-prime-custom-num-" + empId) || {})
             .value || "37";
-        if (!label || mt <= 0) {
-          toast("Nom et montant requis", "error");
+        if (!label || !label.trim()) {
+          toast("Nom de la rubrique requis (montant facultatif)", "error");
           return;
         }
-        // Create a new prime in catalog with this employee assigned
+        // Nouvelle rubrique au catalogue : visible sur tous les bulletins, montant saisissable par employé
         var primes = getPrimesSpec();
         var newId = DB.id();
         primes.push({
           id: newId,
           type: "custom",
-          label: label,
+          label: label.trim(),
           num: num,
           montant: mt,
           dept: "",
           employes: [empId],
+          overrides: {},
         });
         setPrimesSpec(primes);
         generateBulletin();
-        toast("Prime créée et assignée", "success");
+        toast("Rubrique créée — montant saisissable par employé", "success");
       }
       /* Lignes manuelles du bulletin — générique (sursalaire, prime, indemnité...) */
       function addManualLineFromBul(empId, mois) {
@@ -15917,13 +15900,7 @@
               p.type === "custom"
                 ? p.label || "Prime"
                 : LABELS[p.type] || p.label || p.type;
-            var baseMt = parseFloat(p.montant) || 0;
-            var indKey = empId + "_" + p.id;
-            var indPrimes = getEmpIndivPrimes();
-            var currentMt =
-              indPrimes[indKey] !== undefined
-                ? parseFloat(indPrimes[indKey])
-                : baseMt;
+            var currentMt = parseFloat(p.montant) || 0;
             h += '<tr style="border-bottom:1px solid var(--border)">';
             h +=
               '<td style="padding:6px;color:var(--dim)">' +
@@ -15951,10 +15928,15 @@
       }
       function savePrimeFromPointage(empId, primeId, val) {
         var mt = parseFloat(val) || 0;
-        var indPrimes = getEmpIndivPrimes();
-        var key = empId + "_" + primeId;
-        indPrimes[key] = mt;
-        setEmpIndivPrimes(indPrimes);
+        var cp = getPrimesSpec().find(function (x) {
+          return x.id === primeId;
+        });
+        addEmpIndivPrime(
+          empId,
+          primeId,
+          mt,
+          cp ? cp.label || cp.type : "Prime",
+        );
         toast("Montant mis à jour : " + fmtF(mt) + " F/mois");
       }
 
@@ -16399,18 +16381,20 @@
           h +=
             '<div contenteditable="true" style="margin-top:10px;font-size:10px;text-align:center;color:#64748b;font-style:italic;padding:5px;border:1px dashed transparent;transition:border 0.2s" onfocus="this.style.border=\'1px dashed #cbd5e1\'" onblur="this.style.border=\'1px dashed transparent\'">Dans votre intérêt et pour vous aider à faire valoir vos droits, conservez ce bulletin de paie sans limitation de durée.</div>';
 
-          // --- Gestion des Primes depuis le Bulletin ---
+          // --- Rubriques du catalogue : TOUTES visibles ici, montants saisissables par employé ---
           if (catBul !== "externe") {
             var currentPrimes = getPrimesSpecEmp(empId);
-            var catalogPrimes = getPrimesSpec();
             h +=
               '<div class="no-print" style="margin-top:1rem;padding:1rem;background:#fffbeb;border:1px solid #fde68a;border-radius:8px">';
             h +=
-              '<div style="font-weight:700;font-size:.82rem;margin-bottom:.6rem;color:#92400e">Primes & Indemnités de cet employé</h>';
+              '<div style="font-weight:700;font-size:.82rem;margin-bottom:.2rem;color:#92400e">Primes, indemnités & rémunérations — montants saisissables</div>';
+            h +=
+              '<div style="font-size:.7rem;color:#92400e;margin-bottom:.6rem">Toutes les rubriques du catalogue. Laissez 0 si non concerné (les lignes à 0 ne sortent pas à l’impression).</div>';
             if (currentPrimes.length > 0) {
               h += '<div style="margin-bottom:.6rem">';
               currentPrimes.forEach(function (p) {
                 var LABELS2 = {
+                  sursalaire: "Sursalaire",
                   ind_representation: "Rep.",
                   ind_deplacement: "Dépl.",
                   ind_salissure: "Saliss.",
@@ -16445,7 +16429,7 @@
                   '<span style="font-size:.68rem;color:#6b7280">F/mois</span>';
                 if (p._individual) {
                   h +=
-                    '<button class="btn btn-red" style="padding:2px 6px;font-size:.65rem" onclick="removeEmpIndivPrimeUI(\'' +
+                    '<button class="btn btn-red" style="padding:2px 6px;font-size:.65rem" title="Revenir au montant du catalogue" onclick="removeEmpIndivPrimeUI(\'' +
                     empId +
                     "','" +
                     p.id +
@@ -16456,47 +16440,13 @@
               h += "</div>";
             } else {
               h +=
-                '<div style="font-size:.75rem;color:#92400e;margin-bottom:.5rem">Aucune prime assignée. Ajoutez une prime ci-dessous.</div>';
+                '<div style="font-size:.75rem;color:#92400e;margin-bottom:.5rem">Aucune rubrique au catalogue. Créez-en une ci-dessous ou dans Données de Salaire.</div>';
             }
-            // Formulaire ajout rapide
-            h +=
-              '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:flex-end;margin-top:.5rem;padding-top:.5rem;border-top:1px solid #fde68a">';
-            h +=
-              '<div style="flex:1;min-width:180px"><label style="font-size:.68rem;font-weight:700;color:#92400e">Prime existante</label>';
-            h +=
-              '<select id="bul-prime-catalog-' +
-              empId +
-              '" style="width:100%;padding:4px;font-size:.75rem;border:1px solid #d1d5db;border-radius:4px"><option value="">— Ajouter une prime existante —</option>';
-            catalogPrimes.forEach(function (cp) {
-              var lbl2 =
-                cp.type === "custom"
-                  ? cp.label || "Prime"
-                  : cp.label || cp.type;
-              var isAssigned = currentPrimes.some(function (x) {
-                return x.id === cp.id;
-              });
-              h +=
-                '<option value="' +
-                cp.id +
-                '"' +
-                (isAssigned ? " disabled" : "") +
-                ">" +
-                escH(lbl2) +
-                " — " +
-                fmtF(cp.montant) +
-                " F</option>";
-            });
-            h += "</select></div>";
-            h +=
-              '<button class="btn" style="padding:4px 10px;font-size:.72rem" onclick="addCatalogPrimeToEmp(\'' +
-              empId +
-              "')\">+ Ajouter</button>";
-            h += "</div>";
-            // Ajout d'une prime personnalisée
+            // Ajout d'une nouvelle rubrique au catalogue (visible ensuite sur tous les bulletins)
             h +=
               '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:flex-end;margin-top:.5rem">';
             h +=
-              '<div style="flex:1;min-width:150px"><label style="font-size:.68rem;font-weight:700;color:#92400e">Nouvelle prime (personnalisée)</label><input type="text" id="bul-prime-custom-label-' +
+              '<div style="flex:1;min-width:150px"><label style="font-size:.68rem;font-weight:700;color:#92400e">Nouvelle rubrique (catalogue)</label><input type="text" id="bul-prime-custom-label-' +
               empId +
               '" placeholder="Nom de la prime" style="width:100%;padding:4px;font-size:.75rem;border:1px solid #d1d5db;border-radius:4px"></div>';
             h +=
