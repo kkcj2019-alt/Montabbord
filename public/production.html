@@ -1045,9 +1045,34 @@ function calcSBVolume(idx) {
   var l = parseFloat(document.getElementById('sb_long_' + idx).value) || 0;
   var w = parseFloat(document.getElementById('sb_larg_' + idx).value) || 0;
   var t = parseFloat(document.getElementById('sb_epais_' + idx).value) || 0;
-  var vol = l * w * t / 1000000;
+  var vol = l * w * t / 1000000 * q;
   document.getElementById('sb_vol_' + idx).textContent = vol.toFixed(4);
   calcSBTotals();
+}
+/* Code colis tapé en sortie bois -> lot trouvé en stock : volume + quantité restante + pré-remplissage */
+function onSortieBoisCodeChange(idx, code) {
+  var msg = document.getElementById('sb_msg_' + idx);
+  if (!msg) return;
+  var v = (code || '').trim().toLowerCase();
+  if (!v) { msg.innerHTML = ''; return; }
+  var lot = getStockRaw().find(function(s) { return ((s.code || s.colis_number || '').toLowerCase() === v); });
+  if (!lot) { msg.innerHTML = '<span style="font-size:.65rem;color:var(--red)">Non trouvé en stock</span>'; return; }
+  var q = parseFloat(lot.quantite) || 0;
+  var vol = stkVol(lot);
+  var col = q > 0 ? 'var(--green)' : 'var(--red)';
+  msg.innerHTML = '<span style="font-size:.65rem;color:' + col + ';font-weight:700">Stock : ' + q + ' pcs · ' + vol.toFixed(3) + ' m³</span>';
+  var eEl = document.getElementById('sb_essence_' + idx);
+  if (eEl && !eEl.value && lot.essence) eEl.value = lot.essence;
+  var fEl = document.getElementById('sb_fournisseur_' + idx);
+  if (fEl && !fEl.value && lot.fournisseur) fEl.value = lot.fournisseur;
+  var dims = { qte: 'sb_qte_', long: 'sb_long_', larg: 'sb_larg_', epais: 'sb_epais_' };
+  var vals = { qte: lot.quantite, long: lot.longueur || lot.length, larg: lot.largeur || lot.width, epais: lot.epaisseur || lot.thickness };
+  var touched = false;
+  Object.keys(dims).forEach(function(k) {
+    var el = document.getElementById(dims[k] + idx);
+    if (el && !el.value && vals[k]) { el.value = vals[k]; touched = true; }
+  });
+  if (touched) calcSBVolume(idx);
 }
 function calcSBTotals() {
   var rows = document.querySelectorAll('#sortieBoisLignes table tr[id^="sortieBoisRow"]');
@@ -1392,6 +1417,54 @@ function loadArticleComponents() {
   updateProductionSummary();
 }
 
+/* Cohérence fiche : produit (lattes+plots+CP+encours entrée) <= base (sortie+reprise) */
+function ficheVolumes(p) {
+  var prod = (p.vol_lattes || 0) + (p.vol_plots || 0) + (p.vol_cp || 0) + (p.vol_enc_entree || 0);
+  var base = (p.vol_sortie_bois || 0) + (p.vol_enc_reprise || 0);
+  return { prod: prod, base: base };
+}
+function ficheCoherenceOk(p) {
+  var v = ficheVolumes(p);
+  if (v.prod > v.base + 0.001) {
+    toast('Impossible de valider : production (' + v.prod.toFixed(3) + ' m³) supérieure au bois disponible (' + v.base.toFixed(3) + ' m³ sortie + reprise)', 'error');
+    return false;
+  }
+  return true;
+}
+/* Décrément stock MP : sortie (-) + entrée encours (reste en stock : réintégré) + reprise (re-sort du stock) */
+function deductBoisSorti(p) {
+  var stockRaw = getStockRaw();
+  function lot(code) { return stockRaw.find(function(s) { return s.code === code; }); }
+  function applyDeduct(item, q, v) {
+    var oldQ = parseFloat(item.quantite) || 0;
+    var oldV = parseFloat(item.volume) || 0;
+    var unitVol = oldQ > 0 ? oldV / oldQ : calcVolume(item.longueur || item.length, item.largeur || item.width, item.epaisseur || item.thickness);
+    item.quantite = Math.max(0, oldQ - q);
+    if (v > 0 && oldV > 0) item.volume = Math.max(0, oldV - v);
+    else item.volume = Math.max(0, unitVol * item.quantite);
+    item.updated_at = new Date().toISOString();
+  }
+  (p.sortie_bois || []).forEach(function(sb) {
+    if (!sb.code) return;
+    var item = lot(sb.code);
+    if (item) applyDeduct(item, parseFloat(sb.qte) || 0, parseFloat(sb.volume) || 0);
+  });
+  (p.encours || []).filter(function(e) { return (e.wip_type || 'entrée') !== 'reprise'; }).forEach(function(e) {
+    if (!e.code) return;
+    var item = lot(e.code);
+    if (item) {
+      item.quantite = (parseFloat(item.quantite) || 0) + (parseFloat(e.qte) || 0);
+      item.volume = Math.max(0, (parseFloat(item.volume) || 0) + (parseFloat(e.volume) || 0));
+      item.updated_at = new Date().toISOString();
+    }
+  });
+  (p.encours || []).filter(function(e) { return (e.wip_type || '') === 'reprise'; }).forEach(function(e) {
+    if (!e.code) return;
+    var item = lot(e.code);
+    if (item) applyDeduct(item, parseFloat(e.qte) || 0, parseFloat(e.volume) || 0);
+  });
+  setStockRaw(stockRaw);
+}
 function saveProduction(validate) {
   var date = (document.getElementById('prod_date') || {}).value || today();
   var article_id = (document.getElementById('prod_article_id') || {}).value || '';
@@ -1520,19 +1593,14 @@ function saveProduction(validate) {
     statut: validate ? 'validated' : 'draft',
     created_at: new Date().toISOString(),
   };
+  if (validate && !ficheCoherenceOk(prod)) return;
   var prods = getProductions();
   prods.push(prod);
   setProductions(prods);
 
   if (validate) {
-    /* Déduire du stock les bois sortis */
-    sortieBois.forEach(function(sb) {
-      if (sb.code) {
-        var stockRaw = getStockRaw();
-        var item = stockRaw.find(function(s) { return s.code === sb.code; });
-        if (item) { item.quantite = Math.max(0, (item.quantite || 0) - sb.qte); item.updated_at = new Date().toISOString(); setStockRaw(stockRaw); }
-      }
-    });
+    /* Sortie nette : sortie (-) + entrée encours (reste en stock) + reprise (re-sort) */
+    deductBoisSorti(prod);
     toast('Fiche de Production validée ✅ — Rendement: ' + rendement.toFixed(1) + '%');
   } else {
     toast('Fiche enregistrée en brouillon 💾');
@@ -1691,27 +1759,18 @@ function validateProd(id) {
   var prods = getProductions();
   var p = prods.find(function(x) { return x.id === id; });
   if (!p) return;
+  /* Migration anciennes fiches : volume sortie = dims x qté (l'ancien calcul oubliait x qté) */
+  (p.sortie_bois || []).forEach(function(sb) {
+    var L = parseFloat(sb.long) || 0, W = parseFloat(sb.larg) || 0, T = parseFloat(sb.epais) || 0, Q = parseFloat(sb.qte) || 0;
+    if (L > 0 && W > 0 && T > 0 && Q > 0) sb.volume = L * W * T / 1000000 * Q;
+  });
+  p.vol_sortie_bois = (p.sortie_bois || []).reduce(function(s, l) { return s + (l.volume || 0); }, 0);
+  if (!ficheCoherenceOk(p)) return;
   p.statut = 'validated';
   setProductions(prods);
-  /* Déduire bois sorti du stock : quantité ET volume (proportionnel) */
-  if (p.sortie_bois && p.sortie_bois.length) {
-    p.sortie_bois.forEach(function(sb) {
-      if (sb.code) {
-        var stockRaw = getStockRaw();
-        var item = stockRaw.find(function(s) { return s.code === sb.code; });
-        if (item) {
-          var oldQ = parseFloat(item.quantite) || 0;
-          var oldV = parseFloat(item.volume) || 0;
-          var unitVol = oldQ > 0 ? oldV / oldQ : calcVolume(item.longueur || item.length, item.largeur || item.width, item.epaisseur || item.thickness);
-          var takeQ = parseFloat(sb.qte) || 0;
-          item.quantite = Math.max(0, oldQ - takeQ);
-          if (parseFloat(sb.volume) > 0 && oldV > 0) item.volume = Math.max(0, oldV - parseFloat(sb.volume));
-          else item.volume = Math.max(0, unitVol * item.quantite);
-          item.updated_at = new Date().toISOString();
-          setStockRaw(stockRaw);
-        }
-      }
-    });
+  /* Sortie nette : sortie (-) + entrée encours (reste en stock) + reprise (re-sort) */
+  if ((p.sortie_bois && p.sortie_bois.length) || (p.encours && p.encours.length)) {
+    deductBoisSorti(p);
   } else if (p.article_id && p.quantite) {
     updateStockArticle(p.article_id, p.quantite, 'entree', 'production', p.numero);
   }
@@ -3150,9 +3209,9 @@ function render_species() {
   h += '<button class="btn btn-accent" onclick="showNewSpecies()">+ Nouvelle Essence</button>';
   h += '</div>';
   if (species.length === 0) return h + '<div class="empty">Aucune essence enregistrée</div>';
-  h += '<div class="card"><table><tr><th>Code</th><th>Nom</th><th>Nom scientifique</th><th style="text-align:right">Densité</th><th>Origine</th><th style="text-align:right">Prix/m³</th><th>Actions</th></tr>';
+  h += '<div class="card"><table><tr><th>Code</th><th>Nom</th><th>Type</th><th>Nom scientifique</th><th style="text-align:right">Densité</th><th>Origine</th><th style="text-align:right">Prix/m³</th><th>Actions</th></tr>';
   species.forEach(function(s) {
-    h += '<tr><td>' + escH(s.code) + '</td><td>' + escH(s.nom) + '</td><td><em>' + escH(s.nom_scientifique || '-') + '</em></td><td style="text-align:right">' + (s.densite || '-') + '</td><td>' + escH(s.origine || '-') + '</td><td style="text-align:right">' + fmtF(s.prix_m3 || 0) + '</td><td><button class="btn btn-red" onclick="deleteSpecies(\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+    h += '<tr><td>' + escH(s.code) + '</td><td>' + escH(s.nom) + '</td><td><span style="font-size:.68rem;background:#eef2ff;color:#3730a3;border-radius:8px;padding:1px 8px;font-weight:700">' + escH(spType(s)) + '</span></td><td><em>' + escH(s.nom_scientifique || '-') + '</em></td><td style="text-align:right">' + (s.densite || '-') + '</td><td>' + escH(s.origine || '-') + '</td><td style="text-align:right">' + fmtF(s.prix_m3 || 0) + '</td><td><button class="btn btn-red" onclick="deleteSpecies(\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
   });
   h += '</table></div>';
   return h;
@@ -3163,6 +3222,7 @@ function showNewSpecies() {
   m += '<h2>🌲 Nouvelle Essence</h2>';
   m += formField('sp_code', 'Code', '', 'text', true);
   m += formField('sp_nom', 'Nom', '', 'text', true);
+  m += '<div class="form-group"><label>Type *</label><select id="sp_type"><option value="Bois rouge">Bois rouge</option><option value="Bois blanc">Bois blanc</option><option value="Autre">Autre</option></select></div>';
   m += formField('sp_scientifique', 'Nom scientifique', '', 'text', false);
   m += '<div class="form-row">';
   m += formField('sp_densite', 'Densité', '', 'number', false);
@@ -3182,13 +3242,22 @@ function createSpecies() {
   var nom = document.getElementById('sp_nom').value;
   if (!code || !nom) return toast('Code et nom requis', 'error');
   var species = getSpecies();
-  species.push({ id: genId(), code: code, nom: nom, nom_scientifique: document.getElementById('sp_scientifique').value, densite: parseFloat(document.getElementById('sp_densite').value) || 0, prix_m3: parseFloat(document.getElementById('sp_prix').value) || 0, origine: document.getElementById('sp_origine').value, notes: document.getElementById('sp_notes').value });
+  species.push({ id: genId(), code: code, nom: nom, type: (document.getElementById('sp_type') || {}).value || 'Bois rouge', nom_scientifique: document.getElementById('sp_scientifique').value, densite: parseFloat(document.getElementById('sp_densite').value) || 0, prix_m3: parseFloat(document.getElementById('sp_prix').value) || 0, origine: document.getElementById('sp_origine').value, notes: document.getElementById('sp_notes').value });
   setSpecies(species);
   document.getElementById('modalOverlay').remove();
   toast('Essence créée');
   renderPage();
 }
 
+/* Type essence façon ACSER : essence x type (Bois rouge / Bois blanc / Autre) */
+function spType(s) {
+  if (s && s.type) return s.type;
+  var o = ((s && s.origine) || '').toLowerCase();
+  if (o.indexOf('blanc') !== -1) return 'Bois blanc';
+  if (o.indexOf('rouge') !== -1) return 'Bois rouge';
+  if (o.indexOf('autre') !== -1 || o.indexOf('mixte') !== -1) return 'Autre';
+  return 'Bois rouge';
+}
 function deleteSpecies(id) {
   if (!confirm2('Supprimer ?')) return;
   setSpecies(getSpecies().filter(function(s) { return s.id !== id; }));
@@ -4227,23 +4296,25 @@ function seedSpeciesACSER() {
   var has = {};
   existing.forEach(function(s) { has[s.id] = true; });
   var ref = [
-    { id: 'sp_ako', code: 'AKO', nom: 'AKO', origine: 'Bois blanc' },
-    { id: 'sp_awale', code: 'AWALE', nom: 'AWALE', origine: 'Bois blanc' },
-    { id: 'sp_cod', code: 'COD', nom: 'CODABEMA', origine: 'Bois rouge' },
-    { id: 'sp_dab', code: 'DAB', nom: 'DABEMA', origine: 'Bois rouge' },
-    { id: 'sp_divb', code: 'DIV-B', nom: 'DIVERS BLANC', origine: 'Bois blanc' },
-    { id: 'sp_divr', code: 'DIV-R', nom: 'DIVERS ROUGE', origine: 'Bois rouge' },
-    { id: 'sp_divm', code: 'DIV-MIXTE', nom: 'DIVERS-MIXTE', origine: 'Autre' },
-    { id: 'sp_emien', code: 'EMIEN', nom: 'EMIEN', origine: 'Bois blanc' },
-    { id: 'sp_iat', code: 'IAT', nom: 'IATANZA', origine: 'Bois rouge' },
-    { id: 'sp_kap', code: 'KAP', nom: 'KAPOKIER', origine: 'Bois blanc' },
-    { id: 'sp_lati', code: 'LATI', nom: 'LATI', origine: 'Bois blanc' },
-    { id: 'sp_loto', code: 'LOTO', nom: 'LOTOFA', origine: 'Bois rouge' },
-    { id: 'sp_teck', code: 'TECK', nom: 'TECK', origine: 'Bois rouge' },
-    { id: 'sp_tia', code: 'TIA', nom: 'TIAMA', origine: 'Bois rouge' },
+    { id: 'sp_ako', code: 'AKO', nom: 'AKO', type: 'Bois blanc', origine: 'Bois blanc' },
+    { id: 'sp_awale', code: 'AWALE', nom: 'AWALE', type: 'Bois blanc', origine: 'Bois blanc' },
+    { id: 'sp_cod', code: 'COD', nom: 'CODABEMA', type: 'Bois rouge', origine: 'Bois rouge' },
+    { id: 'sp_dab', code: 'DAB', nom: 'DABEMA', type: 'Bois rouge', origine: 'Bois rouge' },
+    { id: 'sp_divb', code: 'DIV-B', nom: 'DIVERS BLANC', type: 'Bois blanc', origine: 'Bois blanc' },
+    { id: 'sp_divr', code: 'DIV-R', nom: 'DIVERS ROUGE', type: 'Bois rouge', origine: 'Bois rouge' },
+    { id: 'sp_divm', code: 'DIV-MIXTE', nom: 'DIVERS-MIXTE', type: 'Autre', origine: 'Autre' },
+    { id: 'sp_emien', code: 'EMIEN', nom: 'EMIEN', type: 'Bois blanc', origine: 'Bois blanc' },
+    { id: 'sp_iat', code: 'IAT', nom: 'IATANZA', type: 'Bois rouge', origine: 'Bois rouge' },
+    { id: 'sp_kap', code: 'KAP', nom: 'KAPOKIER', type: 'Bois blanc', origine: 'Bois blanc' },
+    { id: 'sp_lati', code: 'LATI', nom: 'LATI', type: 'Bois blanc', origine: 'Bois blanc' },
+    { id: 'sp_loto', code: 'LOTO', nom: 'LOTOFA', type: 'Bois rouge', origine: 'Bois rouge' },
+    { id: 'sp_teck', code: 'TECK', nom: 'TECK', type: 'Bois rouge', origine: 'Bois rouge' },
+    { id: 'sp_tia', code: 'TIA', nom: 'TIAMA', type: 'Bois rouge', origine: 'Bois rouge' },
   ];
   var changed = false;
   ref.forEach(function(s) { if (!has[s.id]) { existing.push(s); changed = true; } });
+  /* Backfill type sur essences existantes sans type (origine -> type) */
+  existing.forEach(function(s) { if (!s.type) { s.type = spType(s); changed = true; } });
   if (changed) setSpecies(existing);
 }
 
@@ -4643,7 +4714,7 @@ function showNewAchat(category) {
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">L. Glob</label><input type="number" id="ai_lglob" placeholder="Glob (cm)" oninput="onLGlobInput()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Ep (cm)</label><input type="number" id="ai_epais" placeholder="Ep" oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:700;color:#ea580c">Vol(m³)</label><input type="text" id="ai_vol" value="0.0000" readonly style="width:100%;padding:0.35rem 0.5rem;border:1px solid #ffedd5;border-radius:6px;font-size:0.8rem;font-weight:700;color:#ea580c;background:#fff;text-align:right"></div>';
-    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Essence</label><input type="text" id="ai_essence" placeholder="AY" list="essenceList" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Essence</label><input type="text" id="ai_essence" placeholder="AY" list="essenceList" oninput="onAchatEssenceChange()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Type</label><select id="ai_type" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"><option value="Rouge">Rouge</option><option value="Blanc">Blanc</option><option value="Autre">Autre</option></select></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Zone</label><input type="text" id="ai_zone" placeholder="Zone" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Obs.</label><input type="text" id="ai_obs" placeholder="Obs." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
@@ -4708,6 +4779,17 @@ function showNewAchat(category) {
 }
 
 
+function onAchatEssenceChange() {
+  var codeEl = document.getElementById('ai_essence');
+  var typeEl = document.getElementById('ai_type');
+  if (!codeEl || !typeEl) return;
+  var code = (codeEl.value || '').trim().toUpperCase();
+  if (!code) return;
+  var sp = getSpecies().find(function(s) { return ((s.code || '').toUpperCase() === code); });
+  if (!sp) return;
+  var t = spType(sp);
+  typeEl.value = t === 'Bois rouge' ? 'Rouge' : (t === 'Bois blanc' ? 'Blanc' : 'Autre');
+}
 function onLGlobInput() {
   var lglob = parseFloat((document.getElementById('ai_lglob') || {}).value || 0);
   var qte = parseFloat((document.getElementById('ai_qte') || {}).value || 1);
