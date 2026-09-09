@@ -502,6 +502,27 @@ function updateStockArticle(articleId, qty, type, ref, numero) {
   }
   setFn(stockList);
 
+  /* SYNC → mdb_stocks (pour que l'app principale voie le stock) */
+  try {
+    var mainStocks = JSON.parse(localStorage.getItem('mdb_stocks')) || [];
+    var mainArt = mainStocks.find(function(s) { return s.code === article.code || s.article_id === articleId; });
+    if (mainArt) {
+      mainArt.qte = (mainArt.qte || 0) + (type === 'entree' ? qty : -qty);
+      mainArt.date = today();
+    } else {
+      mainStocks.push({
+        id: 'prod_' + genId(),
+        code: article.code || articleId,
+        designation: article.designation || '',
+        qte: type === 'entree' ? qty : 0,
+        prixUnitaire: article.prix_revient || 0,
+        date: today(),
+        categorie: cat
+      });
+    }
+    localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks));
+  } catch(e) {}
+
   var movements = getMovements();
   movements.push({
     id: genId(), date: today(), type: type, article_id: articleId,
@@ -776,8 +797,25 @@ function addStockItem(key) {
   var items = pair[0]();
   items.push({ id: genId(), article_id: article_id, quantite: qte, prix_unitaire: prix, created_at: new Date().toISOString() });
   pair[1](items);
+
+  /* SYNC → mdb_stocks */
+  try {
+    var article = getArticles().find(function(a) { return a.id === article_id; });
+    var mainStocks = JSON.parse(localStorage.getItem('mdb_stocks')) || [];
+    mainStocks.push({
+      id: 'prod_' + genId(),
+      code: article ? article.code : article_id,
+      designation: article ? article.designation : '',
+      qte: qte,
+      prixUnitaire: prix,
+      date: today(),
+      categorie: key.replace('stock-', '')
+    });
+    localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks));
+  } catch(e) {}
+
   document.getElementById('modalOverlay').remove();
-  toast('Article ajouté au stock');
+  toast('Article ajouté au stock (synchronisé)');
   renderPage();
 }
 
@@ -1480,6 +1518,8 @@ function markPresence() {
   var date = document.getElementById('pres_date').value;
   var statut = document.getElementById('pres_statut').value;
   if (!employee_id || !date) return toast('Champs requis', 'error');
+
+  /* Écrire dans mdb_production.presence (module production) */
   var presences = getPresence();
   presences.push({
     id: genId(), employee_id: employee_id, date: date, statut: statut,
@@ -1491,8 +1531,32 @@ function markPresence() {
     notes: document.getElementById('pres_notes').value
   });
   setPresence(presences);
+
+  /* SYNC → mdb_paye.pointage (pour que paye.html calculs le salaire) */
+  try {
+    var payeData = JSON.parse(localStorage.getItem('mdb_paye')) || {};
+    if (!payeData.pointage) payeData.pointage = [];
+    var arr = document.getElementById('pres_arrivee').value || '';
+    var dep = document.getElementById('pres_depart').value || '';
+    payeData.pointage.push({
+      id: 'prod_' + genId(),
+      employee_id: employee_id,
+      date: date,
+      j_arr: arr,
+      j_pd: '',
+      j_pf: '',
+      j_fin: dep,
+      n_arr: '',
+      n_pd: '',
+      n_pf: '',
+      n_fin: '',
+      faute_societe: document.getElementById('pres_faute').checked
+    });
+    localStorage.setItem('mdb_paye', JSON.stringify(payeData));
+  } catch(e) {}
+
   document.getElementById('modalOverlay').remove();
-  toast('Présence enregistrée');
+  toast('Présence enregistrée (synchronisée avec Paie)');
   renderPage();
 }
 
@@ -1789,9 +1853,108 @@ function globalSearchFn(q) {
 }
 
 /* ==================== INIT ==================== */
+function initACSERData() {
+  /* Pré-remplir les articles si le catalogue est vide */
+  var articles = getArticles();
+  if (articles.length > 0) return; /* Déjà configuré */
+
+  var now = new Date().toISOString();
+
+  /* === ESSENCES DE BOIS === */
+  var speciesData = [
+    { id: 'sp_01', code: 'AYA', nom: 'Ayable', nom_scientifique: 'Tarrietia utilis', densite: 580, prix_m3: 85000, origine: 'Côte d\'Ivoire' },
+    { id: 'sp_02', code: 'IRO', nom: 'Iroko', nom_scientifique: 'Milicia excelsa', densite: 630, prix_m3: 120000, origine: 'Côte d\'Ivoire' },
+    { id: 'sp_03', code: 'MOI', nom: 'Moabi', nom_scientifique: 'Baillonella toxisperma', densite: 720, prix_m3: 150000, origine: 'Congo/Gabon' },
+    { id: 'sp_04', code: 'AZO', nom: 'Azobé', nom_scientifique: 'Lophira alata', densite: 850, prix_m3: 110000, origine: 'Congo/Gabon' },
+    { id: 'sp_05', code: 'BAL', nom: 'Balsa', nom_scientifique: 'Ochroma pyramidale', densite: 150, prix_m3: 250000, origine: 'Équateur' },
+    { id: 'sp_06', code: 'POPL', nom: 'Peuplier', nom_scientifique: 'Populus', densite: 400, prix_m3: 55000, origine: 'Importé' },
+    { id: 'sp_07', code: 'PIN', nom: 'Pin', nom_scientifique: 'Pinus', densite: 480, prix_m3: 65000, origine: 'Importé' },
+    { id: 'sp_08', code: 'KAL', nom: 'Kalmandji', nom_scientifique: 'Guibourtia tessmannii', densite: 780, prix_m3: 130000, origine: 'Congo/Gabon' },
+  ];
+  setSpecies(speciesData);
+
+  /* === ARTICLES — PRODUITS FINIS (PALETTES) === */
+  var articlesData = [
+    /* Palettes finies */
+    { id: 'art_01', code: 'PAL-EP-1200', designation: 'Palette Européenne 1200x800', categorie: 'finished', unite: 'unite', prix_revient: 18500, prix_vente: 28000, dimensions: '1200x800x144mm', statut: 'active' },
+    { id: 'art_02', code: 'PAL-EP-1200R', designation: 'Palette Européenne 1200x800 renforcée', categorie: 'finished', unite: 'unite', prix_revient: 22000, prix_vente: 33000, dimensions: '1200x800x160mm', statut: 'active' },
+    { id: 'art_03', code: 'PAL-CPT-1100', designation: 'Palette Contreplaquée 1100x1100', categorie: 'finished', unite: 'unite', prix_revient: 15000, prix_vente: 24000, dimensions: '1100x1100x130mm', statut: 'active' },
+    { id: 'art_04', code: 'PAL-CH-1000', designation: 'Palette Chevalet 1000x1200', categorie: 'finished', unite: 'unite', prix_revient: 12000, prix_vente: 20000, dimensions: '1000x1200x120mm', statut: 'active' },
+    { id: 'art_05', code: 'PAL-IND-1200', designation: 'Palette Industrielle 1200x1000', categorie: 'finished', unite: 'unite', prix_revient: 20000, prix_vente: 30000, dimensions: '1200x1000x150mm', statut: 'active' },
+    { id: 'art_06', code: 'PAL-MES-800', designation: 'Palette Mesure 800x600', categorie: 'finished', unite: 'unite', prix_revient: 8500, prix_vente: 14000, dimensions: '800x600x120mm', statut: 'active' },
+
+    /* Semi-finis */
+    { id: 'art_10', code: 'LAT-40x80', designation: 'Latte 40x80mm Longueur variable', categorie: 'semi', unite: 'unite', prix_revient: 1200, prix_vente: 2000, statut: 'active' },
+    { id: 'art_11', code: 'LAT-50x100', designation: 'Latte 50x100mm Longueur variable', categorie: 'semi', unite: 'unite', prix_revient: 1800, prix_vente: 2800, statut: 'active' },
+    { id: 'art_12', code: 'PLOT-80x80', designation: 'Plot 80x80mm H=144mm', categorie: 'semi', unite: 'unite', prix_revient: 800, prix_vente: 1500, statut: 'active' },
+    { id: 'art_13', code: 'PLOT-100x100', designation: 'Plot 100x100mm H=160mm', categorie: 'semi', unite: 'unite', prix_revient: 1200, prix_vente: 2000, statut: 'active' },
+    { id: 'art_14', code: 'CPL-5MM', designation: 'Contreplaqué 5mm (1200x1200)', categorie: 'semi', unite: 'unite', prix_revient: 6500, prix_vente: 10000, statut: 'active' },
+    { id: 'art_15', code: 'CPL-8MM', designation: 'Contreplaqué 8mm (1200x1200)', categorie: 'semi', unite: 'unite', prix_revient: 9000, prix_vente: 14000, statut: 'active' },
+
+    /* Matière première */
+    { id: 'art_20', code: 'MP-TRONC-AYA', designation: 'Tronçons Ayable (lots)', categorie: 'raw', unite: 'm3', prix_revient: 85000, prix_vente: 0, statut: 'active' },
+    { id: 'art_21', code: 'MP-TRONC-IRO', designation: 'Tronçons Iroko (lots)', categorie: 'raw', unite: 'm3', prix_revient: 120000, prix_vente: 0, statut: 'active' },
+    { id: 'art_22', code: 'MP-TRONC-AZO', designation: 'Tronçons Azobé (lots)', categorie: 'raw', unite: 'm3', prix_revient: 110000, prix_vente: 0, statut: 'active' },
+    { id: 'art_23', code: 'MP-TRONC-MOI', designation: 'Tronçons Moabi (lots)', categorie: 'raw', unite: 'm3', prix_revient: 150000, prix_vente: 0, statut: 'active' },
+    { id: 'art_24', code: 'MP-TRONC-PIN', designation: 'Tronçons Pin (lots)', categorie: 'raw', unite: 'm3', prix_revient: 65000, prix_vente: 0, statut: 'active' },
+    { id: 'art_25', code: 'MP-TRONC-POP', designation: 'Tronçons Peuplier (lots)', categorie: 'raw', unite: 'm3', prix_revient: 55000, prix_vente: 0, statut: 'active' },
+
+    /* Marchandises */
+    { id: 'art_30', code: 'MAR-CL-40', designation: 'Clous 40mm (sachet 500g)', categorie: 'merchandise', unite: 'unite', prix_revient: 2500, prix_vente: 4000, statut: 'active' },
+    { id: 'art_31', code: 'MAR-CL-50', designation: 'Clous 50mm (sachet 500g)', categorie: 'merchandise', unite: 'unite', prix_revient: 3000, prix_vente: 4500, statut: 'active' },
+    { id: 'art_32', code: 'MAR-CL-65', designation: 'Clous 65mm (sachet 500g)', categorie: 'merchandise', unite: 'unite', prix_revient: 3500, prix_vente: 5500, statut: 'active' },
+    { id: 'art_33', code: 'MAR-FIL-FER', designation: 'Fil de fer 2mm (rouleau 25m)', categorie: 'merchandise', unite: 'unite', prix_revient: 4000, prix_vente: 6000, statut: 'active' },
+
+    /* Consommables */
+    { id: 'art_40', code: 'CON-COLLE', designation: 'Colle bois industrielle (20kg)', categorie: 'consumable', unite: 'unite', prix_revient: 35000, prix_vente: 0, statut: 'active' },
+    { id: 'art_41', code: 'CON-GRAISSE', designation: 'Graisse machine (5kg)', categorie: 'consumable', unite: 'unite', prix_revient: 8000, prix_vente: 0, statut: 'active' },
+    { id: 'art_42', code: 'CON-LAMES', designation: 'Lames de scie circulaire', categorie: 'consumable', unite: 'unite', prix_revient: 25000, prix_vente: 0, statut: 'active' },
+    { id: 'art_43', code: 'CON-PAPIER', designation: 'Papier abrasif grain 80', categorie: 'consumable', unite: 'unite', prix_revient: 3000, prix_vente: 0, statut: 'active' },
+  ];
+  setArticles(articlesData);
+
+  /* === FICHES TECHNIQUES (NOMENCLATURE) === */
+  var fichesData = [
+    /* Palette EP 1200x800 = 9 plots + 5 lattes dessus + 5 lattes dessous + 2 lattes renfort */
+    { id: 'ft_01', article_id: 'art_01', composant_id: 'art_12', quantite: 9, phase: 'III' },
+    { id: 'ft_02', article_id: 'art_01', composant_id: 'art_10', quantite: 5, phase: 'II' },
+    { id: 'ft_03', article_id: 'art_01', composant_id: 'art_11', quantite: 2, phase: 'II' },
+
+    /* Palette EP renforcée = 12 plots + 6 lattes */
+    { id: 'ft_04', article_id: 'art_02', composant_id: 'art_13', quantite: 12, phase: 'III' },
+    { id: 'ft_05', article_id: 'art_02', composant_id: 'art_11', quantite: 6, phase: 'II' },
+
+    /* Palette Contreplaquée = contreplaqué + plots */
+    { id: 'ft_06', article_id: 'art_03', composant_id: 'art_14', quantite: 1, phase: 'IV' },
+    { id: 'ft_07', article_id: 'art_03', composant_id: 'art_12', quantite: 9, phase: 'III' },
+
+    /* Palette Chevalet = lattes uniquement */
+    { id: 'ft_08', article_id: 'art_04', composant_id: 'art_10', quantite: 6, phase: 'II' },
+    { id: 'ft_09', article_id: 'art_04', composant_id: 'art_12', quantite: 4, phase: 'III' },
+
+    /* Palette Industrielle = plots + lattes + renfort */
+    { id: 'ft_10', article_id: 'art_05', composant_id: 'art_13', quantite: 10, phase: 'III' },
+    { id: 'ft_11', article_id: 'art_05', composant_id: 'art_11', quantite: 5, phase: 'II' },
+
+    /* Palette Mesure = plots + lattes fines */
+    { id: 'ft_12', article_id: 'art_06', composant_id: 'art_12', quantite: 6, phase: 'III' },
+    { id: 'ft_13', article_id: 'art_06', composant_id: 'art_10', quantite: 3, phase: 'II' },
+
+    /* Lattes = matière première (tronçons) */
+    { id: 'ft_20', article_id: 'art_10', composant_id: 'art_20', quantite: 0.015, phase: 'I' },
+    { id: 'ft_21', article_id: 'art_11', composant_id: 'art_20', quantite: 0.02, phase: 'I' },
+    { id: 'ft_22', article_id: 'art_14', composant_id: 'art_25', quantite: 0.08, phase: 'I' },
+  ];
+  setFichesTech(fichesData);
+
+  toast('Articles ACSER pré-configurés (28 articles, 8 essences, 22 fiches techniques)');
+}
+
+/* === Lancement === */
 CURRENT_PAGE = localStorage.getItem('mdb_prod_currentPage') || 'dashboard';
 document.getElementById('dateDisplay').textContent = new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 if (window.innerWidth < 768) document.getElementById('menuBtn').style.display = 'inline-flex';
+initACSERData();
 renderNav();
 renderPage();
 </script>
