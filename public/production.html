@@ -211,8 +211,26 @@ function toggleGroup(group) {
 
 function renderNav() {
   var h = '';
+  /* Déterminer quel groupe doit être ouvert (celui avec l'élément actif) */
+  var activeGroup = null;
   NAV.forEach(function(g) {
-    var isOpen = OPEN_GROUPS[g.group];
+    g.items.forEach(function(item) {
+      if (item.children) {
+        var hasActive = item.children.some(function(c) { return CURRENT_PAGE === c.id; });
+        if (hasActive) activeGroup = g.group;
+      } else if (CURRENT_PAGE === item.id) {
+        activeGroup = g.group;
+      }
+    });
+  });
+  /* Si un groupe actif existe, l'ouvrir et fermer les autres */
+  if (activeGroup) {
+    for (var k in OPEN_GROUPS) OPEN_GROUPS[k] = false;
+    OPEN_GROUPS[activeGroup] = true;
+  }
+
+  NAV.forEach(function(g) {
+    var isOpen = OPEN_GROUPS[g.group] || false;
     h += '<div class="nav-group">';
     h += '<div class="nav-group-label">' + escH(g.group) + '</div>';
     g.items.forEach(function(item) {
@@ -887,23 +905,88 @@ function render_stock_consum() { return renderStockPage('stock-consum', getStock
 function renderStockPage(key, getFn, setFn, title) {
   var items = getFn();
   var articles = getArticles();
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'stockTable\',this.value)">';
-  h += '<button class="btn btn-accent" onclick="showAddStock(\'' + key + '\')">+ Ajouter</button>';
+  var composants = getSection('composants', []);
+
+  var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">';
+  h += '<div><input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)"></div>';
+  h += '<div style="display:flex;gap:.5rem">';
+  h += '<button class="btn" onclick="exportStockPDF()">📄 PDF</button>';
+  h += '<button class="btn" onclick="exportStockExcel()">📊 Excel</button>';
+  h += '<button class="btn btn-accent" onclick="showAddStock(\'' + key + '\')">+ Nouveau Produit Fini</button>';
+  h += '</div></div>';
+
+  /* Onglets Stock Actuel / Stock Récapitulatif */
+  h += '<div class="tabs">';
+  h += '<div class="tab active" id="tabActuel" onclick="showStockTab(\'actuel\')">Stock Actuel</div>';
+  h += '<div class="tab" id="tabRecap" onclick="showStockTab(\'recap\')">Stock Récapitulatif Initial</div>';
   h += '</div>';
-  if (items.length === 0) return h + '<div class="empty">Aucun article en stock</div>';
-  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Quantité</th><th style="text-align:right">Prix unitaire</th><th style="text-align:right">Valeur</th><th>Actions</th></tr>';
+
+  h += '<div id="stockContent">';
+
+  /* Stock Actuel */
+  h += '<div class="card" id="stockActuel"><h3>📦 Stock Actuel</h3>';
+  if (items.length === 0) h += '<div class="empty">Aucun article en stock</div>';
+  else {
+    h += '<table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Dimensions</th><th style="text-align:right">Stock Actuel</th><th>Actions</th></tr>';
+    items.forEach(function(s) {
+      var art = articles.find(function(a) { return a.id === s.article_id; }) || {};
+      var dims = art.length > 0 ? art.length + 'x' + art.width + 'x' + art.thickness : (art.dimensions || '0x0x0');
+      h += '<tr>';
+      h += '<td style="font-weight:600;color:var(--accent)">' + escH(art.code || '-') + '</td>';
+      h += '<td>' + escH(art.designation || '-') + '</td>';
+      h += '<td style="color:var(--dim)">' + escH(dims) + '</td>';
+      h += '<td style="text-align:right;font-weight:700;font-size:1.1rem">' + (s.quantite || 0) + '</td>';
+      h += '<td>';
+      h += '<button class="btn" onclick="showArticleDetail(\'' + (art.id || '') + '\')" style="font-size:.7rem">👁️</button> ';
+      h += '<button class="btn btn-red" onclick="deleteStockItem(\'' + key + '\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button>';
+      h += '</td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '</div>';
+
+  /* Stock Récapitulatif (masqué par défaut) */
+  h += '<div class="card" id="stockRecap" style="display:none"><h3>📊 Stock Récapitulatif Initial</h3>';
+  h += '<p style="color:var(--dim);font-size:.82rem">Stock initial de tous les articles (avant mouvements)</p>';
+  h += '<table><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Stock Initial</th><th style="text-align:right">Prix Unitaire</th><th style="text-align:right">Valeur</th></tr>';
   var totalVal = 0;
-  items.forEach(function(s) {
-    var art = articles.find(function(a) { return a.id === s.article_id; }) || {};
-    var val = (s.quantite || 0) * (s.prix_unitaire || 0);
+  articles.forEach(function(a) {
+    var stockItem = items.find(function(s) { return s.article_id === a.id; });
+    var qte = stockItem ? (stockItem.quantite || 0) : 0;
+    var val = qte * (a.prix_vente || 0);
     totalVal += val;
-    h += '<tr><td>' + escH(art.code || '-') + '</td><td>' + escH(art.designation || '-') + '</td><td style="text-align:right;font-weight:700">' + fmt(s.quantite) + '</td><td style="text-align:right">' + fmtF(s.prix_unitaire || 0) + '</td><td style="text-align:right">' + fmtF(val) + '</td><td><button class="btn btn-red" onclick="deleteStockItem(\'' + key + '\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+    h += '<tr><td>' + escH(a.code) + '</td><td>' + escH(a.designation) + '</td>';
+    h += '<td style="text-align:right">' + qte + '</td>';
+    h += '<td style="text-align:right">' + fmt(a.prix_vente || 0) + ' FCFA</td>';
+    h += '<td style="text-align:right">' + fmt(val) + ' FCFA</td></tr>';
   });
-  h += '<tr style="font-weight:800;background:var(--surface)"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmtF(totalVal) + '</td><td></td></tr>';
+  h += '<tr style="font-weight:800"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totalVal) + ' FCFA</td></tr>';
   h += '</table></div>';
+
+  h += '</div>';
   return h;
 }
+
+function showStockTab(tab) {
+  var actuel = document.getElementById('stockActuel');
+  var recap = document.getElementById('stockRecap');
+  var tabActuel = document.getElementById('tabActuel');
+  var tabRecap = document.getElementById('tabRecap');
+  if (tab === 'actuel') {
+    actuel.style.display = '';
+    recap.style.display = 'none';
+    tabActuel.classList.add('active');
+    tabRecap.classList.remove('active');
+  } else {
+    actuel.style.display = 'none';
+    recap.style.display = '';
+    tabActuel.classList.remove('active');
+    tabRecap.classList.add('active');
+  }
+}
+
+function exportStockPDF() { toast('Export PDF en cours...'); }
+function exportStockExcel() { toast('Export Excel en cours...'); }
 
 function showAddStock(key) {
   var articles = getArticles();
@@ -1024,16 +1107,49 @@ function addMovement() {
 /* ==================== INVENTAIRE ==================== */
 function render_inventory() {
   var invs = getInventories().slice().reverse();
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
+  var articles = getArticles();
+
+  var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">';
   h += '<div></div>';
+  h += '<div style="display:flex;gap:.5rem">';
+  h += '<button class="btn">📄 Imprimer</button>';
   h += '<button class="btn btn-accent" onclick="showNewInventory()">+ Nouvel Inventaire</button>';
+  h += '</div></div>';
+
+  /* Paramètres de l'inventaire */
+  h += '<div class="card">';
+  h += '<h3>Paramètres de l\'inventaire</h3>';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1rem">';
+  h += '<div class="form-group"><label>Date</label><input type="date" id="inv_date" value="' + today() + '"></div>';
+  h += '<div class="form-group"><label>Filtrer articles</label><select id="inv_filter"><option value="all">Tous</option><option value="active">Actifs (stock > 0)</option><option value="zero">Stock = 0</option></select></div>';
+  h += '<div class="form-group"><label>Type d\'élément à inventorer</label><select id="inv_type"><option value="">Choisir un type...</option><option value="PALETTE">Palette</option><option value="COUVERCLE">Couvercle</option><option value="SEMI">Semi-fini</option><option value="MATIERE">Matière première</option></select></div>';
+  h += '<div class="form-group"><label>Superviseur</label><input type="text" id="inv_supervisor" placeholder="Nom du superviseur"></div>';
   h += '</div>';
-  if (invs.length === 0) return h + '<div class="empty">Aucun inventaire</div>';
-  h += '<div class="card"><table><tr><th>Date</th><th>Catégorie</th><th style="text-align:right">Articles comptés</th><th style="text-align:right">Écarts</th><th>Statut</th></tr>';
-  invs.forEach(function(inv) {
-    h += '<tr><td>' + escH(inv.date) + '</td><td>' + escH(inv.categorie || '-') + '</td><td style="text-align:right">' + (inv.articles_comptes || 0) + '</td><td style="text-align:right;color:var(--red)">' + (inv.ecarts || 0) + '</td><td>' + badgeStatut(inv.statut) + '</td></tr>';
-  });
-  h += '</table></div>';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;margin-top:.5rem">';
+  h += '<div class="form-group"><label>Exécutants</label><input type="text" id="inv_executants" placeholder="Noms des exécutants"></div>';
+  h += '<div class="form-group"><label>Heure début</label><input type="time" id="inv_heure_debut"></div>';
+  h += '<div class="form-group"><label>Heure fin</label><input type="time" id="inv_heure_fin"></div>';
+  h += '</div></div>';
+
+  /* Inventaires sauvegardés */
+  var thisM = thisMonth();
+  var invsMois = invs.filter(function(inv) { return (inv.date || '').indexOf(thisM) === 0; });
+  h += '<div class="card">';
+  h += '<h3>Inventaires sauvegardés (' + thisM + ')</h3>';
+  if (invsMois.length === 0) h += '<div class="empty">Aucun inventaire sauvegardé pour ce mois.</div>';
+  else {
+    h += '<table><tr><th>Date</th><th>Superviseur</th><th>Articles</th><th>Écarts</th><th>Heure</th><th>Actions</th></tr>';
+    invsMois.forEach(function(inv) {
+      h += '<tr><td>' + escH(inv.date) + '</td><td>' + escH(inv.supervisor || '-') + '</td>';
+      h += '<td style="text-align:right">' + (inv.articles_comptes || 0) + '</td>';
+      h += '<td style="text-align:right;color:var(--red)">' + (inv.ecarts || 0) + '</td>';
+      h += '<td>' + escH((inv.heure_debut || '-') + ' - ' + (inv.heure_fin || '-')) + '</td>';
+      h += '<td><button class="btn" onclick="viewInventory(\'' + inv.id + '\')" style="font-size:.7rem">👁️</button></td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '</div>';
+
   return h;
 }
 
