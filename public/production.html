@@ -581,6 +581,8 @@ function render_dashboard() {
     netMvtVol += (m.type === 'entree' ? vM : -vM);
   });
   var volInitial = Math.max(0, volStock.total - netMvtVol);
+  var snapI = getSection('stockInitialSnap', null);
+  if (snapI && snapI.month === thisM) volInitial = snapInitialTotalVol(snapI);
 
   var h = '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.8rem">Vue d\u2019ensemble de la performance et des stocks</div>';
   h += '<div class="stats-grid">';
@@ -1691,13 +1693,23 @@ function validateProd(id) {
   if (!p) return;
   p.statut = 'validated';
   setProductions(prods);
-  /* Déduire bois sorti du stock */
+  /* Déduire bois sorti du stock : quantité ET volume (proportionnel) */
   if (p.sortie_bois && p.sortie_bois.length) {
     p.sortie_bois.forEach(function(sb) {
       if (sb.code) {
         var stockRaw = getStockRaw();
         var item = stockRaw.find(function(s) { return s.code === sb.code; });
-        if (item) { item.quantite = Math.max(0, (item.quantite || 0) - sb.qte); item.updated_at = new Date().toISOString(); setStockRaw(stockRaw); }
+        if (item) {
+          var oldQ = parseFloat(item.quantite) || 0;
+          var oldV = parseFloat(item.volume) || 0;
+          var unitVol = oldQ > 0 ? oldV / oldQ : calcVolume(item.longueur || item.length, item.largeur || item.width, item.epaisseur || item.thickness);
+          var takeQ = parseFloat(sb.qte) || 0;
+          item.quantite = Math.max(0, oldQ - takeQ);
+          if (parseFloat(sb.volume) > 0 && oldV > 0) item.volume = Math.max(0, oldV - parseFloat(sb.volume));
+          else item.volume = Math.max(0, unitVol * item.quantite);
+          item.updated_at = new Date().toISOString();
+          setStockRaw(stockRaw);
+        }
       }
     });
   } else if (p.article_id && p.quantite) {
@@ -1864,49 +1876,194 @@ function render_stock_finished() { return renderStockFiche('stock-finished', get
 function render_stock_semi() { return renderStockFiche('stock-semi', getStockSemi, 'Fiche de Stock - Semi-Finis', 'showAddStock'); }
 
 /* ==================== STOCK MATIERE PREMIERE (façon ACSER) ==================== */
-function render_stock_raw() {
-  var items = getStockRaw();
-  var tab = getSection('stockRawTab', 'all');
-  var filtered = items.filter(function(s) {
-    var o = mpOrigin(s);
-    if (tab === 'bl') return o === 'BL';
-    if (tab === 'spe') return o === 'SPECIFIC';
-    if (tab === 'enc') return o === 'ENCOURS';
-    return true;
+function mpOriginLabel(o) {
+  if (o === 'SPECIFIC') return 'Spécifique';
+  if (o === 'ENCOURS') return 'En cours';
+  if (o === 'RECOLISAGE') return 'Recolisage';
+  return 'BL';
+}
+function semiVol(s) {
+  var a = getArticles().find(function(x) { return (x.code || '') === (s.code || ''); });
+  if (a) return artUnitVol(a) * (parseFloat(s.quantite) || 0);
+  return 0;
+}
+function wipList() {
+  var out = [];
+  getProductionOrders().filter(function(o) { return o.statut === 'en_cours'; }).forEach(function(o) {
+    var a = getArticles().find(function(x) { return x.id === o.article_id; }) || {};
+    var rem = Math.max(0, (parseFloat(o.quantite_prevue) || 0) - (parseFloat(o.quantite_realisee) || 0));
+    var prev = parseFloat(o.quantite_prevue) || 0;
+    out.push({ numero: o.numero || '-', code: a.code || '-', des: a.designation || '-', remaining: rem, vol: artUnitVol(a) * rem, prog: prev > 0 ? Math.round((parseFloat(o.quantite_realisee) || 0) / prev * 100) : 0 });
   });
+  return out;
+}
+function takeInitialSnap() {
+  var snap = { month: thisMonth(), taken_at: new Date().toISOString(),
+    raw: JSON.parse(JSON.stringify(getStockRaw() || [])),
+    semi: JSON.parse(JSON.stringify(getStockSemi() || [])),
+    wip: wipList() };
+  setSection('stockInitialSnap', snap);
+  return snap;
+}
+function refigerStockInitial() {
+  if (!confirm2('Refiger le stock initial du mois avec les valeurs actuelles ?')) return;
+  takeInitialSnap();
+  toast('Stock initial refigé');
+  renderPage();
+}
+function snapInitialTotalVol(snap) {
+  var t = 0;
+  (snap.raw || []).forEach(function(s) { t += stkVol(s); });
+  (snap.semi || []).forEach(function(s) { t += semiVol(s); });
+  (snap.wip || []).forEach(function(w) { t += (w.vol || 0); });
+  return t;
+}
+function render_stock_raw() {
+  var tab = getSection('stockRawTab', 'actif');
+  if (tab === 'all') tab = 'actif';
+  if (tab === 'enc') tab = 'wip';
+  if (['actif', 'bl', 'spe', 'recol', 'semi', 'wip', 'initial'].indexOf(tab) === -1) tab = 'actif';
+  var etat = getSection('stockRawEtat', 'actifs');
+  if (etat !== 'actifs' && etat !== 'termines') etat = 'actifs';
+  function etatOk(q) { return etat === 'actifs' ? (parseFloat(q) || 0) > 0 : (parseFloat(q) || 0) <= 0; }
+
   var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
   h += '<h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Matière Première</h2>';
   h += '<p style="color:var(--dim);font-size:.82rem;margin:0">État du stock et historique des mouvements</p></div>';
   h += '<div class="tabs">';
-  h += '<div class="tab' + (tab === 'all' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'all\');renderPage()">Toutes</div>';
-  h += '<div class="tab' + (tab === 'bl' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'bl\');renderPage()">BL</div>';
-  h += '<div class="tab' + (tab === 'spe' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'spe\');renderPage()">Spécifique</div>';
-  h += '<div class="tab' + (tab === 'enc' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'enc\');renderPage()">En cours</div>';
+  h += '<div class="tab' + (tab === 'actif' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'actif\');renderPage()">Stock actif global</div>';
+  h += '<div class="tab' + (tab === 'bl' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'bl\');renderPage()">Stock BL</div>';
+  h += '<div class="tab' + (tab === 'spe' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'spe\');renderPage()">Stock Spécifique</div>';
+  h += '<div class="tab' + (tab === 'recol' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'recol\');renderPage()">Recolisage</div>';
+  h += '<div class="tab' + (tab === 'semi' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'semi\');renderPage()">Semi-finis</div>';
+  h += '<div class="tab' + (tab === 'wip' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'wip\');renderPage()">En-cours (WIP)</div>';
+  h += '<div class="tab' + (tab === 'initial' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'initial\');renderPage()">Stock Initial</div>';
   h += '</div>';
+
+  if (tab === 'wip') {
+    var wips = wipList();
+    var totWQ = 0, totWV = 0;
+    var wipArts = {};
+    wips.forEach(function(w) { totWQ += w.remaining; totWV += w.vol; wipArts[w.code] = true; });
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
+    h += '<input type="text" class="search-box" placeholder="Rechercher..." oninput="filterTable(\'stockTable\',this.value)">';
+    h += '<div style="font-size:.8rem;color:var(--dim)">' + Object.keys(wipArts).length + ' art. · ' + fmt(totWQ) + ' élém. · ' + totWV.toFixed(3) + ' m³</div></div>';
+    h += '<div class="card"><table id="stockTable"><tr><th>N° OP</th><th>Article</th><th style="text-align:right">Reste (élém.)</th><th style="text-align:right">Vol. restant (m³)</th><th>Avancement</th></tr>';
+    wips.forEach(function(w) {
+      h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(w.numero) + '</td>';
+      h += '<td>' + escH(w.code + ' — ' + w.des) + '</td>';
+      h += '<td style="text-align:right;font-weight:700">' + fmt(w.remaining) + '</td>';
+      h += '<td style="text-align:right">' + w.vol.toFixed(3) + '</td>';
+      h += '<td><div class="progress-bar"><div class="fill" style="width:' + Math.min(w.prog, 100) + '%"></div></div><small>' + w.prog + '%</small></td></tr>';
+    });
+    h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="2" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totWQ) + '</td><td style="text-align:right">' + totWV.toFixed(3) + '</td><td></td></tr>';
+    h += '</table>';
+    if (!wips.length) h += '<div class="empty">Aucun en-cours</div>';
+    h += '</div>';
+    return h;
+  }
+
+  if (tab === 'initial') {
+    var curM = thisMonth();
+    var snap = getSection('stockInitialSnap', null);
+    if (!snap || snap.month !== curM) snap = takeInitialSnap();
+    function sumQV(list) {
+      var q = 0, v = 0;
+      list.forEach(function(s) { q += parseFloat(s.quantite) || 0; v += stkVol(s); });
+      return { q: q, v: v };
+    }
+    var blS = sumQV(snap.raw.filter(function(s) { return mpOrigin(s) === 'BL'; }));
+    var nBL = snap.raw.filter(function(s) { return mpOrigin(s) === 'BL'; }).length;
+    var speS = sumQV(snap.raw.filter(function(s) { return mpOrigin(s) === 'SPECIFIC'; }));
+    var nSpe = snap.raw.filter(function(s) { return mpOrigin(s) === 'SPECIFIC'; }).length;
+    var recS = sumQV(snap.raw.filter(function(s) { return mpOrigin(s) === 'RECOLISAGE'; }));
+    var nRec = snap.raw.filter(function(s) { return mpOrigin(s) === 'RECOLISAGE'; }).length;
+    var nSemi = snap.semi.length;
+    var qSemi = 0, vSemi = 0;
+    snap.semi.forEach(function(s) { qSemi += parseFloat(s.quantite) || 0; vSemi += semiVol(s); });
+    var wipA = {};
+    var qWip = 0, vWip = 0;
+    (snap.wip || []).forEach(function(w) { wipA[w.code] = true; qWip += w.remaining || 0; vWip += w.vol || 0; });
+    var nWip = Object.keys(wipA).length;
+    var totR = nBL + nSpe + nRec + nSemi + nWip;
+    var totQ = blS.q + speS.q + recS.q + qSemi + qWip;
+    var totV = blS.v + speS.v + recS.v + vSemi + vWip;
+    var _mn = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
+    var mLabel = _mn[parseInt(curM.slice(5, 7), 10) - 1] + ' ' + curM.slice(0, 4);
+    h += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem">';
+    h += '<h3 style="margin:0">Stock Initial au 1er ' + mLabel + '</h3>';
+    h += '<button class="btn" onclick="refigerStockInitial()">🔄 Refiger</button></div>';
+    h += '<div style="font-size:.72rem;color:var(--dim);margin-bottom:.8rem">Figé le ' + escH((snap.taken_at || '').slice(0, 10)) + '</div>';
+    h += '<div style="font-size:1rem;font-weight:800;margin-bottom:.6rem">' + totR + ' références / colis &nbsp;|&nbsp; ' + fmt(totQ) + ' éléments &nbsp;|&nbsp; ' + totV.toFixed(3) + ' m³</div>';
+    h += '<div style="font-size:.85rem;line-height:1.9">';
+    h += '• <strong>BL :</strong> ' + nBL + ' colis (' + fmt(blS.q) + ' élém. / ' + blS.v.toFixed(3) + ' m³)<br>';
+    h += '• <strong>Spéc. :</strong> ' + nSpe + ' colis (' + fmt(speS.q) + ' élém. / ' + speS.v.toFixed(3) + ' m³)<br>';
+    if (nRec) h += '• <strong>Recol. :</strong> ' + nRec + ' colis (' + fmt(recS.q) + ' élém. / ' + recS.v.toFixed(3) + ' m³)<br>';
+    h += '• <strong>Semi-f. :</strong> ' + nSemi + ' art. (' + fmt(qSemi) + ' élém. / ' + vSemi.toFixed(3) + ' m³)<br>';
+    h += '• <strong>WIP :</strong> ' + nWip + ' art. (' + fmt(qWip) + ' élém. / ' + vWip.toFixed(3) + ' m³)';
+    h += '</div></div>';
+    return h;
+  }
+
+  var showEtat = '<div style="display:flex;gap:.4rem;align-items:center">';
+  showEtat += '<button class="btn' + (etat === 'actifs' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'actifs\');renderPage()" style="font-size:.75rem">Actifs</button>';
+  showEtat += '<button class="btn' + (etat === 'termines' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'termines\');renderPage()" style="font-size:.75rem">Terminés</button></div>';
+
+  if (tab === 'semi') {
+    var semiL = getStockSemi().filter(function(s) { return etatOk(s.quantite); });
+    var totSQ = 0, totSV = 0;
+    semiL.forEach(function(s) { totSQ += parseFloat(s.quantite) || 0; totSV += semiVol(s); });
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
+    h += '<input type="text" class="search-box" placeholder="Rechercher..." oninput="filterTable(\'stockTable\',this.value)">';
+    h += '<div style="display:flex;gap:.5rem;align-items:center">' + showEtat + '</div></div>';
+    h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Fournisseur</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
+    semiL.forEach(function(s) {
+      var v = semiVol(s);
+      h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(s.code || '-') + '</td>';
+      h += '<td>' + escH(s.designation || '-') + '</td><td>' + escH(s.fournisseur || '-') + '</td>';
+      h += '<td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td>';
+      h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
+      h += '<td><button class="btn btn-red" onclick="deleteStockItem(\'stock-semi\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+    });
+    h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="3" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totSQ) + '</td><td style="text-align:right">' + totSV.toFixed(3) + '</td><td></td></tr>';
+    h += '</table>';
+    if (!semiL.length) h += '<div class="empty">Aucun semi-fini ' + (etat === 'actifs' ? 'en stock' : 'terminé') + '</div>';
+    h += '</div>';
+    return h;
+  }
+
+  var items = getStockRaw().filter(function(s) {
+    var o = mpOrigin(s);
+    if (tab === 'bl' && o !== 'BL') return false;
+    if (tab === 'spe' && o !== 'SPECIFIC') return false;
+    if (tab === 'recol' && o !== 'RECOLISAGE') return false;
+    return etatOk(s.quantite);
+  });
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
   h += '<input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)">';
-  h += '<div style="display:flex;gap:.5rem">';
+  h += '<div style="display:flex;gap:.5rem;align-items:center">' + showEtat;
   h += '<button class="btn" onclick="exportStockPDF()">🖨️ Imprimer</button>';
   h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
   h += '<button class="btn btn-accent" onclick="showNewRawItem()">+ Nouveau</button>';
   h += '</div></div>';
-  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
+  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Origine</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
   var totQ = 0, totV = 0;
-  filtered.forEach(function(s) {
+  items.forEach(function(s) {
     var v = stkVol(s);
     totQ += parseFloat(s.quantite) || 0;
     totV += v;
     h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(s.code || s.colis_number || '-') + '</td>';
     h += '<td>' + escH(s.designation || s.essence || '-') + '</td>';
+    h += '<td>' + escH(mpOriginLabel(mpOrigin(s))) + '</td>';
     h += '<td style="color:var(--dim)">' + escH(stkDims(s)) + '</td>';
     h += '<td>' + escH(s.zone || s.emplacement || '-') + '</td>';
     h += '<td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td>';
     h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
     h += '<td><button class="btn btn-red" onclick="deleteStockItem(\'stock-raw\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
   });
-  h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + totQ + '</td><td style="text-align:right">' + totV.toFixed(3) + '</td><td></td></tr>';
+  h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totQ) + '</td><td style="text-align:right">' + totV.toFixed(3) + '</td><td></td></tr>';
   h += '</table>';
-  if (filtered.length === 0) h += '<div class="empty">Aucun bois en stock</div>';
+  if (items.length === 0) h += '<div class="empty">Aucun bois ' + (etat === 'actifs' ? 'en stock' : 'terminé') + '</div>';
   h += '</div>';
   return h;
 }
@@ -1965,7 +2122,7 @@ function showNewRawItem() {
   m += '</div>';
   m += '<div class="form-row">';
   m += '<div class="form-group"><label>Type</label><select id="raw_type"><option>Bois rouge</option><option>Bois blanc</option><option>Autre</option></select></div>';
-  m += '<div class="form-group"><label>Origine</label><select id="raw_origin"><option value="BL">BL</option><option value="SPECIFIC">Spécifique</option><option value="ENCOURS">En cours</option></select></div>';
+  m += '<div class="form-group"><label>Origine</label><select id="raw_origin"><option value="BL">BL</option><option value="SPECIFIC">Spécifique</option><option value="RECOLISAGE">Recolisage</option><option value="ENCOURS">En cours</option></select></div>';
   m += '</div>';
   m += '<div class="form-row-3">';
   m += formField('raw_long', 'Longueur (cm)', '', 'number', false);
@@ -2052,7 +2209,77 @@ function renderStockFiche(key, getFn, title, addFn) {
 function render_stock_merch() { return renderStockFiche('stock-merch', getStockMerch, 'Fiche de Stock - Marchandises', 'showAddStock'); }
 
 /* ==================== STOCK CONSOMMABLES ==================== */
-function render_stock_consum() { return renderStockFiche('stock-consum', getStockConsum, 'Fiche de Stock - Consommables', 'showAddStock'); }
+  function consoNorm(s) {
+    var code = s.code || '';
+    var des = s.designation || '';
+    if (s.article_id && (!code || !des)) {
+      var a = getArticles().find(function(x) { return x.id === s.article_id; }) || {};
+      if (!code) code = a.code || '';
+      if (!des) des = a.designation || '';
+    }
+    var cu = (code || '').toUpperCase();
+    var du = (des || '').toUpperCase();
+    var t = s.ctype || s.type || ((cu === 'P5' || cu === 'P6' || cu === 'P7' || du.indexOf('POINTE') === 0) ? 'POINTE' : 'DIVERS');
+    if (t !== 'POINTE') t = 'DIVERS';
+    var cond = parseFloat(s.cond != null ? s.cond : s.qty_per_packet) || 0;
+    var unites = parseFloat(s.quantite) || 0;
+    var paq = t === 'POINTE' ? (cond > 0 ? Math.floor(unites / cond) : unites) : unites;
+    return { id: s.id, code: code || '-', des: des || '-', type: t, emplacement: s.emplacement || s.zone || '-', cond: cond, unites: unites, paquets: paq };
+  }
+  function render_stock_consum() {
+    var tab = getSection('stockConsoTab', 'tous');
+    if (tab !== 'tous' && tab !== 'pointes' && tab !== 'divers') tab = 'tous';
+    var list = getStockConsum().map(consoNorm).filter(function(x) {
+      if (tab === 'pointes') return x.type === 'POINTE';
+      if (tab === 'divers') return x.type === 'DIVERS';
+      return true;
+    });
+    var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
+    h += '<h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Consommables</h2>';
+    h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Pointes et divers, sans dimensions ni volume</p></div>';
+    h += '<div class="tabs">';
+    h += '<div class="tab' + (tab === 'tous' ? ' active' : '') + '" onclick="setSection(\'stockConsoTab\',\'tous\');renderPage()">Tous</div>';
+    h += '<div class="tab' + (tab === 'pointes' ? ' active' : '') + '" onclick="setSection(\'stockConsoTab\',\'pointes\');renderPage()">Pointes</div>';
+    h += '<div class="tab' + (tab === 'divers' ? ' active' : '') + '" onclick="setSection(\'stockConsoTab\',\'divers\');renderPage()">Divers</div>';
+    h += '</div>';
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
+    h += '<input type="text" class="search-box" placeholder="Rechercher code, nom..." oninput="filterTable(\'consoTable\',this.value)">';
+    h += '<div style="display:flex;gap:.5rem">';
+    h += '<button class="btn btn-accent" onclick="showAddStock(\'stock-consum\')">+ Nouveau</button>';
+    h += '</div></div>';
+    h += '<div class="card"><table id="consoTable">';
+    if (tab === 'divers') {
+      h += '<tr><th>Code</th><th>Nom</th><th>Type</th><th>Emplacement</th><th style="text-align:right">Stock</th><th>Actions</th></tr>';
+      var totD = 0;
+      list.forEach(function(x) {
+        totD += x.unites;
+        h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(x.code) + '</td>';
+        h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement) + '</td>';
+        h += '<td style="text-align:right;font-weight:700">' + fmt(x.unites) + '</td>';
+        h += '<td><button class="btn btn-red" onclick="deleteStockItem(\'stock-consum\',\'' + x.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+      });
+      h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totD) + '</td><td></td></tr>';
+    } else {
+      h += '<tr><th>Code</th><th>Nom</th><th>Type</th><th>Emplacement</th><th style="text-align:right">Cond.</th><th style="text-align:right">Stock pointes</th><th style="text-align:right">Stock paquets</th><th>Actions</th></tr>';
+      var totU = 0, totP = 0;
+      list.forEach(function(x) {
+        totU += x.unites;
+        totP += x.paquets;
+        var isDiv = x.type === 'DIVERS';
+        h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(x.code) + '</td>';
+        h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement) + '</td>';
+        h += '<td style="text-align:right">' + (isDiv ? '-' : fmt(x.cond)) + '</td>';
+        h += '<td style="text-align:right;font-weight:700">' + (isDiv ? '-' : fmt(x.unites)) + '</td>';
+        h += '<td style="text-align:right;font-weight:700">' + fmt(x.paquets) + '</td>';
+        h += '<td><button class="btn btn-red" onclick="deleteStockItem(\'stock-consum\',\'' + x.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+      });
+      h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totU) + '</td><td style="text-align:right">' + fmt(totP) + '</td><td></td></tr>';
+    }
+    h += '</table>';
+    if (list.length === 0) h += '<div class="empty">Aucun consommable</div>';
+    h += '</div>';
+    return h;
+  }
 
 function renderStockPage(key, getFn, setFn, title) {
   var items = getFn();
@@ -4411,10 +4638,10 @@ function showNewAchat(category) {
     
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">N° Colis</label><input type="text" id="ai_colis" placeholder="N° Colis" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Qté</label><input type="number" id="ai_qte" value="1" min="1" oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
-    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">L (cm)</label><input type="number" id="ai_long" placeholder="L" oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
-    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">l (cm)</label><input type="number" id="ai_larg" placeholder="l" oninput="onLargInput()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Long (cm)</label><input type="number" id="ai_long" placeholder="Long" oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Larg (cm)</label><input type="number" id="ai_larg" placeholder="Larg moy." oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">L. Glob</label><input type="number" id="ai_lglob" placeholder="Glob (cm)" oninput="onLGlobInput()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
-    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">E (cm)</label><input type="number" id="ai_epais" placeholder="E" oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Ep (cm)</label><input type="number" id="ai_epais" placeholder="Ep" oninput="calcItemVolLive()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:700;color:#ea580c">Vol(m³)</label><input type="text" id="ai_vol" value="0.0000" readonly style="width:100%;padding:0.35rem 0.5rem;border:1px solid #ffedd5;border-radius:6px;font-size:0.8rem;font-weight:700;color:#ea580c;background:#fff;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Essence</label><input type="text" id="ai_essence" placeholder="AY" list="essenceList" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Type</label><select id="ai_type" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"><option value="Rouge">Rouge</option><option value="Blanc">Blanc</option><option value="Autre">Autre</option></select></div>';
@@ -4427,11 +4654,13 @@ function showNewAchat(category) {
   } else if (category === 'consumable') {
     // Consumable Category (matching ACSER: qty_per_packet, unit_cost, observation)
     m += '<div style="background:#f8fafc;padding:0.85rem;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:1rem">';
-    m += '  <div style="display:grid;grid-template-columns: 1fr 1.5fr 0.8fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:center">';
+    m += '  <div style="display:grid;grid-template-columns: 0.8fr 1.5fr 0.8fr 0.7fr 0.8fr 0.8fr 0.8fr 1fr auto;gap:0.5rem;align-items:center">';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Code</label><input type="text" id="ai_code" placeholder="Code..." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Désignation / Libellé</label><input type="text" id="ai_designation" placeholder="Description..." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Type</label><select id="ai_constype" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"><option value="POINTE">Pointe</option><option value="DIVERS">Divers</option></select></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Qté (paquets)</label><input type="number" id="ai_qte" value="1" min="1" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Qté par paquet</label><input type="number" id="ai_qte_paquet" value="1" min="1" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Emplacement</label><input type="text" id="ai_emplacement" placeholder="Zone..." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Prix Unitaire (FCFA)</label><input type="number" id="ai_pu" placeholder="0" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Observation</label><input type="text" id="ai_obs" placeholder="Obs." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div style="display:flex;align-items:flex-end"><button type="button" onclick="addAchatItemLine(\'consumable\')" style="background:#f97316;color:#fff;border:none;border-radius:8px;padding:0.45rem 0.75rem;font-weight:700;cursor:pointer;font-size:1.1rem;line-height:1">+</button></div>';
@@ -4456,7 +4685,7 @@ function showNewAchat(category) {
   m += '  <table style="width:100%;font-size:0.8rem;border-collapse:collapse">';
   m += '    <thead style="background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;font-weight:600">';
   if (category === 'raw-materials') {
-    m += '      <tr><th style="padding:0.5rem">N° Colis</th><th style="padding:0.5rem;text-align:right">Qté</th><th style="padding:0.5rem;text-align:right">L</th><th style="padding:0.5rem;text-align:right">l</th><th style="padding:0.5rem;text-align:right">L. Glob</th><th style="padding:0.5rem;text-align:right">E</th><th style="padding:0.5rem;text-align:right">Vol (m³)</th><th style="padding:0.5rem">Essence</th><th style="padding:0.5rem">Type</th><th style="padding:0.5rem">Zone</th><th style="padding:0.5rem">Obs.</th><th style="padding:0.5rem">Action</th></tr>';
+    m += '      <tr><th style="padding:0.5rem">N° Colis</th><th style="padding:0.5rem;text-align:right">Qté</th><th style="padding:0.5rem;text-align:right">Long</th><th style="padding:0.5rem;text-align:right">Larg</th><th style="padding:0.5rem;text-align:right">L. Glob</th><th style="padding:0.5rem;text-align:right">Ep</th><th style="padding:0.5rem;text-align:right">Vol (m³)</th><th style="padding:0.5rem">Essence</th><th style="padding:0.5rem">Type</th><th style="padding:0.5rem">Zone</th><th style="padding:0.5rem">Obs.</th><th style="padding:0.5rem">Action</th></tr>';
   } else {
     m += '      <tr><th style="padding:0.5rem">Code</th><th style="padding:0.5rem">Désignation</th><th style="padding:0.5rem;text-align:right">Qté</th><th style="padding:0.5rem;text-align:right">P.U FCFA</th><th style="padding:0.5rem;text-align:right">Total FCFA</th><th style="padding:0.5rem">Obs.</th><th style="padding:0.5rem">Action</th></tr>';
   }
@@ -4491,12 +4720,7 @@ function onLGlobInput() {
 }
 
 function onLargInput() {
-  var larg = parseFloat((document.getElementById('ai_larg') || {}).value || 0);
-  var qte = parseFloat((document.getElementById('ai_qte') || {}).value || 1);
-  var lglobEl = document.getElementById('ai_lglob');
-  if (larg > 0 && qte > 0 && lglobEl) {
-    lglobEl.value = (larg * qte).toFixed(1);
-  }
+  /* La largeur globale n'est jamais remplie auto : seul le sens L.glob -> Larg moy. existe */
   calcItemVolLive();
 }
 
@@ -4546,8 +4770,12 @@ function addAchatItemLine(category) {
     var qte = parseFloat((document.getElementById('ai_qte') || {}).value || 1);
     var pu = parseFloat((document.getElementById('ai_pu') || {}).value || 0);
     var obs = (document.getElementById('ai_obs') || {}).value || '';
+    var ctype = (document.getElementById('ai_constype') || {}).value || 'POINTE';
+    var empl = (document.getElementById('ai_emplacement') || {}).value || '';
+    var qtePaq = parseFloat((document.getElementById('ai_qte_paquet') || {}).value || 1);
+    var units = ctype === 'POINTE' ? qte * Math.max(1, qtePaq) : qte;
 
-    item = { code: code, designation: des, quantity: qte, unit_price: pu, total_price: qte * pu, obs: obs };
+    item = { code: code, designation: des, quantity: units, paquets: qte, cond: qtePaq, ctype: ctype, emplacement: empl, unit_price: pu, total_price: qte * pu, obs: obs };
   } else {
     var code = (document.getElementById('ai_code') || {}).value || 'ART-' + Date.now().toString().slice(-4);
     var des = (document.getElementById('ai_designation') || {}).value || 'Article';
@@ -4592,11 +4820,11 @@ function renderAchatItemsTable(category) {
       h += '<td style="padding:0.5rem">' + escH(it.obs || '-') + '</td>';
     } else if (category === 'consumable' || category === 'consumables') {
       h += '<td style="padding:0.5rem;font-weight:600">' + escH(it.code) + '</td>';
-      h += '<td style="padding:0.5rem">' + escH(it.designation) + '</td>';
-      h += '<td style="padding:0.5rem;text-align:right">' + it.quantity + '</td>';
+      h += '<td style="padding:0.5rem">' + escH(it.designation) + (it.ctype ? ' <span style="font-size:.65rem;background:#eef2ff;color:#3730a3;border-radius:8px;padding:1px 7px;font-weight:700">' + escH(it.ctype) + '</span>' : '') + '</td>';
+      h += '<td style="padding:0.5rem;text-align:right" title="' + (it.paquets != null ? escH(it.paquets) + ' paquet(s)' : '') + '">' + it.quantity + '</td>';
       h += '<td style="padding:0.5rem;text-align:right">' + fmt(it.unit_price) + ' F</td>';
       h += '<td style="padding:0.5rem;text-align:right;font-weight:700">' + fmt(it.total_price) + ' F</td>';
-      h += '<td style="padding:0.5rem">' + escH(it.obs || '-') + '</td>';
+      h += '<td style="padding:0.5rem">' + escH(((it.emplacement ? it.emplacement + ' · ' : '') + (it.obs || '-'))) + '</td>';
     } else {
     h += '<td style="padding:0.5rem;text-align:center"><button type="button" onclick="removeAchatItemLine(' + i + ',\'' + category + '\')" style="background:none;border:none;color:#ef4444;cursor:pointer">🗑️</button></td>';
     h += '</tr>';
@@ -4737,6 +4965,10 @@ function saveAchatByCategory(e, category) {
         designation: it.designation,
         fournisseur: fournisseur,
         quantite: it.quantity,
+        paquets: it.paquets || it.quantity,
+        cond: it.cond || 1,
+        ctype: it.ctype || 'DIVERS',
+        emplacement: it.emplacement || '',
         prix_unitaire: it.unit_price,
         created_at: today()
       });
