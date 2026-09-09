@@ -179,6 +179,10 @@ var NAV = [
       { id: 'stock-movements', label: 'Mouvements' },
       { id: 'inventory', label: 'Inventaire' },
     ]},
+    { id: 'achats', label: 'Achats', icon: '🛒', children: [
+      { id: 'achats', label: 'Saisie Achat' },
+      { id: 'achats-history', label: 'Historique Achats' },
+    ]},
     { id: 'thermal', label: 'Traitement thermique', icon: '🌡️', children: [
       { id: 'thermal', label: 'Opérations' },
       { id: 'thermal-types', label: 'Types Produits' },
@@ -211,24 +215,6 @@ function toggleGroup(group) {
 
 function renderNav() {
   var h = '';
-  /* Déterminer quel groupe doit être ouvert (celui avec l'élément actif) */
-  var activeGroup = null;
-  NAV.forEach(function(g) {
-    g.items.forEach(function(item) {
-      if (item.children) {
-        var hasActive = item.children.some(function(c) { return CURRENT_PAGE === c.id; });
-        if (hasActive) activeGroup = g.group;
-      } else if (CURRENT_PAGE === item.id) {
-        activeGroup = g.group;
-      }
-    });
-  });
-  /* Si un groupe actif existe, l'ouvrir et fermer les autres */
-  if (activeGroup) {
-    for (var k in OPEN_GROUPS) OPEN_GROUPS[k] = false;
-    OPEN_GROUPS[activeGroup] = true;
-  }
-
   NAV.forEach(function(g) {
     var isOpen = OPEN_GROUPS[g.group] || false;
     h += '<div class="nav-group">';
@@ -236,7 +222,6 @@ function renderNav() {
     g.items.forEach(function(item) {
       if (item.children) {
         var hasActive = item.children.some(function(c) { return CURRENT_PAGE === c.id; });
-        if (hasActive) isOpen = true;
         h += '<div class="nav-parent' + (isOpen ? ' open' : '') + (hasActive ? ' active' : '') + '" onclick="toggleGroup(\'' + escH(g.group) + '\')">';
         h += '<span class="icon">' + item.icon + '</span>';
         h += '<span class="label">' + escH(item.label) + '</span>';
@@ -319,6 +304,8 @@ var PAGE_TITLES = {
   'leaves': 'Congés',
   'sanctions': 'Sanctions Disciplinaires',
   'reports': 'Rapports',
+  'achats': 'Saisie Achat',
+  'achats-history': 'Historique Achats',
 };
 
 function renderPage() {
@@ -381,6 +368,8 @@ function getLeaves() { return getSection('leaves', []); }
 function setLeaves(v) { setSection('leaves', v); }
 function getSanctions() { return getSection('sanctions', []); }
 function setSanctions(v) { setSection('sanctions', v); }
+function getAchats() { return getSection('achats', []); }
+function setAchats(v) { setSection('achats', v); }
 function getLosses() { return getSection('losses', []); }
 function setLosses(v) { setSection('losses', v); }
 function getPersonnel() { try { return JSON.parse(localStorage.getItem('mdb_employes')) || []; } catch(e) { return []; } }
@@ -944,6 +933,7 @@ function updateStockArticle(articleId, qty, type, ref, numero) {
   if (cat === 'finished') { stockList = getStockFinished(); setFn = setStockFinished; }
   else if (cat === 'semi') { stockList = getStockSemi(); setFn = setStockSemi; }
   else if (cat === 'lattes') { stockList = getStockSemi(); setFn = setStockSemi; }
+  else if (cat === 'raw') { stockList = getStockRaw(); setFn = setStockRaw; }
   else { stockList = getStockFinished(); setFn = setStockFinished; }
 
   var existing = stockList.find(function(s) { return s.article_id === articleId; });
@@ -2462,6 +2452,134 @@ function generateReport(type) {
   toast('Génération du rapport ' + type + '...');
 }
 
+/* ==================== ACHATS ==================== */
+function render_achats() {
+  var articles = getArticles();
+  var personnel = getPersonnel();
+  var h = '<div class="card">';
+  h += '<h3>🛒 Nouvel Achat</h3>';
+  h += '<div class="form-row">';
+  h += formField('achat_date', 'Date', today(), 'date', true);
+  h += formField('achat_fournisseur', 'Fournisseur', '', 'text', true);
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += formField('achat_ref', 'Référence Bon de Commande', '', 'text', false);
+  h += formSelect('achat_article_id', 'Article / Matière Première', articles.map(function(a) { return { v: a.id, t: a.code + ' — ' + a.designation }; }), true);
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += formField('achat_quantite', 'Quantité', '', 'number', true);
+  h += formField('achat_prix_unitaire', 'Prix Unitaire', '', 'number', true);
+  h += '</div>';
+  h += '<div class="form-row">';
+  h += formField('achat_montant', 'Montant Total', '', 'number', false);
+  h += formField('achat_devise', 'Devise', 'FCFA', 'text', false);
+  h += '</div>';
+  h += '<div class="form-group"><label>Responsable Réception</label>';
+  h += '<select id="achat_responsable">';
+  personnel.forEach(function(p) {
+    h += '<option value="' + p.id + '">' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>';
+  });
+  h += '</select></div>';
+  h += formTextarea('achat_observations', 'Observations');
+  h += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
+  h += '<button class="btn btn-accent" onclick="saveAchat()">💾 Enregistrer</button>';
+  h += '<button class="btn btn-green" onclick="saveAchat(true)">✅ Valider & Mettre à jour Stock</button>';
+  h += '</div></div>';
+
+  /* Historique récent */
+  var achats = getAchats();
+  if (achats.length > 0) {
+    h += '<div class="card" style="margin-top:1rem">';
+    h += '<h3>📋 Derniers Achats</h3>';
+    h += '<table><thead><tr><th>Date</th><th>Fournisseur</th><th>Article</th><th>Qté</th><th>Prix U</th><th>Montant</th><th>Statut</th></tr></thead><tbody>';
+    achats.slice(-10).reverse().forEach(function(a) {
+      var art = articles.find(function(x) { return x.id === a.article_id; });
+      h += '<tr>';
+      h += '<td>' + escH(a.date) + '</td>';
+      h += '<td>' + escH(a.fournisseur) + '</td>';
+      h += '<td>' + escH(art ? art.code : '') + '</td>';
+      h += '<td style="text-align:right">' + (a.quantite || 0) + '</td>';
+      h += '<td style="text-align:right">' + formatCurrency(a.prix_unitaire || 0) + '</td>';
+      h += '<td style="text-align:right;font-weight:700">' + formatCurrency(a.montant || 0) + '</td>';
+      h += '<td>' + (a.statut === 'validated' ? '✅' : '📝') + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+
+  return h;
+}
+
+function saveAchat(validate) {
+  var date = document.getElementById('achat_date').value;
+  var fournisseur = document.getElementById('achat_fournisseur').value;
+  var article_id = document.getElementById('achat_article_id').value;
+  var quantite = parseFloat(document.getElementById('achat_quantite').value) || 0;
+  var prix_unitaire = parseFloat(document.getElementById('achat_prix_unitaire').value) || 0;
+  var observations = document.getElementById('achat_observations') ? document.getElementById('achat_observations').value : '';
+
+  if (!date || !fournisseur || !article_id || quantite <= 0) return toast('Remplissez les champs obligatoires', 'error');
+
+  var montant = quantite * prix_unitaire;
+
+  var achat = {
+    id: genId(),
+    numero: 'ACH-' + String(getAchats().length + 1).padStart(4, '0'),
+    date: date,
+    fournisseur: fournisseur,
+    article_id: article_id,
+    quantite: quantite,
+    prix_unitaire: prix_unitaire,
+    montant: montant,
+    observations: observations,
+    statut: validate ? 'validated' : 'draft',
+    created_at: new Date().toISOString(),
+  };
+  var achats = getAchats();
+  achats.push(achat);
+  setAchats(achats);
+
+  if (validate) {
+    /* Mettre à jour le stock de la matière première */
+    updateStockArticle(article_id, quantite, 'entree', 'achat', achat.numero);
+    toast('Achat validé — Stock mis à jour (+ ' + quantite + ')');
+  } else {
+    toast('Achat enregistré (brouillon)');
+  }
+  navigate('achats-history');
+}
+
+function render_achats_history() {
+  var articles = getArticles();
+  var achats = getAchats();
+  var h = '<div class="card">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+  h += '<h3>📋 Historique des Achats</h3>';
+  h += '<button class="btn btn-accent" onclick="navigate(\'achats\')">+ Nouvel Achat</button>';
+  h += '</div>';
+  if (achats.length === 0) {
+    h += '<div class="empty">Aucun achat enregistré. Commencez par créer un achat.</div>';
+  } else {
+    h += '<table><thead><tr><th>N°</th><th>Date</th><th>Fournisseur</th><th>Article</th><th>Qté</th><th>Prix U</th><th>Montant</th><th>Statut</th></tr></thead><tbody>';
+    achats.slice().reverse().forEach(function(a) {
+      var art = articles.find(function(x) { return x.id === a.article_id; });
+      h += '<tr>';
+      h += '<td>' + escH(a.numero) + '</td>';
+      h += '<td>' + escH(a.date) + '</td>';
+      h += '<td>' + escH(a.fournisseur) + '</td>';
+      h += '<td>' + escH(art ? art.code + ' — ' + art.designation : '') + '</td>';
+      h += '<td style="text-align:right">' + (a.quantite || 0) + '</td>';
+      h += '<td style="text-align:right">' + formatCurrency(a.prix_unitaire || 0) + '</td>';
+      h += '<td style="text-align:right;font-weight:700">' + formatCurrency(a.montant || 0) + '</td>';
+      h += '<td>' + (a.statut === 'validated' ? '✅ Validé' : '📝 Brouillon') + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+  return h;
+}
+
 /* ==================== HELPERS ==================== */
 function formField(id, label, value, type, required) {
   return '<div class="form-group"><label>' + escH(label) + (required ? ' *' : '') + '</label><input type="' + type + '" id="' + id + '" value="' + escH(value || '') + '"' + (required ? ' required' : '') + '></div>';
@@ -2598,9 +2716,9 @@ function initACSERData() {
   ];
   setSection('composants', composants);
 
-  /* Initialiser les stocks avec les quantités ACSER */
+  /* Initialiser les stocks à VIDE — zéro saisie = zéro stock */
   var stockData = articlesData.map(function(a) {
-    return { id: 'stk_' + a.id, article_id: a.id, quantite: a.code === 'PAL114' ? 251 : a.code === 'COUV114' ? 126 : a.code === 'BBAG' ? 50 : a.code === 'FRI140' ? 6 : a.code === 'BBOX' ? 15 : a.code === 'NES' ? 42 : a.code === 'E2' ? 255 : 0, prix_unitaire: a.prix_vente || 0, created_at: now };
+    return { id: 'stk_' + a.id, article_id: a.id, quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: now };
   });
   setStockFinished(stockData);
 
