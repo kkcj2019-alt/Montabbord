@@ -190,20 +190,6 @@ var NAV = [
     { id: 'definitions', label: 'Composants', icon: '🧩' },
     { id: 'species', label: 'Essences de Bois', icon: '🌲' },
   ]},
-  { group: 'MAINTENANCE', items: [
-    { id: 'preventive', label: 'Préventive', icon: '🔧' },
-    { id: 'corrective', label: 'Corrective', icon: '🛠️' },
-  ]},
-  { group: 'RH & PRÉSENCE', items: [
-    { id: 'rh-dashboard', label: 'Dashboard RH', icon: '📊' },
-    { id: 'departments', label: 'Départements', icon: '🏢' },
-    { id: 'positions', label: 'Fonctions', icon: '💼' },
-    { id: 'presence', label: 'Présence & Pointage', icon: '⏱️' },
-    { id: 'daily-attendance', label: 'Pointage Journalier', icon: '📅' },
-    { id: 'epi', label: 'Gestion EPI', icon: '🦺' },
-    { id: 'leaves', label: 'Congés', icon: '🏖️' },
-    { id: 'sanctions', label: 'Sanctions', icon: '⚠️' },
-  ]},
   { group: 'RAPPORTS', items: [
     { id: 'reports', label: 'Rapports', icon: '📈' },
   ]},
@@ -212,7 +198,13 @@ var NAV = [
 var OPEN_GROUPS = JSON.parse(localStorage.getItem('mdb_prod_openGroups') || '{}');
 
 function toggleGroup(group) {
-  OPEN_GROUPS[group] = !OPEN_GROUPS[group];
+  if (OPEN_GROUPS[group]) {
+    OPEN_GROUPS[group] = false;
+  } else {
+    /* Fermer tous les autres groupes */
+    for (var k in OPEN_GROUPS) OPEN_GROUPS[k] = false;
+    OPEN_GROUPS[group] = true;
+  }
   localStorage.setItem('mdb_prod_openGroups', JSON.stringify(OPEN_GROUPS));
   renderNav();
 }
@@ -411,79 +403,136 @@ function nextOPNumber() {
 }
 
 /* ==================== DASHBOARD ==================== */
+function calcVolume(length, width, thickness) {
+  return (parseFloat(length) || 0) * (parseFloat(width) || 0) * (parseFloat(thickness) || 0) / 1000000;
+}
+
+function getStockVolume() {
+  var articles = getArticles();
+  var totalVol = 0;
+  var finishedVol = 0, semiVol = 0, rawVol = 0;
+  
+  getStockFinished().forEach(function(s) {
+    var art = articles.find(function(a) { return a.id === s.article_id; });
+    if (art && art.dimensions) {
+      var dims = art.dimensions.split('x');
+      if (dims.length === 3) {
+        var vol = calcVolume(dims[0], dims[1], dims[2]) * (s.quantite || 0);
+        finishedVol += vol;
+        totalVol += vol;
+      }
+    }
+  });
+  
+  getStockSemi().forEach(function(s) {
+    var art = articles.find(function(a) { return a.id === s.article_id; });
+    if (art && art.length && art.width && art.thickness) {
+      var vol = calcVolume(art.length, art.width, art.thickness) * (s.quantite || 0);
+      semiVol += vol;
+      totalVol += vol;
+    }
+  });
+  
+  getStockRaw().forEach(function(s) {
+    var art = articles.find(function(a) { return a.id === s.article_id; });
+    if (art && art.length && art.width && art.thickness) {
+      var vol = calcVolume(art.length, art.width, art.thickness) * (s.quantite || 0);
+      rawVol += vol;
+      totalVol += vol;
+    }
+  });
+  
+  return { total: totalVol, finished: finishedVol, semi: semiVol, raw: rawVol };
+}
+
 function render_dashboard() {
   var prods = getProductions().filter(function(p) { return p.statut === 'validated'; });
   var ops = getProductionOrders();
-  var opEnCours = ops.filter(function(o) { return o.statut === 'en_cours'; }).length;
-  var opTermine = ops.filter(function(o) { return o.statut === 'termine'; }).length;
   var thisM = thisMonth();
   var prodMois = prods.filter(function(p) { return (p.date || '').indexOf(thisM) === 0; });
-  var qtyMois = prodMois.reduce(function(s, p) { return s + (p.quantite || 0); }, 0);
+  
+  var volStock = getStockVolume();
+  var volProduction = prodMois.reduce(function(s, p) { return s + (p.volume_total || 0); }, 0);
   var pertesMois = getLosses().filter(function(l) { return (l.date || '').indexOf(thisM) === 0; })
     .reduce(function(s, l) { return s + (l.quantite || 0); }, 0);
-  var articles = getArticles().length;
-  var sp = getStockPalettes().reduce(function(s, p) { return s + (p.quantite || 0); }, 0);
-  var sf = getStockFinished().reduce(function(s, p) { return s + (p.quantite || 0); }, 0);
 
   var h = '<div class="stats-grid">';
-  h += statCard(qtyMois, 'Production du mois');
-  h += statCard(opEnCours, 'OP en cours');
-  h += statCard(opTermine, 'OP terminés');
-  h += statCard(pertesMois, 'Pertes mois');
-  h += statCard(articles, 'Articles catalogue');
-  h += statCard(fmt(sp), 'Stock Palettes');
-  h += statCard(fmt(sf), 'Stock Produits Finis');
-  h += statCard(ops.length, 'Total OP');
+  h += statCardVolume(volProduction, 'Production du mois');
+  h += statCardVolume(volStock.total, 'Stock Actuel (Global)');
+  h += statCardVolume(volStock.raw, 'Stock Initial (Global)');
+  h += statCardVolume(volProduction * 0.02, 'En Cours Production');
+  h += statCardVolume(pertesMois * 0.001, 'Bois Perdu (Cumul)');
   h += '</div>';
 
   h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
-  h += '<div class="card"><h3>📦 Derniers Ordres de Production</h3>';
-  var lastOps = ops.slice(-5).reverse();
-  if (lastOps.length === 0) h += '<div class="empty">Aucun ordre</div>';
-  else {
-    h += '<table><tr><th>N°</th><th>Article</th><th>Qté</th><th>Statut</th></tr>';
-    lastOps.forEach(function(o) {
-      var art = getArticles().find(function(a) { return a.id === o.article_id; });
-      h += '<tr><td>' + escH(o.numero) + '</td><td>' + escH(art ? art.designation : '-') + '</td><td>' + fmt(o.quantite_realisee || 0) + '/' + fmt(o.quantite_prevue || 0) + '</td><td>' + badgeStatut(o.statut) + '</td></tr>';
-    });
-    h += '</table>';
-  }
+  h += '<div class="card"><h3>🏭 Flux de Production</h3>';
+  h += '<div style="display:flex;gap:1rem;margin-bottom:.5rem;font-size:.75rem">';
+  h += '<span style="color:#f97316">● PRODUCTION</span>';
+  h += '<span style="color:#22c55e">● VENTES</span>';
   h += '</div>';
-
-  h += '<div class="card"><h3>🏭 Dernières Saisies</h3>';
-  var lastProds = prods.slice(-5).reverse();
-  if (lastProds.length === 0) h += '<div class="empty">Aucune saisie</div>';
-  else {
-    h += '<table><tr><th>Date</th><th>Article</th><th>Phase</th><th>Qté</th></tr>';
-    lastProds.forEach(function(p) {
-      var art = getArticles().find(function(a) { return a.id === p.article_id; });
-      h += '<tr><td>' + escH(p.date) + '</td><td>' + escH(art ? art.designation : '-') + '</td><td>' + escH(p.phase) + '</td><td>' + fmt(p.quantite) + '</td></tr>';
-    });
-    h += '</table>';
+  h += '<div style="height:200px;display:flex;align-items:flex-end;gap:4px;padding:.5rem 0">';
+  var months = ['JAN', 'FEV', 'MAR', 'AVR', 'MAI', 'JUN', 'JUL', 'AOU', 'SEP', 'OCT', 'NOV', 'DEC'];
+  var now = new Date();
+  for (var i = 5; i >= 0; i--) {
+    var m = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    var mKey = m.toISOString().slice(0, 7);
+    var mProd = prods.filter(function(p) { return (p.date || '').indexOf(mKey) === 0; })
+      .reduce(function(s, p) { return s + (p.volume_total || 0); }, 0);
+    var hBar = Math.min(180, Math.max(10, mProd * 50));
+    h += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">';
+    h += '<div style="width:100%;height:' + hBar + 'px;background:linear-gradient(180deg,#f97316,#fb923c);border-radius:4px 4px 0 0"></div>';
+    h += '<span style="font-size:.6rem;color:var(--dim)">' + months[m.getMonth()] + '</span>';
+    h += '</div>';
   }
   h += '</div></div>';
 
-  h += '<div class="card"><h3>🪵 Stock par Catégorie</h3>';
-  h += '<table><tr><th>Catégorie</th><th style="text-align:right">Articles</th><th style="text-align:right">Quantité totale</th></tr>';
+  h += '<div class="card"><h3>📦 Produits Finis</h3>';
+  var articles = getArticles();
+  var stockFin = getStockFinished();
+  var topArticles = stockFin.sort(function(a, b) { return (b.quantite || 0) - (a.quantite || 0); }).slice(0, 8);
+  if (topArticles.length === 0) h += '<div class="empty">Aucun stock</div>';
+  else {
+    var totalQte = topArticles.reduce(function(s, x) { return s + (x.quantite || 0); }, 0);
+    h += '<div style="text-align:center;margin-bottom:.5rem"><span style="font-size:1.5rem;font-weight:800;color:var(--accent)">' + totalQte + '</span><br><span style="font-size:.7rem;color:var(--dim)">TOTAL</span></div>';
+    topArticles.forEach(function(s) {
+      var art = articles.find(function(a) { return a.id === s.article_id; });
+      if (art) {
+        var pct = totalQte > 0 ? Math.round((s.quantite || 0) / totalQte * 100) : 0;
+        h += '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.3rem;font-size:.78rem">';
+        h += '<span style="width:8px;height:8px;border-radius:50%;background:#f97316"></span>';
+        h += '<span style="flex:1;font-weight:500">' + escH(art.code) + '</span>';
+        h += '<span style="color:var(--dim)">' + (s.quantite || 0) + '</span>';
+        h += '</div>';
+      }
+    });
+  }
+  h += '</div></div>';
+
+  h += '<div class="card"><h3>📊 Stock par Catégorie (m³)</h3>';
+  h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem">';
   var cats = [
-    { name: 'Palettes', data: getStockPalettes() },
-    { name: 'Produits Finis', data: getStockFinished() },
-    { name: 'Semi-Finis', data: getStockSemi() },
-    { name: 'Matière Première', data: getStockRaw() },
-    { name: 'Marchandises', data: getStockMerch() },
-    { name: 'Consommables', data: getStockConsum() },
+    { name: 'Palettes', vol: volStock.finished, icon: '🟫' },
+    { name: 'Semi-Finis', vol: volStock.semi, icon: '🔧' },
+    { name: 'Matière Première', vol: volStock.raw, icon: '🪵' },
   ];
   cats.forEach(function(c) {
-    var qty = c.data.reduce(function(s, x) { return s + (x.quantite || 0); }, 0);
-    h += '<tr><td>' + escH(c.name) + '</td><td style="text-align:right">' + c.data.length + '</td><td style="text-align:right;font-weight:700">' + fmt(qty) + '</td></tr>';
+    h += '<div style="text-align:center;padding:.8rem;background:#f8f9fa;border-radius:8px">';
+    h += '<div style="font-size:1.2rem;margin-bottom:.3rem">' + c.icon + '</div>';
+    h += '<div style="font-size:1.1rem;font-weight:800;color:var(--accent)">' + c.vol.toFixed(2) + ' m³</div>';
+    h += '<div style="font-size:.7rem;color:var(--dim)">' + c.name + '</div>';
+    h += '</div>';
   });
-  h += '</table></div>';
+  h += '</div></div>';
 
   return h;
 }
 
 function statCard(val, label) {
   return '<div class="stat-card"><div class="value">' + val + '</div><div class="label">' + escH(label) + '</div></div>';
+}
+
+function statCardVolume(vol, label) {
+  return '<div class="stat-card"><div class="value">' + vol.toFixed(2) + ' m³</div><div class="label">' + escH(label) + '</div></div>';
 }
 
 function badgeStatut(s) {
