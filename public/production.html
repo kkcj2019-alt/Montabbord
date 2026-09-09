@@ -1796,10 +1796,34 @@ function validateProd(id) {
 }
 
 function deleteProd(id) {
-  if (!confirm2('Supprimer cette fiche de production ?')) return;
-  setProductions(getProductions().filter(function(p) { return p.id !== id; }));
+  var prods = getProductions();
+  var p = prods.find(function(x) { return x.id === id; });
+  if (!p) return;
+  var msg = 'Supprimer cette fiche de production ?';
+  if (p.statut === 'validated') {
+    var nSB = (p.sortie_bois || []).length;
+    msg = '⚠️ Cette fiche est VALIDÉE.\n\n' +
+      '• Sortie bois : ' + nSB + ' lot(s)\n' +
+      '• Lattes : ' + fmt(p.vol_lattes || 0) + ' m³\n' +
+      '• Plots : ' + fmt(p.vol_plots || 0) + ' m³\n' +
+      '• CP : ' + fmt(p.vol_cp || 0) + ' m³\n\n' +
+      'Supprimer cette fiche restaurera le stock de ' + fmt(p.vol_sortie_bois || 0) + ' m³.\n\nConfirmer ?';
+  }
+  if (!confirm2(msg)) return;
+  if (p.statut === 'validated') { restoreBoisSorti(p); }
+  setProductions(prods.filter(function(x) { return x.id !== id; }));
   toast('Fiche supprimée');
   renderPage();
+}
+function restoreBoisSorti(p) {
+  var stockRaw = getStockRaw();
+  function lot(code) { return stockRaw.find(function(s) { return s.code === code; }); }
+  (p.sortie_bois || []).forEach(function(sb) {
+    if (!sb.code) return;
+    var item = lot(sb.code);
+    if (item) { item.quantite = (parseFloat(item.quantite) || 0) + (parseFloat(sb.qte) || 0); item.volume = (parseFloat(item.volume) || 0) + (parseFloat(sb.volume) || 0); item.updated_at = new Date().toISOString(); }
+  });
+  setStockRaw(stockRaw);
 }
 
 /* ==================== ORDRES DE PRODUCTION ==================== */
@@ -2501,10 +2525,19 @@ function addStockItem(key) {
 }
 
 function deleteStockItem(key, id) {
-  if (!confirm2('Supprimer cet article du stock ?')) return;
   var map = { 'stock-palettes': [getStockPalettes, setStockPalettes], 'stock-finished': [getStockFinished, setStockFinished], 'stock-semi': [getStockSemi, setStockSemi], 'stock-raw': [getStockRaw, setStockRaw], 'stock-merch': [getStockMerch, setStockMerch], 'stock-consum': [getStockConsum, setStockConsum] };
   var pair = map[key];
-  if (pair) { pair[1](pair[0].filter(function(s) { return s.id !== id; })); renderPage(); }
+  if (!pair) return;
+  var items = pair[0]();
+  var item = items.find(function(s) { return s.id === id; });
+  if (!item) return;
+  var nom = item.code || item.colis_number || item.nom || item.designation || 'Cet article';
+  var q = parseFloat(item.quantite) || parseFloat(item.quantite_stock) || 0;
+  var v = stkVol(item);
+  if (!confirm2('⚠️ Supprimer ' + nom + ' du stock ?\n\nStock actuel : ' + fmt(q) + ' éléments / ' + v.toFixed(3) + ' m³\n\nCette action est irréversible.')) return;
+  pair[1](items.filter(function(s) { return s.id !== id; }));
+  toast('Article supprimé du stock');
+  renderPage();
 }
 
 /* ==================== MOUVEMENTS ==================== */
@@ -3217,7 +3250,14 @@ function createArticle() { saveArticleModal(null); }
 function updateArticle(id) { saveArticleModal(id); }
 
 function deleteArticle(id) {
-  if (!confirm2('Supprimer cet article ?')) return;
+  var art = getArticles().find(function(a) { return a.id === id; });
+  if (!art) return;
+  /* Vérifiez s'il y a du stock */
+  var inStock = (getStockFinished().find(function(s) { return s.article_id === id; }) || getStockSemi().find(function(s) { return s.article_id === id; }));
+  var msg = '⚠️ Supprimer l\'article ' + (art.code || '-') + ' — ' + (art.designation || '') + ' ?';
+  if (inStock) msg += '\n\n⚠️ Cet article a du stock enregistré !\nSa suppression impactera les stocks liés.';
+  msg += '\n\nConfirmer ?';
+  if (!confirm2(msg)) return;
   setArticles(getArticles().filter(function(a) { return a.id !== id; }));
   toast('Article supprimé');
   renderPage();
@@ -4037,9 +4077,17 @@ function createEpi() {
 }
 
 function deleteEpi(id) {
-  if (!confirm2('Supprimer ?')) return;
+  var epi = getEpiItems().find(function(e) { return e.id === id; });
+  if (!epi) return;
+  var assignments = getEpiAssignments().filter(function(a) { return a.epi_id === id; });
+  var msg = '⚠️ Supprimer l\'EPI ' + (epi.code || '-') + ' — ' + (epi.designation || '') + ' ?\n\n';
+  msg += '• Stock : ' + (epi.quantite_stock || 0) + '\n';
+  if (assignments.length) msg += '• ' + assignments.length + ' affectation(s) seront supprimées\n';
+  msg += '\nConfirmer ?';
+  if (!confirm2(msg)) return;
   setEpiItems(getEpiItems().filter(function(e) { return e.id !== id; }));
-  toast('Supprimé');
+  if (assignments.length) setEpiAssignments(getEpiAssignments().filter(function(a) { return a.epi_id !== id; }));
+  toast('EPI supprimé');
   renderPage();
 }
 
@@ -5245,11 +5293,19 @@ function saveAchatByCategory(e, category) {
 }
 
 function deleteAchat(id) {
-  if (confirm('Êtes-vous sûr de vouloir supprimer cet achat ?')) {
-    var achats = getAchats().filter(function(a) { return String(a.id) !== String(id); });
-    setAchats(achats);
-    renderPage();
-  }
+  var achats = getAchats();
+  var a = achats.find(function(x) { return String(x.id) === String(id); });
+  if (!a) return;
+  var nItems = (a.items || []).length;
+  var msg = '⚠️ Supprimer cet achat ' + (a.categorie || '') + ' ?\n\n' +
+    '• ' + nItems + ' article(s) concerné(s)\n' +
+    '• Montant : ' + fmtF(a.montant_total || 0) + '\n' +
+    '• Fournisseur : ' + (a.fournisseur || '-') + '\n\n' +
+    'Le stock sera impacté si cet achat a déjà été réceptionné.\nConfirmer ?';
+  if (!confirm2(msg)) return;
+  setAchats(achats.filter(function(x) { return String(x.id) !== String(id); }));
+  toast('Achat supprimé');
+  renderPage();
 }
 
 </script>
