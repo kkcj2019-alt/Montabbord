@@ -187,6 +187,11 @@ function setSection(key, val) { var db = getDB(); db[key] = val; setDB(db); }
 function genId() { return Date.now().toString(36) + Math.random().toString(36).substr(2, 6); }
 function today() { return new Date().toISOString().slice(0, 10); }
 function thisMonth() { return new Date().toISOString().slice(0, 7); }
+function monthLabel(ym) {
+  var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  var mIdx = parseInt((ym || '').slice(5, 7), 10) - 1;
+  return mIdx >= 0 ? _mn[mIdx] + ' ' + (ym || '').slice(0, 4) : ym || '';
+}
 function fmt(n) { return new Intl.NumberFormat('fr-FR').format(Math.floor(n || 0)); }
 function fmtF(n) { return fmt(n) + ' F'; }
 function escH(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
@@ -1976,12 +1981,6 @@ function takeInitialSnap() {
   setSection('stockInitialSnap', snap);
   return snap;
 }
-function refigerStockInitial() {
-  if (!confirm2('Refiger le stock initial du mois avec les valeurs actuelles ?')) return;
-  takeInitialSnap();
-  toast('Stock initial refigé');
-  renderPage();
-}
 function snapInitialTotalVol(snap) {
   var t = 0;
   (snap.raw || []).forEach(function(s) { t += stkVol(s); });
@@ -2035,43 +2034,55 @@ function render_stock_raw() {
   }
 
   if (tab === 'initial') {
+    /* Dernier inventaire sauvegardé = stock initial */
+    var invs = getInventories().slice().reverse();
+    var lastInv = invs.length > 0 ? invs[0] : null;
     var curM = thisMonth();
-    var snap = getSection('stockInitialSnap', null);
-    if (!snap || snap.month !== curM) snap = takeInitialSnap();
-    function sumQV(list) {
-      var q = 0, v = 0;
-      list.forEach(function(s) { q += parseFloat(s.quantite) || 0; v += stkVol(s); });
-      return { q: q, v: v };
-    }
-    var blS = sumQV(snap.raw.filter(function(s) { return mpOrigin(s) === 'BL'; }));
-    var nBL = snap.raw.filter(function(s) { return mpOrigin(s) === 'BL'; }).length;
-    var speS = sumQV(snap.raw.filter(function(s) { return mpOrigin(s) === 'SPECIFIC'; }));
-    var nSpe = snap.raw.filter(function(s) { return mpOrigin(s) === 'SPECIFIC'; }).length;
-    var recS = sumQV(snap.raw.filter(function(s) { return mpOrigin(s) === 'RECOLISAGE'; }));
-    var nRec = snap.raw.filter(function(s) { return mpOrigin(s) === 'RECOLISAGE'; }).length;
-    var nSemi = snap.semi.length;
-    var qSemi = 0, vSemi = 0;
-    snap.semi.forEach(function(s) { qSemi += parseFloat(s.quantite) || 0; vSemi += semiVol(s); });
-    var wipA = {};
-    var qWip = 0, vWip = 0;
-    (snap.wip || []).forEach(function(w) { wipA[w.code] = true; qWip += w.remaining || 0; vWip += w.vol || 0; });
-    var nWip = Object.keys(wipA).length;
-    var totR = nBL + nSpe + nRec + nSemi + nWip;
-    var totQ = blS.q + speS.q + recS.q + qSemi + qWip;
-    var totV = blS.v + speS.v + recS.v + vSemi + vWip;
-    var _mn = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
+    var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
     var mLabel = _mn[parseInt(curM.slice(5, 7), 10) - 1] + ' ' + curM.slice(0, 4);
+
+    if (!lastInv) {
+      h += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem">';
+      h += '<h3 style="margin:0">Stock Initial au 1er ' + mLabel + '</h3>';
+      h += '<a href="#inventory" class="btn btn-accent" onclick="setSection(\'activeTab\',\'inventory\');renderPage()" style="text-decoration:none">📊 Faire l\'inventaire</a></div>';
+      h += '<div class="empty">Aucun inventaire sauvegardé. Créez un inventaire de fin de mois pour définir le stock initial.</div></div>';
+      return h;
+    }
+    var invMonth = lastInv.month || '';
+    var invLabel = monthLabel(invMonth);
+    var prevMonth = '';
+    var d = new Date(parseInt(invMonth.slice(0,4),10), parseInt(invMonth.slice(5,7),10) - 1, 1);
+    prevMonth = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+    var prevLabel = monthLabel(prevMonth);
+
+    /* Résumé */
+    var totItems = (lastInv.items || []).length;
+    var totTheo = 0, totReal = 0, totEcart = 0;
+    var cats = {};
+    (lastInv.items || []).forEach(function(it) {
+      var t = parseFloat(it.theo_qte) || 0;
+      var r = parseFloat(it.real_qte) || 0;
+      totTheo += t;
+      totReal += r;
+      totEcart += Math.abs(r - t);
+      var c = it.categorie || 'Autre';
+      if (!cats[c]) cats[c] = { count: 0, theo: 0, real: 0 };
+      cats[c].count++;
+      cats[c].theo += t;
+      cats[c].real += r;
+    });
+
     h += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem">';
-    h += '<h3 style="margin:0">Stock Initial au 1er ' + mLabel + '</h3>';
-    h += '<button class="btn" onclick="refigerStockInitial()">🔄 Refiger</button></div>';
-    h += '<div style="font-size:.72rem;color:var(--dim);margin-bottom:.8rem">Figé le ' + escH((snap.taken_at || '').slice(0, 10)) + '</div>';
-    h += '<div style="font-size:1rem;font-weight:800;margin-bottom:.6rem">' + totR + ' références / colis &nbsp;|&nbsp; ' + fmt(totQ) + ' éléments &nbsp;|&nbsp; ' + totV.toFixed(3) + ' m³</div>';
+    h += '<h3 style="margin:0">📦 Stock Initial au 1er ' + mLabel + '</h3>';
+    h += '<div style="font-size:.75rem;color:var(--dim)">Défini par l\'inventaire du 31 ' + invLabel + '</div>';
+    h += '</div>';
+    h += '<div style="font-size:1rem;font-weight:800;margin-bottom:.6rem">' + totItems + ' références &nbsp;|&nbsp; ' + fmt(totReal) + ' éléments (réel) &nbsp;|&nbsp; ' + totEcart.toFixed(1) + ' écarts</div>';
     h += '<div style="font-size:.85rem;line-height:1.9">';
-    h += '• <strong>BL :</strong> ' + nBL + ' colis (' + fmt(blS.q) + ' élém. / ' + blS.v.toFixed(3) + ' m³)<br>';
-    h += '• <strong>Spéc. :</strong> ' + nSpe + ' colis (' + fmt(speS.q) + ' élém. / ' + speS.v.toFixed(3) + ' m³)<br>';
-    if (nRec) h += '• <strong>Recol. :</strong> ' + nRec + ' colis (' + fmt(recS.q) + ' élém. / ' + recS.v.toFixed(3) + ' m³)<br>';
-    h += '• <strong>Semi-f. :</strong> ' + nSemi + ' art. (' + fmt(qSemi) + ' élém. / ' + vSemi.toFixed(3) + ' m³)<br>';
-    h += '• <strong>WIP :</strong> ' + nWip + ' art. (' + fmt(qWip) + ' élém. / ' + vWip.toFixed(3) + ' m³)';
+    Object.keys(cats).forEach(function(c) {
+      var cat = cats[c];
+      var ecart = cat.real - cat.theo;
+      h += '• <strong>' + escH(c) + ' :</strong> ' + cat.count + ' élém. → réel ' + fmt(cat.real) + (ecart !== 0 ? ' <span style="color:' + (ecart > 0 ? 'var(--green)' : 'var(--red)') + '">(' + (ecart > 0 ? '+' : '') + fmt(ecart) + ')</span>' : '') + '<br>';
+    });
     h += '</div></div>';
     return h;
   }
@@ -2554,81 +2565,292 @@ function addMovement() {
   renderPage();
 }
 
-/* ==================== INVENTAIRE ==================== */
+/* ==================== INVENTAIRE FIN DE MOIS ==================== */
+var _invMonthCache = null;
 function render_inventory() {
   var invs = getInventories().slice().reverse();
-  var articles = getArticles();
+  var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  var now = new Date();
+  var months = [];
+  for (var i = 0; i < 12; i++) {
+    var d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    var ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    months.push({ ym: ym, label: _mn[d.getMonth()] + ' ' + d.getFullYear() });
+  }
+  var selMonth = _invMonthCache || months[0].ym;
 
   var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">';
-  h += '<div></div>';
+  h += '<h2 style="margin:0">📊 Inventaire de fin de mois</h2>';
   h += '<div style="display:flex;gap:.5rem">';
-  h += '<button class="btn">📄 Imprimer</button>';
-  h += '<button class="btn btn-accent" onclick="showNewInventory()">+ Nouvel Inventaire</button>';
+  h += '<button class="btn" onclick="printInventory()">🖨️ Imprimer</button>';
   h += '</div></div>';
 
-  /* Paramètres de l'inventaire */
-  h += '<div class="card">';
-  h += '<h3>Paramètres de l\'inventaire</h3>';
-  h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1rem">';
-  h += '<div class="form-group"><label>Date</label><input type="date" id="inv_date" value="' + today() + '"></div>';
-  h += '<div class="form-group"><label>Filtrer articles</label><select id="inv_filter"><option value="all">Tous</option><option value="active">Actifs (stock > 0)</option><option value="zero">Stock = 0</option></select></div>';
-  h += '<div class="form-group"><label>Type d\'élément à inventorer</label><select id="inv_type"><option value="">Choisir un type...</option><option value="PALETTE">Palette</option><option value="COUVERCLE">Couvercle</option><option value="SEMI">Semi-fini</option><option value="MATIERE">Matière première</option></select></div>';
-  h += '<div class="form-group"><label>Superviseur</label><input type="text" id="inv_supervisor" placeholder="Nom du superviseur"></div>';
-  h += '</div>';
-  h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;margin-top:.5rem">';
-  h += '<div class="form-group"><label>Exécutants</label><input type="text" id="inv_executants" placeholder="Noms des exécutants"></div>';
-  h += '<div class="form-group"><label>Heure début</label><input type="time" id="inv_heure_debut"></div>';
-  h += '<div class="form-group"><label>Heure fin</label><input type="time" id="inv_heure_fin"></div>';
+  /* Sélecteur de mois */
+  h += '<div class="card"><div style="display:flex;gap:1rem;align-items:end;flex-wrap:wrap">';
+  h += '<div class="form-group"><label style="font-weight:700">Mois à inventer</label>';
+  h += '<select id="inv_month" onchange="launchInventory()" style="padding:.4rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem">';
+  months.forEach(function(m) {
+    h += '<option value="' + m.ym + '"' + (m.ym === selMonth ? ' selected' : '') + '>' + m.label + '</option>';
+  });
+  h += '</select></div>';
+  h += '<button class="btn btn-accent" onclick="launchInventory()" style="margin-bottom:2px">🔍 Lancer l\'inventaire</button>';
   h += '</div></div>';
+
+  h += '<div id="invContent"></div>';
 
   /* Inventaires sauvegardés */
-  var thisM = thisMonth();
-  var invsMois = invs.filter(function(inv) { return (inv.date || '').indexOf(thisM) === 0; });
-  h += '<div class="card">';
-  h += '<h3>Inventaires sauvegardés (' + thisM + ')</h3>';
-  if (invsMois.length === 0) h += '<div class="empty">Aucun inventaire sauvegardé pour ce mois.</div>';
+  h += '<div class="card" style="margin-top:1rem">';
+  h += '<h3>📋 Historique des inventaires</h3>';
+  if (invs.length === 0) h += '<div class="empty">Aucun inventaire sauvegardé.</div>';
   else {
-    h += '<table><tr><th>Date</th><th>Superviseur</th><th>Articles</th><th>Écarts</th><th>Heure</th><th>Actions</th></tr>';
-    invsMois.forEach(function(inv) {
-      h += '<tr><td>' + escH(inv.date) + '</td><td>' + escH(inv.supervisor || '-') + '</td>';
-      h += '<td style="text-align:right">' + (inv.articles_comptes || 0) + '</td>';
-      h += '<td style="text-align:right;color:var(--red)">' + (inv.ecarts || 0) + '</td>';
-      h += '<td>' + escH((inv.heure_debut || '-') + ' - ' + (inv.heure_fin || '-')) + '</td>';
-      h += '<td><button class="btn" onclick="viewInventory(\'' + inv.id + '\')" style="font-size:.7rem">👁️</button></td></tr>';
+    h += '<table><tr><th>Mois</th><th>Date</th><th>Éléments</th><th>Écart total</th><th>Actions</th></tr>';
+    invs.forEach(function(inv) {
+      var mIdx = parseInt((inv.month || '').slice(5, 7), 10) - 1;
+      var mLabel = mIdx >= 0 ? _mn[mIdx] + ' ' + (inv.month || '').slice(0, 4) : '-';
+      h += '<tr><td>' + mLabel + '</td><td>' + escH((inv.date || '').slice(0, 10)) + '</td>';
+      h += '<td style="text-align:right">' + (inv.items || []).length + '</td>';
+      var ecart = 0;
+      (inv.items || []).forEach(function(it) { ecart += Math.abs((parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0)); });
+      h += '<td style="text-align:right;color:' + (ecart > 0 ? 'var(--red)' : 'var(--green)') + ';font-weight:700">' + ecart.toFixed(1) + '</td>';
+      h += '<td><button class="btn" onclick="viewInventory(\'' + inv.id + '\')" style="font-size:.7rem">👁️ Voir</button> <button class="btn btn-red" onclick="deleteInventory(\'' + inv.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
     });
     h += '</table>';
   }
   h += '</div>';
 
+  setTimeout(function() { launchInventory(); }, 50);
   return h;
 }
 
-function showNewInventory() {
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
-  m += '<h2>📊 Nouvel Inventaire</h2>';
-  m += formField('inv_date', 'Date', today(), 'date', true);
-  m += '<div class="form-group"><label>Catégorie</label><select id="inv_cat"><option value="palettes">Palettes</option><option value="finished">Produits Finis</option><option value="semi">Semi-Finis</option><option value="raw">Matière Première</option><option value="merch">Marchandises</option><option value="consum">Consommables</option></select></div>';
-  m += formField('inv_qte', 'Articles comptés', '', 'number', false);
-  m += formField('inv_ecarts', 'Écarts trouvés', '', 'number', false);
-  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
-  m += '<button class="btn btn-accent" onclick="createInventory()">✅ Créer</button>';
-  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
-  m += '</div></div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
+function launchInventory() {
+  var sel = document.getElementById('inv_month');
+  if (!sel) return;
+  _invMonthCache = sel.value;
+  var month = sel.value;
+  var items = calcInventoryItems(month);
+  var target = document.getElementById('invContent');
+  if (!target) return;
+
+  var h = '<div class="card">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem">';
+  h += '<h3 style="margin:0">Stock théorique au 31 ' + monthLabel(month) + ' — Saisissez le stock réel</h3>';
+  h += '<button class="btn btn-accent" onclick="saveInventory(\'' + month + '\')">✅ Enregistrer l\'inventaire</button>';
+  h += '</div>';
+  h += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.6rem">Le stock réel saisi deviendra le stock initial du mois suivant.</div>';
+
+  if (items.length === 0) {
+    h += '<div class="empty">Aucun élément en stock pour ce mois.</div>';
+  } else {
+    h += '<div style="overflow-x:auto"><table><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th>Emplacement</th><th style="text-align:right">Stock Théo.</th><th style="text-align:right;width:80px">Stock Réel</th><th style="text-align:right">Écart</th></tr>';
+    items.forEach(function(it, idx) {
+      var ecart = (parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0);
+      var ecol = ecart === 0 ? 'var(--dim)' : (ecart > 0 ? 'var(--green)' : 'var(--red)');
+      h += '<tr>';
+      h += '<td style="font-weight:600">' + escH(it.code) + '</td>';
+      h += '<td>' + escH(it.nom) + '</td>';
+      h += '<td>' + escH(it.categorie) + '</td>';
+      h += '<td>' + escH(it.emplacement || '-') + '</td>';
+      h += '<td style="text-align:right;font-weight:700">' + fmt(it.theo_qte) + '</td>';
+      h += '<td><input type="number" id="inv_real_' + idx + '" min="0" step="any" value="' + (it.theo_qte || 0) + '" style="width:80px;padding:4px;border:1px solid var(--border);border-radius:4px;text-align:right;font-size:.8rem" oninput="calcInvEcart()"></td>';
+      h += '<td style="text-align:right;color:' + ecol + ';font-weight:700" id="inv_ecart_' + idx + '">0</td>';
+      h += '</tr>';
+    });
+    h += '</table></div>';
+    h += '<div style="text-align:right;margin-top:.5rem;font-size:.85rem;font-weight:700">Écart total: <span id="inv_ecart_total" style="color:var(--red)">0</span></div>';
+  }
+  h += '</div>';
+  target.innerHTML = h;
+  window._invItems = items;
+  calcInvEcart();
 }
 
-function createInventory() {
-  var date = document.getElementById('inv_date').value;
-  var cat = document.getElementById('inv_cat').value;
-  var qte = parseInt(document.getElementById('inv_qte').value) || 0;
-  var ecarts = parseInt(document.getElementById('inv_ecarts').value) || 0;
-  if (!date) return toast('Date requise', 'error');
+function calcInventoryItems(month) {
+  /* Tous les stocks de toutes les catégories */
+  var items = [];
+  /* MP (stockRaw) */
+  (getStockRaw() || []).forEach(function(s) {
+    items.push({ code: s.code || s.colis_number || '-', nom: s.essence || s.designation || s.name || '-', categorie: 'MP - ' + (mpOrigin(s) || 'BL'), emplacement: s.emplacement || s.origin || '', theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || s.colis_number, store: 'stockRaw', storeIdx: items.length });
+  });
+  /* Semi-finis */
+  (getStockSemi() || []).forEach(function(s) {
+    items.push({ code: s.code || '-', nom: s.nom || s.designation || '-', categorie: 'Semi-fini', emplacement: '', theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code, store: 'stockSemi', storeIdx: items.length });
+  });
+  /* Palettes */
+  (getStockPalettes() || []).forEach(function(s) {
+    items.push({ code: s.code || '-', nom: s.nom || s.designation || '-', categorie: 'Palette', emplacement: s.emplacement || '', theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code, store: 'stockPalettes', storeIdx: items.length });
+  });
+  /* Produits finis */
+  (getStockFinished() || []).forEach(function(s) {
+    items.push({ code: s.code || '-', nom: s.nom || s.designation || '-', categorie: 'Produit fini', emplacement: s.emplacement || '', theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code, store: 'stockFinished', storeIdx: items.length });
+  });
+  /* Marchandises */
+  (getStockMerch() || []).forEach(function(s) {
+    items.push({ code: s.code || '-', nom: s.nom || s.designation || '-', categorie: 'Marchandise', emplacement: s.emplacement || '', theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code, store: 'stockMerch', storeIdx: items.length });
+  });
+  /* Consommables */
+  (getStockConsum() || []).forEach(function(s) {
+    items.push({ code: s.code || '-', nom: s.nom || s.nom_complet || s.designation || '-', categorie: 'Consommable', emplacement: s.emplacement || s.type || '', theo_qte: parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0, ref: s.code, store: 'stockConsum', storeIdx: items.length });
+  });
+  /* EPI */
+  (getEpiItems() || []).forEach(function(s) {
+    items.push({ code: s.code || '-', nom: s.designation || '-', categorie: 'EPI', emplacement: s.categorie || '', theo_qte: parseFloat(s.quantite_stock) || 0, real_qte: parseFloat(s.quantite_stock) || 0, ref: s.code, store: 'epiItems', storeIdx: items.length });
+  });
+  return items;
+}
+
+function calcInvEcart() {
+  var items = window._invItems || [];
+  var totalEcart = 0;
+  items.forEach(function(it, idx) {
+    var el = document.getElementById('inv_real_' + idx);
+    if (!el) return;
+    var real = parseFloat(el.value) || 0;
+    it.real_qte = real;
+    var ecart = real - (parseFloat(it.theo_qte) || 0);
+    totalEcart += Math.abs(ecart);
+    var ecartEl = document.getElementById('inv_ecart_' + idx);
+    if (ecartEl) {
+      ecartEl.textContent = ecart > 0 ? '+' + fmt(ecart) : fmt(ecart);
+      ecartEl.style.color = ecart === 0 ? 'var(--dim)' : (ecart > 0 ? 'var(--green)' : 'var(--red)');
+    }
+  });
+  var totalEl = document.getElementById('inv_ecart_total');
+  if (totalEl) totalEl.textContent = totalEcart.toFixed(1);
+}
+
+function saveInventory(month) {
+  if (!confirm2('Enregistrer l\'inventaire de ' + monthLabel(month) + ' ? Le stock réel saisi deviendra le stock initial du mois suivant.')) return;
+  var items = window._invItems || [];
+  var savedItems = [];
+  items.forEach(function(it, idx) {
+    var el = document.getElementById('inv_real_' + idx);
+    var real = el ? (parseFloat(el.value) || 0) : (parseFloat(it.real_qte) || 0);
+    savedItems.push({ code: it.code, nom: it.nom, categorie: it.categorie, emplacement: it.emplacement, theo_qte: it.theo_qte, real_qte: real, store: it.store });
+  });
+  var inv = { id: genId(), month: month, date: new Date().toISOString(), items: savedItems, created_at: new Date().toISOString() };
   var invs = getInventories();
-  invs.push({ id: genId(), date: date, categorie: cat, articles_comptes: qte, ecarts: ecarts, statut: 'draft', created_at: new Date().toISOString() });
+  invs = invs.filter(function(x) { return x.month !== month; });
+  invs.push(inv);
   setInventories(invs);
-  document.getElementById('modalOverlay').remove();
-  toast('Inventaire créé');
+  /* Le stock réel saisi devient le stock initial du mois suivant */
+  applyInventoryAsInitial(month, savedItems);
+  toast('Inventaire de ' + monthLabel(month) + ' enregistré ✅');
   renderPage();
+}
+
+function applyInventoryAsInitial(month, items) {
+  /* Met à jour les stocks actuels avec les valeurs réelles de l'inventaire */
+  var raw = getStockRaw();
+  var semi = getStockSemi();
+  var palettes = getStockPalettes();
+  var finished = getStockFinished();
+  var merch = getStockMerch();
+  var consum = getStockConsum();
+  var epi = getEpiItems();
+  var rawMap = {};
+  raw.forEach(function(s, i) { rawMap[s.code || s.colis_number] = i; });
+  var semiMap = {};
+  semi.forEach(function(s, i) { semiMap[s.code] = i; });
+  var palMap = {};
+  palettes.forEach(function(s, i) { palMap[s.code] = i; });
+  var finMap = {};
+  finished.forEach(function(s, i) { finMap[s.code] = i; });
+  var merchMap = {};
+  merch.forEach(function(s, i) { merchMap[s.code] = i; });
+  var consumMap = {};
+  consum.forEach(function(s, i) { consumMap[s.code] = i; });
+  var epiMap = {};
+  epi.forEach(function(s, i) { epiMap[s.code] = i; });
+  items.forEach(function(it) {
+    var idx;
+    switch (it.store) {
+      case 'stockRaw':
+        idx = rawMap[it.ref];
+        if (idx !== undefined) { raw[idx].quantite = it.real_qte; raw[idx].volume = it.real_qte * stkUnitVol(raw[idx]); }
+        break;
+      case 'stockSemi':
+        idx = semiMap[it.ref];
+        if (idx !== undefined) { semi[idx].quantite = it.real_qte; }
+        break;
+      case 'stockPalettes':
+        idx = palMap[it.ref];
+        if (idx !== undefined) { palettes[idx].quantite = it.real_qte; }
+        break;
+      case 'stockFinished':
+        idx = finMap[it.ref];
+        if (idx !== undefined) { finished[idx].quantite = it.real_qte; }
+        break;
+      case 'stockMerch':
+        idx = merchMap[it.ref];
+        if (idx !== undefined) { merch[idx].quantite = it.real_qte; }
+        break;
+      case 'stockConsum':
+        idx = consumMap[it.ref];
+        if (idx !== undefined) { consum[idx].quantite_stock = it.real_qte; consum[idx].quantite = it.real_qte; }
+        break;
+      case 'epiItems':
+        idx = epiMap[it.ref];
+        if (idx !== undefined) { epi[idx].quantite_stock = it.real_qte; }
+        break;
+    }
+  });
+  setStockRaw(raw);
+  setStockSemi(semi);
+  setStockPalettes(palettes);
+  setStockFinished(finished);
+  setStockMerch(merch);
+  setStockConsum(consum);
+  setEpiItems(epi);
+}
+
+function viewInventory(id) {
+  var inv = getInventories().find(function(x) { return x.id === id; });
+  if (!inv) return;
+  var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  var mIdx = parseInt((inv.month || '').slice(5, 7), 10) - 1;
+  var mLabel = mIdx >= 0 ? _mn[mIdx] + ' ' + (inv.month || '').slice(0, 4) : '-';
+  var m = '<h2>📊 Inventaire du ' + mLabel + '</h2>';
+  m += '<p><strong>Date :</strong> ' + escH((inv.date || '').slice(0, 10)) + '</p>';
+  m += '<div style="overflow-x:auto"><table><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th style="text-align:right">Stock Théo.</th><th style="text-align:right">Stock Réel</th><th style="text-align:right">Écart</th></tr>';
+  (inv.items || []).forEach(function(it) {
+    var ecart = (parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0);
+    var ecol = ecart === 0 ? 'var(--dim)' : (ecart > 0 ? 'var(--green)' : 'var(--red)');
+    m += '<tr><td>' + escH(it.code) + '</td><td>' + escH(it.nom) + '</td><td>' + escH(it.categorie) + '</td>';
+    m += '<td style="text-align:right">' + fmt(it.theo_qte) + '</td>';
+    m += '<td style="text-align:right;font-weight:700">' + fmt(it.real_qte) + '</td>';
+    m += '<td style="text-align:right;color:' + ecol + ';font-weight:700">' + (ecart > 0 ? '+' : '') + fmt(ecart) + '</td></tr>';
+  });
+  m += '</table></div>';
+  m += '<div style="margin-top:1rem;text-align:right"><button class="btn" onclick="closeModal()">Fermer</button></div>';
+  openModal(m);
+}
+
+function deleteInventory(id) {
+  if (!confirm2('Supprimer cet inventaire ? Cette action est irréversible.')) return;
+  setInventories(getInventories().filter(function(x) { return x.id !== id; }));
+  toast('Inventaire supprimé');
+  renderPage();
+}
+
+function printInventory() {
+  var sel = document.getElementById('inv_month');
+  var month = sel ? sel.value : _invMonthCache;
+  if (!month) return toast('Sélectionnez un mois', 'error');
+  var items = calcInventoryItems(month);
+  var html = '<html><head><title>Inventaire ' + monthLabel(month) + '</title>';
+  html += '<style>body{font-family:Arial;font-size:9pt}table{width:100%;border-collapse:collapse}th,td{border:1px solid #94a3b8;padding:4px 6px}th{background:#f1f5f9;font-weight:700}td{text-align:center}.total{font-weight:700;background:#e2e8f0}</style></head><body>';
+  html += '<h2 style="text-align:center">INVENTAIRE AU 31 ' + monthLabel(month).toUpperCase() + '</h2>';
+  html += '<p>Date: ' + new Date().toLocaleDateString('fr-FR') + '</p>';
+  html += '<table><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th>Emplacement</th><th>Stock Théo.</th><th>Stock Réel</th><th>Écart</th></tr>';
+  items.forEach(function(it) {
+    var ecart = (parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0);
+    html += '<tr><td>' + escH(it.code) + '</td><td>' + escH(it.nom) + '</td><td>' + escH(it.categorie) + '</td><td>' + escH(it.emplacement || '-') + '</td><td>' + fmt(it.theo_qte) + '</td><td style="font-weight:700">' + fmt(it.real_qte) + '</td><td>' + (ecart > 0 ? '+' : '') + fmt(ecart) + '</td></tr>';
+  });
+  html += '</table></body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.print();
 }
 
 /* ==================== ARTICLES ==================== */
