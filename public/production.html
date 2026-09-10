@@ -482,6 +482,29 @@ function setAchats(v) { setSection('achats', v); }
 function getLosses() { return getSection('losses', []); }
 function setLosses(v) { setSection('losses', v); }
 function getPersonnel() { try { return JSON.parse(localStorage.getItem('mdb_employes')) || []; } catch(e) { return []; } }
+
+/* Personnel présent par fonction pour une date donnée (basé sur pointage/présence) */
+function getPresentByFonction(dateStr) {
+  var presences = getPresence();
+  var presentIds = presences.filter(function(p) { return p.date === dateStr && p.statut === 'present'; }).map(function(p) { return p.employee_id; });
+  var personnel = getPersonnel();
+  var byFonction = {};
+  presentIds.forEach(function(id) {
+    var emp = personnel.find(function(e) { return e.id === id; });
+    if (emp) {
+      var fonc = (emp.fonction || emp.service || 'Sans fonction').trim();
+      if (!byFonction[fonc]) byFonction[fonc] = [];
+      var nomComplet = (emp.nom || '') + ' ' + (emp.prenoms || '');
+      byFonction[fonc].push(nomComplet.trim());
+    }
+  });
+  return byFonction;
+}
+
+function showFonctionPersonnel(fonction, noms) {
+  alert('👥 ' + fonction + ' (' + noms.split(', ').length + ' personnes)\n\n' + noms);
+}
+
 /* Taux de perte accepté par défaut : réglé par la Direction dans le Tableau de Bord Direction (app principale, mdb_entreprise) */
 function getDefaultTauxPerte() {
   var v = null;
@@ -518,12 +541,36 @@ function phaseLabel(code) {
 
 function nextProdNumber() {
   var prods = getProductions();
-  var max = 0;
+  var now = new Date();
+  var year = String(now.getFullYear()).slice(-2);
+  var month = String(now.getMonth() + 1).padStart(2, '0');
+  var prefix = year + month;
+  var maxSeq = 0;
   prods.forEach(function(p) {
-    var n = parseInt((p.numero || '').replace(/\D/g, ''), 10);
-    if (n > max) max = n;
+    var num = p.numero || '';
+    if (num.startsWith(prefix)) {
+      var seq = parseInt(num.slice(4), 10);
+      if (seq > maxSeq) maxSeq = seq;
+    }
   });
-  return 'PRD-' + String(max + 1).padStart(4, '0');
+  return prefix + String(maxSeq + 1).padStart(2, '0');
+}
+
+function isCurrentUserAdmin() {
+  try {
+    var uDisp = JSON.parse(localStorage.getItem('mdb_userDisplay') || 'null');
+    if (uDisp && uDisp.isAdmin) return true;
+    var rawU = localStorage.getItem('mdb_currentUser');
+    if (rawU) {
+      var cu = JSON.parse(rawU);
+      if (cu && cu.isAdmin) return true;
+    }
+    var users = JSON.parse(localStorage.getItem('mdb_users') || '[]');
+    var curName = (uDisp && (uDisp.nom || uDisp.username || uDisp.login)) || (cu && (cu.nom || cu.login || cu.username)) || '';
+    var found = users.find(function(u) { return u && (u.id === curName || u.login === curName || u.nom === curName) && u.isAdmin; });
+    if (found) return true;
+  } catch(e) {}
+  return false;
 }
 
 function nextOPNumber() {
@@ -908,12 +955,14 @@ function render_production() {
   var h = '';
 
   /* === EN-TÊTE FICHE === */
+  var isAdmin = isCurrentUserAdmin();
   h += '<div class="card">';
   h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1rem">';
   h += formField('prod_date', 'Date', today(), 'date', true);
   h += '<div class="form-group"><label>N° Fiche de Production</label><input type="text" id="prod_numero" value="' + numero + '" readonly style="background:#f8f9fa;font-weight:700"></div>';
-  h += formField('prod_chef', 'Chef de Projet', '', 'text', false);
-  h += formField('prod_taux_perte', '% Taux de Perte Accepté', getDefaultTauxPerte(), 'number', false);
+  h += formField('prod_chef', 'Chef de Projet', '', 'text', true);
+  var tauxPerteDisabled = isAdmin ? '' : ' disabled style="background:#f5f5f5;cursor:not-allowed"';
+  h += '<div class="form-group"><label>% Taux de Perte Accepté</label><input type="number" id="prod_taux_perte" value="' + getDefaultTauxPerte() + '"' + tauxPerteDisabled + '></div>';
   h += '</div></div>';
 
   /* === REPRISE DU BROUILLON === */
@@ -929,6 +978,8 @@ function render_production() {
   h += '<button class="btn" onclick="saveProduction(\'brouillon\')">📝 Mettre en brouillon</button>';
   h += '<button class="btn btn-accent" onclick="saveProduction(\'save\')">💾 Enregistrer</button>';
   h += '<button class="btn btn-green" onclick="saveProduction(true)">✅ Valider la fiche</button>';
+  h += '<button class="btn" onclick="printProductionFiche()">🖨 Imprimer Fiche</button>';
+  h += '<button class="btn" onclick="exportProductionFichePDF()">📄 Export PDF</button>';
   h += '</div>';
 
   /* === SECTION 1: SORTIE DU BOIS === */
@@ -974,9 +1025,9 @@ function render_production() {
   h += '<h4 style="margin:0;font-size:.8rem;color:var(--accent);font-weight:700">I-USINAGE - LATTES</h4>';
   h += '<button class="btn" onclick="addLigneLattes()" style="font-size:.72rem;padding:.3rem .7rem">+ Ajouter</button>';
   h += '</div>';
-  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th style="text-align:right">Volume(m³)</th><th>Observations</th><th></th></tr></thead>';
+  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Type</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th style="text-align:right">Volume(m³)</th><th>Observations</th><th></th></tr></thead>';
   h += '<tbody id="lattesBody"></tbody>';
-  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="2" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--accent)" id="latte_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--accent)" id="latte_total_vol">0.0000</td><td colspan="2"></td></tr>';
+  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="3" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--accent)" id="latte_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--accent)" id="latte_total_vol">0.0000</td><td colspan="2"></td></tr>';
   h += '</table></div>';
 
   /* PLOTS */
@@ -985,9 +1036,9 @@ function render_production() {
   h += '<h4 style="margin:0;font-size:.8rem;color:var(--blue);font-weight:700">PLOTS</h4>';
   h += '<button class="btn" onclick="addLignePlots()" style="font-size:.72rem;padding:.3rem .7rem">+ Ajouter</button>';
   h += '</div>';
-  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th style="text-align:right">Volume(m³)</th><th>Observations</th><th></th></tr></thead>';
+  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Type</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th style="text-align:right">Volume(m³)</th><th>Observations</th><th></th></tr></thead>';
   h += '<tbody id="plotsBody"></tbody>';
-  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="2" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--blue)" id="plot_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--blue)" id="plot_total_vol">0.0000</td><td colspan="2"></td></tr>';
+  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="3" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--blue)" id="plot_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--blue)" id="plot_total_vol">0.0000</td><td colspan="2"></td></tr>';
   h += '</table></div>';
 
   /* CONTREPLAQUE */
@@ -996,7 +1047,7 @@ function render_production() {
   h += '<h4 style="margin:0;font-size:.8rem;color:var(--green);font-weight:700">CONTREPLAQUE (CP)</h4>';
   h += '<button class="btn" onclick="addLigneCP()" style="font-size:.72rem;padding:.3rem .7rem">+ Ajouter</button>';
   h += '</div>';
-  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Type de CP</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(mm)</th><th style="text-align:right">Volume(m³)</th><th>Lot</th><th>Observations</th><th></th></tr></thead>';
+  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Type</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(mm)</th><th style="text-align:right">Volume(m³)</th><th>Lot</th><th>Observations</th><th></th></tr></thead>';
   h += '<tbody id="cpBody"></tbody>';
   h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="2" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--green)" id="cp_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--green)" id="cp_total_vol">0.0000</td><td colspan="3"></td></tr>';
   h += '</table></div>';
@@ -1018,35 +1069,28 @@ function render_production() {
   h += '<h4 style="margin:0;font-size:.8rem;color:var(--accent);font-weight:700">III-EN COURS DE PRODUCTION</h4>';
   h += '<button class="btn" onclick="addLigneEncours()" style="font-size:.72rem;padding:.3rem .7rem">+ Ajouter une ligne</button>';
   h += '</div>';
-  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th style="text-align:right">Volume(m³)</th><th>Type</th><th>Opérateur</th><th>Observations</th><th></th></tr></thead>';
+  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Type</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th style="text-align:right">Volume(m³)</th><th>Type</th><th>Observations</th><th></th></tr></thead>';
   h += '<tbody id="encBody"></tbody>';
-  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="2" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--accent)" id="enc_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--accent)" id="enc_total_vol">0.0000</td><td colspan="4"></td></tr>';
+  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="3" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--accent)" id="enc_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--accent)" id="enc_total_vol">0.0000</td><td colspan="3"></td></tr>';
   h += '</table></div>';
 
   h += '</div>';
 
-  /* === OBSERVATIONS === */
-  h += '<div class="card">';
-  h += formTextarea('prod_observations', 'Observations');
-  h += '</div>';
-
-  /* === RÉSUMÉ DE LA PRODUCTION === */
-  h += '<div class="card" style="border-left:4px solid var(--purple);background:linear-gradient(135deg,#fdf4ff,#fff)">';
-  h += '<h3 style="margin-bottom:.8rem">📊 RÉSUMÉ DE LA PRODUCTION</h3>';
-  h += '<div class="stats-grid">';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.1rem" id="summary_sb_vol">0.0000 m³</div><div class="label">Volume Bois Sorti (m³)</div></div>';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.1rem" id="summary_latte_vol">0.0000 m³</div><div class="label">Volume Lattes (m³)</div></div>';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.1rem" id="summary_plot_vol">0.0000 m³</div><div class="label">Volume Plots (m³)</div></div>';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.1rem" id="summary_cp_vol">0.0000 m³</div><div class="label">Volume CP (m³)</div></div>';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.1rem" id="summary_enc_vol">0.0000 m³</div><div class="label">En-cours Entrée (m³)</div></div>';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.1rem" id="summary_total_prod_vol">0.0000 m³</div><div class="label">Total Transformé (m³)</div></div>';
-  h += '<div class="stat-card"><div class="value" style="font-size:1.4rem;color:var(--green)" id="summary_rendement">0.0 %</div><div class="label">Rendement Matière</div></div>';
-  h += '</div>';
-  h += '<div style="background:#f8f9fa;padding:.6rem;border-radius:6px;font-size:.75rem;color:var(--dim);margin-top:.5rem">';
-  h += '💡 Le rendement = Volume transformé / Volume sorti × 100. Il se met à jour automatiquement quand vous saisissez les données.';
-  h += '</div>';
-  h += '<div id="summary_perte_warn" style="display:none;background:#fff3cd;color:#856404;padding:.6rem;border-radius:6px;font-size:.78rem;margin-top:.5rem;border:1px solid #ffeeba"></div>';
-  h += '</div>';
+  /* Personnel présent par fonction (depuis pointage du jour) */
+  var _prodDate = (document.getElementById('prod_date') || {}).value || today();
+  var _presentByFonction = getPresentByFonction(_prodDate);
+  if (Object.keys(_presentByFonction).length > 0) {
+    h += '<div style="margin-top:.8rem;padding:.6rem;background:#f0fdf4;border:1px solid #86efac;border-radius:6px">';
+    h += '<strong style="font-size:.8rem;color:#166534">👥 Personnel Présent (par fonction) — ' + _prodDate + '</strong>';
+    h += '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.4rem">';
+    Object.keys(_presentByFonction).sort().forEach(function(fonction) {
+      var noms = _presentByFonction[fonction];
+      h += '<span style="background:#dcfce7;color:#166534;padding:.2rem .6rem;border-radius:20px;font-size:.7rem;cursor:pointer;border:1px solid #86efac" onclick="showFonctionPersonnel(\'' + escH(fonction) + '\',\'' + escH(noms.join(', ')) + '\')">';
+      h += fonction + ' <strong>(' + noms.length + ')</strong>';
+      h += '</span>';
+    });
+    h += '</div></div>';
+  }
 
   return h;
 }
@@ -1145,14 +1189,15 @@ function addLigneLattes(code, designation, qte, long, larg, epais) {
   var vol = (parseFloat(long)||0)*(parseFloat(larg)||0)*(parseFloat(epais)||0)/1000000;
   var tr = document.createElement('tr');
   tr.id = 'latteRow' + idx;
-  tr.innerHTML = '<td><input type="text" placeholder="Code" list="compDefList_LATTE" onchange="onCompCodeChange(this,\'LATTE\')" value="' + escH(code||'') + '" style="' + _piS('100px') + '"></td>' +
-    '<td><input type="text" placeholder="Désignation" value="' + escH(designation||'') + '" style="' + _piS('130px') + '"></td>' +
-    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('60px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
+  tr.innerHTML = '<td><input type="text" placeholder="Code" list="compDefList_LATTE" onchange="onCompCodeChange(this,\'LATTE\')" value="' + escH(code||'') + '" style="' + _piS('90px') + '"></td>' +
+    '<td><select style="' + _piS('70px') + '"><option value="">—</option><option value="LATTE">LATTE</option><option value="PLOT">PLOT</option><option value="CP">CP</option></select></td>' +
+    '<td><input type="text" placeholder="Désignation" value="' + escH(designation||'') + '" style="' + _piS('150px') + '"></td>' +
+    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('75px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcLatteVol(' + idx + ')"></td>' +
     '<td style="text-align:right;font-weight:700;font-size:.78rem" id="latte_vol_' + idx + '">' + vol.toFixed(4) + '</td>' +
-    '<td><input type="text" style="' + _piS('110px') + '"></td>' +
+    '<td><input type="text" placeholder="Observations" style="' + _piS('180px') + '"></td>' +
     '<td><button class="btn btn-red" onclick="this.closest(\'tr\').remove();calcLatteTotals()" style="font-size:.65rem;padding:2px 6px">🗑️</button></td>';
   tbody.appendChild(tr);
   calcLatteTotals();
@@ -1190,14 +1235,15 @@ function addLignePlots(code, designation, qte, long, larg, epais) {
   var vol = (parseFloat(long)||0)*(parseFloat(larg)||0)*(parseFloat(epais)||0)/1000000;
   var tr = document.createElement('tr');
   tr.id = 'plotRow' + idx;
-  tr.innerHTML = '<td><input type="text" placeholder="Code" list="compDefList_PLOT" onchange="onCompCodeChange(this,\'PLOT\')" value="' + escH(code||'') + '" style="' + _piS('100px') + '"></td>' +
-    '<td><input type="text" placeholder="Désignation" value="' + escH(designation||'') + '" style="' + _piS('130px') + '"></td>' +
-    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('60px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
+  tr.innerHTML = '<td><input type="text" placeholder="Code" list="compDefList_PLOT" onchange="onCompCodeChange(this,\'PLOT\')" value="' + escH(code||'') + '" style="' + _piS('90px') + '"></td>' +
+    '<td><select style="' + _piS('70px') + '"><option value="">—</option><option value="LATTE">LATTE</option><option value="PLOT">PLOT</option><option value="CP">CP</option></select></td>' +
+    '<td><input type="text" placeholder="Désignation" value="' + escH(designation||'') + '" style="' + _piS('150px') + '"></td>' +
+    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('75px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcPlotVol(' + idx + ')"></td>' +
     '<td style="text-align:right;font-weight:700;font-size:.78rem" id="plot_vol_' + idx + '">' + vol.toFixed(4) + '</td>' +
-    '<td><input type="text" style="' + _piS('110px') + '"></td>' +
+    '<td><input type="text" placeholder="Observations" style="' + _piS('180px') + '"></td>' +
     '<td><button class="btn btn-red" onclick="this.closest(\'tr\').remove();calcPlotTotals()" style="font-size:.65rem;padding:2px 6px">🗑️</button></td>';
   tbody.appendChild(tr);
   calcPlotTotals();
@@ -1235,15 +1281,15 @@ function addLigneCP(code, typeCP, qte, long, larg, epais) {
   var vol = (parseFloat(long)||0)*(parseFloat(larg)||0)*(parseFloat(epais)||0)/1000000;
   var tr = document.createElement('tr');
   tr.id = 'cpRow' + idx;
-  tr.innerHTML = '<td><input type="text" placeholder="Code" list="compDefList_CP" onchange="onCompCodeChange(this,\'CP\')" value="' + escH(code||'') + '" style="' + _piS('100px') + '"></td>' +
-    '<td><input type="text" placeholder="Type de CP" value="' + escH(typeCP||'') + '" style="' + _piS('110px') + '"></td>' +
-    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('60px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('65px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
+  tr.innerHTML = '<td><input type="text" placeholder="Code" list="compDefList_CP" onchange="onCompCodeChange(this,\'CP\')" value="' + escH(code||'') + '" style="' + _piS('90px') + '"></td>' +
+    '<td><input type="text" placeholder="Type" value="' + escH(typeCP||'') + '" style="' + _piS('90px') + '"></td>' +
+    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('75px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcCPVol(' + idx + ')"></td>' +
     '<td style="text-align:right;font-weight:700;font-size:.78rem" id="cp_vol_' + idx + '">' + vol.toFixed(4) + '</td>' +
-    '<td><input type="text" style="' + _piS('70px') + '"></td>' +
-    '<td><input type="text" style="' + _piS('110px') + '"></td>' +
+    '<td><input type="text" placeholder="Lot" style="' + _piS('80px') + '"></td>' +
+    '<td><input type="text" placeholder="Observations" style="' + _piS('180px') + '"></td>' +
     '<td><button class="btn btn-red" onclick="this.closest(\'tr\').remove();calcCPTotals()" style="font-size:.65rem;padding:2px 6px">🗑️</button></td>';
   tbody.appendChild(tr);
   calcCPTotals();
@@ -1312,15 +1358,15 @@ function addLigneEncours(code, designation, qte, long, larg, epais, wipType, ope
   var tr = document.createElement('tr');
   tr.id = 'encRow' + idx;
   tr.innerHTML = '<td><input type="text" placeholder="Code" list="encDatalist" onchange="onEncoursCodeChange(this)" value="' + escH(code||'') + '" style="' + _piS('90px') + '"></td>' +
-    '<td><input type="text" placeholder="Désignation" value="' + escH(designation||'') + '" style="' + _piS('120px') + '"></td>' +
-    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('55px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('60px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('60px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
-    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('60px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
+    '<td><select style="' + _piS('70px') + '"><option value="">—</option><option value="LATTE">LATTE</option><option value="PLOT">PLOT</option><option value="CP">CP</option></select></td>' +
+    '<td><input type="text" placeholder="Désignation" value="' + escH(designation||'') + '" style="' + _piS('150px') + '"></td>' +
+    '<td><input type="number" value="' + (qte||'') + '" min="0" style="' + _pnS('75px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (long||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (larg||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
+    '<td><input type="number" value="' + (epais||'') + '" min="0" step="0.1" style="' + _pnS('80px') + '" oninput="calcEncoursVol(' + idx + ')"></td>' +
     '<td style="text-align:right;font-weight:700;font-size:.78rem" id="enc_vol_' + idx + '">' + vol.toFixed(4) + '</td>' +
     '<td><select data-wiptype="1" onchange="calcEncoursTotals()" style="' + _piS('95px') + '"><option value="entrée"' + (wipType === 'reprise' ? '' : ' selected') + '>Entrée</option><option value="reprise"' + (wipType === 'reprise' ? ' selected' : '') + '>Reprise</option></select></td>' +
-    '<td><input type="text" placeholder="Opérateur" value="' + escH(operateur||'') + '" style="' + _piS('90px') + '"></td>' +
-    '<td><input type="text" style="' + _piS('100px') + '"></td>' +
+    '<td><input type="text" placeholder="Observations" style="' + _piS('180px') + '"></td>' +
     '<td><button class="btn btn-red" onclick="this.closest(\'tr\').remove();calcEncoursTotals()" style="font-size:.65rem;padding:2px 6px">🗑️</button></td>';
   tbody.appendChild(tr);
   calcEncoursTotals();
@@ -1424,6 +1470,8 @@ function updateProductionSummary() {
   var totalProd = latteVol + plotVol + cpVol + enc.entree;
   var base = sbVol + enc.reprise;
   var rendement = base > 0 ? (totalProd / base * 100) : 0;
+  var perteVol = base > 0 ? (base - totalProd) : 0;
+  var perteTaux = base > 0 ? (perteVol / base * 100) : 0;
 
   var el;
   el = document.getElementById('summary_sb_vol');    if (el) el.textContent = sbVol.toFixed(4) + ' m³';
@@ -1431,7 +1479,8 @@ function updateProductionSummary() {
   el = document.getElementById('summary_plot_vol');  if (el) el.textContent = plotVol.toFixed(4) + ' m³';
   el = document.getElementById('summary_cp_vol');    if (el) el.textContent = cpVol.toFixed(4) + ' m³';
   el = document.getElementById('summary_enc_vol');   if (el) el.textContent = enc.entree.toFixed(4) + ' m³';
-  el = document.getElementById('summary_total_prod_vol'); if (el) el.textContent = totalProd.toFixed(4) + ' m³';
+  el = document.getElementById('summary_perte_vol'); if (el) el.textContent = perteVol.toFixed(4) + ' m³';
+  el = document.getElementById('summary_perte_taux'); if (el) el.textContent = perteTaux.toFixed(1) + ' %';
   el = document.getElementById('summary_rendement'); if (el) {
     el.textContent = rendement.toFixed(1) + ' %';
     el.style.color = rendement >= 80 ? 'var(--green)' : rendement >= 60 ? 'var(--orange)' : 'var(--red)';
@@ -1747,6 +1796,144 @@ function clearDraftEdit() {
   renderPage();
 }
 
+/* Impression / Export PDF de la fiche de production courante */
+function printProductionFiche() {
+  var editId = localStorage.getItem('mdb_prod_editId') || '';
+  var prod = editId ? getProductions().find(function(x) { return x.id === editId; }) : null;
+  if (!prod) return toast('Aucune fiche en cours à imprimer', 'error');
+  generateProdFichePrint(prod);
+}
+function exportProductionFichePDF() {
+  var editId = localStorage.getItem('mdb_prod_editId') || '';
+  var prod = editId ? getProductions().find(function(x) { return x.id === editId; }) : null;
+  if (!prod) return toast('Aucune fiche en cours à exporter', 'error');
+  generateProdFichePDF(prod);
+}
+function generateProdFichePrint(p) {
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche Production ' + escH(p.numero) + '</title>';
+  h += '<style>body{font-family:Arial,sans-serif;margin:20px;font-size:12px}table{width:100%;border-collapse:collapse;margin-bottom:1rem}th,td{border:1px solid #333;padding:4px 6px;font-size:11px}th{background:#f0f0f0;text-align:left}tr.total td{font-weight:bold;background:#f5f5f5}.section-title{margin:1rem 0 .5rem;font-weight:bold;font-size:13px;border-bottom:2px solid #333;padding-bottom:2px}.header{display:flex;justify-content:space-between;margin-bottom:1rem}.header h1{margin:0;font-size:18px}.badge{padding:2px 6px;border-radius:4px;font-size:11px;font-weight:bold}.badge-draft{background:#fff3cd;color:#856404}.badge-validated{background:#d4edda;color:#155724}.badge-done{background:#d4edda;color:#155724}.badge-danger{background:#f8d7da;color:#721c24}</style>';
+  h += '</head><body>';
+  h += '<div class="header"><h1>📋 Fiche de Production — ' + escH(p.numero) + '</h1><span class="badge badge-' + (p.statut || 'draft') + '">' + (p.statut || 'draft') + '</span></div>';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;font-size:12px">';
+  h += '<div><strong>Date:</strong> ' + escH(p.date) + '</div>';
+  h += '<div><strong>Chef de Projet:</strong> ' + escH(p.chef || '-') + '</div>';
+  h += '<div><strong>Taux Perte:</strong> ' + escH(p.taux_perte || '10') + '%</div>';
+  h += '<div><strong>Rendement:</strong> ' + (p.rendement ? p.rendement.toFixed(1) + '%' : '0%') + '</div>';
+  h += '</div>';
+  if (p.observations) h += '<div style="margin-bottom:1rem"><strong>Observations:</strong> ' + escH(p.observations) + '</div>';
+  /* Sortie Bois */
+  if (p.sortie_bois && p.sortie_bois.length) {
+    h += '<div class="section-title">1. Sortie du Bois</div>';
+    h += '<table><tr><th>Code</th><th>Date</th><th>Libellé</th><th>Essence</th><th>Fournisseur</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th><th style="text-align:right">Vol(m³)</th></tr>';
+    p.sortie_bois.forEach(function(sb) {
+      h += '<tr><td>' + escH(sb.code) + '</td><td>' + escH(sb.date) + '</td><td>' + escH(sb.libelle) + '</td><td>' + escH(sb.essence) + '</td><td>' + escH(sb.fournisseur) + '</td><td style="text-align:right">' + (sb.qte || 0) + '</td><td style="text-align:right">' + (sb.long || 0) + '</td><td style="text-align:right">' + (sb.larg || 0) + '</td><td style="text-align:right">' + (sb.epais || 0) + '</td><td style="text-align:right">' + (sb.volume || 0).toFixed(4) + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="5" style="text-align:right"><strong>TOTAL</strong></td><td style="text-align:right"><strong>' + (p.sortie_bois.reduce(function(s, l) { return s + (l.qte || 0); }, 0)) + '</strong></td><td colspan="4"></td><td style="text-align:right"><strong>' + (p.vol_sortie_bois || 0).toFixed(4) + ' m³</strong></td></tr>';
+    h += '</table>';
+  }
+  /* Lattes */
+  if (p.lattes && p.lattes.length) {
+    h += '<div class="section-title">I. Lattes</div>';
+    h += '<table><tr><th>Code</th><th>Type</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th><th style="text-align:right">Vol(m³)</th></tr>';
+    p.lattes.forEach(function(l) {
+      h += '<tr><td>' + escH(l.code) + '</td><td>' + escH(l.type || 'LATTE') + '</td><td>' + escH(l.designation) + '</td><td style="text-align:right">' + (l.qte || 0) + '</td><td style="text-align:right">' + (l.long || 0) + '</td><td style="text-align:right">' + (l.larg || 0) + '</td><td style="text-align:right">' + (l.epais || 0) + '</td><td style="text-align:right">' + (l.volume || 0).toFixed(4) + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="3" style="text-align:right"><strong>TOTAL</strong></td><td style="text-align:right"><strong>' + (p.lattes.reduce(function(s, l) { return s + (l.qte || 0); }, 0)) + '</strong></td><td colspan="3"></td><td style="text-align:right"><strong>' + (p.vol_lattes || 0).toFixed(4) + ' m³</strong></td></tr>';
+    h += '</table>';
+  }
+  /* Plots */
+  if (p.plots && p.plots.length) {
+    h += '<div class="section-title">Plots</div>';
+    h += '<table><tr><th>Code</th><th>Type</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th><th style="text-align:right">Vol(m³)</th></tr>';
+    p.plots.forEach(function(l) {
+      h += '<tr><td>' + escH(l.code) + '</td><td>' + escH(l.type || 'PLOT') + '</td><td>' + escH(l.designation) + '</td><td style="text-align:right">' + (l.qte || 0) + '</td><td style="text-align:right">' + (l.long || 0) + '</td><td style="text-align:right">' + (l.larg || 0) + '</td><td style="text-align:right">' + (l.epais || 0) + '</td><td style="text-align:right">' + (l.volume || 0).toFixed(4) + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="3" style="text-align:right"><strong>TOTAL</strong></td><td style="text-align:right"><strong>' + (p.plots.reduce(function(s, l) { return s + (l.qte || 0); }, 0)) + '</strong></td><td colspan="3"></td><td style="text-align:right"><strong>' + (p.vol_plots || 0).toFixed(4) + ' m³</strong></td></tr>';
+    h += '</table>';
+  }
+  /* CP */
+  if (p.cp && p.cp.length) {
+    h += '<div class="section-title">Contreplaqué (CP)</div>';
+    h += '<table><tr><th>Code</th><th>Type</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th><th style="text-align:right">Vol(m³)</th><th>Lot</th></tr>';
+    p.cp.forEach(function(l) {
+      h += '<tr><td>' + escH(l.code) + '</td><td>' + escH(l.type_cp || 'CP') + '</td><td style="text-align:right">' + (l.qte || 0) + '</td><td style="text-align:right">' + (l.long || 0) + '</td><td style="text-align:right">' + (l.larg || 0) + '</td><td style="text-align:right">' + (l.epais || 0) + '</td><td style="text-align:right">' + (l.volume || 0).toFixed(4) + '</td><td>' + escH(l.lot || '') + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="2" style="text-align:right"><strong>TOTAL</strong></td><td style="text-align:right"><strong>' + (p.cp.reduce(function(s, l) { return s + (l.qte || 0); }, 0)) + '</strong></td><td colspan="3"></td><td style="text-align:right"><strong>' + (p.vol_cp || 0).toFixed(4) + ' m³</strong></td><td></td></tr>';
+    h += '</table>';
+  }
+  /* Assemblage */
+  if (p.assemblage && p.assemblage.length) {
+    h += '<div class="section-title">II. Assemblage</div>';
+    h += '<table><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th></tr>';
+    p.assemblage.forEach(function(l) {
+      h += '<tr><td>' + escH(l.code) + '</td><td>' + escH(l.designation) + '</td><td style="text-align:right">' + (l.qte || 0) + '</td><td style="text-align:right">' + (l.long || 0) + '</td><td style="text-align:right">' + (l.larg || 0) + '</td><td style="text-align:right">' + (l.epais || 0) + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="2" style="text-align:right"><strong>TOTAL Qté</strong></td><td style="text-align:right"><strong>' + (p.assemblage.reduce(function(s, l) { return s + (l.qte || 0); }, 0)) + '</strong></td><td colspan="3"></td></tr>';
+    h += '</table>';
+  }
+  /* En-cours */
+  if (p.encours && p.encours.length) {
+    h += '<div class="section-title">III. En-cours</div>';
+    h += '<table><tr><th>Code</th><th>Type</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th><th style="text-align:right">Vol(m³)</th><th>Type</th></tr>';
+    p.encours.forEach(function(e) {
+      h += '<tr><td>' + escH(e.code) + '</td><td>' + escH(e.type || 'LATTE') + '</td><td>' + escH(e.designation) + '</td><td style="text-align:right">' + (e.qte || 0) + '</td><td style="text-align:right">' + (e.long || 0) + '</td><td style="text-align:right">' + (e.larg || 0) + '</td><td style="text-align:right">' + (e.epais || 0) + '</td><td style="text-align:right">' + (e.volume || 0).toFixed(4) + '</td><td>' + escH(e.wip_type) + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="3" style="text-align:right"><strong>TOTAL</strong></td><td style="text-align:right"><strong>' + (p.encours.reduce(function(s, l) { return s + (l.qte || 0); }, 0)) + '</strong></td><td colspan="3"></td><td style="text-align:right"><strong>' + ((p.vol_enc_entree || 0) + (p.vol_enc_reprise || 0)).toFixed(4) + ' m³</strong></td><td></td></tr>';
+    h += '</table>';
+  }
+  /* Résumé volumes */
+  h += '<div class="section-title">Résumé Volumes</div>';
+  h += '<table><tr><th>Bois Sorti</th><th>Lattes</th><th>Plots</th><th>CP</th><th>En-cours Entrée</th><th>Perte</th><th>Rendement</th></tr>';
+  var perteVol = (p.vol_sortie_bois || 0) + (p.vol_enc_reprise || 0) - (p.vol_lattes || 0) - (p.vol_plots || 0) - (p.vol_cp || 0) - (p.vol_enc_entree || 0);
+  h += '<tr><td style="text-align:right">' + (p.vol_sortie_bois || 0).toFixed(4) + ' m³</td><td style="text-align:right">' + (p.vol_lattes || 0).toFixed(4) + ' m³</td><td style="text-align:right">' + (p.vol_plots || 0).toFixed(4) + ' m³</td><td style="text-align:right">' + (p.vol_cp || 0).toFixed(4) + ' m³</td><td style="text-align:right">' + (p.vol_enc_entree || 0).toFixed(4) + ' m³</td><td style="text-align:right;color:red">' + perteVol.toFixed(4) + ' m³</td><td style="text-align:right;color:green"><strong>' + (p.rendement || 0).toFixed(1) + '%</strong></td></tr>';
+  h += '</table>';
+  /* Personnel présent */
+  var byFonction = getPresentByFonction(p.date);
+  if (Object.keys(byFonction).length) {
+    h += '<div class="section-title">Personnel Présent (par fonction)</div>';
+    h += '<table><tr><th>Fonction</th><th>Effectif</th><th>Noms</th></tr>';
+    Object.keys(byFonction).sort().forEach(function(f) {
+      h += '<tr><td>' + escH(f) + '</td><td style="text-align:center">' + byFonction[f].length + '</td><td>' + escH(byFonction[f].join(', ')) + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '<div style="margin-top:2rem;text-align:center;color:#666;font-size:11px">Généré le ' + new Date().toLocaleString('fr-FR') + '</div>';
+  h += '</body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(h);
+  w.document.close();
+  w.onload = function() { w.print(); };
+}
+
+function generateProdFichePDF(p) {
+  generateProdFichePrint(p);
+  toast('Utilisez la fenêtre d\'impression pour "Enregistrer sous PDF"', 'info');
+}
+
+function printProductionHistory() {
+  var prods = getProductions().slice().reverse();
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Historique Production</title>';
+  h += '<style>body{font-family:Arial,sans-serif;margin:20px;font-size:11px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:4px 6px;font-size:10px}th{background:#f0f0f0;text-align:left}tr.total td{font-weight:bold;background:#f5f5f5}.header{display:flex;justify-content:space-between;margin-bottom:1rem}.header h1{margin:0;font-size:16px}</style>';
+  h += '</head><body>';
+  h += '<div class="header"><h1>📋 Historique des Fiches de Production</h1><div>Généré le ' + new Date().toLocaleString('fr-FR') + '</div></div>';
+  h += '<table><tr><th>N°</th><th>Date</th><th>Article / Produit</th><th>Chef Projet</th><th style="text-align:right">Vol. Bois Sorti</th><th style="text-align:right">Vol. Lattes</th><th style="text-align:right">Vol. Plots</th><th style="text-align:right">Rendement</th><th>Statut</th></tr>';
+  prods.forEach(function(p) {
+    var art = getArticles().find(function(a) { return a.id === p.article_id; });
+    var rend = p.rendement != null ? p.rendement.toFixed(1) + '%' : '-';
+    h += '<tr><td>' + escH(p.numero || '-') + '</td><td>' + escH(p.date || '-') + '</td><td>' + escH(art ? (art.code + ' — ' + art.designation) : '-') + '</td><td>' + escH(p.chef || '-') + '</td><td style="text-align:right">' + ((p.vol_sortie_bois || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_lattes || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_plots || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + rend + '</td><td>' + (p.statut === 'validated' ? '✅ Validé' : p.statut === 'draft' ? '📝 Brouillon' : p.statut) + '</td></tr>';
+  });
+  h += '</table></body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(h);
+  w.document.close();
+  w.onload = function() { w.print(); };
+}
+
+function exportProductionHistoryPDF() {
+  printProductionHistory();
+  toast('Utilisez la fenêtre d\'impression pour "Enregistrer sous PDF"', 'info');
+}
+
 function openDraftProd(id) {
   var p = getProductions().find(function(x) { return x.id === id; });
   if (!p) return;
@@ -1876,7 +2063,8 @@ function render_history() {
 
   if (tab === 'saisies') {
     if (prods.length === 0) return h + '<div class="empty">Aucune fiche de production</div>';
-    h += '<div class="card"><table><tr><th>N°</th><th>Date</th><th>Article / Produit</th><th>Chef Projet</th><th style="text-align:right">Vol. Bois Sorti</th><th style="text-align:right">Vol. Lattes</th><th style="text-align:right">Vol. Plots</th><th style="text-align:right">Rendement</th><th>Statut</th><th>Actions</th></tr>';
+    h += '<div class="card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📋 Fiches de Production (' + prods.length + ')</h3><div style="display:flex;gap:.5rem"><button class="btn" onclick="printProductionHistory()">🖨 Imprimer</button><button class="btn" onclick="exportProductionHistoryPDF()">📄 Export PDF</button></div></div>';
+    h += '<table><tr><th>N°</th><th>Date</th><th>Article / Produit</th><th>Chef Projet</th><th style="text-align:right">Vol. Bois Sorti</th><th style="text-align:right">Vol. Lattes</th><th style="text-align:right">Vol. Plots</th><th style="text-align:right">Rendement</th><th>Statut</th><th>Actions</th></tr>';
     prods.forEach(function(p) {
       var art = getArticles().find(function(a) { return a.id === p.article_id; });
       var rend = p.rendement != null ? p.rendement : (p.quantite != null ? '-' : 0);
@@ -3865,7 +4053,6 @@ function showNewWoodDef() {
   m += '<div class="form-row">';
   m += '<div class="form-group"><label>Catégorie</label><select id="df_type"><option value="LATTE">LATTES</option><option value="PLOT">PLOTS</option><option value="CP">CONTRE PLAQUÉ</option></select></div>';
   m += formField('df_code', 'Code (ex: LAT-01)', '', 'text', true);
-  m += formField('df_classe', 'Classe (bois)', '', 'text', false);
   m += '</div>';
   m += formField('df_nom', 'Désignation (ex: Latte 120cm)', '', 'text', true);
   m += '<div class="form-row-3">';
@@ -3873,14 +4060,11 @@ function showNewWoodDef() {
   m += formField('df_larg', 'Larg. (cm)', '', 'number', false);
   m += formField('df_epais', 'Épais. (cm)', '', 'number', false);
   m += '</div>';
-  m += '<div class="form-group"><label>Essence</label><input type="text" id="df_essence" list="essenceList"></div>';
-  m += formTextarea('df_obs', 'Observations');
   m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
   m += '<button class="btn btn-accent" onclick="createWoodDef()">✅ Créer</button>';
   m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
   m += '</div></div></div>';
   document.body.insertAdjacentHTML('beforeend', m);
-  ensureEssenceDatalist();
 }
 
 function createWoodDef() {
@@ -3891,7 +4075,7 @@ function createWoodDef() {
   var w = parseFloat((document.getElementById('df_larg') || {}).value) || 0;
   var t = parseFloat((document.getElementById('df_epais') || {}).value) || 0;
   var defs = getDefinitions();
-  defs.push({ id: genId(), code: code, designation: nom, type: (document.getElementById('df_type') || {}).value || 'LATTE', classe: (document.getElementById('df_classe') || {}).value || '', length: l, width: w, thickness: t, volume: l * w * t / 1000000, essence: (document.getElementById('df_essence') || {}).value || '', observation: (document.getElementById('df_obs') || {}).value || '' });
+  defs.push({ id: genId(), code: code, designation: nom, type: (document.getElementById('df_type') || {}).value || 'LATTE', length: l, width: w, thickness: t, volume: l * w * t / 1000000 });
   setDefinitions(defs);
   document.getElementById('modalOverlay').remove();
   toast('Composant bois créé');
@@ -3953,7 +4137,6 @@ function showEditWoodDef(id) {
   m += '<div class="form-row">';
   m += '<div class="form-group"><label>Catégorie</label><select id="df_type"><option value="LATTE"' + (c.type === 'LATTE' ? ' selected' : '') + '>LATTES</option><option value="PLOT"' + (c.type === 'PLOT' ? ' selected' : '') + '>PLOTS</option><option value="CP"' + (c.type === 'CP' ? ' selected' : '') + '>CONTRE PLAQUÉ</option></select></div>';
   m += formField('df_code', 'Code', c.code, 'text', true);
-  m += formField('df_classe', 'Classe (bois)', c.classe || '', 'text', false);
   m += '</div>';
   m += formField('df_nom', 'Désignation', c.designation, 'text', true);
   m += '<div class="form-row-3">';
@@ -3961,14 +4144,11 @@ function showEditWoodDef(id) {
   m += formField('df_larg', 'Larg. (cm)', c.width || '', 'number', false);
   m += formField('df_epais', 'Épais. (cm)', c.thickness || '', 'number', false);
   m += '</div>';
-  m += '<div class="form-group"><label>Essence</label><input type="text" id="df_essence" list="essenceList" value="' + escH(c.essence || '') + '"></div>';
-  m += formTextarea('df_obs', c.observation || '');
   m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
   m += '<button class="btn btn-accent" onclick="updateWoodDef(\'' + id + '\')">✅ Enregistrer</button>';
   m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
   m += '</div></div></div>';
   document.body.insertAdjacentHTML('beforeend', m);
-  ensureEssenceDatalist();
 }
 
 function updateWoodDef(id) {
@@ -3986,13 +4166,10 @@ function updateWoodDef(id) {
   c.code = code;
   c.designation = nom;
   c.type = (document.getElementById('df_type') || {}).value || 'LATTE';
-  c.classe = (document.getElementById('df_classe') || {}).value || '';
   c.length = parseFloat((document.getElementById('df_long') || {}).value) || 0;
   c.width = parseFloat((document.getElementById('df_larg') || {}).value) || 0;
   c.thickness = parseFloat((document.getElementById('df_epais') || {}).value) || 0;
   c.volume = c.length * c.width * c.thickness / 1000000;
-  c.essence = (document.getElementById('df_essence') || {}).value || '';
-  c.observation = (document.getElementById('df_obs') || {}).value || '';
   setDefinitions(defs);
   document.getElementById('modalOverlay').remove();
   toast(isNew ? 'Composant créé ✅' : 'Composant modifié ✏️');
