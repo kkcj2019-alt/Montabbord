@@ -258,7 +258,6 @@ var NAV = [
       { id: 'departments', label: 'Départements' },
       { id: 'positions', label: 'Fonctions' },
       { id: 'presence', label: 'Présence & Pointage' },
-      { id: 'daily-attendance', label: 'Pointage Journalier' },
       { id: 'epi', label: 'Gestion EPI' },
       { id: 'leaves', label: 'Congés' },
       { id: 'sanctions', label: 'Sanctions Disciplinaires' }
@@ -397,7 +396,6 @@ var PAGE_TITLES = {
   'departments': 'Départements',
   'positions': 'Fonctions',
   'presence': 'Présence & Pointage',
-  'daily-attendance': 'Pointage Journalier',
   'epi': 'Gestion EPI',
   'leaves': 'Congés',
   'sanctions': 'Sanctions Disciplinaires'
@@ -1052,15 +1050,31 @@ function render_production() {
   h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="2" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--green)" id="cp_total_qte">0</td><td colspan="3"></td><td style="text-align:right;color:var(--green)" id="cp_total_vol">0.0000</td><td colspan="3"></td></tr>';
   h += '</table></div>';
 
-  /* II-ASSEMBLAGE */
+  /* II-ASSEMBLAGE (intelligent : charge nomenclature + calcule quantités + vérifie stock temps réel) */
   h += '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:.9rem;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,.04)">';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">';
-  h += '<h4 style="margin:0;font-size:.8rem;color:#334155;font-weight:700">II-ASSEMBLAGE</h4>';
-  h += '<button class="btn" onclick="addLigneAssemblage()" style="font-size:.72rem;padding:.3rem .7rem">+ Ajouter</button>';
+  h += '<h4 style="margin:0;font-size:.8rem;color:#334155;font-weight:700">II-ASSEMBLAGE (Production finie)</h4>';
   h += '</div>';
-  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long(cm)</th><th style="text-align:right">Larg(cm)</th><th style="text-align:right">Épais(cm)</th><th>Emplacement</th><th>Observations</th><th></th></tr></thead>';
+  h += '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:end;margin-bottom:1rem">';
+  h += '<div style="flex:1;min-width:200px">';
+  h += '  <label style="display:block;font-size:.75rem;font-weight:600;color:#475569;margin-bottom:.25rem">Produit à assembler *</label>';
+  h += '  <select id="ass_article_id" onchange="loadAssemblageComponents()" style="width:100%;padding:.5rem .75rem;border:1px solid #cbd5e1;border-radius:8px;font-size:.85rem">';
+  h += '    <option value="">— Choisir un produit —</option>';
+  var articlesWithFiche = getArticles().filter(function(a) { return getFichesTech().some(function(f) { return f.article_id === a.id; }); });
+  articlesWithFiche.forEach(function(a) { h += '<option value="' + a.id + '">' + escH(a.code + ' — ' + a.designation) + '</option>'; });
+  h += '  </select>';
+  h += '</div>';
+  h += '<div style="min-width:120px">';
+  h += '  <label style="display:block;font-size:.75rem;font-weight:600;color:#475569;margin-bottom:.25rem">Quantité à assembler</label>';
+  h += '  <input type="number" id="ass_qty" value="1" min="1" oninput="recalcAssemblage()" style="width:100%;padding:.5rem .75rem;border:1px solid #cbd5e1;border-radius:8px;font-size:.85rem;text-align:right">';
+  h += '</div>';
+  h += '<div style="flex:1;min-width:180px">';
+  h += '  <label style="display:block;font-size:.75rem;font-weight:600;color:#475569;margin-bottom:.25rem">Stock dispo (incl. production jour)</label>';
+  h += '  <div id="ass_stock_status" style="padding:.4rem .6rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:.75rem;color:var(--dim);min-height:2rem">Sélectionnez un produit</div>';
+  h += '</div>';
+  h += '</div>';
+  h += '<table style="width:100%;font-size:.75rem"><thead><tr><th>Composant</th><th>Type</th><th style="text-align:right">Qté/Unité</th><th style="text-align:right">Qté Requise</th><th>Stock Actuel</th><th>Prod. Jour</th><th>Total Dispo</th><th style="text-align:right">Écart</th><th>Statut</th></tr></thead>';
   h += '<tbody id="assBody"></tbody>';
-  h += '<tr style="font-weight:700;background:#f8f9fa"><td colspan="2" style="text-align:center">TOTAL</td><td style="text-align:right;color:var(--accent)" id="ass_total_qte">0</td><td colspan="6"></td></tr>';
   h += '</table></div>';
 
   /* III-EN COURS DE PRODUCTION */
@@ -1347,6 +1361,105 @@ function calcAssemblageTotals() {
   });
   var tq = document.getElementById('ass_total_qte');
   if (tq) tq.textContent = totalQ;
+}
+
+/* ===== ASSEMBLAGE INTELLIGENT ===== */
+function loadAssemblageComponents() {
+  var articleId = document.getElementById('ass_article_id').value;
+  var qty = parseInt(document.getElementById('ass_qty').value) || 1;
+  var tbody = document.getElementById('assBody');
+  var statusEl = document.getElementById('ass_stock_status');
+  if (!articleId) { tbody.innerHTML = ''; if (statusEl) statusEl.innerHTML = 'Sélectionnez un produit'; return; }
+  var fiches = getFichesTech().filter(function(f) { return f.article_id === articleId; });
+  if (!fiches.length) { tbody.innerHTML = ''; if (statusEl) statusEl.innerHTML = 'Aucune fiche technique pour ce produit'; return; }
+  var article = getArticles().find(function(a) { return a.id === articleId; });
+  var h = '';
+  var allOk = true;
+  var missingDetails = [];
+  fiches.forEach(function(f) {
+    var comp = getComposantById(f.composant_id);
+    if (!comp) return;
+    var reqPerUnit = parseFloat(f.quantite) || 0;
+    var reqTotal = reqPerUnit * qty;
+    var stockInfo = getComponentStock(comp);
+    var dispo = stockInfo.stock + stockInfo.todayProd;
+    var ecart = dispo - reqTotal;
+    var ok = ecart >= -0.001;
+    if (!ok) { allOk = false; missingDetails.push(comp.code + ' (besoin ' + reqTotal + ', dispo ' + dispo.toFixed(2) + ')'); }
+    var statusClass = ok ? 'style="color:var(--green)"' : 'style="color:var(--red);font-weight:700"';
+    var statusText = ok ? '✅ OK' : '❌ MANQUANT';
+    h += '<tr>';
+    h += '<td><strong>' + escH(comp.code) + '</strong><br><small style="color:var(--dim)">' + escH(comp.designation || comp.code) + '</small></td>';
+    h += '<td>' + escH(comp.type || '-') + '</td>';
+    h += '<td style="text-align:right">' + reqPerUnit + ' / unité</td>';
+    h += '<td style="text-align:right;font-weight:700">' + reqTotal + '</td>';
+    h += '<td style="text-align:right">' + stockInfo.stock + '</td>';
+    h += '<td style="text-align:right;color:var(--blue)">' + stockInfo.todayProd.toFixed(2) + '</td>';
+    h += '<td style="text-align:right;font-weight:700">' + dispo.toFixed(2) + '</td>';
+    h += '<td style="text-align:right" ' + statusClass + '>' + (ecart >= 0 ? '+' : '') + ecart.toFixed(2) + '</td>';
+    h += '<td ' + statusClass + '>' + statusText + '</td>';
+    h += '</tr>';
+  });
+  tbody.innerHTML = h;
+  if (statusEl) {
+    if (allOk) statusEl.innerHTML = '<span style="color:var(--green)">✅ Stock suffisant pour ' + qty + ' unité(s)</span>';
+    else statusEl.innerHTML = '<span style="color:var(--red)">❌ Stock insuffisant : ' + missingDetails.join(', ') + '</span>';
+  }
+}
+function getComposantById(id) {
+  var defs = getDefinitions();
+  var comp = defs.find(function(d) { return d.id === id; });
+  if (!comp) {
+    var comps = getSection('composants', []);
+    comp = comps.find(function(c) { return c.id === id; });
+  }
+  return comp;
+}
+function getComponentStock(comp) {
+  var code = comp.code;
+  var type = comp.type;
+  var stock = 0, todayProd = 0;
+  if (type === 'LATTE' || type === 'PLOT' || type === 'CP') {
+    var semi = getStockSemi().find(function(s) { return s.code === code; });
+    stock = semi ? (parseFloat(semi.quantite) || 0) : 0;
+    var today = today();
+    var prods = getProductions().filter(function(p) { return p.date === today && p.statut !== 'draft'; });
+    prods.forEach(function(p) {
+      (p.lattes || []).concat(p.plots || []).concat(p.cp || []).forEach(function(l) {
+        if (l.code === code) todayProd += parseFloat(l.qte) || 0;
+      });
+    });
+  } else if (type === 'POINTE') {
+    var cons = getStockConsum().find(function(s) { return s.code === code; });
+    stock = cons ? (parseFloat(cons.quantite) || 0) : 0;
+  } else {
+    var raw = getStockRaw().find(function(s) { return (s.code || s.colis_number) === code; });
+    stock = raw ? (parseFloat(raw.quantite) || 0) : 0;
+  }
+  return { stock: stock, todayProd: todayProd };
+}
+function recalcAssemblage() { loadAssemblageComponents(); }
+function getAssemblageData() {
+  var articleId = document.getElementById('ass_article_id').value;
+  var qty = parseInt(document.getElementById('ass_qty').value) || 1;
+  var rows = [];
+  document.querySelectorAll('#assBody tr').forEach(function(r) {
+    var cells = r.querySelectorAll('td');
+    if (cells.length >= 8) {
+      rows.push({
+        composant: cells[0].textContent.trim().split('\n')[0],
+        type: cells[1].textContent.trim(),
+        qtePerUnit: parseFloat(cells[2].textContent) || 0,
+        reqTotal: parseFloat(cells[3].textContent) || 0,
+        stock: parseFloat(cells[4].textContent) || 0,
+        todayProd: parseFloat(cells[5].textContent) || 0,
+        dispo: parseFloat(cells[6].textContent) || 0,
+        ecart: parseFloat(cells[7].textContent) || 0,
+        ok: cells[8].textContent.indexOf('OK') >= 0
+      });
+    }
+  });
+  return { article_id: articleId, qty: qty, components: rows };
 }
 
 /* === III-EN COURS DE PRODUCTION (wip ACSER : entrée / reprise) === */
@@ -1705,16 +1818,36 @@ function saveProduction(validate) {
     cps.push({ code: texts[0] ? texts[0].value : '', type_cp: texts[1] ? texts[1].value : '', qte: qte, long: parseFloat(inputs[1].value)||0, larg: parseFloat(inputs[2].value)||0, epais: parseFloat(inputs[3].value)||0, volume: vol, lot: texts[2] ? texts[2].value : '' });
   });
 
-  /* Collecter les lignes Assemblage */
+  /* Collecter les lignes Assemblage (nouveau mode intelligent) */
   var assemblage = [];
-  document.querySelectorAll('#assBody tr[id^="assRow"]').forEach(function(r) {
-    var inputs = r.querySelectorAll('input[type="number"]');
-    if (!inputs.length) return;
-    var texts = r.querySelectorAll('input[type="text"]');
-    var qte = parseFloat(inputs[0].value)||0;
-    if (!qte && !(texts[0] && texts[0].value)) return;
-    assemblage.push({ code: texts[0] ? texts[0].value : '', designation: texts[1] ? texts[1].value : '', qte: qte, long: parseFloat(inputs[1].value)||0, larg: parseFloat(inputs[2].value)||0, epais: parseFloat(inputs[3].value)||0 });
-  });
+  var assData = getAssemblageData();
+  if (assData.article_id) {
+    assemblage = assData.components.map(function(c) {
+      return {
+        article_id: assData.article_id,
+        qty_assembled: assData.qty,
+        composant_code: c.composant,
+        composant_type: c.type,
+        qte_per_unit: c.qtePerUnit,
+        qte_required: c.reqTotal,
+        stock_available: c.stock,
+        today_production: c.todayProd,
+        total_available: c.dispo,
+        ecart: c.ecart,
+        stock_ok: c.ok
+      };
+    });
+  } else {
+    /* Fallback ancien mode (si lignes saisies manuellement) */
+    document.querySelectorAll('#assBody tr[id^="assRow"]').forEach(function(r) {
+      var inputs = r.querySelectorAll('input[type="number"]');
+      if (!inputs.length) return;
+      var texts = r.querySelectorAll('input[type="text"]');
+      var qte = parseFloat(inputs[0].value)||0;
+      if (!qte && !(texts[0] && texts[0].value)) return;
+      assemblage.push({ code: texts[0] ? texts[0].value : '', designation: texts[1] ? texts[1].value : '', qte: qte, long: parseFloat(inputs[1].value)||0, larg: parseFloat(inputs[2].value)||0, epais: parseFloat(inputs[3].value)||0 });
+    });
+  }
 
   /* Collecter les lignes En-cours (wip ACSER : entrée / reprise) */
   var encours = [];
@@ -1990,7 +2123,15 @@ function populateProdForm(editId) {
   });
   t = document.getElementById('assBody');
   if (t) { t.innerHTML = ''; }
-  (p.assemblage || []).forEach(function(l) { addLigneAssemblage(l.code, l.designation, l.qte, l.long, l.larg, l.epais); });
+  if (p.assemblage && p.assemblage.length && p.assemblage[0].article_id) {
+    /* Nouveau mode intelligent */
+    setV('ass_article_id', p.assemblage[0].article_id);
+    setV('ass_qty', p.assemblage[0].qty_assembled || 1);
+    loadAssemblageComponents();
+  } else {
+    /* Ancien mode */
+    (p.assemblage || []).forEach(function(l) { addLigneAssemblage(l.code, l.designation, l.qte, l.long, l.larg, l.epais); });
+  }
   t = document.getElementById('encBody');
   if (t) { t.innerHTML = ''; }
   (p.encours || []).forEach(function(l) { addLigneEncours(l.code, l.designation, l.qte, l.long, l.larg, l.epais, l.wip_type, l.operateur); });
@@ -2392,9 +2533,9 @@ function render_stock_raw() {
   if (tab === 'all') tab = 'actif';
   if (tab === 'enc') tab = 'wip';
   if (['actif', 'bl', 'spe', 'recol', 'semi', 'wip', 'initial'].indexOf(tab) === -1) tab = 'actif';
-  var etat = getSection('stockRawEtat', 'actifs');
-  if (etat !== 'actifs' && etat !== 'termines') etat = 'actifs';
-  function etatOk(q) { return etat === 'actifs' ? (parseFloat(q) || 0) > 0 : (parseFloat(q) || 0) <= 0; }
+  var etat = getSection('stockRawEtat', 'actif');
+  if (etat !== 'actif' && etat !== 'tout') etat = 'actif';
+  function etatOk(q) { return etat === 'actif' ? (parseFloat(q) || 0) > 0 : true; }
 
   var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
   h += '<h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Matière Première</h2>';
@@ -2487,8 +2628,8 @@ function render_stock_raw() {
   }
 
   var showEtat = '<div style="display:flex;gap:.4rem;align-items:center">';
-  showEtat += '<button class="btn' + (etat === 'actifs' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'actifs\');renderPage()" style="font-size:.75rem">Actifs</button>';
-  showEtat += '<button class="btn' + (etat === 'termines' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'termines\');renderPage()" style="font-size:.75rem">Terminés</button></div>';
+  showEtat += '<button class="btn' + (etat === 'actif' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'actif\');renderPage()" style="font-size:.75rem">Actif (qté>0)</button>';
+  showEtat += '<button class="btn' + (etat === 'tout' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'tout\');renderPage()" style="font-size:.75rem">Tout (y compris 0)</button></div>';
 
   if (tab === 'semi') {
     var semiL = getStockSemi().filter(function(s) { return etatOk(s.quantite); });
@@ -2847,8 +2988,75 @@ function showStockTab(tab) {
   }
 }
 
-function exportStockPDF() { toast('Export PDF en cours...'); }
-function exportStockExcel() { toast('Export Excel en cours...'); }
+function exportStockPDF() {
+  var etat = getSection('stockRawEtat', 'actif');
+  var tab = getSection('stockRawTab', 'actif');
+  var items = getStockRaw().filter(function(s) {
+    var o = mpOrigin(s);
+    if (tab === 'bl' && o !== 'BL') return false;
+    if (tab === 'spe' && o !== 'SPECIFIC') return false;
+    if (tab === 'recol' && o !== 'RECOLISAGE') return false;
+    if (tab === 'semi') return false;
+    if (etat === 'actif' && (parseFloat(s.quantite) || 0) <= 0) return false;
+    return true;
+  });
+  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Stock Matière Première</title>';
+  h += '<style>body{font-family:Arial,sans-serif;margin:20px;font-size:11px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:4px 6px;font-size:10px}th{background:#f0f0f0;text-align:left}tr.total td{font-weight:bold;background:#f5f5f5}</style>';
+  h += '</head><body>';
+  h += '<h2>Stock Matière Première — ' + (tab === 'actif' ? 'Actif' : tab) + ' / ' + (etat === 'actif' ? 'Actif (qté>0)' : 'Tout') + '</h2>';
+  h += '<table><tr><th>Code</th><th>Désignation</th><th>Origine</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock</th><th style="text-align:right">Volume (m³)</th></tr>';
+  var totQ = 0, totV = 0;
+  items.forEach(function(s) {
+    var v = stkVol(s);
+    h += '<tr><td>' + escH(s.code || s.colis_number || '-') + '</td><td>' + escH(s.designation || s.essence || '-') + '</td><td>' + escH(mpOriginLabel(mpOrigin(s))) + '</td><td>' + escH(stkDims(s)) + '</td><td>' + escH(s.zone || s.emplacement || '-') + '</td><td style="text-align:right">' + (s.quantite || 0) + '</td><td style="text-align:right">' + v.toFixed(3) + '</td></tr>';
+    totQ += parseFloat(s.quantite) || 0; totV += v;
+  });
+  h += '<tr class="total"><td colspan="5" style="text-align:right"><strong>TOTAL</strong></td><td style="text-align:right"><strong>' + fmt(totQ) + '</strong></td><td style="text-align:right"><strong>' + totV.toFixed(3) + '</strong></td></tr>';
+  h += '</table></body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(h);
+  w.document.close();
+  w.onload = function() { w.print(); };
+}
+
+function exportStockExcel() {
+  if (typeof XLSX === 'undefined') return toast('xlsx non chargé', 'error');
+  var etat = getSection('stockRawEtat', 'actif');
+  var tab = getSection('stockRawTab', 'actif');
+  var items = getStockRaw().filter(function(s) {
+    var o = mpOrigin(s);
+    if (tab === 'bl' && o !== 'BL') return false;
+    if (tab === 'spe' && o !== 'SPECIFIC') return false;
+    if (tab === 'recol' && o !== 'RECOLISAGE') return false;
+    if (tab === 'semi') return false;
+    if (etat === 'actif' && (parseFloat(s.quantite) || 0) <= 0) return false;
+    return true;
+  });
+  var data = items.map(function(s) {
+    return { Code: s.code || s.colis_number || '-', Désignation: s.designation || s.essence || '-', Origine: mpOriginLabel(mpOrigin(s)), Dimensions: stkDims(s), Emplacement: s.zone || s.emplacement || '-', 'Stock': parseFloat(s.quantite) || 0, 'Volume (m3)': parseFloat(stkVol(s)).toFixed(3) };
+  });
+  var ws = XLSX.utils.json_to_sheet(data);
+  // Add borders
+  var range = XLSX.utils.decode_range(ws['!ref']);
+  for (var R = range.s.r; R <= range.e.r; R++) {
+    for (var C = range.s.c; C <= range.e.c; C++) {
+      var addr = XLSX.utils.encode_cell({r:R,c:C});
+      if (!ws[addr]) continue;
+      ws[addr].s = { border: { top: {style:'thin'}, bottom: {style:'thin'}, left: {style:'thin'}, right: {style:'thin'} } };
+    }
+  }
+  // Header style
+  for (var C = range.s.c; C <= range.e.c; C++) {
+    var addr = XLSX.utils.encode_cell({r:0,c:C});
+    if (ws[addr]) ws[addr].s = { font: {bold:true}, fill: {fgColor:{rgb:'E0E0E0'}}, border: { top: {style:'thin'}, bottom: {style:'thin'}, left: {style:'thin'}, right: {style:'thin'} } };
+  }
+  // Column widths
+  ws['!cols'] = [{wch:15},{wch:30},{wch:15},{wch:20},{wch:15},{wch:10},{wch:15}];
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'StockMP');
+  XLSX.writeFile(wb, 'Stock_Matiere_Premiere_' + today() + '.xlsx');
+  toast('Export Excel généré ✅');
+}
 
 function showAddStock(key) {
   var articles = getArticles();
@@ -4699,84 +4907,271 @@ function deletePresence(id) {
   renderPage();
 }
 
-/* ==================== RH - POINTAGE JOURNALIER ==================== */
-function render_daily_attendance() {
-  var daily = getDailyAttendance();
+/* ==================== RH - DÉPARTEMENTS / FONCTIONS (sync depuis paye) ==================== */
+function getDepartementsFromPaye() {
+  try {
+    var payeData = JSON.parse(localStorage.getItem('mdb_paye')) || {};
+    var cats = payeData.categories || [];
+    var depts = new Set();
+    cats.forEach(function(c) { if (c.service) depts.add(c.service); });
+    return Array.from(depts).sort();
+  } catch(e) { return ['Production', 'Maintenance', 'Logistique', 'Administration']; }
+}
+function getFonctionsFromPaye() {
+  try {
+    var payeData = JSON.parse(localStorage.getItem('mdb_paye')) || {};
+    var cats = payeData.categories || [];
+    var funcs = new Set();
+    cats.forEach(function(c) { if (c.fonction) funcs.add(c.fonction); });
+    return Array.from(funcs).sort();
+  } catch(e) { return ['Machiniste', 'Monteur', 'Manutentionnaire', 'Chef d\'équipe', 'Superviseur']; }
+}
+function getPersonnelByFonction(fonction) {
+  return getPersonnel().filter(function(e) { return (e.fonction || e.service || '').trim() === fonction; });
+}
+function getPersonnelByDepartement(dept) {
+  return getPersonnel().filter(function(e) { return (e.service || '').trim() === dept; });
+}
+
+/* ==================== RH - NOUVEAU POINTAGE GROUPÉ ==================== */
+function render_presence() {
   var personnel = getPersonnel();
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<input type="month" id="da_month" value="' + thisMonth() + '" onchange="renderPage()" class="search-box">';
-  h += '<button class="btn btn-accent" onclick="showNewDailyAtt()">+ Nouveau Pointage</button>';
+  var presences = getPresence();
+  var depts = getDepartementsFromPaye();
+  var funcs = getFonctionsFromPaye();
+  var h = '<div class="tabs" style="margin-bottom:1rem">';
+  h += '<div class="tab active" onclick="setSection(\'presenceSubTab\',\'pointage\');renderPage()">⏱️ Pointage Groupé</div>';
+  h += '<div class="tab" onclick="setSection(\'presenceSubTab\',\'epi\');renderPage()">🛡️ Stock EPI</div>';
+  h += '<div class="tab" onclick="setSection(\'presenceSubTab\',\'conges\');renderPage()">🏖️ Congés (lecture)</div>';
+  h += '<div class="tab" onclick="setSection(\'presenceSubTab\',\'sanctions\');renderPage()">⚠️ Sanctions (lecture)</div>';
   h += '</div>';
-  var selMonth = (document.getElementById('da_month') || {}).value || thisMonth();
-  var monthDaily = daily.filter(function(d) { return (d.date || '').indexOf(selMonth) === 0; });
-  if (monthDaily.length === 0) return h + '<div class="empty">Aucun pointage pour ' + escH(selMonth) + '</div>';
-  h += '<div class="card"><table><tr><th>Date</th><th>Employé</th><th>Statut</th><th>Arrivée</th><th>Départ</th><th>H.Jour</th><th>H.Nuit</th><th>Validé</th><th>Actions</th></tr>';
-  monthDaily.forEach(function(d) {
-    var emp = personnel.find(function(e) { return e.id === d.employee_id; });
-    h += '<tr><td>' + escH(d.date) + '</td><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + badgeStatut(d.statut) + '</td><td>' + escH(d.heure_arrivee || '-') + '</td><td>' + escH(d.heure_depart || '-') + '</td><td>' + (d.heures_jour || 0) + 'h</td><td>' + (d.heures_nuit || 0) + 'h</td><td>' + (d.valide ? '✅' : '—') + '</td><td><button class="btn btn-red" onclick="deleteDailyAtt(\'' + d.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
-  });
-  h += '</table></div>';
+  var subTab = getSection('presenceSubTab', 'pointage');
+  if (subTab === 'pointage') h += renderPointageGrouped();
+  else if (subTab === 'epi') h += renderEpiStock();
+  else if (subTab === 'conges') h += renderLeavesReadOnly();
+  else if (subTab === 'sanctions') h += renderSanctionsReadOnly();
   return h;
 }
 
-function showNewDailyAtt() {
+/* Pointage groupé par fonction/département/type avec marquage collectif */
+function renderPointageGrouped() {
   var personnel = getPersonnel();
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
-  m += '<h2>📅 Nouveau Pointage Journalier</h2>';
-  m += '<div class="form-group"><label>Employé *</label><select id="da_emp">';
-  personnel.forEach(function(p) { m += '<option value="' + p.id + '">' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>'; });
-  m += '</select></div>';
-  m += formField('da_date', 'Date', today(), 'date', true);
-  m += '<div class="form-group"><label>Statut</label><select id="da_statut"><option value="present">Présent</option><option value="absent">Absent</option><option value="conge">Congé</option></select></div>';
-  m += '<div class="form-row">';
-  m += formField('da_arrivee', 'Heure arrivée', '', 'time', false);
-  m += formField('da_depart', 'Heure départ', '', 'time', false);
-  m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
-  m += '<button class="btn btn-accent" onclick="createDailyAtt()">✅ Enregistrer</button>';
-  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
-  m += '</div></div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
-}
+  var presences = getPresence();
+  var depts = getDepartementsFromPaye();
+  var funcs = getFonctionsFromPaye();
+  var selDate = (document.getElementById('ptDate') || {}).value || today();
+  var dayPres = presences.filter(function(p) { return p.date === selDate; });
+  var presentIds = dayPres.filter(function(p) { return p.statut === 'present'; }).map(function(p) { return p.employee_id; });
+  var absentIds = dayPres.filter(function(p) { return p.statut === 'absent'; }).map(function(p) { return p.employee_id; });
 
-function createDailyAtt() {
-  var employee_id = document.getElementById('da_emp').value;
-  var date = document.getElementById('da_date').value;
-  if (!employee_id || !date) return toast('Champs requis', 'error');
-  var daily = getDailyAttendance();
-  daily.push({
-    id: genId(), employee_id: employee_id, date: date,
-    statut: document.getElementById('da_statut').value,
-    heure_arrivee: document.getElementById('da_arrivee').value,
-    heure_depart: document.getElementById('da_depart').value,
-    valide: false
+  var h = '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<input type="date" id="ptDate" value="' + selDate + '" onchange="renderPage()" class="search-box" style="min-width:180px">';
+  h += '<button class="btn btn-accent" onclick="markCollectivePresence(\'present\')">✅ Tous Présents</button>';
+  h += '<button class="btn" onclick="markCollectivePresence(\'absent\')">❌ Tous Absents</button>';
+  h += '<button class="btn" onclick="markCollectivePresence(\'conge\')">🏖️ Tous Congés</button>';
+  h += '<button class="btn btn-red" onclick="clearDayPresence()">🗑️ Effacer jour</button>';
+  h += '</div>';
+
+  /* Filtres */
+  h += '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<select id="ptFilterDept" onchange="renderPage()" style="min-width:180px"><option value="">🏢 Tous départements</option>';
+  depts.forEach(function(d) { h += '<option value="' + escH(d) + '">' + escH(d) + '</option>'; });
+  h += '</select>';
+  h += '<select id="ptFilterFonction" onchange="renderPage()" style="min-width:180px"><option value="">👷 Toutes fonctions</option>';
+  funcs.forEach(function(f) { h += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
+  h += '</select>';
+  h += '<select id="ptFilterType" onchange="renderPage()" style="min-width:150px"><option value="">📋 Type pointage</option><option value="jour">Jour</option><option value="nuit">Nuit</option><option value="mixte">Mixte</option></select>';
+  h += '<span style="margin-left:auto;font-size:.8rem;color:var(--dim)">📅 ' + selDate + '</span>';
+  h += '</div>';
+
+  var deptFilter = getSection('ptFilterDept', '');
+  var foncFilter = getSection('ptFilterFonction', '');
+  var typeFilter = getSection('ptFilterType', '');
+
+  var filtered = personnel;
+  if (deptFilter) filtered = filtered.filter(function(e) { return (e.service || '') === deptFilter; });
+  if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
+  if (typeFilter === 'jour') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') === -1; });
+  else if (typeFilter === 'nuit') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') !== -1; });
+
+  if (filtered.length === 0) return h + '<div class="empty">Aucun personnel pour ces filtres</div>';
+
+  /* Groupé par fonction */
+  var byFonction = {};
+  filtered.forEach(function(e) {
+    var f = (e.fonction || 'Sans fonction').trim();
+    if (!byFonction[f]) byFonction[f] = [];
+    byFonction[f].push(e);
   });
-  setDailyAttendance(daily);
-  document.getElementById('modalOverlay').remove();
-  toast('Pointage enregistré');
+
+  Object.keys(byFonction).sort().forEach(function(fonction) {
+    var list = byFonction[fonction];
+    var presentCount = list.filter(function(e) { return presentIds.indexOf(e.id) >= 0; }).length;
+    var absentCount = list.filter(function(e) { return absentIds.indexOf(e.id) >= 0; }).length;
+    var congeCount = list.filter(function(e) {
+      var p = dayPres.find(function(p) { return p.employee_id === e.id; });
+      return p && p.statut === 'conge';
+    }).length;
+
+    h += '<div class="card" style="margin-bottom:1rem">';
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;padding:.5rem;background:#f8fafc;border-bottom:1px solid var(--border)">';
+    h += '<strong style="font-size:.9rem">👷 ' + escH(fonction) + ' <span style="color:var(--dim);font-weight:400;font-size:.75rem">(' + list.length + ' personnes)</span></strong>';
+    h += '<div style="display:flex;gap:.5rem;align-items:center;font-size:.75rem">';
+    h += '<span style="color:var(--green)">✅ ' + presentCount + ' présents</span>';
+    h += '<span style="color:var(--red)">❌ ' + absentCount + ' absents</span>';
+    if (congeCount) h += '<span style="color:var(--blue)">🏖️ ' + congeCount + ' congés</span>';
+    h += '<button class="btn" onclick="markFonctionCollective(\'' + escH(fonction) + '\',\'present\')" style="font-size:.65rem">✅ Tous présents</button>';
+    h += '<button class="btn" onclick="markFonctionCollective(\'' + escH(fonction) + '\',\'absent\')" style="font-size:.65rem">❌ Tous absents</button>';
+    h += '<button class="btn" onclick="markFonctionCollective(\'' + escH(fonction) + '\',\'conge\')" style="font-size:.65rem">🏖️ Congés</button>';
+    h += '</div></div>';
+
+    h += '<div class="card"><table style="width:100%;font-size:.78rem"><tr><th>Employé</th><th>Matricule</th><th>Statut</th><th>Arrivée</th><th>Départ</th><th>H.Jour</th><th>H.Nuit</th><th>Faute soc.</th><th>Actions</th></tr>';
+    list.forEach(function(e) {
+      var p = dayPres.find(function(p) { return p.employee_id === e.id; });
+      var statut = p ? p.statut : '—';
+      var arr = p ? (p.heure_arrivee || '—') : '—';
+      var dep = p ? (p.heure_depart || '—') : '—';
+      var hj = p ? (p.heures_jour || 0) : 0;
+      var hn = p ? (p.heures_nuit || 0) : 0;
+      var faute = p && p.faute_societe ? '🏢' : '—';
+      var badge = p ? badgeStatut(p.statut) : '<span style="color:var(--dim)">—</span>';
+      h += '<tr><td>' + escH(e.nom + ' ' + (e.prenoms || '')) + '</td><td>' + escH(e.matricule || '-') + '</td><td>' + badge + '</td><td>' + escH(arr) + '</td><td>' + escH(dep) + '</td><td>' + hj + 'h</td><td>' + hn + 'h</td><td>' + faute + '</td><td>';
+      h += '<select onchange="updateSinglePresence(\'' + e.id + '\',this.value)" style="font-size:.7rem;padding:2px">';
+      h += '<option value="present"' + (statut === 'present' ? ' selected' : '') + '>Présent</option>';
+      h += '<option value="absent"' + (statut === 'absent' ? ' selected' : '') + '>Absent</option>';
+      h += '<option value="conge"' + (statut === 'conge' ? ' selected' : '') + '>Congé</option>';
+      h += '<option value="permission"' + (statut === 'permission' ? ' selected' : '') + '>Permission</option>';
+      h += '<option value=""' + (!p ? ' selected' : '') + '>— Non pointé</option>';
+      h += '</select>';
+      h += ' <button class="btn btn-red" onclick="deletePresence(\'' + (p ? p.id : '') + '\')" style="font-size:.6rem">🗑️</button>';
+      h += '</td></tr>';
+    });
+    h += '</table></div></div>';
+  });
+  return h;
+}
+
+function markCollectivePresence(statut) {
+  var deptFilter = getSection('ptFilterDept', '');
+  var foncFilter = getSection('ptFilterFonction', '');
+  var typeFilter = getSection('ptFilterType', '');
+  var personnel = getPersonnel();
+  var filtered = personnel;
+  if (deptFilter) filtered = filtered.filter(function(e) { return (e.service || '') === deptFilter; });
+  if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
+  if (typeFilter === 'jour') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') === -1; });
+  else if (typeFilter === 'nuit') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') !== -1; });
+
+  var date = (document.getElementById('ptDate') || {}).value || today();
+  var presences = getPresence();
+  filtered.forEach(function(e) {
+    var existing = presences.find(function(p) { return p.employee_id === e.id && p.date === date; });
+    if (existing) {
+      existing.statut = statut;
+      existing.heure_arrivee = statut === 'present' ? '08:00' : '';
+      existing.heure_depart = statut === 'present' ? '17:00' : '';
+    } else {
+      presences.push({ id: genId(), employee_id: e.id, date: date, statut: statut, heure_arrivee: statut === 'present' ? '08:00' : '', heure_depart: statut === 'present' ? '17:00' : '', heures_jour: 8, heures_nuit: 0, faute_societe: false });
+    }
+  });
+  setPresence(presences);
+  toast('Marquage collectif ' + statut + ' appliqué à ' + filtered.length + ' personnes');
   renderPage();
 }
 
-function deleteDailyAtt(id) {
-  if (!confirm2('Supprimer ?')) return;
-  setDailyAttendance(getDailyAttendance().filter(function(d) { return d.id !== id; }));
-  toast('Supprimé');
+function markFonctionCollective(fonction, statut) {
+  var personnel = getPersonnel().filter(function(e) { return (e.fonction || '').trim() === fonction; });
+  var date = (document.getElementById('ptDate') || {}).value || today();
+  var presences = getPresence();
+  personnel.forEach(function(e) {
+    var existing = presences.find(function(p) { return p.employee_id === e.id && p.date === date; });
+    if (existing) {
+      existing.statut = statut;
+      existing.heure_arrivee = statut === 'present' ? '08:00' : '';
+      existing.heure_depart = statut === 'present' ? '17:00' : '';
+    } else {
+      presences.push({ id: genId(), employee_id: e.id, date: date, statut: statut, heure_arrivee: statut === 'present' ? '08:00' : '', heure_depart: statut === 'present' ? '17:00' : '', heures_jour: 8, heures_nuit: 0, faute_societe: false });
+    }
+  });
+  setPresence(presences);
+  toast('Fonction ' + fonction + ' : ' + statut + ' appliqué à ' + personnel.length + ' personnes');
   renderPage();
 }
 
-/* ==================== RH - EPI ==================== */
-function render_epi() {
+function clearDayPresence() {
+  var date = (document.getElementById('ptDate') || {}).value || today();
+  setPresence(getPresence().filter(function(p) { return p.date !== date; }));
+  toast('Pointage du jour effacé');
+  renderPage();
+}
+
+function updateSinglePresence(empId, statut) {
+  var date = (document.getElementById('ptDate') || {}).value || today();
+  var presences = getPresence();
+  var existing = presences.find(function(p) { return p.employee_id === empId && p.date === date; });
+  if (statut === '') {
+    if (existing) presences = presences.filter(function(p) { return !(p.employee_id === empId && p.date === date); });
+  } else {
+    if (existing) {
+      existing.statut = statut;
+      existing.heure_arrivee = statut === 'present' ? '08:00' : '';
+      existing.heure_depart = statut === 'present' ? '17:00' : '';
+    } else {
+      presences.push({ id: genId(), employee_id: empId, date: date, statut: statut, heure_arrivee: statut === 'present' ? '08:00' : '', heure_depart: statut === 'present' ? '17:00' : '', heures_jour: 8, heures_nuit: 0 });
+    }
+  }
+  setPresence(presences);
+  renderPage();
+}
+
+/* ==================== RH - STOCK EPI ==================== */
+function renderEpiStock() {
   var items = getEpiItems();
   var assignments = getEpiAssignments();
-  var h = '<div class="tabs">';
-  h += '<div class="tab active" id="tab_epi" onclick="showEpiTab(\'inventory\')">📦 Inventaire EPI</div>';
-  h += '<div class="tab" id="tab_assign" onclick="showEpiTab(\'assignments\')">👤 Affectations</div>';
-  h += '</div>';
-  h += '<div id="epiContent">';
-  h += renderEpiInventory(items);
-  h += '</div>';
-  return h;
+  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
+  h += '<h3 style="margin:0">🛡️ Stock EPI</h3>';
+  h += '<button class="btn btn-accent" onclick="showNewEpiItem()">+ Nouvel EPI</button></div>';
+  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Type</th><th>Taille</th><th style="text-align:right">Stock</th><th>Unité</th><th>Seuil Alerte</th><th>Actions</th></tr>';
+  var tot = 0;
+  items.forEach(function(s) {
+    tot += parseFloat(s.quantite) || 0;
+    h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(s.code || '-') + '</td><td>' + escH(s.designation || '-') + '</td><td>' + escH(s.type || '-') + '</td><td>' + escH(s.taille || '-') + '</td><td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td><td>' + escH(s.unite || 'pièce') + '</td><td>' + (s.seuil_alerte || 0) + '</td><td><button class="btn btn-red" onclick="deleteEpiItem(\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+  });
+  h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(items.reduce(function(s,i){return s+(parseFloat(i.quantite)||0);},0)) + '</td><td colspan="3"></td></tr>';
+  h += '</table>';
+  if (!items.length) h = '<div class="empty">Aucun EPI en stock. Cliquez sur + Nouvel EPI pour ajouter.</div>';
+  return h + '</div>';
 }
+
+function showNewEpiItem() {
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
+  m += '<h2>🛡️ Nouvel EPI</h2>';
+  m += formField('epi_code', 'Code', '', 'text', true);
+  m += formField('epi_designation', 'Désignation', '', 'text', true);
+  m += formField('epi_type', 'Type (casque, gant, botte...)', '', 'text', true);
+  m += '<div class="form-row">';
+  m += formField('epi_taille', 'Taille', '', 'text', false);
+  m += formField('epi_unite', 'Unité', 'pièce', 'text', false);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('epi_qte', 'Quantité', '0', 'number', true);
+  m += formField('epi_seuil', 'Seuil alerte', '5', 'number', false);
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem"><button class="btn btn-accent" onclick="createEpiItem()">✅ Ajouter</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+function createEpiItem() {
+  var code = (document.getElementById('epi_code')||{}).value;
+  var des = (document.getElementById('epi_designation')||{}).value;
+  if (!code || !des) return toast('Code et désignation requis', 'error');
+  var items = getEpiItems();
+  items.push({ id: genId(), code: code, designation: des, type: (document.getElementById('epi_type')||{}).value, taille: (document.getElementById('epi_taille')||{}).value, unite: (document.getElementById('epi_unite')||{}).value, quantite: parseFloat((document.getElementById('epi_qte')||{}).value)||0, seuil_alerte: parseFloat((document.getElementById('epi_seuil')||{}).value)||0 });
+  setEpiItems(items);
+  document.getElementById('modalOverlay').remove();
+  toast('EPI ajouté');
+  renderPage();
+}
+function deleteEpiItem(id) { if(!confirm2('Supprimer ?')) return; setEpiItems(getEpiItems().filter(function(i){return i.id!==id;})); toast('Supprimé'); renderPage(); }
 
 function renderEpiInventory(items) {
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem"><div></div>';
@@ -4837,106 +5232,42 @@ function deleteEpi(id) {
 }
 
 /* ==================== RH - CONGES ==================== */
-function render_leaves() {
+function renderLeavesReadOnly() {
   var leaves = getLeaves().slice().reverse();
   var personnel = getPersonnel();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<div></div>';
-  h += '<button class="btn btn-accent" onclick="showNewLeave()">+ Nouvelle Demande</button>';
+  h += '<div><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — Gestion des congés dans l\'app principale</span></div>';
   h += '</div>';
-  if (leaves.length === 0) return h + '<div class="empty">Aucune demande de congé</div>';
-  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Du</th><th>Au</th><th style="text-align:right">Jours</th><th>Statut</th><th>Actions</th></tr>';
+  if (leaves.length === 0) return h + '<div class="empty">Aucun congé enregistré</div>';
+  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Du</th><th>Au</th><th style="text-align:right">Jours</th><th>Statut</th><th>Date reprise</th></tr>';
   leaves.forEach(function(l) {
     var emp = personnel.find(function(e) { return e.id === l.employee_id; });
-    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(l.type_conge || '-') + '</td><td>' + escH(l.date_debut || '-') + '</td><td>' + escH(l.date_fin || '-') + '</td><td style="text-align:right">' + (l.jours || 0) + '</td><td>' + badgeStatut(l.statut) + '</td><td>';
-    if (l.statut === 'en_attente') {
-      h += '<button class="btn btn-green" onclick="updateLeave(\'' + l.id + '\',\'approuve\')" style="font-size:.7rem">✅</button> ';
-      h += '<button class="btn btn-red" onclick="updateLeave(\'' + l.id + '\',\'refuse\')" style="font-size:.7rem">❌</button>';
-    }
-    h += '</td></tr>';
+    var reprise = l.date_fin ? new Date(new Date(l.date_fin).getTime() + 86400000).toLocaleDateString('fr-FR') : '—';
+    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(l.type_conge || '-') + '</td><td>' + escH(l.date_debut || '-') + '</td><td>' + escH(l.date_fin || '-') + '</td><td style="text-align:right">' + (l.jours || 0) + '</td><td>' + badgeStatut(l.statut) + '</td><td>' + reprise + '</td></tr>';
   });
   h += '</table></div>';
+  h += '<div style="margin-top:.5rem;font-size:.75rem;color:var(--dim)">⚠️ Lecture seule — Créer/modifier les congés dans l\'application principale (module RH)</div>';
   return h;
 }
 
-function showNewLeave() {
-  var personnel = getPersonnel();
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
-  m += '<h2>🏖️ Demande de Congé</h2>';
-  m += '<div class="form-group"><label>Employé *</label><select id="lv_emp">';
-  personnel.forEach(function(p) { m += '<option value="' + p.id + '">' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>'; });
-  m += '</select></div>';
-  m += '<div class="form-group"><label>Type *</label><select id="lv_type"><option value="annuel">Annuel</option><option value="maladie">Maladie</option><option value="maternite">Maternité</option><option value="exceptionnel">Exceptionnel</option></select></div>';
-  m += '<div class="form-row">';
-  m += formField('lv_debut', 'Date début', '', 'date', true);
-  m += formField('lv_fin', 'Date fin', '', 'date', true);
-  m += '</div>';
-  m += formTextarea('lv_motif', 'Motif');
-  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
-  m += '<button class="btn btn-accent" onclick="createLeave()">✅ Soumettre</button>';
-  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
-  m += '</div></div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
-}
-
-function createLeave() {
-  var employee_id = document.getElementById('lv_emp').value;
-  var date_debut = document.getElementById('lv_debut').value;
-  var date_fin = document.getElementById('lv_fin').value;
-  if (!employee_id || !date_debut || !date_fin) return toast('Champs requis', 'error');
-  var days = Math.ceil((new Date(date_fin) - new Date(date_debut)) / 86400000) + 1;
-  var leaves = getLeaves();
-  leaves.push({ id: genId(), employee_id: employee_id, type_conge: document.getElementById('lv_type').value, date_debut: date_debut, date_fin: date_fin, jours: days, motif: document.getElementById('lv_motif').value, statut: 'en_attente' });
-  setLeaves(leaves);
-  document.getElementById('modalOverlay').remove();
-  toast('Demande soumise');
-  renderPage();
-}
-
-function updateLeave(id, statut) {
-  var leaves = getLeaves();
-  var l = leaves.find(function(x) { return x.id === id; });
-  if (l) { l.statut = statut; setLeaves(leaves); toast('Congé ' + statut); renderPage(); }
-}
-
-/* ==================== RH - SANCTIONS ==================== */
-function render_sanctions() {
+/* ==================== RH - SANCTIONS (LECTURE SEULE) ==================== */
+function renderSanctionsReadOnly() {
   var sanctions = getSanctions().slice().reverse();
   var personnel = getPersonnel();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<div></div>';
-  h += '<button class="btn btn-accent" onclick="showNewSanction()">+ Nouvelle Sanction</button>';
+  h += '<div><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — Gestion des sanctions dans l\'app principale (module RH)</span></div>';
   h += '</div>';
-  if (sanctions.length === 0) return h + '<div class="empty">Aucune sanction</div>';
-  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Date</th><th>Motif</th><th>Décision</th></tr>';
+  if (sanctions.length === 0) return h + '<div class="empty">Aucune sanction enregistrée</div>';
+  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Date</th><th>Motif</th><th>Décision</th><th>Absent pointage</th></tr>';
   sanctions.forEach(function(s) {
     var emp = personnel.find(function(e) { return e.id === s.employee_id; });
-    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(s.type || '-') + '</td><td>' + escH(s.date || '-') + '</td><td>' + escH(s.motif || '-') + '</td><td>' + escH(s.decision || '-') + '</td></tr>';
+    var absent = (s.type === 'Suspension' || s.decision === 'absent') ? '⚠️ Oui' : 'Non';
+    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(s.type || '-') + '</td><td>' + escH(s.date || '-') + '</td><td>' + escH(s.motif || '-') + '</td><td>' + escH(s.decision || '-') + '</td><td>' + absent + '</td></tr>';
   });
   h += '</table></div>';
+  h += '<div style="margin-top:.5rem;font-size:.75rem;color:var(--dim)">⚠️ Lecture seule — Créer/modifier les sanctions dans l\'application principale (module RH)</div>';
   return h;
 }
-
-function showNewSanction() {
-  var personnel = getPersonnel();
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
-  m += '<h2>⚠️ Nouvelle Sanction</h2>';
-  m += '<div class="form-group"><label>Employé *</label><select id="san_emp">';
-  personnel.forEach(function(p) { m += '<option value="' + p.id + '">' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>'; });
-  m += '</select></div>';
-  m += '<div class="form-group"><label>Type *</label><select id="san_type"><option value="Avertissement">Avertissement</option><option value="Blâme">Blâme</option><option value="Suspension">Suspension</option><option value="Licenciement">Licenciement</option></select></div>';
-  m += formField('san_date', 'Date', today(), 'date', true);
-  m += formTextarea('san_motif', 'Motif');
-  m += formTextarea('san_decision', 'Décision');
-  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
-  m += '<button class="btn btn-accent" onclick="createSanction()">✅ Enregistrer</button>';
-  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
-  m += '</div></div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
-}
-
-function createSanction() {
-  var employee_id = document.getElementById('san_emp').value;
   var date = document.getElementById('san_date').value;
   if (!employee_id || !date) return toast('Champs requis', 'error');
   var sanctions = getSanctions();
