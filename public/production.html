@@ -2599,10 +2599,34 @@ function filterOP(q) {
 function render_stock_palettes() { return renderStockFiche('stock-palettes', getStockPalettes, 'Fiche de Stock - Palettes', 'showAddStock'); }
 
 /* ==================== STOCK PRODUITS FINIS ==================== */
-function render_stock_finished() { return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
+/* Le catalogue = les produits finis : chaque article (finished/semi) possède une entrée stock (qte 0 par défaut) */
+function syncCatalogueToStock() {
+  var articles = getArticles();
+  var fin = getStockFinished();
+  var semi = getStockSemi();
+  var changedF = false, changedS = false;
+  articles.forEach(function(a) {
+    var cat = a.categorie || 'finished';
+    if (cat === 'finished') {
+      if (!fin.some(function(s) { return s.article_id === a.id; })) {
+        fin.push({ id: genId(), article_id: a.id, quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: new Date().toISOString() });
+        changedF = true;
+      }
+    } else if (cat === 'semi') {
+      if (!semi.some(function(s) { return s.article_id === a.id; })) {
+        semi.push({ id: genId(), article_id: a.id, quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: new Date().toISOString() });
+        changedS = true;
+      }
+    }
+  });
+  if (changedF) setStockFinished(fin);
+  if (changedS) setStockSemi(semi);
+}
+
+function render_stock_finished() { syncCatalogueToStock(); return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
 
 /* ==================== STOCK SEMI-FINIS ==================== */
-function render_stock_semi() { return renderStockFiche('stock-semi', getStockSemi, 'Fiche de Stock - Semi-Finis', 'showAddStock'); }
+function render_stock_semi() { syncCatalogueToStock(); return renderStockFiche('stock-semi', getStockSemi, 'Fiche de Stock - Semi-Finis', 'showAddStock'); }
 
 /* ==================== STOCK MATIERE PREMIERE (façon ACSER) ==================== */
 function mpOriginLabel(o) {
@@ -3172,7 +3196,10 @@ function exportStockExcel() {
 }
 
 function showAddStock(key) {
-  var articles = getArticles();
+  var catMap = { 'stock-finished': 'finished', 'stock-semi': 'semi', 'stock-raw': 'raw', 'stock-consum': 'consum', 'stock-merch': 'merch' };
+  var wantCat = catMap[key] || null;
+  var articles = getArticles().filter(function(a) { return !wantCat || (a.categorie || 'finished') === wantCat; });
+  if (articles.length === 0) articles = getArticles();
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
   m += '<h2>Ajouter au stock</h2>';
   m += '<div class="form-group"><label>Article *</label><select id="stk_article">';
@@ -3282,7 +3309,15 @@ function addStockItem(key) {
   var pair = map[key];
   if (!pair) return;
   var items = pair[0]();
-  items.push({ id: genId(), article_id: article_id, quantite: qte, prix_unitaire: prix, created_at: new Date().toISOString() });
+  /* Le catalogue = les produits finis : on fusionne avec l'entrée existante plutôt que dupliquer */
+  var existing = items.find(function(s) { return s.article_id && s.article_id === article_id; });
+  if (existing) {
+    existing.quantite = (parseFloat(existing.quantite) || 0) + qte;
+    if (prix) existing.prix_unitaire = prix;
+    existing.updated_at = new Date().toISOString();
+  } else {
+    items.push({ id: genId(), article_id: article_id, quantite: qte, prix_unitaire: prix, created_at: new Date().toISOString() });
+  }
   pair[1](items);
 
   /* SYNC → mdb_stocks */
@@ -4154,6 +4189,7 @@ function saveArticleModal(id) {
   var articles = getArticles();
   var a = id ? articles.find(function(x) { return x.id === id; }) : null;
   if (id && !a) return;
+  var oldCat = a ? (a.categorie || 'finished') : null;
   if (!a) { a = { id: genId(), created_at: new Date().toISOString() }; articles.push(a); }
   a.code = code;
   a.designation = designation;
@@ -4179,6 +4215,23 @@ function saveArticleModal(id) {
     });
   });
   setSection('composants', allComp);
+  /* Le catalogue = les produits finis : synchroniser l'entrée stock (finished/semi) */
+  try {
+    var newCat = a.categorie || 'finished';
+    if (oldCat && oldCat !== newCat && (oldCat === 'finished' || oldCat === 'semi')) {
+      if (oldCat === 'finished') setStockFinished(getStockFinished().filter(function(s) { return s.article_id !== a.id; }));
+      else setStockSemi(getStockSemi().filter(function(s) { return s.article_id !== a.id; }));
+    }
+    if (newCat === 'finished' && !getStockFinished().some(function(s) { return s.article_id === a.id; })) {
+      var _f = getStockFinished();
+      _f.push({ id: genId(), article_id: a.id, quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: new Date().toISOString() });
+      setStockFinished(_f);
+    } else if (newCat === 'semi' && !getStockSemi().some(function(s) { return s.article_id === a.id; })) {
+      var _s = getStockSemi();
+      _s.push({ id: genId(), article_id: a.id, quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: new Date().toISOString() });
+      setStockSemi(_s);
+    }
+  } catch (e) {}
   document.getElementById('modalOverlay').remove();
   toast(id ? 'Article mis à jour' : 'Article créé');
   renderPage();
@@ -4200,6 +4253,9 @@ function deleteArticle(id) {
   msg += '\n\nConfirmer ?';
   if (!confirm2(msg)) return;
   setArticles(getArticles().filter(function(a) { return a.id !== id; }));
+  /* Le catalogue = les produits finis : supprimer aussi les entrées stock liées */
+  setStockFinished(getStockFinished().filter(function(s) { return s.article_id !== id; }));
+  setStockSemi(getStockSemi().filter(function(s) { return s.article_id !== id; }));
   toast('Article supprimé');
   renderPage();
 }
