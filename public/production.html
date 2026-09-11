@@ -2275,7 +2275,7 @@ function populateProdForm(editId) {
   toast('Brouillon ' + (p.numero || '') + ' chargé ✏️ — continuez la saisie');
 }
 
-function updateStockArticle(articleId, qty, type, ref, numero) {
+function updateStockArticle(articleId, qty, type, ref, numero, motifOverride) {
   var article = getArticles().find(function(a) { return a.id === articleId; });
   if (!article) return;
   var cat = article.categorie || 'finished';
@@ -2328,7 +2328,7 @@ function updateStockArticle(articleId, qty, type, ref, numero) {
   var movements = getMovements();
   movements.push({
     id: genId(), date: today(), type: type, article_id: articleId,
-    quantite: qty, reference: ref, motif: 'Saisie production ' + numero,
+    quantite: qty, reference: ref, motif: motifOverride || (ref === 'production' ? 'Production ' + numero + ' – Assemblage (Produits Finis) (Entrée)' : 'Saisie production ' + numero),
     created_at: new Date().toISOString()
   });
   setMovements(movements);
@@ -2469,7 +2469,13 @@ function deleteProd(id) {
       'Supprimer cette fiche restaurera le stock de ' + fmt(p.vol_sortie_bois || 0) + ' m³.\n\nConfirmer ?';
   }
   if (!confirm2(msg)) return;
-  if (p.statut === 'validated') { restoreBoisSorti(p); }
+  if (p.statut === 'validated') {
+    restoreBoisSorti(p);
+    /* Annulation : les produits finis entrés en stock repartent (sortie) */
+    if (!((p.sortie_bois && p.sortie_bois.length) || (p.encours && p.encours.length)) && p.article_id && (parseFloat(p.quantite) || 0) > 0) {
+      updateStockArticle(p.article_id, parseFloat(p.quantite) || 0, 'sortie', 'production', p.numero, 'ANNULATION Production ' + (p.numero || '') + ' – Assemblage (Produits Finis) (Sortie) – Annulation – suppression fiche');
+    }
+  }
   setProductions(prods.filter(function(x) { return x.id !== id; }));
   toast('Fiche supprimée');
   renderPage();
@@ -3023,7 +3029,8 @@ function renderStockFiche(key, getFn, title, addFn) {
   h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
   h += '<button class="btn btn-accent" onclick="' + addFn + '(\'' + key + '\')">+ Nouveau</button>';
   h += '</div></div>';
-  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
+  var noVol = (key === 'stock-finished');
+  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th>' + (noVol ? '' : '<th style="text-align:right">Volume (m³)</th>') + '<th>Observation</th><th>Actions</th></tr>';
   var totQ = 0, totV = 0;
   items.forEach(function(s) {
     var v = stkVol(s);
@@ -3037,10 +3044,11 @@ function renderStockFiche(key, getFn, title, addFn) {
     h += '<td style="color:var(--dim)">' + escH(stkDims(s)) + '</td>';
     h += '<td>' + escH(s.zone || s.emplacement || '-') + '</td>';
     h += '<td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td>';
-    h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
+    if (!noVol) h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
+    h += '<td style="font-size:.75rem;color:var(--dim)">' + escH(s.observation || s.obs || '-') + '</td>';
     h += '<td style="white-space:nowrap">' + (key === 'stock-finished' ? '<button class="btn" onclick="showFinishedFiche(\'' + s.id + '\')" title="Fiche de stock" style="font-size:.7rem">👁️</button> ' : '') + '<button class="btn btn-red" onclick="deleteStockItem(\'' + key + '\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
   });
-  h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + totQ + '</td><td style="text-align:right">' + totV.toFixed(3) + '</td><td></td></tr>';
+  h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + totQ + '</td>' + (noVol ? '' : '<td style="text-align:right">' + totV.toFixed(3) + '</td>') + '<td colspan="2"></td></tr>';
   h += '</table>';
   if (items.length === 0) h += '<div class="empty">Aucun article en stock</div>';
   h += '</div>';
@@ -3292,6 +3300,7 @@ function showAddStock(key) {
   m += formField('stk_qte', 'Quantité', '', 'number', true);
   m += formField('stk_prix', 'Prix unitaire', '', 'number', false);
   m += '</div>';
+  m += '<div class="form-group"><label>Observation</label><input type="text" id="stk_obs" placeholder="Observation..."></div>';
   m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
   m += '<button class="btn btn-accent" onclick="addStockItem(\'' + key + '\')">✅ Ajouter</button>';
   m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
@@ -3392,16 +3401,24 @@ function addStockItem(key) {
   var pair = map[key];
   if (!pair) return;
   var items = pair[0]();
+  var _obs = ((document.getElementById('stk_obs') || {}).value || '').trim();
   /* Le catalogue = les produits finis : on fusionne avec l'entrée existante plutôt que dupliquer */
   var existing = items.find(function(s) { return s.article_id && s.article_id === article_id; });
   if (existing) {
     existing.quantite = (parseFloat(existing.quantite) || 0) + qte;
     if (prix) existing.prix_unitaire = prix;
+    if (_obs) existing.observation = _obs;
     existing.updated_at = new Date().toISOString();
   } else {
-    items.push({ id: genId(), article_id: article_id, quantite: qte, prix_unitaire: prix, created_at: new Date().toISOString() });
+    items.push({ id: genId(), article_id: article_id, quantite: qte, prix_unitaire: prix, observation: _obs, created_at: new Date().toISOString() });
   }
   pair[1](items);
+  /* Journal : entrée manuelle (fiche de stock) */
+  try {
+    var _m = getMovements();
+    _m.push({ id: genId(), date: today(), type: 'entree', article_id: article_id, quantite: qte, reference: '', motif: 'Ajout manuel au stock' + (_obs ? ' — ' + _obs : ''), created_at: new Date().toISOString() });
+    setMovements(_m);
+  } catch (e) {}
 
   /* SYNC → mdb_stocks (articleNom/articleCode requis par la gestion commerciale) */
   try {
@@ -3470,6 +3487,7 @@ function editStockItem(key, id) {
   m += formField('stk_qte', 'Quantité', item.quantite || item.quantite_stock || 0, 'number', true);
   m += formField('stk_prix', 'Prix unitaire', item.prix_unitaire || 0, 'number', false);
   m += '</div>';
+  m += '<div class="form-group"><label>Observation</label><input type="text" id="stk_obs" placeholder="Observation..." value="' + escH(item.observation || item.obs || '') + '"></div>';
   m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
   m += '<button class="btn btn-accent" onclick="updateStockItem(\'' + key + '\',\'' + id + '\')">✅ Enregistrer</button>';
   m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
@@ -3486,10 +3504,22 @@ function updateStockItem(key, id) {
   if (!item) return;
   var qte = parseFloat((document.getElementById('stk_qte') || {}).value) || 0;
   var prix = parseFloat((document.getElementById('stk_prix') || {}).value) || 0;
+  var obs = ((document.getElementById('stk_obs') || {}).value || '').trim();
+  var oldQ = parseFloat(item.quantite) || parseFloat(item.quantite_stock) || 0;
   item.quantite = qte;
   item.prix_unitaire = prix;
+  if (obs) item.observation = obs;
   item.updated_at = new Date().toISOString();
   pair[1](items);
+  /* Journal : correction manuelle = ajustement (fiche de stock) + miroir commercial */
+  try {
+    if (item.article_id && qte !== oldQ) {
+      var _m = getMovements();
+      _m.push({ id: genId(), date: today(), type: 'ajustement', article_id: item.article_id, quantite: qte - oldQ, reference: '', motif: 'Correction manuelle' + (obs ? ' — ' + obs : ''), created_at: new Date().toISOString() });
+      setMovements(_m);
+    }
+    if (key === 'stock-finished' && item.article_id) syncMirrorFinished(item.article_id);
+  } catch (e) {}
   document.getElementById('modalOverlay').remove();
   toast('Stock modifié ✏️');
   renderPage();
@@ -3507,8 +3537,10 @@ function render_stock_movements() {
   h += '<div class="card"><table id="movTable"><tr><th>Date</th><th>Type</th><th>Article</th><th style="text-align:right">Quantité</th><th>Référence</th><th>Motif</th></tr>';
   movs.forEach(function(m) {
     var art = articles.find(function(a) { return a.id === m.article_id; });
-    var typeColor = m.type === 'entree' ? 'color:var(--green)' : 'color:var(--red)';
-    h += '<tr><td>' + escH(m.date) + '</td><td style="' + typeColor + ';font-weight:700">' + escH(m.type === 'entree' ? '↑ Entrée' : '↓ Sortie') + '</td><td>' + escH(art ? art.designation : '-') + '</td><td style="text-align:right;font-weight:700">' + fmt(m.quantite) + '</td><td>' + escH(m.reference || '-') + '</td><td>' + escH(m.motif || '-') + '</td></tr>';
+    var typeColor = m.type === 'entree' ? 'color:var(--green)' : (m.type === 'ajustement' ? 'color:var(--accent)' : 'color:var(--red)');
+    var typeLabel = m.type === 'entree' ? '↑ Entrée' : (m.type === 'ajustement' ? '≈ Ajustement' : '↓ Sortie');
+    var qAff = m.type === 'ajustement' && (parseFloat(m.quantite) || 0) >= 0 ? '+' + m.quantite : m.quantite;
+    h += '<tr><td>' + escH(m.date) + '</td><td style="' + typeColor + ';font-weight:700">' + typeLabel + '</td><td>' + escH(art ? art.designation : '-') + '</td><td style="text-align:right;font-weight:700">' + qAff + '</td><td>' + escH(m.reference || '-') + '</td><td>' + escH(m.motif || '-') + '</td></tr>';
   });
   h += '</table></div>';
   return h;
@@ -3876,6 +3908,16 @@ function applyInventoryAsInitial(month, items) {
   consum.forEach(function(s, i) { consumMap[s.code] = i; });
   var epiMap = {};
   epi.forEach(function(s, i) { epiMap[s.code] = i; });
+  var _invLogs = [];
+  function _invLog(list, idx, real) {
+    var s = list[idx];
+    if (!s || !s.article_id) return;
+    var old = parseFloat(s.quantite) || parseFloat(s.quantite_stock) || 0;
+    var nw = parseFloat(real) || 0;
+    if (old === nw) return;
+    _invLogs.push({ id: genId(), date: today(), type: 'sortie', article_id: s.article_id, quantite: old, reference: '', motif: 'Annulation inventaire - stock théorique', created_at: new Date().toISOString() });
+    _invLogs.push({ id: genId(), date: today(), type: 'ajustement', article_id: s.article_id, quantite: nw, reference: '', motif: 'Correction inventaire - stock réel', created_at: new Date().toISOString() });
+  }
   items.forEach(function(it) {
     var idx;
     switch (it.store) {
@@ -3885,13 +3927,13 @@ function applyInventoryAsInitial(month, items) {
         break;
       case 'stockSemi':
         idx = semiMap[it.ref];
-        if (idx !== undefined) { semi[idx].quantite = it.real_qte; }
+        if (idx !== undefined) { _invLog(semi, idx, it.real_qte); semi[idx].quantite = it.real_qte; }
         break;
       case 'stockPalettes':
       case 'stockFinished':
         /* Les palettes = les produits finis : tout est appliqué au stock finis */
         idx = finMap[it.ref];
-        if (idx !== undefined) { finished[idx].quantite = it.real_qte; }
+        if (idx !== undefined) { _invLog(finished, idx, it.real_qte); finished[idx].quantite = it.real_qte; }
         break;
       case 'stockMerch':
         idx = merchMap[it.ref];
@@ -3899,7 +3941,7 @@ function applyInventoryAsInitial(month, items) {
         break;
       case 'stockConsum':
         idx = consumMap[it.ref];
-        if (idx !== undefined) { consum[idx].quantite_stock = it.real_qte; consum[idx].quantite = it.real_qte; }
+        if (idx !== undefined) { _invLog(consum, idx, it.real_qte); consum[idx].quantite_stock = it.real_qte; consum[idx].quantite = it.real_qte; }
         break;
       case 'epiItems':
         idx = epiMap[it.ref];
@@ -3914,6 +3956,11 @@ function applyInventoryAsInitial(month, items) {
   setStockMerch(merch);
   setStockConsum(consum);
   setEpiItems(epi);
+  if (_invLogs.length) {
+    var _mo = getMovements();
+    _invLogs.forEach(function(x) { _mo.push(x); });
+    setMovements(_mo);
+  }
 }
 
 function viewInventory(id) {
@@ -7507,6 +7554,16 @@ function saveAchatByCategory(e, category) {
       });
     });
     setStockFinished(finStock);
+    /* Journal des mouvements : entrées achats (pour la fiche de stock) */
+    try {
+      var _arts = getArticles();
+      var _movs = getMovements();
+      _tempAchatItems.forEach(function(it) {
+        var _a = _arts.find(function(x) { return (x.code || '').trim().toLowerCase() === String(it.code || '').trim().toLowerCase(); }) || {};
+        _movs.push({ id: genId(), date: date, type: 'entree', article_id: _a.id || '', quantite: parseFloat(it.quantity) || 0, reference: ref, motif: 'Achat ' + ref, created_at: new Date().toISOString() });
+      });
+      setMovements(_movs);
+    } catch (e) {}
   } else if (category === 'merchandises' && !existing) {
     var merchStock = getStockMerch();
     _tempAchatItems.forEach(function(it) {
@@ -8017,60 +8074,41 @@ function showFinishedFiche(stockId) {
   var codeL = String(code === '-' ? '' : code).trim().toLowerCase();
   var actuel = 0;
   fin.forEach(function(s) { if (artId ? s.article_id === artId : String(s.id) === String(stockId)) actuel += parseFloat(s.quantite) || 0; });
-  /* Entrées : productions validées (assemblage) */
-  var eProd = getProductions().filter(function(p) { return p.statut === 'validated' && artId && p.article_id === artId; })
-    .map(function(p) { return { date: p.date || '', src: 'Production ' + (p.numero || ''), qte: parseFloat(p.quantite) || 0 }; });
-  /* Entrées : achats produits finis (même code) */
-  var eAch = [];
-  getAchats().forEach(function(a) {
-    if ((a.category || a.type) !== 'finished') return;
-    (a.items || []).forEach(function(it) {
-      if (codeL && String(it.code || '').trim().toLowerCase() === codeL) {
-        eAch.push({ date: a.date || '', src: 'Achat ' + (a.reference || ''), qte: parseFloat(it.quantity) || 0 });
-      }
-    });
+  /* Journal des mouvements = source de la fiche (entrées, sorties, ajustements, annulations) */
+  var movs = getMovements().filter(function(mm) { return artId && mm.article_id === artId; });
+  movs.sort(function(a, b) { return String(a.date).localeCompare(String(b.date)); });
+  var totE = 0, totS = 0, totA = 0;
+  movs.forEach(function(mm) {
+    var q = parseFloat(mm.quantite) || 0;
+    if (mm.type === 'entree') totE += q;
+    else if (mm.type === 'sortie') totS += q;
+    else if (mm.type === 'ajustement') totA += q;
   });
-  /* Sorties : livraisons */
-  var sLiv = [];
-  getLivraisons().forEach(function(lv) {
-    (lv.lignes || []).forEach(function(ln) {
-      if ((artId && ln.article_id === artId) || (!artId && codeL && String(ln.code || '').trim().toLowerCase() === codeL)) {
-        sLiv.push({ date: lv.date || '', src: 'Livraison ' + (lv.numero || '') + (lv.clientNom ? ' — ' + lv.clientNom : ''), qte: parseFloat(ln.qte) || 0 });
-      }
-    });
-  });
-  var totE = 0, totS = 0;
-  eProd.concat(eAch).forEach(function(e) { totE += e.qte; });
-  sLiv.forEach(function(s) { totS += s.qte; });
-  var initial = actuel - totE + totS;
-  /* Chronologie avec solde courant */
-  var evts = [];
-  eProd.forEach(function(e) { evts.push({ date: e.date, type: 'Entrée', src: e.src, q: e.qte }); });
-  eAch.forEach(function(e) { evts.push({ date: e.date, type: 'Entrée', src: e.src, q: e.qte }); });
-  sLiv.forEach(function(s) { evts.push({ date: s.date, type: 'Sortie', src: s.src, q: -s.qte }); });
-  evts.sort(function(a, b) { return String(a.date).localeCompare(String(b.date)); });
-  window._ficheData = { code: code, des: des, actuel: actuel, initial: initial, totE: totE, totS: totS, evts: evts };
+  var initial = actuel - totE + totS - totA;
+  function fnum(n) { return (parseFloat(n) || 0); }
+  window._ficheData = { code: code, des: des, actuel: actuel, initial: initial, movs: movs };
   var bal = initial;
-  var rows = '<tr style="background:#f8f9fa"><td>-</td><td>🏁 Stock initial</td><td></td><td style="text-align:right;font-weight:700">' + initial + '</td></tr>';
-  evts.forEach(function(e) {
-    bal += e.q;
-    var col = e.q >= 0 ? 'var(--green)' : 'var(--red)';
-    rows += '<tr><td>' + escH(e.date || '-') + '</td><td>' + (e.type === 'Entrée' ? '📥 Entrée' : '📤 Sortie') + ' — ' + escH(e.src) + '</td>';
-    rows += '<td style="text-align:right;font-weight:700;color:' + col + '">' + (e.q >= 0 ? '+' : '') + e.q + '</td>';
-    rows += '<td style="text-align:right;font-weight:700">' + bal + '</td></tr>';
+  var rows = '<tr style="background:#f8fafc"><td style="color:var(--blue);font-weight:600">-</td><td style="color:var(--blue);font-weight:600">' + escH(code) + '</td><td style="color:var(--blue);font-weight:600">' + escH(des) + '</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(initial) + '</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(initial) + '</td><td style="color:var(--blue)">Stock initial</td><td style="text-align:center;color:var(--dim)">-</td></tr>';
+  movs.forEach(function(mm) {
+    var q = parseFloat(mm.quantite) || 0;
+    var eC = '', sC = '', aC = '';
+    if (mm.type === 'entree') { eC = '<span style="color:var(--green);font-weight:700">+' + q + '</span>'; bal += q; }
+    else if (mm.type === 'sortie') { sC = '<span style="color:var(--red);font-weight:700">-' + q + '</span>'; bal -= q; }
+    else { aC = '<span style="color:var(--accent);font-weight:700">' + (q >= 0 ? '+' : '') + q + '</span>'; bal += q; }
+    rows += '<tr><td>' + escH(mm.date || '-') + '</td><td>' + escH(code) + '</td><td>' + escH(des) + '</td>';
+    rows += '<td style="text-align:right">' + fnum(bal - (mm.type === 'entree' ? q : (mm.type === 'sortie' ? -q : q))) + '</td>';
+    rows += '<td style="text-align:right">' + (eC || '<span style="color:var(--dim)">-</span>') + '</td>';
+    rows += '<td style="text-align:right">' + (sC || '<span style="color:var(--dim)">-</span>') + '</td>';
+    rows += '<td style="text-align:right">' + (aC || '<span style="color:var(--dim)">0.000</span>') + '</td>';
+    rows += '<td style="text-align:right;font-weight:700;color:var(--accent)">' + fnum(bal) + '</td>';
+    rows += '<td style="font-size:.75rem">' + escH(mm.motif || '-') + '</td>';
+    rows += '<td style="text-align:center;color:var(--dim)">-</td></tr>';
   });
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:800px">';
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:1100px">';
   m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem">';
-  m += '<h2 style="margin:0">📋 Fiche de Stock — ' + escH(code) + '</h2>';
+  m += '<h2 style="margin:0">⇄ HISTORIQUE DES MOUVEMENTS – ' + escH(code) + '</h2>';
   m += '<button class="btn" onclick="printFinishedFiche()">🖨️ Imprimer</button></div>';
-  m += '<p style="color:var(--dim);font-size:.85rem;margin-top:0">' + escH(des) + '</p>';
-  m += '<div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">';
-  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem">' + initial + '</div><div class="label">🏁 Stock initial</div></div>';
-  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem;color:var(--green)">+' + totE + '</div><div class="label">📥 Entrées (prod + achats)</div></div>';
-  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem;color:var(--red)">-' + totS + '</div><div class="label">📤 Sorties (livraisons)</div></div>';
-  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem;color:var(--accent)">' + actuel + '</div><div class="label">📊 Stock actuel</div></div>';
-  m += '</div>';
-  m += '<div class="card"><table><tr><th>Date</th><th>Mouvement</th><th style="text-align:right">Qté</th><th style="text-align:right">Solde</th></tr>' + rows + '</table></div>';
+  m += '<div class="card" style="overflow-x:auto"><table style="font-size:.75rem"><tr><th>Jour</th><th>Code</th><th>Libellé</th><th style="text-align:right">Stock Initial</th><th style="text-align:right">Entrée</th><th style="text-align:right">Sortie</th><th style="text-align:right">Ajustement</th><th style="text-align:right">Stock Final</th><th>Observation</th><th>Justification</th></tr>' + rows + '</table></div>';
   m += '<div style="display:flex;gap:.5rem;margin-top:.8rem"><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Fermer</button></div>';
   m += '</div></div>';
   document.body.insertAdjacentHTML('beforeend', m);
@@ -8079,16 +8117,19 @@ function printFinishedFiche() {
   var d = window._ficheData;
   if (!d) return;
   var bal = d.initial;
-  var rows = '<tr><td>-</td><td>Stock initial</td><td></td><td style="text-align:right">' + d.initial + '</td></tr>';
-  d.evts.forEach(function(e) {
-    bal += e.q;
-    rows += '<tr><td>' + escH(e.date || '-') + '</td><td>' + escH(e.type) + ' — ' + escH(e.src) + '</td><td style="text-align:right">' + (e.q >= 0 ? '+' : '') + e.q + '</td><td style="text-align:right">' + bal + '</td></tr>';
+  var rows = '<tr><td>-</td><td>' + escH(d.code) + '</td><td>' + escH(d.des) + '</td><td style="text-align:right">' + d.initial + '</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:right">' + d.initial + '</td><td>Stock initial</td><td style="text-align:center">-</td></tr>';
+  (d.movs || []).forEach(function(mm) {
+    var q = parseFloat(mm.quantite) || 0;
+    var eC = '-', sC = '-', aC = '0.000';
+    if (mm.type === 'entree') { eC = '+' + q; bal += q; }
+    else if (mm.type === 'sortie') { sC = '-' + q; bal -= q; }
+    else { aC = (q >= 0 ? '+' : '') + q; bal += q; }
+    rows += '<tr><td>' + escH(mm.date || '-') + '</td><td>' + escH(d.code) + '</td><td>' + escH(d.des) + '</td><td style="text-align:right">' + (bal - (mm.type === 'entree' ? q : (mm.type === 'sortie' ? -q : q))) + '</td><td style="text-align:right">' + eC + '</td><td style="text-align:right">' + sC + '</td><td style="text-align:right">' + aC + '</td><td style="text-align:right">' + bal + '</td><td>' + escH(mm.motif || '-') + '</td><td style="text-align:center">-</td></tr>';
   });
-  var html = '<html><head><meta charset="UTF-8"><title>Fiche de stock ' + escH(d.code) + '</title>';
-  html += '<style>body{font-family:Arial;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #333;padding:5px 7px}th{background:#f0f0f0}h2{text-align:center}</style></head><body>';
-  html += '<h2>FICHE DE STOCK — ' + escH(d.code) + ' (' + escH(d.des) + ')</h2>';
-  html += '<p><strong>Stock initial :</strong> ' + d.initial + ' &nbsp; <strong>Entrées :</strong> +' + d.totE + ' &nbsp; <strong>Sorties :</strong> -' + d.totS + ' &nbsp; <strong>Stock actuel :</strong> ' + d.actuel + '</p>';
-  html += '<table><tr><th>Date</th><th>Mouvement</th><th style="text-align:right">Qté</th><th style="text-align:right">Solde</th></tr>' + rows + '</table>';
+  var html = '<html><head><meta charset="UTF-8"><title>Historique des mouvements ' + escH(d.code) + '</title>';
+  html += '<style>body{font-family:Arial;font-size:10px;margin:20px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #333;padding:4px 6px}th{background:#f0f0f0}h2{text-align:center}</style></head><body>';
+  html += '<h2>HISTORIQUE DES MOUVEMENTS – ' + escH(d.code) + ' (' + escH(d.des) + ')</h2>';
+  html += '<table><tr><th>Jour</th><th>Code</th><th>Libellé</th><th>Stock Initial</th><th>Entrée</th><th>Sortie</th><th>Ajustement</th><th>Stock Final</th><th>Observation</th><th>Justification</th></tr>' + rows + '</table>';
   html += '</body></html>';
   var w = window.open('', '_blank');
   w.document.write(html);
