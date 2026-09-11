@@ -23542,6 +23542,7 @@ html += '</datalist></div>';
   html += '<button class="btn btn-outline btn-sm" onclick="openInterroComptes()" style="width:100%;color:var(--green);border-color:var(--green);justify-content:center" title="Interroger les comptes par code">\u2211 Comptes</button>';
   html += '<button id="csToggleSpfBtn2" class="btn btn-outline btn-sm" onclick="toggleSpfColumn()" style="width:100%;color:var(--purple);border-color:var(--purple);justify-content:center">S+F</button>';
   html += '<button class="btn btn-outline btn-sm" onclick="openCorrigerPeriodeModal()" style="width:100%;color:#b45309;border-color:#f59e0b;justify-content:center;background:#fffbeb;font-weight:700" title="Corriger les opérations saisies dans le mauvais mois (ex: août saisi en juin)">\u21C4 Corriger période</button>';
+  html += '<button class="btn btn-outline btn-sm" onclick="exportCaisseExcel()" style="width:100%;color:#15803d;border-color:#15803d;justify-content:center;font-weight:700" title="Exporter les opérations filtrées en Excel">📊 Excel</button>';
   html += '</div>';
   html += '</div>'; // fin flex 2 blocs
    html += '<div id="csValidationGroup" style="display:none;margin-top:6px;padding:8px;background:#fef3c7;border:1px solid #fcd34d;border-radius:6px"><label style="font-size:11px;font-weight:700;color:#92400e">Code de validation (requis pour modifier un transfert reçu)</label><input type="password" id="csValidationCode" placeholder="Entrez le code configuré dans Entreprise" style="width:100%;padding:6px 10px;border:1px solid #fcd34d;border-radius:4px;font-size:12px;margin-top:4px"><div style="font-size:10px;color:#92400e;margin-top:4px">Ce code est défini dans <strong>Entreprise &gt; Code de validation (suppression transferts reçus)</strong>. Configurez-le d\'abord si vide.</div></div>';
@@ -28976,6 +28977,255 @@ function printFilteredCaisse() {
   html += '</tbody></table></body></html>';
   var w = window.open('', '_blank', 'width=900,height=600');
   w.document.write(html); w.document.close(); w.print();
+}
+
+/* ===== EXPORT CAISSE EXCEL ===== */
+function exportCaisseExcel() {
+  try {
+    var EJ = (typeof ExcelJS !== 'undefined' && ExcelJS) || window.ExcelJS;
+    if (!EJ) { toast('Bibliothèque Excel non chargée', 'error'); return; }
+    var rows = document.getElementById('csOpsBody');
+    if (!rows) { toast('Aucune donnée à exporter', 'error'); return; }
+    var trs = rows.getElementsByTagName('tr');
+    var visibleOps = [];
+    for (var i = 0; i < trs.length; i++) {
+      if (trs[i].style.display === 'none') continue;
+      if (trs[i].getAttribute('data-brouillon') === 'brouillon') continue;
+      if (trs[i].getAttribute('data-charge-type') === 'charge_seule') continue;
+      var c = trs[i].cells;
+      visibleOps.push({
+        date: c[0] ? c[0].textContent.trim() : '',
+        piece: c[1] ? c[1].textContent.trim() : '',
+        code: c[2] ? c[2].textContent.trim() : '',
+        libelle: c[3] ? c[3].textContent.trim() : '',
+        entree: parseFloat(trs[i].getAttribute('data-entree')) || 0,
+        sortie: parseFloat(trs[i].getAttribute('data-sortie')) || 0,
+        charge: parseFloat(trs[i].getAttribute('data-charge')) || 0,
+        frais: parseFloat(trs[i].getAttribute('data-frais')) || 0,
+        benef: c[10] ? c[10].textContent.trim() : '',
+        executant: c[11] ? c[11].textContent.trim() : '',
+        moyen: c[12] ? c[12].textContent.trim() : '',
+        remettant: c[13] ? c[13].textContent.trim() : '',
+        obs: c[14] ? c[14].textContent.trim() : '',
+        solde: c[16] ? c[16].textContent.trim().replace(/\s/g, '') : ''
+      });
+    }
+    if (!visibleOps.length) { toast('Aucune opération à exporter', 'error'); return; }
+
+    var wb = new EJ.Workbook();
+    var ws = wb.addWorksheet('Caisse', { views: [{ state: 'frozen', ySplit: 4, showGridLines: false }] });
+
+    /* Styles */
+    var THIN = { style: 'thin', color: { argb: 'FF0F172A' } };
+    var MED = { style: 'medium', color: { argb: 'FF0F172A' } };
+    var GRID = { top: THIN, bottom: THIN, left: THIN, right: THIN };
+
+    /* Columns: Date, Pièce, Code, Libellé, Entrée, Sortie, Charge, Frais, S+F, Bénéficiaire, Exécutant, Moyen/N°, Remettant, Observations, Solde */
+    var colWidths = [14, 16, 10, 35, 16, 16, 14, 12, 14, 22, 18, 18, 18, 25, 16];
+    colWidths.forEach(function(w, idx) { ws.getColumn(idx + 1).width = w; });
+    var maxC = colWidths.length;
+
+    /* Company info */
+    var soc = DB.get('mdb_entreprise') || {};
+    var company = soc.nom || 'SOCIÉTÉ';
+    var addr = [soc.adresse || '', soc.ncc ? 'NCC: ' + soc.ncc : '', soc.telephone ? 'Tél: ' + soc.telephone : ''].filter(Boolean).join(' | ');
+
+    /* Period info */
+    var selMonth = window._csSelMonth || '';
+    var selYear = window._csSelYear || '';
+    var months = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
+    var periodLabel = selMonth && selYear ? months[parseInt(selMonth) - 1] + ' ' + selYear : 'Toutes périodes';
+
+    /* Row 1: Company */
+    var r1 = ws.getRow(1);
+    r1.height = 28;
+    r1.getCell(1).value = company;
+    r1.getCell(1).font = { bold: true, size: 14, name: 'Calibri', color: { argb: 'FF0F172A' } };
+    r1.getCell(1).alignment = { horizontal: 'left', vertical: 'middle' };
+    for (var ci = 1; ci <= maxC; ci++) {
+      r1.getCell(ci).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } };
+      r1.getCell(ci).border = ci === 1 ? { left: MED, right: THIN, top: MED, bottom: THIN } : (ci === maxC ? { left: THIN, right: MED, top: MED, bottom: THIN } : GRID);
+    }
+    ws.mergeCells(1, 1, 1, maxC);
+
+    /* Row 2: Address */
+    var r2 = ws.getRow(2);
+    r2.height = 18;
+    r2.getCell(1).value = addr;
+    r2.getCell(1).font = { size: 9, name: 'Calibri', color: { argb: 'FF475569' } };
+    r2.getCell(1).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    for (var ci2 = 1; ci2 <= maxC; ci2++) {
+      r2.getCell(ci2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } };
+      r2.getCell(ci2).border = ci2 === 1 ? { left: MED, right: THIN, top: THIN, bottom: THIN } : (ci2 === maxC ? { left: THIN, right: MED, top: THIN, bottom: THIN } : GRID);
+    }
+    ws.mergeCells(2, 1, 2, maxC);
+
+    /* Row 3: Title */
+    var r3 = ws.getRow(3);
+    r3.height = 22;
+    r3.getCell(1).value = 'ÉTAT DE CAISSE — ' + periodLabel;
+    r3.getCell(1).font = { bold: true, size: 12, name: 'Calibri', color: { argb: 'FF1E293B' } };
+    r3.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+    for (var ci3 = 1; ci3 <= maxC; ci3++) {
+      r3.getCell(ci3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF15803D' } };
+      r3.getCell(ci3).font = { bold: true, size: 12, name: 'Calibri', color: { argb: 'FFFFFFFF' } };
+      r3.getCell(ci3).border = ci3 === 1 ? { left: MED, right: THIN, top: THIN, bottom: THIN } : (ci3 === maxC ? { left: THIN, right: MED, top: THIN, bottom: THIN } : GRID);
+    }
+    ws.mergeCells(3, 1, 3, maxC);
+
+    /* Row 4: Summary */
+    var r4 = ws.getRow(4);
+    r4.height = 20;
+    var totalEntree = 0, totalSortie = 0, totalCharge = 0, totalFrais = 0;
+    visibleOps.forEach(function(o) {
+      totalEntree += o.entree;
+      totalSortie += o.sortie;
+      totalCharge += o.charge;
+      totalFrais += o.frais;
+    });
+    r4.getCell(1).value = visibleOps.length + ' opération(s)';
+    r4.getCell(1).font = { bold: true, size: 9, name: 'Calibri', color: { argb: 'FF475569' } };
+    r4.getCell(1).alignment = { horizontal: 'left', vertical: 'middle' };
+    r4.getCell(5).value = 'Entrées:';
+    r4.getCell(5).font = { bold: true, size: 9, name: 'Calibri', color: { argb: 'FF15803D' } };
+    r4.getCell(5).alignment = { horizontal: 'right', vertical: 'middle' };
+    r4.getCell(6).value = totalEntree;
+    r4.getCell(6).font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF15803D' } };
+    r4.getCell(6).numFmt = '#,##0';
+    r4.getCell(6).alignment = { horizontal: 'right', vertical: 'middle' };
+    r4.getCell(7).value = 'Sorties:';
+    r4.getCell(7).font = { bold: true, size: 9, name: 'Calibri', color: { argb: 'FFDC2626' } };
+    r4.getCell(7).alignment = { horizontal: 'right', vertical: 'middle' };
+    r4.getCell(8).value = totalSortie;
+    r4.getCell(8).font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFDC2626' } };
+    r4.getCell(8).numFmt = '#,##0';
+    r4.getCell(8).alignment = { horizontal: 'right', vertical: 'middle' };
+    for (var ci4 = 1; ci4 <= maxC; ci4++) {
+      r4.getCell(ci4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      r4.getCell(ci4).border = ci4 === 1 ? { left: MED, right: THIN, top: THIN, bottom: MED } : (ci4 === maxC ? { left: THIN, right: MED, top: THIN, bottom: MED } : GRID);
+    }
+    ws.mergeCells(4, 1, 4, 4);
+    ws.mergeCells(4, 9, 4, 15);
+
+    /* Row 5: Headers */
+    var headers = ['Date', 'N° Pièce', 'Code', 'Libellé', 'Entrée (FCFA)', 'Sortie (FCFA)', 'Charge', 'Frais', 'S+F', 'Bénéficiaire', 'Exécutant', 'Moyen / N°', 'Remettant', 'Observations', 'Solde'];
+    var r5 = ws.getRow(5);
+    r5.height = 24;
+    headers.forEach(function(h, idx) {
+      var cell = r5.getCell(idx + 1);
+      cell.value = h;
+      cell.font = { bold: true, size: 9, name: 'Calibri', color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F172A' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.border = idx === 0 ? { left: MED, right: THIN, top: MED, bottom: THIN } : (idx === maxC - 1 ? { left: THIN, right: MED, top: MED, bottom: THIN } : GRID);
+    });
+
+    /* Data rows (newest first, like the table) */
+    var firstHead = 5;
+    for (var di = 0; di < visibleOps.length; di++) {
+      var o = visibleOps[di];
+      var row = ws.getRow(6 + di);
+      row.height = 18;
+      var bg = di % 2 === 0 ? 'FFFFFFFF' : 'FFEEF2F6';
+
+      var vals = [o.date, o.piece, o.code, o.libelle, o.entree || '', o.sortie || '', o.charge || '', o.frais || '',
+        (o.sortie + o.frais) > 0 ? (o.sortie + o.frais) : '',
+        o.benef, o.executant, o.moyen, o.remettant, o.obs, o.solde];
+
+      vals.forEach(function(v, idx) {
+        var cell = row.getCell(idx + 1);
+        cell.value = v;
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
+        cell.font = { size: 9, name: 'Calibri', color: { argb: idx === 0 ? 'FF0F172A' : 'FF1E293B' }, bold: idx === 0 };
+        cell.border = idx === 0 ? { left: MED, right: THIN, top: THIN, bottom: THIN } : (idx === maxC - 1 ? { left: THIN, right: MED, top: THIN, bottom: THIN } : GRID);
+
+        if (typeof v === 'number' && v !== 0) {
+          cell.numFmt = '#,##0';
+          cell.alignment = { horizontal: 'right', vertical: 'middle' };
+          if (idx === 4) cell.font = { size: 9, name: 'Calibri', bold: true, color: { argb: 'FF15803D' } };
+          else if (idx === 5) cell.font = { size: 9, name: 'Calibri', bold: true, color: { argb: 'FFDC2626' } };
+          else if (idx === 6 || idx === 7) cell.font = { size: 9, name: 'Calibri', bold: true, color: { argb: 'FF7C3AED' } };
+          else if (idx === 8) cell.font = { size: 9, name: 'Calibri', bold: true, color: { argb: 'FFD97706' } };
+        } else {
+          cell.alignment = { horizontal: idx <= 3 ? 'left' : 'center', vertical: 'middle', wrapText: idx === 3 || idx === 13 };
+        }
+      });
+    }
+
+    /* Total row with SUM formulas */
+    var totalRow = ws.getRow(6 + visibleOps.length);
+    totalRow.height = 22;
+    var totIdx = 6 + visibleOps.length;
+    var totLabels = ['', '', '', 'TOTAL (' + visibleOps.length + ' opérations)'];
+    for (var ti = 0; ti < maxC; ti++) {
+      var tcell = totalRow.getCell(ti + 1);
+      tcell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFCBD5E1' } };
+      tcell.border = ti === 0 ? { left: MED, right: THIN, top: MED, bottom: MED } : (ti === maxC - 1 ? { left: THIN, right: MED, top: MED, bottom: MED } : GRID);
+
+      if (ti < 4) {
+        tcell.value = totLabels[ti] || '';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF0F172A' } };
+        tcell.alignment = { horizontal: ti === 3 ? 'right' : 'left', vertical: 'middle' };
+      } else if (ti === 4) {
+        tcell.value = { formula: 'SUM(F6:F' + (totIdx - 1) + ')' };
+        tcell.numFmt = '#,##0';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF15803D' } };
+        tcell.alignment = { horizontal: 'right', vertical: 'middle' };
+      } else if (ti === 5) {
+        tcell.value = { formula: 'SUM(G6:G' + (totIdx - 1) + ')' };
+        tcell.numFmt = '#,##0';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFDC2626' } };
+        tcell.alignment = { horizontal: 'right', vertical: 'middle' };
+      } else if (ti === 6) {
+        tcell.value = { formula: 'SUM(H6:H' + (totIdx - 1) + ')' };
+        tcell.numFmt = '#,##0';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF7C3AED' } };
+        tcell.alignment = { horizontal: 'right', vertical: 'middle' };
+      } else if (ti === 7) {
+        tcell.value = { formula: 'SUM(I6:I' + (totIdx - 1) + ')' };
+        tcell.numFmt = '#,##0';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFD97706' } };
+        tcell.alignment = { horizontal: 'right', vertical: 'middle' };
+      } else if (ti === 8) {
+        tcell.value = { formula: 'SUM(J6:J' + (totIdx - 1) + ')' };
+        tcell.numFmt = '#,##0';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FFD97706' } };
+        tcell.alignment = { horizontal: 'right', vertical: 'middle' };
+      } else if (ti === 14) {
+        tcell.value = '';
+        tcell.font = { bold: true, size: 10, name: 'Calibri', color: { argb: 'FF0F172A' } };
+        tcell.alignment = { horizontal: 'right', vertical: 'middle' };
+      }
+    }
+    if (maxC > 4) {
+      try { ws.mergeCells(6 + visibleOps.length, 1, 6 + visibleOps.length, 4); } catch(e) {}
+    }
+
+    /* Auto-filter */
+    try { ws.autoFilter = { from: { row: firstHead, column: 1 }, to: { row: 6 + visibleOps.length, column: maxC } }; } catch(e) {}
+    ws.pageSetup.printTitlesRow = firstHead + ':' + firstHead;
+
+    /* Print setup */
+    ws.pageSetup.orientation = 'landscape';
+    ws.pageSetup.fitToPage = true;
+    ws.pageSetup.fitToWidth = 1;
+    ws.pageSetup.fitToHeight = 0;
+    ws.pageSetup.paperSize = 9;
+    ws.pageSetup.margins = { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 };
+
+    /* Download */
+    wb.xlsx.writeBuffer().then(function(buf) {
+      var bl = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      var u = URL.createObjectURL(bl);
+      var a = document.createElement('a');
+      a.href = u;
+      a.download = 'Caisse_' + periodLabel.replace(/\s+/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function() { try { document.body.removeChild(a); } catch(e) {} URL.revokeObjectURL(u); }, 400);
+      toast('Fichier Excel téléchargé ✅');
+    }).catch(function(eW) { console.warn('xlsx writeBuffer fail', eW); toast('Erreur export Excel', 'error'); });
+  } catch(e) { console.warn('exportCaisseExcel fail', e); toast('Erreur export Excel', 'error'); }
 }
 
 /* ===== BULK PRINT PIECES DE CAISSE ===== */
