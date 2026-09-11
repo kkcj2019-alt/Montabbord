@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Fusion de données hors-ligne</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#f3f4f6;color:#1f2937;padding:20px}
+.wrap{max-width:960px;margin:0 auto}
+.card{background:#fff;border-radius:12px;padding:20px 22px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+h1{font-size:20px;margin-bottom:4px}
+h2{font-size:16px;margin-bottom:10px}
+p.sub{font-size:13px;color:#6b7280;margin-bottom:12px}
+.btn{display:inline-block;padding:9px 18px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;background:#2563eb;color:#fff;margin:4px 6px 4px 0}
+.btn:hover{background:#1d4ed8}
+.btn.green{background:#16a34a}.btn.green:hover{background:#15803d}
+.btn.gray{background:#6b7280}.btn.gray:hover{background:#4b5563}
+.btn.red{background:#dc2626}.btn.red:hover{background:#b91c1c}
+.btn:disabled{background:#9ca3af;cursor:not-allowed}
+.warn{background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;font-size:13px;margin:10px 0}
+.info{background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;padding:10px 14px;font-size:13px;margin:10px 0}
+.ok{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:10px 14px;font-size:13px;margin:10px 0}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+th,td{border:1px solid #e5e7eb;padding:5px 8px;text-align:left;vertical-align:top}
+th{background:#f3f4f6;font-size:11px}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700}
+.b-add{background:#dcfce7;color:#166534}.b-upd{background:#fef3c7;color:#92400e}
+.b-cfl{background:#fee2e2;color:#991b1b}.b-same{background:#f3f4f6;color:#6b7280}
+.b-del{background:#ede9fe;color:#5b21b6}
+.small{font-size:11px;color:#6b7280}
+pre.diff{background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:8px;font-size:11px;white-space:pre-wrap;max-height:220px;overflow-y:auto}
+input[type=file]{margin:8px 0}
+.counts{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.counts span{font-size:12px;background:#f3f4f6;border-radius:8px;padding:3px 10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>🔀 Fusion de données hors-ligne</h1>
+    <p class="sub">Mélange une sauvegarde JSON (autre appareil, ex. clé USB) avec les données de <strong>cet appareil</strong>, sans rien écraser : les ajouts des deux côtés sont unis, les suppressions sont respectées, et les conflits sont signalés pour correction manuelle.</p>
+    <div class="warn"><strong>Règle :</strong> en cas de conflit (même fiche modifiée des deux côtés), c'est la version de <strong>cet appareil</strong> qui est gardée — le rapport liste chaque conflit à vérifier. Faites d'abord une sauvegarde normale (Entreprise → Sauvegarder) par sécurité.</div>
+    <div id="localSummary" class="small">Chargement…</div>
+  </div>
+
+  <div class="card">
+    <h2>1️⃣ Exporter les données de cet appareil</h2>
+    <p class="sub">Télécharge un JSON complet (appli principale + production + paie) à transporter sur l'autre appareil.</p>
+    <button class="btn" onclick="exportAll()">📥 Exporter tout (JSON)</button>
+    <span id="exportMsg" class="small"></span>
+  </div>
+
+  <div class="card">
+    <h2>2️⃣ Charger le fichier de l'autre appareil</h2>
+    <input type="file" id="fileInput" accept=".json,application/json">
+    <div id="fileSummary" class="small">Aucun fichier chargé.</div>
+  </div>
+
+  <div class="card" id="analyzeCard" style="display:none">
+    <h2>3️⃣ Analyser (simulation sans toucher aux données)</h2>
+    <button class="btn gray" onclick="analyze()">🔍 Analyser la fusion</button>
+    <div id="reportBox"></div>
+  </div>
+
+  <div class="card" id="applyCard" style="display:none">
+    <h2>4️⃣ Appliquer la fusion</h2>
+    <p class="sub">Écrit le résultat fusionné dans cet appareil. Une copie d'annulation est gardée automatiquement.</p>
+    <button class="btn green" id="applyBtn" onclick="applyMerge()">✅ Appliquer la fusion</button>
+    <span id="applyMsg" class="small"></span>
+  </div>
+
+  <div class="card" id="undoCard" style="display:none">
+    <h2>↩️ Annuler la dernière fusion</h2>
+    <button class="btn red" onclick="undoMerge()">Annuler (restaurer l'état d'avant fusion)</button>
+    <span id="undoMsg" class="small"></span>
+  </div>
+</div>
+
+<script>
+/* ================= Clés gérées ================= */
+var DATA_KEYS = ['mdb_tombstones','mdb_clients','mdb_nomenclature','mdb_bc','mdb_deletedBLs','mdb_deletedFactures','mdb_deletedOps','mdb_deletedStocks','mdb_bl','mdb_factures','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_banques','mdb_banqueOperations','mdb_reportReserve','mdb_bankSoldeOverrides','mdb_users','mdb_previsions','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory','mdb_dashboardCreances','mdb_dashboardDettesF','mdb_notes','mdb_journal_ventes'];
+var EXTRA_KEYS = ['mdb_production'];
+var MANAGED = DATA_KEYS.concat(EXTRA_KEYS);
+var DELETED_MAP = { 'mdb_deletedBLs': 'mdb_bl', 'mdb_deletedFactures': 'mdb_factures', 'mdb_deletedOps': 'mdb_operationsCaisse', 'mdb_deletedStocks': 'mdb_stocks' };
+var NUMERO_FIELDS = { 'mdb_bl': 'numero', 'mdb_factures': 'numero', 'mdb_bc': 'numero', 'mdb_operationsCaisse': 'numeroPiece' };
+var UNDO_KEY = 'mdb_fusion_undo';
+
+function readLS(k) { try { var v = localStorage.getItem(k); return v == null ? undefined : JSON.parse(v); } catch (e) { return undefined; } }
+function escH(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+function isObj(x) { return x !== null && typeof x === 'object' && !Array.isArray(x); }
+function isArr(x) { return Array.isArray(x); }
+function same(a, b) { try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; } }
+function countArr(v) { return isArr(v) ? v.length : (v == null ? 0 : 1); }
+
+/* Champs résumés pour le rapport */
+function shortRec(r) {
+  if (!isObj(r)) return String(r).slice(0, 60);
+  var parts = [];
+  ['numero', 'numeroPiece', 'reference', 'code', 'nom', 'designation', 'libelle', 'date', 'dateLivraison', 'clientNom'].forEach(function (k) {
+    if (r[k] != null && r[k] !== '') parts.push(k + '=' + String(r[k]).slice(0, 28));
+  });
+  if (r.quantite != null) parts.push('qte=' + r.quantite);
+  if (r.montant != null) parts.push('montant=' + r.montant);
+  return parts.slice(0, 5).join(' | ') || ('id=' + r.id);
+}
+function diffFields(a, b) {
+  var out = [];
+  if (!isObj(a) || !isObj(b)) return out;
+  var keys = {};
+  Object.keys(a).forEach(function (k) { keys[k] = 1; });
+  Object.keys(b).forEach(function (k) { keys[k] = 1; });
+  Object.keys(keys).forEach(function (k) {
+    if (!same(a[k], b[k])) {
+      var av = JSON.stringify(a[k]); if (av && av.length > 80) av = av.slice(0, 80) + '…';
+      var bv = JSON.stringify(b[k]); if (bv && bv.length > 80) bv = bv.slice(0, 80) + '…';
+      out.push(k + ' : ici=' + (av == null ? '∅' : av) + ' | fichier=' + (bv == null ? '∅' : bv));
+    }
+  });
+  return out;
+}
+
+/* Fusionne deux tableaux d'objets par id. Conflits : version locale gardée. */
+function mergeArrays(localArr, fileArr, stats, conflicts, keyLabel) {
+  localArr = isArr(localArr) ? localArr : [];
+  fileArr = isArr(fileArr) ? fileArr : [];
+  var byId = {};
+  var result = [];
+  localArr.forEach(function (r) {
+    if (isObj(r) && r.id != null) { byId[r.id] = r; result.push(r); }
+    else result.push(r);
+  });
+  fileArr.forEach(function (r) {
+    if (!(isObj(r) && r.id != null)) {
+      var found = false;
+      for (var i = 0; i < result.length; i++) { if (same(result[i], r)) { found = true; break; } }
+      if (!found) { result.push(r); stats.added++; }
+      else stats.same++;
+      return;
+    }
+    if (!byId.hasOwnProperty(r.id)) { byId[r.id] = r; result.push(r); stats.added++; }
+    else if (same(byId[r.id], r)) { stats.same++; }
+    else {
+      stats.conflicts++;
+      conflicts.push({ key: keyLabel, id: r.id, local: shortRec(byId[r.id]), file: shortRec(r), diffs: diffFields(byId[r.id], r) });
+    }
+  });
+  return result;
+}
+
+/* Fusionne deux objets type mdb_production / mdb_paye : sections tableaux par id, reste gardé local */
+function mergeDeepObject(localObj, fileObj, stats, conflicts, keyLabel) {
+  localObj = isObj(localObj) ? localObj : {};
+  fileObj = isObj(fileObj) ? fileObj : {};
+  var out = {};
+  var keys = {};
+  Object.keys(localObj).forEach(function (k) { keys[k] = 1; });
+  Object.keys(fileObj).forEach(function (k) { keys[k] = 1; });
+  Object.keys(keys).forEach(function (k) {
+    var lv = localObj[k], fv = fileObj[k];
+    if (lv === undefined) { out[k] = fv; stats.addedSec++; }
+    else if (fv === undefined) { out[k] = lv; }
+    else if (isArr(lv) && isArr(fv)) { out[k] = mergeArrays(lv, fv, stats, conflicts, keyLabel + '.' + k); }
+    else if (same(lv, fv)) { out[k] = lv; }
+    else { out[k] = lv; stats.scalars++; }
+  });
+  return out;
+}
+
+function mergeTombstones(localT, fileT) {
+  localT = isObj(localT) ? localT : {};
+  fileT = isObj(fileT) ? fileT : {};
+  var out = {};
+  var keys = {};
+  Object.keys(localT).forEach(function (k) { keys[k] = 1; });
+  Object.keys(fileT).forEach(function (k) { keys[k] = 1; });
+  Object.keys(keys).forEach(function (k) {
+    if (k === '__resetAt') { out[k] = Math.max(localT[k] || 0, fileT[k] || 0); return; }
+    out[k] = {};
+    var ids = {};
+    [localT[k], fileT[k]].forEach(function (side) {
+      if (isObj(side)) Object.keys(side).forEach(function (id) {
+        if (!ids.hasOwnProperty(id) || (side[id] || 0) > (ids[id] || 0)) ids[id] = side[id] || 0;
+      });
+    });
+    out[k] = ids;
+  });
+  return out;
+}
+function tombstonedIds(t, entityKey) {
+  var out = {};
+  if (isObj(t) && isObj(t[entityKey])) Object.keys(t[entityKey]).forEach(function (id) { out[id] = 1; });
+  return out;
+}
+
+/* ================= Analyse ================= */
+var FILE_DATA = null;
+var LAST_REPORT = null;
+
+function summarizeSide(getVal) {
+  var rows = [];
+  MANAGED.forEach(function (k) {
+    var v = getVal(k);
+    if (v !== undefined) rows.push(k + ' (' + (isArr(v) ? v.length + ' élém.' : 'objet') + ')');
+  });
+  return rows;
+}
+
+function analyzeData(fileData) {
+  var rep = { keys: [], conflicts: [], dupNumeros: [], purged: 0, ignored: [], merged: {} };
+  var fileT = isObj(fileData.mdb_tombstones) ? fileData.mdb_tombstones : {};
+  var localT = isObj(readLS('mdb_tombstones')) ? readLS('mdb_tombstones') : {};
+  var mergedT = mergeTombstones(localT, fileT);
+  rep.merged.mdb_tombstones = mergedT;
+  var allKeys = {};
+  MANAGED.forEach(function (k) { allKeys[k] = 1; });
+  Object.keys(fileData).forEach(function (k) { if (k.indexOf('mdb_') === 0 && !allKeys[k]) rep.ignored.push(k); });
+
+  MANAGED.forEach(function (key) {
+    var lv = readLS(key);
+    var hasLocal = lv !== undefined;
+    var hasFile = fileData.hasOwnProperty(key) && fileData[key] !== undefined && fileData[key] !== null;
+    var st = { key: key, local: hasLocal ? countArr(lv) : '-', file: hasFile ? countArr(fileData[key]) : '-', added: 0, same: 0, conflicts: 0, purged: 0, scalars: 0, addedSec: 0, result: 0, note: '' };
+    if (key === 'mdb_tombstones') { st.note = 'pierres tombales unies'; st.result = Object.keys(mergedT).length + ' rubriques'; rep.keys.push(st); return; }
+    if (!hasLocal && !hasFile) { return; }
+    if (!hasLocal && hasFile) {
+      rep.merged[key] = fileData[key];
+      st.added = countArr(fileData[key]); st.result = st.added; st.note = 'clé absente ici → reprise telle quelle';
+      rep.keys.push(st); return;
+    }
+    if (hasLocal && !hasFile) { rep.merged[key] = lv; st.result = countArr(lv); st.note = 'absente du fichier → gardée telle quelle'; rep.keys.push(st); return; }
+    /* les deux côtés ont la clé */
+    var fv = fileData[key];
+    if (key === 'mdb_production' || key === 'mdb_paye') {
+      var s2 = { added: 0, same: 0, conflicts: 0, scalars: 0, addedSec: 0 };
+      rep.merged[key] = mergeDeepObject(lv, fv, s2, rep.conflicts, key);
+      st.added = s2.added; st.conflicts = s2.conflicts; st.scalars = s2.scalars; st.addedSec = s2.addedSec;
+      st.result = Object.keys(rep.merged[key]).length + ' sections';
+      rep.keys.push(st); return;
+    }
+    if (['mdb_deletedBLs', 'mdb_deletedFactures', 'mdb_deletedOps', 'mdb_deletedStocks'].indexOf(key) !== -1) {
+      var seen = {}, uni = [];
+      (isArr(lv) ? lv : []).concat(isArr(fv) ? fv : []).forEach(function (r) {
+        var id = (isObj(r) ? r.id : r);
+        if (id == null || seen[id]) return;
+        seen[id] = 1; uni.push(r);
+      });
+      rep.merged[key] = uni;
+      st.added = uni.length - (isArr(lv) ? lv.length : 0); st.result = uni.length;
+      rep.keys.push(st); return;
+    }
+    if (isArr(lv) && isArr(fv)) {
+      var s3 = { added: 0, same: 0, conflicts: 0 };
+      rep.merged[key] = mergeArrays(lv, fv, s3, rep.conflicts, key);
+      st.added = s3.added; st.same = s3.same; st.conflicts = s3.conflicts;
+      st.result = rep.merged[key].length;
+      rep.keys.push(st); return;
+    }
+    /* scalaires / objets sans id : gardé local */
+    rep.merged[key] = lv;
+    if (!same(lv, fv)) { st.scalars = 1; st.note = 'différent → version de CET appareil gardée'; }
+    else st.note = 'identique';
+    st.result = st.local;
+    rep.keys.push(st);
+  });
+
+  /* Appliquer les suppressions (pierres tombales + listes deleted) aux tableaux fusionnés */
+  var purgeMap = { 'mdb_bl': 'mdb_bl', 'mdb_factures': 'mdb_factures', 'mdb_operationsCaisse': 'mdb_operationsCaisse', 'mdb_stocks': 'mdb_stocks' };
+  Object.keys(purgeMap).forEach(function (dataKey) {
+    var arr = rep.merged[dataKey];
+    if (!isArr(arr)) return;
+    var kill = tombstonedIds(mergedT, dataKey);
+    Object.keys(DELETED_MAP).forEach(function (dk) {
+      if (DELETED_MAP[dk] === dataKey && isArr(rep.merged[dk])) {
+        rep.merged[dk].forEach(function (r) { var id = isObj(r) ? r.id : r; if (id != null) kill[id] = 1; });
+      }
+    });
+    var before = arr.length;
+    rep.merged[dataKey] = arr.filter(function (r) { return !(isObj(r) && r.id != null && kill[r.id]); });
+    var n = before - rep.merged[dataKey].length;
+    if (n > 0) {
+      rep.purged += n;
+      for (var i = 0; i < rep.keys.length; i++) if (rep.keys[i].key === dataKey) rep.keys[i].purged = n;
+    }
+  });
+
+  /* Doublons de numéros (même numéro, ids différents) */
+  Object.keys(NUMERO_FIELDS).forEach(function (dataKey) {
+    var arr = rep.merged[dataKey];
+    if (!isArr(arr)) return;
+    var f = NUMERO_FIELDS[dataKey];
+    var seen = {};
+    arr.forEach(function (r) {
+      if (!isObj(r) || !r[f]) return;
+      var n = String(r[f]).trim();
+      if (!seen[n]) seen[n] = [];
+      seen[n].push(r.id);
+    });
+    Object.keys(seen).forEach(function (n) {
+      if (seen[n].length > 1) rep.dupNumeros.push({ key: dataKey, numero: n, ids: seen[n] });
+    });
+  });
+  /* productions / achats / livraisons : même contrôle */
+  var prod = rep.merged.mdb_production;
+  if (isObj(prod)) {
+    [['productions', 'numero'], ['achats', 'reference'], ['livraisons', 'numero']].forEach(function (pair) {
+      var arr = prod[pair[0]];
+      if (!isArr(arr)) return;
+      var seen = {};
+      arr.forEach(function (r) {
+        if (!isObj(r) || !r[pair[1]]) return;
+        var n = String(r[pair[1]]).trim();
+        if (!seen[n]) seen[n] = [];
+        seen[n].push(r.id);
+      });
+      Object.keys(seen).forEach(function (n) {
+        if (seen[n].length > 1) rep.dupNumeros.push({ key: 'mdb_production.' + pair[0], numero: n, ids: seen[n] });
+      });
+    });
+  }
+  return rep;
+}
+
+/* ================= UI ================= */
+function refreshLocalSummary() {
+  var rows = [];
+  var total = 0;
+  MANAGED.forEach(function (k) {
+    var v = readLS(k);
+    if (v !== undefined) { var c = countArr(v); total += (isArr(v) ? c : 0); rows.push(k.replace('mdb_', '') + ':' + (isArr(v) ? c : 'obj')); }
+  });
+  document.getElementById('localSummary').textContent = 'Cet appareil : ' + total + ' enregistrements — ' + rows.join(' · ');
+}
+refreshLocalSummary();
+if (readLS(UNDO_KEY) !== undefined) document.getElementById('undoCard').style.display = '';
+
+document.getElementById('fileInput').addEventListener('change', function () {
+  var f = this.files[0];
+  if (!f) return;
+  var rd = new FileReader();
+  rd.onload = function (ev) {
+    try {
+      var raw = JSON.parse(ev.target.result);
+      var data = (isObj(raw.data) ? raw.data : raw);
+      FILE_DATA = data;
+      var n = 0, keys = [];
+      Object.keys(data).forEach(function (k) { if (k.indexOf('mdb_') === 0) { n++; keys.push(k.replace('mdb_', '')); } });
+      document.getElementById('fileSummary').innerHTML = 'Fichier <strong>' + escH(f.name) + '</strong> : ' + n + ' clés.<br><span class="small">' + escH(keys.slice(0, 30).join(' · ')) + (keys.length > 30 ? ' …' : '') + '</span>';
+      document.getElementById('analyzeCard').style.display = '';
+      document.getElementById('reportBox').innerHTML = '';
+      document.getElementById('applyCard').style.display = 'none';
+      LAST_REPORT = null;
+    } catch (e) { document.getElementById('fileSummary').textContent = 'Erreur : ' + e.message; }
+  };
+  rd.readAsText(f);
+});
+
+function exportAll() {
+  try {
+    var out = {};
+    MANAGED.forEach(function (k) {
+      var v = readLS(k);
+      if (v !== undefined) out[k] = v;
+    });
+    var payload = { app: 'Montabbord', exportedAt: new Date().toISOString(), data: out };
+    var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'fusion-mdb-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 500);
+    document.getElementById('exportMsg').textContent = 'Exporté (' + Object.keys(out).length + ' clés).';
+  } catch (e) { document.getElementById('exportMsg').textContent = 'Erreur : ' + e.message; }
+}
+
+function analyze() {
+  if (!FILE_DATA) return;
+  LAST_REPORT = analyzeData(FILE_DATA);
+  var rep = LAST_REPORT;
+  var h = '';
+  var tA = 0, tC = 0;
+  rep.keys.forEach(function (s) { tA += (s.added || 0); tC += (s.conflicts || 0); });
+  h += '<div class="counts"><span>➕ ajoutés depuis le fichier : <strong>' + tA + '</strong></span>' +
+    '<span>⚠️ conflits (gardé local) : <strong>' + tC + '</strong></span>' +
+    '<span>🗑️ suppressions appliquées : <strong>' + rep.purged + '</strong></span>' +
+    '<span>🔢 N° en double : <strong>' + rep.dupNumeros.length + '</strong></span></div>';
+  if (rep.ignored.length) h += '<div class="info">Clés ignorées (hors périmètre) : ' + escH(rep.ignored.join(', ')) + '</div>';
+  h += '<table><tr><th>Clé</th><th class="num">Ici</th><th class="num">Fichier</th><th class="num">Ajoutés</th><th class="num">Conflits</th><th class="num">Purgés</th><th>Résultat / note</th></tr>';
+  rep.keys.forEach(function (s) {
+    if (!s.added && !s.conflicts && !s.purged && !s.scalars && !s.addedSec) return;
+    h += '<tr><td><strong>' + escH(s.key.replace('mdb_', '')) + '</strong></td>' +
+      '<td class="num">' + escH(String(s.local)) + '</td><td class="num">' + escH(String(s.file)) + '</td>' +
+      '<td class="num">' + (s.added ? '<span class="badge b-add">+' + s.added + '</span>' : '-') + '</td>' +
+      '<td class="num">' + (s.conflicts ? '<span class="badge b-cfl">' + s.conflicts + '</span>' : '-') + '</td>' +
+      '<td class="num">' + (s.purged ? '<span class="badge b-del">-' + s.purged + '</span>' : '-') + '</td>' +
+      '<td class="small">' + escH(String(s.result)) + (s.note ? ' — ' + escH(s.note) : '') + (s.scalars ? ' — <span class="badge b-upd">valeurs locales gardées</span>' : '') + (s.addedSec ? ' — +' + s.addedSec + ' sections' : '') + '</td></tr>';
+  });
+  h += '</table>';
+  if (rep.conflicts.length) {
+    h += '<h2 style="margin-top:14px">⚠️ Conflits à vérifier à la main (' + rep.conflicts.length + ')</h2>';
+    h += '<div class="warn">Même fiche modifiée des deux côtés — la version de <strong>cet appareil</strong> est gardée. Vérifiez surtout les <strong>quantités de stock</strong> ci-dessous et corrigez dans l\u2019application si besoin.</div>';
+    rep.conflicts.slice(0, 60).forEach(function (c, i) {
+      h += '<div style="margin-bottom:8px"><strong>' + (i + 1) + '. ' + escH(c.key) + ' — id ' + escH(String(c.id)).slice(0, 24) + '</strong><br>' +
+        '<span class="small">ICI : ' + escH(c.local) + '<br>FICHIER : ' + escH(c.file) + '</span>';
+      if (c.diffs && c.diffs.length) h += '<pre class="diff">' + escH(c.diffs.slice(0, 8).join('\n')) + '</pre>';
+      h += '</div>';
+    });
+    if (rep.conflicts.length > 60) h += '<p class="small">… +' + (rep.conflicts.length - 60) + ' autres conflits.</p>';
+  } else {
+    h += '<div class="ok">Aucun conflit : les deux côtés se complètent parfaitement. ✅</div>';
+  }
+  if (rep.dupNumeros.length) {
+    h += '<h2 style="margin-top:14px">🔢 Numéros en double (' + rep.dupNumeros.length + ')</h2>';
+    h += '<div class="warn">Même numéro pour des fiches différentes (créées hors-ligne des deux côtés). Renumérotez l\u2019une des deux dans l\u2019application.</div><table>';
+    rep.dupNumeros.forEach(function (d) {
+      h += '<tr><td>' + escH(d.key) + '</td><td><strong>' + escH(d.numero) + '</strong></td><td class="small">' + escH(d.ids.join(', ')) + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  document.getElementById('reportBox').innerHTML = h;
+  document.getElementById('applyCard').style.display = '';
+  document.getElementById('reportBox').scrollIntoView();
+}
+
+function applyMerge() {
+  if (!LAST_REPORT) return;
+  if (!confirm('Appliquer la fusion dans cet appareil ? (Une copie d\u2019annulation sera gardée.)')) return;
+  try {
+    /* Copie d'annulation */
+    var undo = {};
+    Object.keys(LAST_REPORT.merged).forEach(function (k) {
+      var cur = readLS(k);
+      if (cur !== undefined) undo[k] = cur;
+    });
+    try { localStorage.setItem(UNDO_KEY, JSON.stringify({ ts: Date.now(), data: undo })); } catch (e) {
+      if (!confirm('Copie d\u2019annulation impossible (stockage plein). Continuer quand même ?')) return;
+    }
+    var n = 0;
+    Object.keys(LAST_REPORT.merged).forEach(function (k) {
+      try { localStorage.setItem(k, JSON.stringify(LAST_REPORT.merged[k])); n++; } catch (e) {}
+    });
+    try { localStorage.setItem('mdb_fusion_last', JSON.stringify({ ts: Date.now() })); } catch (e) {}
+    document.getElementById('applyMsg').textContent = 'Fusion appliquée (' + n + ' clés écrites). Rechargez l\u2019application pour voir les données.';
+    document.getElementById('undoCard').style.display = '';
+    document.getElementById('applyBtn').disabled = true;
+    refreshLocalSummary();
+  } catch (e) { document.getElementById('applyMsg').textContent = 'Erreur : ' + e.message; }
+}
+
+function undoMerge() {
+  try {
+    var raw = localStorage.getItem(UNDO_KEY);
+    if (!raw) { document.getElementById('undoMsg').textContent = 'Aucune copie d\u2019annulation.'; return; }
+    var undo = JSON.parse(raw);
+    if (!confirm('Restaurer l\u2019état d\u2019avant fusion ?')) return;
+    var n = 0;
+    Object.keys(undo.data || {}).forEach(function (k) {
+      try { localStorage.setItem(k, JSON.stringify(undo.data[k])); n++; } catch (e) {}
+    });
+    document.getElementById('undoMsg').textContent = 'État restauré (' + n + ' clés). Rechargez l\u2019application.';
+    refreshLocalSummary();
+  } catch (e) { document.getElementById('undoMsg').textContent = 'Erreur : ' + e.message; }
+}
+</script>
+</body>
+</html>
