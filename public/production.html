@@ -5077,103 +5077,467 @@ function render_presence() {
   return h;
 }
 
-/* Pointage groupé par fonction/département/type avec marquage collectif */
+/* ==================== POINTAGE CALENDRIER MENSUEL ==================== */
 function renderPointageGrouped() {
   var personnel = getPersonnel();
   var presences = getPresence();
-  var depts = getDepartementsFromPaye();
   var funcs = getFonctionsFromPaye();
-  var selDate = (document.getElementById('ptDate') || {}).value || today();
-  var dayPres = presences.filter(function(p) { return p.date === selDate; });
-  var presentIds = dayPres.filter(function(p) { return p.statut === 'present'; }).map(function(p) { return p.employee_id; });
-  var absentIds = dayPres.filter(function(p) { return p.statut === 'absent'; }).map(function(p) { return p.employee_id; });
-
-  var h = '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem;align-items:center">';
-  h += '<input type="date" id="ptDate" value="' + selDate + '" onchange="renderPage()" class="search-box" style="min-width:180px">';
-  h += '<button class="btn btn-accent" onclick="markCollectivePresence(\'present\')">✅ Tous Présents</button>';
-  h += '<button class="btn" onclick="markCollectivePresence(\'absent\')">❌ Tous Absents</button>';
-  h += '<button class="btn" onclick="markCollectivePresence(\'conge\')">🏖️ Tous Congés</button>';
-  h += '<button class="btn btn-red" onclick="clearDayPresence()">🗑️ Effacer jour</button>';
-  h += '</div>';
-
-  /* Filtres */
-  h += '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem;align-items:center">';
-  h += '<select id="ptFilterDept" onchange="renderPage()" style="min-width:180px"><option value="">🏢 Tous départements</option>';
-  depts.forEach(function(d) { h += '<option value="' + escH(d) + '">' + escH(d) + '</option>'; });
-  h += '</select>';
-  h += '<select id="ptFilterFonction" onchange="renderPage()" style="min-width:180px"><option value="">👷 Toutes fonctions</option>';
-  funcs.forEach(function(f) { h += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
-  h += '</select>';
-  h += '<select id="ptFilterType" onchange="renderPage()" style="min-width:150px"><option value="">📋 Type pointage</option><option value="jour">Jour</option><option value="nuit">Nuit</option><option value="mixte">Mixte</option></select>';
-  h += '<span style="margin-left:auto;font-size:.8rem;color:var(--dim)">📅 ' + selDate + '</span>';
-  h += '</div>';
-
-  var deptFilter = getSection('ptFilterDept', '');
+  var selMonth = parseInt(document.getElementById('ptMonth') || {}.value || (new Date().getMonth() + 1));
+  var selYear = parseInt(document.getElementById('ptYear') || {}.value || new Date().getFullYear());
+  var daysInMonth = new Date(selYear, selMonth, 0).getDate();
   var foncFilter = getSection('ptFilterFonction', '');
-  var typeFilter = getSection('ptFilterType', '');
-
+  var searchQ = (document.getElementById('ptSearch') || {}).value || '';
   var filtered = personnel;
-  if (deptFilter) filtered = filtered.filter(function(e) { return (e.service || '') === deptFilter; });
   if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
-  if (typeFilter === 'jour') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') === -1; });
-  else if (typeFilter === 'nuit') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') !== -1; });
+  if (searchQ) { var q = searchQ.toLowerCase(); filtered = filtered.filter(function(e) { return ((e.nom || '') + ' ' + (e.prenoms || '') + ' ' + (e.matricule || '')).toLowerCase().indexOf(q) !== -1; }); }
 
-  if (filtered.length === 0) return h + '<div class="empty">Aucun personnel pour ces filtres</div>';
+  var h = '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem;align-items:center">';
+  h += '<select id="ptMonth" onchange="renderPage()" style="min-width:110px">';
+  var monthNames = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  for (var m = 1; m <= 12; m++) h += '<option value="' + m + '"' + (m === selMonth ? ' selected' : '') + '>' + monthNames[m-1] + '</option>';
+  h += '</select>';
+  h += '<select id="ptYear" onchange="renderPage()" style="min-width:80px">';
+  for (var y = new Date().getFullYear() - 2; y <= new Date().getFullYear() + 1; y++) h += '<option value="' + y + '"' + (y === selYear ? ' selected' : '') + '>' + y + '</option>';
+  h += '</select>';
+  h += '<select id="ptFilterFonction" onchange="renderPage()" style="min-width:160px"><option value="">Toutes fonctions</option>';
+  funcs.forEach(function(f) { h += '<option value="' + escH(f) + '"' + (foncFilter === f ? ' selected' : '') + '>' + escH(f) + '</option>'; });
+  h += '</select>';
+  h += '<input type="text" id="ptSearch" placeholder="Nom ou matricule..." oninput="renderPage()" class="search-box" value="' + escH(searchQ) + '" style="min-width:150px">';
+  h += '</div>';
 
-  /* Groupé par fonction */
-  var byFonction = {};
+  h += '<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem">';
+  h += '<button class="btn" onclick="printPointageFiches()" style="font-size:.75rem">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="exportPointagePDF()" style="font-size:.75rem">📄 PDF</button>';
+  h += '<button class="btn" onclick="showPrintFichesModal()" style="font-size:.75rem">📋 Fiches</button>';
+  h += '<button class="btn" onclick="showEffacerPointagesModal()" style="font-size:.75rem;background:var(--red);color:#fff">🗑️ Effacer pointages</button>';
+  h += '<button class="btn" onclick="showGenererMoisModal()" style="font-size:.75rem;background:var(--accent);color:#fff">📅 Générer mois complet</button>';
+  h += '<button class="btn btn-accent" onclick="showPointageGroupeModal()" style="font-size:.75rem">👥 Pointage groupé</button>';
+  h += '<button class="btn" onclick="renderPage()" style="font-size:.75rem">🔄 Actualiser</button>';
+  h += '</div>';
+
+  if (!filtered.length) return h + '<div class="empty">Aucun personnel pour ces filtres</div>';
+
+  h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.72rem;min-width:' + (180 + daysInMonth * 38) + 'px">';
+  h += '<tr style="background:var(--accent);color:#fff;position:sticky;top:0;z-index:2"><th style="position:sticky;left:0;z-index:3;background:var(--accent);min-width:170px;padding:6px 8px;text-align:left">EMPLOYÉ</th>';
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dt = new Date(selYear, selMonth - 1, d);
+    var dow = dt.getDay();
+    var isWeekend = dow === 0 || dow === 6;
+    var bg = isWeekend ? '#f59e0b' : 'transparent';
+    h += '<th style="width:38px;padding:4px 2px;text-align:center;background:' + bg + (isWeekend ? ';color:#000' : '') + '">' + d + '</th>';
+  }
+  h += '</tr>';
+
   filtered.forEach(function(e) {
-    var f = (e.fonction || 'Sans fonction').trim();
-    if (!byFonction[f]) byFonction[f] = [];
-    byFonction[f].push(e);
+    h += '<tr style="border-bottom:1px solid var(--border)">';
+    h += '<td style="position:sticky;left:0;z-index:1;background:var(--card);padding:6px 8px;white-space:nowrap"><strong style="font-size:.78rem">' + escH(e.nom + ' ' + (e.prenoms || '')) + '</strong><br><span style="font-size:.65rem;color:var(--dim)">' + escH((e.fonction || '').toUpperCase()) + '</span></td>';
+    for (var d = 1; d <= daysInMonth; d++) {
+      var dateStr = selYear + '-' + String(selMonth).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+      var p = presences.find(function(p) { return p.employee_id === e.id && p.date === dateStr; });
+      var dt = new Date(selYear, selMonth - 1, d);
+      var dow = dt.getDay();
+      var isWeekend = dow === 0 || dow === 6;
+      var cellBg = isWeekend ? '#fffbeb' : (p && p.statut === 'present' ? '#f0fdf4' : p && p.statut === 'absent' ? '#fef2f2' : p && p.statut === 'conge' ? '#eff6ff' : 'transparent');
+      var txt = '-', title = '';
+      if (p) {
+        if (p.statut === 'present') {
+          txt = (p.heure_arrivee || '').substring(0,5) + '-' + (p.heure_depart || '').substring(0,5);
+          title = 'Présent ' + (p.heures_jour || 0) + 'h jour' + ((p.heures_nuit || 0) > 0 ? ' + ' + p.heures_nuit + 'h nuit' : '');
+        } else if (p.statut === 'absent') { txt = 'A'; title = 'Absent'; cellBg = '#fef2f2'; }
+        else if (p.statut === 'conge') { txt = 'C'; title = 'Congé'; cellBg = '#eff6ff'; }
+        else if (p.statut === 'permission') { txt = 'P'; title = 'Permission'; }
+      }
+      h += '<td style="text-align:center;padding:3px 1px;cursor:pointer;background:' + cellBg + ';border:1px solid var(--border);font-size:.68rem;font-weight:' + (p && p.statut === 'present' ? '700' : '400') + '" title="' + escH(title) + '" onclick="openPointageCell(\'' + e.id + '\',\'' + dateStr + '\')">' + txt + '</td>';
+    }
+    h += '</tr>';
   });
-
-  Object.keys(byFonction).sort().forEach(function(fonction) {
-    var list = byFonction[fonction];
-    var presentCount = list.filter(function(e) { return presentIds.indexOf(e.id) >= 0; }).length;
-    var absentCount = list.filter(function(e) { return absentIds.indexOf(e.id) >= 0; }).length;
-    var congeCount = list.filter(function(e) {
-      var p = dayPres.find(function(p) { return p.employee_id === e.id; });
-      return p && p.statut === 'conge';
-    }).length;
-
-    h += '<div class="card" style="margin-bottom:1rem">';
-    h += '<div style="display:flex;justify-content:space-between;align-items:center;padding:.5rem;background:#f8fafc;border-bottom:1px solid var(--border)">';
-    h += '<strong style="font-size:.9rem">👷 ' + escH(fonction) + ' <span style="color:var(--dim);font-weight:400;font-size:.75rem">(' + list.length + ' personnes)</span></strong>';
-    h += '<div style="display:flex;gap:.5rem;align-items:center;font-size:.75rem">';
-    h += '<span style="color:var(--green)">✅ ' + presentCount + ' présents</span>';
-    h += '<span style="color:var(--red)">❌ ' + absentCount + ' absents</span>';
-    if (congeCount) h += '<span style="color:var(--blue)">🏖️ ' + congeCount + ' congés</span>';
-    h += '<button class="btn" onclick="markFonctionCollective(\'' + escH(fonction) + '\',\'present\')" style="font-size:.65rem">✅ Tous présents</button>';
-    h += '<button class="btn" onclick="markFonctionCollective(\'' + escH(fonction) + '\',\'absent\')" style="font-size:.65rem">❌ Tous absents</button>';
-    h += '<button class="btn" onclick="markFonctionCollective(\'' + escH(fonction) + '\',\'conge\')" style="font-size:.65rem">🏖️ Congés</button>';
-    h += '</div></div>';
-
-    h += '<div class="card"><table style="width:100%;font-size:.78rem"><tr><th>Employé</th><th>Matricule</th><th>Statut</th><th>Arrivée</th><th>Départ</th><th>H.Jour</th><th>H.Nuit</th><th>Faute soc.</th><th>Actions</th></tr>';
-    list.forEach(function(e) {
-      var p = dayPres.find(function(p) { return p.employee_id === e.id; });
-      var statut = p ? p.statut : '—';
-      var arr = p ? (p.heure_arrivee || '—') : '—';
-      var dep = p ? (p.heure_depart || '—') : '—';
-      var hj = p ? (p.heures_jour || 0) : 0;
-      var hn = p ? (p.heures_nuit || 0) : 0;
-      var faute = p && p.faute_societe ? '🏢' : '—';
-      var badge = p ? badgeStatut(p.statut) : '<span style="color:var(--dim)">—</span>';
-      h += '<tr><td>' + escH(e.nom + ' ' + (e.prenoms || '')) + '</td><td>' + escH(e.matricule || '-') + '</td><td>' + badge + '</td><td>' + escH(arr) + '</td><td>' + escH(dep) + '</td><td>' + hj + 'h</td><td>' + hn + 'h</td><td>' + faute + '</td><td>';
-      h += '<select onchange="updateSinglePresence(\'' + e.id + '\',this.value)" style="font-size:.7rem;padding:2px">';
-      h += '<option value="present"' + (statut === 'present' ? ' selected' : '') + '>Présent</option>';
-      h += '<option value="absent"' + (statut === 'absent' ? ' selected' : '') + '>Absent</option>';
-      h += '<option value="conge"' + (statut === 'conge' ? ' selected' : '') + '>Congé</option>';
-      h += '<option value="permission"' + (statut === 'permission' ? ' selected' : '') + '>Permission</option>';
-      h += '<option value=""' + (!p ? ' selected' : '') + '>— Non pointé</option>';
-      h += '</select>';
-      h += ' <button class="btn btn-red" onclick="deletePresence(\'' + (p ? p.id : '') + '\')" style="font-size:.6rem">🗑️</button>';
-      h += '</td></tr>';
-    });
-    h += '</table></div></div>';
-  });
+  h += '</table></div>';
   return h;
 }
+
+function openPointageCell(empId, dateStr) {
+  var emp = getPersonnel().find(function(e) { return e.id === empId; });
+  if (!emp) return;
+  var pres = getPresence().find(function(p) { return p.employee_id === empId && p.date === dateStr; });
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
+  m += '<h2>📝 Pointage — ' + escH(emp.nom + ' ' + (emp.prenoms || '')) + '</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">📅 ' + dateStr + ' · ' + escH(emp.fonction || '') + '</p>';
+  m += '<div style="display:flex;gap:.5rem;margin-bottom:.8rem">';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="present"' + (pres && pres.statut === 'present' ? ' checked' : '') + '> ✅ Présent</label>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="absent"' + (pres && pres.statut === 'absent' ? ' checked' : '') + '> ❌ Absent</label>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="conge"' + (pres && pres.statut === 'conge' ? ' checked' : '') + '> 🏖️ Congé</label>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="permission"' + (pres && pres.statut === 'permission' ? ' checked' : '') + '> 📋 Permission</label>';
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('pcArrivee', 'Arrivée', pres ? pres.heure_arrivee || '08:00' : '08:00', 'time', false);
+  m += formField('pcDepart', 'Départ', pres ? pres.heure_depart || '17:00' : '17:00', 'time', false);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('pcHeuresJour', 'Heures jour', pres ? pres.heures_jour || 8 : 8, 'number', false);
+  m += formField('pcHeuresNuit', 'Heures nuit', pres ? pres.heures_nuit || 0 : 0, 'number', false);
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="savePointageCell(\'' + empId + '\',\'' + dateStr + '\')">✅ Enregistrer</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function savePointageCell(empId, dateStr) {
+  var statut = (document.querySelector('input[name="pcStatut"]:checked') || {}).value || 'present';
+  var arr = (document.getElementById('pcArrivee') || {}).value || '08:00';
+  var dep = (document.getElementById('pcDepart') || {}).value || '17:00';
+  var hj = parseFloat((document.getElementById('pcHeuresJour') || {}).value) || 0;
+  var hn = parseFloat((document.getElementById('pcHeuresNuit') || {}).value) || 0;
+  var presences = getPresence();
+  var existing = presences.find(function(p) { return p.employee_id === empId && p.date === dateStr; });
+  if (statut === '') {
+    if (existing) presences = presences.filter(function(p) { return !(p.employee_id === empId && p.date === dateStr); });
+  } else {
+    if (existing) { existing.statut = statut; existing.heure_arrivee = arr; existing.heure_depart = dep; existing.heures_jour = hj; existing.heures_nuit = hn; }
+    else presences.push({ id: genId(), employee_id: empId, date: dateStr, statut: statut, heure_arrivee: arr, heure_depart: dep, heures_jour: hj, heures_nuit: hn });
+  }
+  setPresence(presences);
+  document.getElementById('modalOverlay').remove();
+  toast('Pointage enregistré');
+  renderPage();
+}
+
+/* ==================== MODAL POINTAGE GROUPE ==================== */
+function showPointageGroupeModal() {
+  var funcs = getFonctionsFromPaye();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:600px">';
+  m += '<h2>👥 Pointage groupé</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Sélectionnez les employés et saisissez les horaires à appliquer</p>';
+  m += formField('pgDate', 'Date', today(), 'date', true);
+  m += '<label style="display:flex;align-items:center;gap:.3rem;margin:.8rem 0;cursor:pointer;color:var(--red)"><input type="checkbox" id="pgMarquerAbsent"> Marquer comme absent (pour tous les employés sélectionnés)</label>';
+  m += '<div class="card" style="padding:.8rem;margin-bottom:.8rem">';
+  m += '<strong style="font-size:.8rem">Horaires globaux à appliquer</strong>';
+  m += '<div class="form-row" style="margin-top:.5rem">';
+  m += formField('pgArrivee', 'Arrivée', '08:00', 'time', false);
+  m += formField('pgPauseDeb', 'Pause début', '12:00', 'time', false);
+  m += '</div><div class="form-row">';
+  m += formField('pgPauseFin', 'Pause fin', '13:00', 'time', false);
+  m += formField('pgDepart', 'Départ', '17:00', 'time', false);
+  m += '</div>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;margin-top:.5rem;cursor:pointer"><input type="checkbox" id="pgNuit"> Pointage Nuit</label>';
+  m += '</div>';
+  m += '<div class="card" style="padding:.8rem;margin-bottom:.8rem">';
+  m += '<strong style="font-size:.8rem;color:var(--accent)">Gestion des heures à rattraper (Groupé)</strong>';
+  m += '<div class="form-row" style="margin-top:.5rem">';
+  m += formField('pgHeuresGagnees', 'Heures gagnées', '0', 'number', false);
+  m += formField('pgHeuresRattrapage', 'Heures utilisées (Rattrapage)', '0', 'number', false);
+  m += '</div>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;margin-top:.5rem;cursor:pointer"><input type="checkbox" id="pgMarquerRattrapage"> Marquer comme jour de rattrapage (groupe)</label>';
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-bottom:.8rem;align-items:center">';
+  m += '<select id="pgFonctionFilter" onchange="renderPointageGroupeList()" style="min-width:160px"><option value="">Toutes les fonctions</option>';
+  funcs.forEach(function(f) { m += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
+  m += '</select>';
+  m += '<input type="text" id="pgSearch" placeholder="Nom ou matricule..." oninput="renderPointageGroupeList()" class="search-box" style="min-width:150px">';
+  m += '</div>';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="pgSelectAll" onchange="pgToggleAll(this.checked)"> Tout sélectionner (<span id="pgCount">0</span> sélectionné(s))</label>';
+  m += '<span style="font-size:.75rem;color:var(--dim)">Présents ce jour</span>';
+  m += '</div>';
+  m += '<div id="pgEmployeeList" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem"></div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="applyPointageGroupe()">✅ Appliquer</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
+  m += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+  renderPointageGroupeList();
+}
+
+function renderPointageGroupeList() {
+  var personnel = getPersonnel();
+  var presences = getPresence();
+  var date = (document.getElementById('pgDate') || {}).value || today();
+  var foncFilter = (document.getElementById('pgFonctionFilter') || {}).value;
+  var search = ((document.getElementById('pgSearch') || {}).value || '').toLowerCase();
+  var filtered = personnel;
+  if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
+  if (search) filtered = filtered.filter(function(e) { return ((e.nom || '') + ' ' + (e.prenoms || '') + ' ' + (e.matricule || '')).toLowerCase().indexOf(search) !== -1; });
+  var dayPres = presences.filter(function(p) { return p.date === date; });
+  var presentIds = dayPres.filter(function(p) { return p.statut === 'present'; }).map(function(p) { return p.employee_id; });
+  var el = document.getElementById('pgEmployeeList');
+  if (!el) return;
+  var h = '';
+  filtered.forEach(function(e) {
+    var isPresent = presentIds.indexOf(e.id) !== -1;
+    h += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
+    h += '<input type="checkbox" class="pg-emp" value="' + e.id + '"' + (isPresent ? ' checked' : '') + '>';
+    h += '<span style="font-size:.78rem"><strong>' + escH(e.matricule || '—') + '</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + '</span>';
+    h += '<span style="margin-left:auto;font-size:.65rem;color:var(--dim)">' + escH((e.fonction || '').toUpperCase()) + '</span>';
+    h += '</label>';
+  });
+  el.innerHTML = h || '<div style="padding:.5rem;color:var(--dim);font-size:.8rem">Aucun employé</div>';
+  document.getElementById('pgCount').textContent = filtered.length;
+}
+
+function pgToggleAll(checked) {
+  document.querySelectorAll('.pg-emp').forEach(function(cb) { cb.checked = checked; });
+}
+
+function applyPointageGroupe() {
+  var date = (document.getElementById('pgDate') || {}).value || today();
+  var absent = (document.getElementById('pgMarquerAbsent') || {}).checked;
+  var arr = (document.getElementById('pgArrivee') || {}).value || '08:00';
+  var dep = (document.getElementById('pgDepart') || {}).value || '17:00';
+  var nuit = (document.getElementById('pgNuit') || {}).checked;
+  var checked = document.querySelectorAll('.pg-emp:checked');
+  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
+  var presences = getPresence();
+  var count = 0;
+  checked.forEach(function(cb) {
+    var empId = cb.value;
+    var statut = absent ? 'absent' : 'present';
+    var existing = presences.find(function(p) { return p.employee_id === empId && p.date === date; });
+    if (existing) { existing.statut = statut; existing.heure_arrivee = absent ? '' : arr; existing.heure_depart = absent ? '' : dep; }
+    else presences.push({ id: genId(), employee_id: empId, date: date, statut: statut, heure_arrivee: absent ? '' : arr, heure_depart: absent ? '' : dep, heures_jour: absent ? 0 : 8, heures_nuit: nuit ? 8 : 0 });
+    count++;
+  });
+  setPresence(presences);
+  document.getElementById('modalOverlay').remove();
+  toast('Pointage groupé appliqué à ' + count + ' employé(s)');
+  renderPage();
+}
+
+/* ==================== MODAL GENERER MOIS COMPLET ==================== */
+function showGenererMoisModal() {
+  var personnel = getPersonnel();
+  var funcs = getFonctionsFromPaye();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:500px">';
+  m += '<h2>📅 Générer pointage (Standard 173.33h)</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Génération automatique des 8h de travail pour les employés de type Standard</p>';
+  m += formField('gmPeriode', 'Période à générer', 'Tout le mois (' + (new Date().getMonth()+1) + '/' + new Date().getFullYear() + ')', 'text', false);
+  m += '<strong style="font-size:.8rem;margin:1rem 0 .5rem;display:block">Employés concernés</strong>';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="gmSelectAll" onchange="gmToggleAll(this.checked)"> Tout sélectionner</label>';
+  m += '<span id="gmCount" style="font-size:.75rem;color:var(--dim)">' + personnel.length + ' employé(s)</span>';
+  m += '</div>';
+  m += '<div id="gmEmployeeList" style="max-height:250px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem">';
+  personnel.forEach(function(e) {
+    m += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
+    m += '<input type="checkbox" class="gm-emp" value="' + e.id + '" checked>';
+    m += '<span style="font-size:.78rem"><strong>[' + escH(e.matricule || '—') + ']</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + '</span>';
+    m += '</label>';
+  });
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="applyGenererMois()">📅 Générer pour ' + personnel.length + ' employé(s)</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
+  m += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function gmToggleAll(checked) {
+  document.querySelectorAll('.gm-emp').forEach(function(cb) { cb.checked = checked; });
+}
+
+function applyGenererMois() {
+  var now = new Date();
+  var year = now.getFullYear();
+  var month = now.getMonth() + 1;
+  var daysInMonth = new Date(year, month, 0).getDate();
+  var checked = document.querySelectorAll('.gm-emp:checked');
+  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
+  var presences = getPresence();
+  var count = 0;
+  checked.forEach(function(cb) {
+    var empId = cb.value;
+    for (var d = 1; d <= daysInMonth; d++) {
+      var dt = new Date(year, month - 1, d);
+      var dow = dt.getDay();
+      if (dow === 0 || dow === 6) continue;
+      var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+      var existing = presences.find(function(p) { return p.employee_id === empId && p.date === dateStr; });
+      if (!existing) {
+        presences.push({ id: genId(), employee_id: empId, date: dateStr, statut: 'present', heure_arrivee: '08:00', heure_depart: '17:00', heures_jour: 8, heures_nuit: 0 });
+        count++;
+      }
+    }
+  });
+  setPresence(presences);
+  document.getElementById('modalOverlay').remove();
+  toast(count + ' pointages générés automatiquement');
+  renderPage();
+}
+
+/* ==================== MODAL EFFACER POINTAGES ==================== */
+function showEffacerPointagesModal() {
+  var funcs = getFonctionsFromPaye();
+  var now = new Date();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:500px">';
+  m += '<h2 style="color:var(--red)">🗑️ Effacer des pointages</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Sélectionnez la période et filtrez les employés pour effacer les pointages.</p>';
+  m += '<div class="form-row">';
+  m += formField('epDateDebut', 'Date début', now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-01', 'date', true);
+  m += formField('epDateFin', 'Date fin', now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(), 'date', true);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += '<div><label style="font-size:.75rem;color:var(--dim);display:block;margin-bottom:2px">Type de pointage</label><select id="epType" style="width:100%"><option value="">Tous les types</option><option value="jour">Jour</option><option value="nuit">Nuit</option></select></div>';
+  m += '<div><label style="font-size:.75rem;color:var(--dim);display:block;margin-bottom:2px">Fonction</label><select id="epFonction" style="width:100%"><option value="">Toutes les fonctions</option>';
+  funcs.forEach(function(f) { m += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
+  m += '</select></div></div>';
+  m += '<strong style="font-size:.8rem;margin:1rem 0 .5rem;display:block">Employés concernés <span id="epCount" style="font-weight:400;color:var(--dim)">(0 sélectionné(s))</span></strong>';
+  m += '<div style="display:flex;justify-content:flex-end;margin-bottom:.5rem"><label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="epSelectAll" onchange="epToggleAll(this.checked)"> Tout sélectionner</label></div>';
+  m += '<div id="epEmployeeList" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem">';
+  getPersonnel().forEach(function(e) {
+    m += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
+    m += '<input type="checkbox" class="ep-emp" value="' + e.id + '">';
+    m += '<span style="font-size:.78rem"><strong>[' + escH(e.matricule || '—') + ']</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + '</span>';
+    m += '</label>';
+  });
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-red" onclick="applyEffacerPointages()">🗑️ Confirmer la suppression</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
+  m += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function epToggleAll(checked) {
+  document.querySelectorAll('.ep-emp').forEach(function(cb) { cb.checked = checked; });
+}
+
+function applyEffacerPointages() {
+  var d1 = (document.getElementById('epDateDebut') || {}).value;
+  var d2 = (document.getElementById('epDateFin') || {}).value;
+  if (!d1 || !d2) return toast('Dates requises', 'error');
+  var checked = document.querySelectorAll('.ep-emp:checked');
+  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
+  var empIds = Array.from(checked).map(function(cb) { return cb.value; });
+  if (!confirm2('Supprimer les pointages du ' + d1 + ' au ' + d2 + ' pour ' + empIds.length + ' employé(s) ?')) return;
+  var presences = getPresence().filter(function(p) {
+    if (p.date < d1 || p.date > d2) return true;
+    return empIds.indexOf(p.employee_id) === -1;
+  });
+  setPresence(presences);
+  document.getElementById('modalOverlay').remove();
+  toast('Pointages supprimés');
+  renderPage();
+}
+
+/* ==================== MODAL IMPRIMER FICHES ==================== */
+function showPrintFichesModal() {
+  var funcs = getFonctionsFromPaye();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:500px">';
+  m += '<h2>🖨️ Imprimer Fiches de Pointage</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Sélectionnez les employés pour générer leur fiche individuelle de pointage au format PDF.</p>';
+  m += '<div style="margin-bottom:1rem"><select id="pfFonction" onchange="renderPrintFichesList()" style="width:100%"><option value="">Toutes les fonctions</option>';
+  funcs.forEach(function(f) { m += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
+  m += '</select></div>';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="pfSelectAll" onchange="pfToggleAll(this.checked)"> Tout sélectionner</label>';
+  m += '<span id="pfCount" style="font-size:.75rem;color:var(--dim)"></span>';
+  m += '</div>';
+  m += '<div id="pfEmployeeList" style="max-height:250px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem"></div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn" onclick="printSelectedFiches()">🖨️ Imprimer direct</button><button class="btn btn-accent" onclick="downloadSelectedFiches()">📄 Télécharger PDF</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
+  m += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+  renderPrintFichesList();
+}
+
+function renderPrintFichesList() {
+  var personnel = getPersonnel();
+  var foncFilter = (document.getElementById('pfFonction') || {}).value;
+  var filtered = foncFilter ? personnel.filter(function(e) { return (e.fonction || '') === foncFilter; }) : personnel;
+  var el = document.getElementById('pfEmployeeList');
+  if (!el) return;
+  var h = '';
+  filtered.forEach(function(e) {
+    h += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
+    h += '<input type="checkbox" class="pf-emp" value="' + e.id + '" checked>';
+    h += '<span style="font-size:.78rem"><strong>[' + escH(e.matricule || '—') + ']</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + ' <span style="color:var(--dim)">(' + escH((e.fonction || '').toUpperCase()) + ')</span></span>';
+    h += '</label>';
+  });
+  el.innerHTML = h || '<div style="padding:.5rem;color:var(--dim)">Aucun employé</div>';
+  document.getElementById('pfCount').textContent = filtered.length + ' employé(s)';
+}
+
+function pfToggleAll(checked) {
+  document.querySelectorAll('.pf-emp').forEach(function(cb) { cb.checked = checked; });
+}
+
+function getSelectedFicheEmpIds() {
+  return Array.from(document.querySelectorAll('.pf-emp:checked')).map(function(cb) { return cb.value; });
+}
+
+function buildFichePointageHTML(emp) {
+  var pres = getPresence();
+  var now = new Date();
+  var year = now.getFullYear();
+  var month = now.getMonth() + 1;
+  var daysInMonth = new Date(year, month, 0).getDate();
+  var monthNames = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+  var html = '<html><head><style>body{font-family:Arial,sans-serif;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #ccc;padding:4px 6px;text-align:left}th{background:#f0f0f0;font-size:10px}td{font-size:10px}.header{text-align:center;margin-bottom:15px}.summary{margin-top:15px;display:flex;gap:20px}.summary-box{border:1px solid #ccc;padding:8px;flex:1}</style></head><body>';
+  html += '<div class="header"><strong>Fiche de pointage détaillée</strong></div>';
+  html += '<div style="font-size:10px;margin-bottom:10px">Employé: <strong>' + escH(emp.nom + ' ' + (emp.prenoms || '')) + '</strong> | Matricule: ' + escH(emp.matricule || '—') + ' | Fonction: ' + escH((emp.fonction || '').toUpperCase()) + '</div>';
+  html += '<table><tr><th>Date</th><th>Pointages</th><th>Jour (H)</th><th>Nuit (H)</th><th>Total (H)</th><th>Rendement</th><th>Observations</th></tr>';
+  var totalJour = 0, totalNuit = 0;
+  for (var d = 1; d <= daysInMonth; d++) {
+    var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+    var dt = new Date(year, month - 1, d);
+    var dayNames = ['dim.','lun.','mar.','mer.','jeu.','ven.','sam.'];
+    var label = dayNames[dt.getDay()] + ' ' + String(d).padStart(2,'0') + '/' + String(month).padStart(2,'0');
+    var p = pres.find(function(p) { return p.employee_id === emp.id && p.date === dateStr; });
+    var ptg = p ? (p.heure_arrivee || '') + '-' + (p.heure_depart || '') : '-';
+    var hj = p ? (parseFloat(p.heures_jour) || 0) : 0;
+    var hn = p ? (parseFloat(p.heures_nuit) || 0) : 0;
+    totalJour += hj;
+    totalNuit += hn;
+    html += '<tr><td>' + label + '</td><td>' + ptg + '</td><td>' + hj + '</td><td>' + hn + '</td><td>' + (hj + hn) + '</td><td>-</td><td>' + (p ? (p.statut || '') : '') + '</td></tr>';
+  }
+  html += '</table>';
+  html += '<div class="summary">';
+  html += '<div class="summary-box"><strong>Total Heures Jour :</strong> ' + totalJour + 'h<br><strong>Total Heures Nuit :</strong> ' + totalNuit + 'h<br><strong>TOTAL MENSUEL :</strong> ' + (totalJour + totalNuit) + 'h</div>';
+  html += '<div class="summary-box"><strong>Heures à rattraper</strong><br>Total gagné: 0h<br>Total rattrapage: 0h</div>';
+  html += '<div class="summary-box"><strong>Solde Restant à rattraper</strong><br><span style="font-size:20px;font-weight:800">' + (totalJour + totalNuit) + 'h</span></div>';
+  html += '</div></body></html>';
+  return html;
+}
+
+function printSelectedFiches() {
+  var ids = getSelectedFicheEmpIds();
+  if (!ids.length) return toast('Sélectionnez au moins un employé', 'error');
+  var personnel = getPersonnel();
+  ids.forEach(function(id) {
+    var emp = personnel.find(function(e) { return e.id === id; });
+    if (!emp) return;
+    var win = window.open('', '_blank');
+    win.document.write(buildFichePointageHTML(emp));
+    win.document.close();
+    win.print();
+  });
+  toast(ids.length + ' fiche(s) envoyée(s) à l\'impression');
+}
+
+function downloadSelectedFiches() {
+  var ids = getSelectedFicheEmpIds();
+  if (!ids.length) return toast('Sélectionnez au moins un employé', 'error');
+  if (typeof window.jspdf === 'undefined') return toast('jsPDF non chargé', 'error');
+  var personnel = getPersonnel();
+  var doc = new window.jspdf.jsPDF();
+  var first = true;
+  ids.forEach(function(id) {
+    var emp = personnel.find(function(e) { return e.id === id; });
+    if (!emp) return;
+    if (!first) doc.addPage();
+    first = false;
+    var html = buildFichePointageHTML(emp);
+    doc.html(html, { callback: function(d) { d.save('Fiche_Pointage_' + (emp.matricule || emp.nom) + '.pdf'); }, x: 5, y: 5, width: 200, windowWidth: 700 });
+  });
+  toast(ids.length + ' fiche(s) téléchargée(s)');
+}
+
+function exportPointagePDF() {
+  if (typeof window.jspdf === 'undefined') return toast('jsPDF non chargé', 'error');
+  var ids = getPersonnel().map(function(e) { return e.id; });
+  var doc = new window.jspdf.jsPDF();
+  var first = true;
+  ids.forEach(function(id) {
+    var emp = getPersonnel().find(function(e) { return e.id === id; });
+    if (!emp) return;
+    if (!first) doc.addPage();
+    first = false;
+    doc.html(buildFichePointageHTML(emp), { callback: function(d) { d.save('Pointage_Compact_' + new Date().toISOString().slice(0,10) + '.pdf'); }, x: 5, y: 5, width: 200, windowWidth: 700 });
+  });
+  toast('PDF exporté');
+}
+
+function printPointageFiches() { printSelectedFiches(); }
 
 function markCollectivePresence(statut) {
   var deptFilter = getSection('ptFilterDept', '');
