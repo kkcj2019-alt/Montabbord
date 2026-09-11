@@ -2751,6 +2751,184 @@ function snapInitialTotalVol(snap) {
   (snap.wip || []).forEach(function(w) { t += (w.vol || 0); });
   return t;
 }
+
+/* ==================== ONGLET STOCK BL : accordéon BL → colis → mouvements ====================
+   Résidus pilotés par le stock (l'inventaire prime sur tout : qté + volume résiduels lus sur l'entrée stock) */
+function colisSorties(colisCode) {
+  var out = [];
+  if (!colisCode) return out;
+  getProductions().forEach(function(p) {
+    (p.sortie_bois || []).forEach(function(sb) {
+      if ((sb.code || '') === colisCode) {
+        out.push({ date: p.date || '', numero: p.numero || '', qte: parseFloat(sb.qte) || 0, vol: parseFloat(sb.volume) || 0 });
+      }
+    });
+  });
+  out.sort(function(a, b) { return String(a.date).localeCompare(String(b.date)); });
+  return out;
+}
+function dateLong(d) {
+  if (!d) return '-';
+  try {
+    var dt = new Date(d + 'T00:00:00');
+    if (isNaN(dt.getTime())) return d;
+    return dt.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+  } catch (e) { return d; }
+}
+function blFilterTable(q) {
+  q = (q || '').toLowerCase();
+  (window._blTabData || []).forEach(function(b) {
+    var txt = ((b.a.reference || '') + ' ' + (b.a.fournisseur || '') + ' ' + (b.a.receiver_name || '') + ' ' + (b.a.date || '')).toLowerCase();
+    b.items.forEach(function(c) { txt += ' ' + (c.code + ' ' + (c.it.essence || '') + ' ' + (c.it.type || '')).toLowerCase(); });
+    var show = !q || txt.indexOf(q) !== -1;
+    var r1 = document.getElementById('blRow_' + b.a.id);
+    var r2 = document.getElementById('blDet_' + b.a.id);
+    if (r1) r1.style.display = show ? '' : 'none';
+    if (r2) r2.style.display = show ? '' : 'none';
+  });
+}
+function renderStockBLTab() {
+  var vue = getSection('stockBLVue', 'actifs');
+  if (vue !== 'actifs' && vue !== 'termines') vue = 'actifs';
+  var fourFilter = getSection('stockBLFour', '');
+  var achats = getAchats().filter(function(a) { return (a.category || a.type) === 'raw-materials'; });
+  var stock = getStockRaw();
+  var fours = {};
+  achats.forEach(function(a) { if (a.fournisseur) fours[a.fournisseur] = true; });
+  var fourList = Object.keys(fours).sort();
+  var bls = achats.map(function(a) {
+    var items = (a.items || []).map(function(it, idx) {
+      var code = it.colis_number || it.code || '';
+      var entry = stock.find(function(s) { return s.code === code || s.colis_number === code; }) || null;
+      var q0 = parseFloat(it.quantity) || 0;
+      var v0 = parseFloat(it.volume) || 0;
+      var sorts = colisSorties(code);
+      var qS = 0, vS = 0;
+      sorts.forEach(function(s) { qS += s.qte; vS += s.vol; });
+      var qR = entry ? (parseFloat(entry.quantite) || 0) : Math.max(0, q0 - qS);
+      var vR = entry ? (parseFloat(entry.volume) || 0) : Math.max(0, v0 - vS);
+      return { it: it, idx: idx, code: code, q0: q0, v0: v0, sorts: sorts, qS: qS, vS: vS, qR: qR, vR: vR, aQ: qR - (q0 - qS), aV: vR - (v0 - vS), entry: entry };
+    });
+    var vRes = 0, actif = false;
+    items.forEach(function(c) { vRes += c.vR; if (c.qR > 0) actif = true; });
+    return { a: a, items: items, nbColis: items.length, vRes: vRes, actif: actif };
+  });
+  var actifsAll = bls.filter(function(b) { return b.actif; });
+  var baseSet = vue === 'actifs' ? actifsAll : bls.filter(function(b) { return !b.actif; });
+  var list = fourFilter ? baseSet.filter(function(b) { return (b.a.fournisseur || '') === fourFilter; }) : baseSet.slice();
+  list.sort(function(x, y) { return String(y.a.date || '').localeCompare(String(x.a.date || '')); });
+  var cumV = 0;
+  baseSet.forEach(function(b) { cumV += b.vRes; });
+  window._blTabData = list;
+  var isActifs = vue === 'actifs';
+  var pill = function(active, label, val) {
+    return '<button onclick="setSection(\'stockBLVue\',\'' + val + '\');renderPage()" style="border:none;cursor:pointer;border-radius:999px;padding:.4rem 1rem;font-size:.8rem;font-weight:600;background:' + (active ? '#fff7ed;color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.12)' : 'transparent;color:var(--dim)') + '">' + label + '</button>';
+  };
+  var h = '<div style="display:inline-flex;gap:.3rem;background:#f1f5f9;border-radius:999px;padding:.25rem;margin-bottom:.8rem">';
+  h += pill(isActifs, '◉ Actifs', 'actifs') + pill(!isActifs, '◉ Terminés', 'termines') + '</div>';
+  h += '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:.6rem 1rem;margin-bottom:1rem;font-size:.82rem;color:#1e40af">' + (isActifs ? 'Actifs' : 'Terminés') + ' cumulés : &nbsp;<strong>' + baseSet.length + ' BL</strong> &nbsp;|&nbsp; <strong>' + cumV.toFixed(3) + ' m³</strong></div>';
+  h += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem;margin-bottom:.8rem">';
+  h += '<h3 style="margin:0">📦 Bons de livraison ' + (isActifs ? 'Actifs' : 'Terminés') + ' <span style="font-size:.68rem;background:#eef2ff;color:#3730a3;border-radius:10px;padding:1px 8px;font-weight:700">' + list.length + 'BL</span></h3>';
+  h += '<div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">';
+  h += '<input type="text" class="search-box" placeholder="🔍 Rechercher un BL..." oninput="blFilterTable(this.value)" style="width:200px">';
+  h += '<select onchange="setSection(\'stockBLFour\',this.value);renderPage()" style="padding:.45rem .7rem;border:1px solid var(--border);border-radius:8px;font-size:.8rem;background:#fff">';
+  h += '<option value="">Fournisseur : tous</option>';
+  fourList.forEach(function(f) { h += '<option value="' + escH(f) + '"' + (f === fourFilter ? ' selected' : '') + '>' + escH(f) + '</option>'; });
+  h += '</select>';
+  h += '<button class="btn btn-accent" onclick="printStockBL()" style="font-size:.75rem">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="exportStockBLCSV()" style="font-size:.75rem">📥 Exporter</button>';
+  h += '</div></div>';
+  if (!list.length) { h += '<div class="empty">Aucun BL ' + (isActifs ? 'actif' : 'terminé') + '</div></div>'; return h; }
+  h += '<table id="blTable"><thead><tr><th></th><th>N° BL</th><th>Fournisseur</th><th>Réceptionniste</th><th style="text-align:center">Nb Colis</th><th style="text-align:right">Volume résiduel (m³)</th><th>Date de réception</th></tr></thead><tbody>';
+  list.forEach(function(b) {
+    var a = b.a;
+    h += '<tr id="blRow_' + a.id + '" onclick="toggleAccordion(\'blAchat_' + a.id + '\')" style="cursor:pointer;background:#fff7ed">';
+    h += '<td style="width:28px"><span id="arrow_blAchat_' + a.id + '" style="display:inline-block;transition:transform .2s;color:var(--accent)">›</span></td>';
+    h += '<td style="font-weight:700;color:var(--accent)">' + escH(a.reference || ('BL-' + a.id)) + '</td>';
+    h += '<td>' + escH(a.fournisseur || '-') + '</td>';
+    h += '<td>' + escH(a.receiver_name || '-') + '</td>';
+    h += '<td style="text-align:center"><span style="background:#f1f5f9;border-radius:8px;padding:1px 10px;font-size:.75rem">≡ ' + b.nbColis + '</span></td>';
+    h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + b.vRes.toFixed(3) + '</td>';
+    h += '<td style="font-size:.78rem">📅 ' + dateLong(a.date) + '</td>';
+    h += '</tr>';
+    h += '<tr id="blDet_' + a.id + '"><td colspan="7" style="padding:0;border-top:none"><div id="content_blAchat_' + a.id + '" style="display:none;padding:.8rem;background:#f8fafc">';
+    h += '<div style="font-size:.8rem;font-weight:700;color:var(--accent);margin-bottom:.5rem">📦 Colis du BL ' + escH(a.reference || '') + ' <span style="font-weight:400;color:var(--dim)">— cliquez sur un colis pour voir ses mouvements</span></div>';
+    h += '<table style="background:#fff"><thead><tr><th></th><th>N° Colis</th><th>Essence</th><th>Type</th><th>Dimensions (cm)</th><th style="text-align:right">Qté BL</th><th style="text-align:right">Qté Restante</th><th style="text-align:right">Vol. Restant (m³)</th></tr></thead><tbody>';
+    b.items.forEach(function(c) {
+      var it = c.it;
+      var L = it.length || (c.entry && (c.entry.longueur || c.entry.length)) || 0;
+      var W = it.width || (c.entry && (c.entry.largeur || c.entry.width)) || 0;
+      var T = it.thickness || (c.entry && (c.entry.epaisseur || c.entry.thickness)) || 0;
+      var dims = (L || W || T) ? (L + 'x' + W + 'x' + T) : '-';
+      var mid = 'blColis_' + a.id + '_' + c.idx;
+      h += '<tr onclick="toggleAccordion(\'' + mid + '\')" style="cursor:pointer">';
+      h += '<td style="width:24px"><span id="arrow_' + mid + '" style="display:inline-block;transition:transform .2s;color:var(--dim)">›</span></td>';
+      h += '<td style="font-weight:600">' + escH(c.code || '-') + '</td>';
+      h += '<td>' + escH(it.essence || (c.entry && c.entry.essence) || '-') + '</td>';
+      h += '<td>' + escH(it.type || (c.entry && c.entry.type) || '-') + '</td>';
+      h += '<td>' + escH(dims) + '</td>';
+      h += '<td style="text-align:right">' + c.q0 + '</td>';
+      h += '<td style="text-align:right">' + (c.qR > 0 ? '<span style="background:#dcfce7;color:#166534;border-radius:8px;padding:1px 10px;font-weight:700">' + c.qR + '</span>' : '<strong>0</strong>') + '</td>';
+      h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + c.vR.toFixed(3) + '</td>';
+      h += '</tr>';
+      h += '<tr><td colspan="8" style="padding:0;border-top:none"><div id="content_' + mid + '" style="display:none;padding:.6rem 1rem;background:#fff">';
+      h += '<table style="font-size:.75rem"><thead><tr><th>Date</th><th>Mouvement</th><th>Référence</th><th style="text-align:right">Qté</th><th style="text-align:right">Volume (m³)</th></tr></thead><tbody>';
+      h += '<tr><td>-</td><td>🏁 Stock initial</td><td>-</td><td style="text-align:right">0</td><td style="text-align:right">0.000</td></tr>';
+      h += '<tr><td>' + escH(a.date || '-') + '</td><td>📥 Entrée — Achat</td><td>' + escH(a.reference || '') + '</td><td style="text-align:right;font-weight:700;color:var(--green)">+' + c.q0 + '</td><td style="text-align:right">' + c.v0.toFixed(3) + '</td></tr>';
+      c.sorts.forEach(function(s) {
+        h += '<tr><td>' + escH(s.date || '-') + '</td><td>📤 Sortie — Production</td><td>Fiche ' + escH(s.numero || '') + '</td><td style="text-align:right;font-weight:700;color:var(--red)">-' + s.qte + '</td><td style="text-align:right">' + s.vol.toFixed(3) + '</td></tr>';
+      });
+      if (Math.abs(c.aQ) > 0.0005 || Math.abs(c.aV) > 0.0000005) {
+        h += '<tr style="background:#fff7ed"><td>-</td><td>⚖️ Ajustement inventaire</td><td>Inventaire</td><td style="text-align:right;font-weight:700;color:var(--accent)">' + (c.aQ >= 0 ? '+' : '') + (Math.round(c.aQ * 1000) / 1000) + '</td><td style="text-align:right">' + (c.aV >= 0 ? '+' : '') + c.aV.toFixed(3) + '</td></tr>';
+      }
+      h += '<tr style="background:#f8f9fa;font-weight:700"><td>-</td><td>📊 Stock final</td><td>-</td><td style="text-align:right">' + c.qR + '</td><td style="text-align:right;color:var(--accent)">' + c.vR.toFixed(3) + '</td></tr>';
+      h += '</tbody></table></div></td></tr>';
+    });
+    h += '</tbody></table></div></td></tr>';
+  });
+  h += '</tbody></table></div>';
+  return h;
+}
+function printStockBL() {
+  var list = window._blTabData || [];
+  if (!list.length) return toast('Rien à imprimer', 'error');
+  var rows = '';
+  list.forEach(function(b) {
+    rows += '<tr class="total"><td><strong>' + escH(b.a.reference || '') + '</strong></td><td>' + escH(b.a.fournisseur || '') + '</td><td>' + escH(b.a.receiver_name || '') + '</td><td style="text-align:center">' + b.nbColis + '</td><td style="text-align:right">' + b.vRes.toFixed(3) + '</td><td>' + dateLong(b.a.date) + '</td></tr>';
+    b.items.forEach(function(c) {
+      rows += '<tr><td style="padding-left:20px">↳ ' + escH(c.code || '') + '</td><td>' + escH(c.it.essence || '') + '</td><td>' + escH(c.it.type || '') + '</td><td style="text-align:right">' + c.q0 + ' / ' + c.qR + '</td><td style="text-align:right">' + c.vR.toFixed(3) + '</td><td></td></tr>';
+    });
+  });
+  var html = '<html><head><meta charset="UTF-8"><title>Stock BL</title>';
+  html += '<style>body{font-family:Arial;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:5px 7px}th{background:#f0f0f0}.total td{background:#e2e8f0}h2{text-align:center}</style></head><body>';
+  html += '<h2>STOCK — BONS DE LIVRAISON</h2>';
+  html += '<table><tr><th>N° BL / Colis</th><th>Fournisseur / Essence</th><th>Réceptionniste / Type</th><th>Nb / Qté BL-Rest.</th><th>Vol. résiduel (m³)</th><th>Date</th></tr>' + rows + '</table>';
+  html += '</body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.onload = function() { w.print(); };
+}
+function exportStockBLCSV() {
+  var list = window._blTabData || [];
+  if (!list.length) return toast('Rien à exporter', 'error');
+  var csv = '﻿N° BL;Fournisseur;Receptionniste;Date reception;N° Colis;Essence;Type;Dimensions;Qte BL;Qte Restante;Vol Restant (m3)\n';
+  list.forEach(function(b) {
+    b.items.forEach(function(c) {
+      var it = c.it;
+      var dims = (it.length || 0) + 'x' + (it.width || 0) + 'x' + (it.thickness || 0);
+      csv += [b.a.reference || '', b.a.fournisseur || '', b.a.receiver_name || '', b.a.date || '', c.code, it.essence || '', it.type || '', dims, c.q0, c.qR, c.vR.toFixed(3)].map(function(v) { return '"' + String(v).replace(/"/g, '""') + '"'; }).join(';') + '\n';
+    });
+  });
+  var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'stock_bl.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  toast('Export CSV téléchargé ✅');
+}
 function render_stock_raw() {
   var tab = getSection('stockRawTab', 'actif');
   if (tab === 'all') tab = 'actif';
@@ -2772,6 +2950,8 @@ function render_stock_raw() {
   h += '<div class="tab' + (tab === 'wip' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'wip\');renderPage()">En-cours (WIP)</div>';
   h += '<div class="tab' + (tab === 'initial' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'initial\');renderPage()">Stock Initial</div>';
   h += '</div>';
+
+  if (tab === 'bl') return h + renderStockBLTab();
 
   if (tab === 'wip') {
     var wips = wipList();
@@ -3923,7 +4103,15 @@ function applyInventoryAsInitial(month, items) {
     switch (it.store) {
       case 'stockRaw':
         idx = rawMap[it.ref];
-        if (idx !== undefined) { raw[idx].quantite = it.real_qte; raw[idx].volume = it.real_qte * stkUnitVol(raw[idx]); }
+        if (idx !== undefined) {
+          /* L'inventaire prime sur tout : quantité déclarée + volume résiduel recalculé au prorata */
+          var _oQ = parseFloat(raw[idx].quantite) || 0;
+          var _oV = parseFloat(raw[idx].volume) || 0;
+          var _uV = stkUnitVol(raw[idx]) || (_oQ > 0 ? _oV / _oQ : 0);
+          raw[idx].quantite = it.real_qte;
+          raw[idx].volume = Math.max(0, _uV * (parseFloat(it.real_qte) || 0));
+          raw[idx].volume = Math.round(raw[idx].volume * 10000) / 10000;
+        }
         break;
       case 'stockSemi':
         idx = semiMap[it.ref];
