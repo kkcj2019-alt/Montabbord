@@ -272,6 +272,9 @@ var NAV = [
     ]}
   ]},
   { group: 'LOGISTIQUE ET COMMERCIAL', items: [
+    { id: 'livraisons-group', label: 'Livraisons', icon: '🚚', children: [
+      { id: 'livraisons', label: 'Bons de Livraison' }
+    ]},
     { id: 'prestation-group', label: 'Prestations', icon: '🔧', children: [
       { id: 'preventive', label: 'Préventive' },
       { id: 'corrective', label: 'Corrective' }
@@ -463,6 +466,7 @@ var PAGE_TITLES = {
   'stock-consum': 'Stock Consommables',
   'inventory': 'Inventaire',
   'stock-movements': 'Mouvements de Stock',
+  'livraisons': 'Livraisons — Bons de Livraison',
   'thermal': 'Traitement Thermique — Opérations',
   'thermal-types': 'Types de Produits Thermiques',
   'articles': 'Catalogue Produits',
@@ -537,6 +541,8 @@ function getStockConsum() { return getSection('stockConsum', []); }
 function setStockConsum(v) { setSection('stockConsum', v); }
 function getMovements() { return getSection('movements', []); }
 function setMovements(v) { setSection('movements', v); }
+function getLivraisons() { return getSection('livraisons', []); }
+function setLivraisons(v) { setSection('livraisons', v); }
 function getInventories() { return getSection('inventories', []); }
 function setInventories(v) { setSection('inventories', v); }
 function getFichesTech() { return getSection('fichesTech', []); }
@@ -2291,19 +2297,26 @@ function updateStockArticle(articleId, qty, type, ref, numero) {
   }
   setFn(stockList);
 
-  /* SYNC → mdb_stocks (pour que l'app principale voie le stock) */
+  /* SYNC → mdb_stocks (pour que l'app principale voie le stock : articleNom/articleCode requis par la gestion commerciale) */
   try {
     var mainStocks = JSON.parse(localStorage.getItem('mdb_stocks')) || [];
-    var mainArt = mainStocks.find(function(s) { return s.code === article.code || s.article_id === articleId; });
+    var mainArt = mainStocks.find(function(s) { return s.code === article.code || s.articleCode === article.code || s.article_id === articleId; });
     if (mainArt) {
       mainArt.qte = (mainArt.qte || 0) + (type === 'entree' ? qty : -qty);
       mainArt.date = today();
+      mainArt.articleCode = mainArt.articleCode || article.code || '';
+      mainArt.articleNom = mainArt.articleNom || article.designation || '';
+      mainArt.article_id = mainArt.article_id || articleId;
     } else {
       mainStocks.push({
         id: 'prod_' + genId(),
         code: article.code || articleId,
         designation: article.designation || '',
+        articleCode: article.code || '',
+        articleNom: article.designation || '',
+        article_id: articleId,
         qte: type === 'entree' ? qty : 0,
+        quantite: type === 'entree' ? qty : 0,
         prixUnitaire: article.prix_revient || 0,
         date: today(),
         categorie: cat
@@ -2655,6 +2668,39 @@ function syncCatalogueToStock() {
   });
   if (changedF) setStockFinished(fin);
   if (changedS) setStockSemi(semi);
+  /* Backfill : les anciennes entrées miroir mdb_stocks sans articleNom/articleCode (invisibles en gestion commerciale) */
+  try { backfillMirrorFields(); } catch (e) {}
+}
+
+/* Le stock PF de production = le stock des articles type produits finis en gestion commerciale : miroir exact */
+function syncMirrorFinished(articleId) {
+  try {
+    var a = getArticles().find(function(x) { return x.id === articleId; }) || {};
+    var q = 0;
+    getStockFinished().forEach(function(s) { if (s.article_id === articleId) q += parseFloat(s.quantite) || 0; });
+    var ms = JSON.parse(localStorage.getItem('mdb_stocks')) || [];
+    var code = a.code || '';
+    var ex = ms.find(function(s) { return (code && (s.code === code || s.articleCode === code)) || (s.article_id && s.article_id === articleId); });
+    if (ex) {
+      ex.qte = q; ex.quantite = q; ex.date = today();
+      ex.articleCode = ex.articleCode || code; ex.articleNom = ex.articleNom || a.designation || '';
+    } else {
+      ms.push({ id: 'prod_' + genId(), code: code || articleId, designation: a.designation || '', articleCode: code, articleNom: a.designation || '', article_id: articleId, qte: q, quantite: q, prixUnitaire: a.prix_vente || a.prix_revient || 0, date: today(), categorie: 'finished' });
+    }
+    localStorage.setItem('mdb_stocks', JSON.stringify(ms));
+  } catch (e) {}
+}
+function backfillMirrorFields() {
+  var ms = JSON.parse(localStorage.getItem('mdb_stocks')) || [];
+  var changed = false;
+  ms.forEach(function(s) {
+    if (((!s.articleNom && s.designation) || (!s.articleCode && s.code)) && (s.id || '').indexOf('prod_') === 0) {
+      if (!s.articleNom && s.designation) { s.articleNom = s.designation; changed = true; }
+      if (!s.articleCode && s.code) { s.articleCode = s.code; changed = true; }
+      if (s.qte == null && s.quantite != null) { s.qte = s.quantite; changed = true; }
+    }
+  });
+  if (changed) localStorage.setItem('mdb_stocks', JSON.stringify(ms));
 }
 
 function render_stock_finished() { syncCatalogueToStock(); return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
@@ -2983,13 +3029,16 @@ function renderStockFiche(key, getFn, title, addFn) {
     var v = stkVol(s);
     totQ += parseFloat(s.quantite) || 0;
     totV += v;
-    h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(stkCode(s)) + '</td>';
+    var _fc = stkCode(s);
+    var _codeCell = escH(_fc);
+    if (key === 'stock-finished') _codeCell = '<span onclick="showFinishedFiche(\'' + s.id + '\')" title="Voir la fiche de stock (historique des mouvements)" style="cursor:pointer;text-decoration:underline dotted">' + escH(_fc) + '</span>';
+    h += '<tr><td style="font-weight:600;color:var(--accent)">' + _codeCell + '</td>';
     h += '<td>' + escH(stkDes(s)) + '</td>';
     h += '<td style="color:var(--dim)">' + escH(stkDims(s)) + '</td>';
     h += '<td>' + escH(s.zone || s.emplacement || '-') + '</td>';
     h += '<td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td>';
     h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
-    h += '<td><button class="btn btn-red" onclick="deleteStockItem(\'' + key + '\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+    h += '<td style="white-space:nowrap">' + (key === 'stock-finished' ? '<button class="btn" onclick="showFinishedFiche(\'' + s.id + '\')" title="Fiche de stock" style="font-size:.7rem">👁️</button> ' : '') + '<button class="btn btn-red" onclick="deleteStockItem(\'' + key + '\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
   });
   h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + totQ + '</td><td style="text-align:right">' + totV.toFixed(3) + '</td><td></td></tr>';
   h += '</table>';
@@ -3354,19 +3403,33 @@ function addStockItem(key) {
   }
   pair[1](items);
 
-  /* SYNC → mdb_stocks */
+  /* SYNC → mdb_stocks (articleNom/articleCode requis par la gestion commerciale) */
   try {
     var article = getArticles().find(function(a) { return a.id === article_id; });
     var mainStocks = JSON.parse(localStorage.getItem('mdb_stocks')) || [];
-    mainStocks.push({
-      id: 'prod_' + genId(),
-      code: article ? article.code : article_id,
-      designation: article ? article.designation : '',
-      qte: qte,
-      prixUnitaire: prix,
-      date: today(),
-      categorie: key.replace('stock-', '')
-    });
+    var _msCode = article ? article.code : article_id;
+    var _msEx = mainStocks.find(function(s) { return (s.code && _msCode && s.code === _msCode) || (s.articleCode && _msCode && s.articleCode === _msCode); });
+    if (_msEx) {
+      _msEx.qte = (parseFloat(_msEx.qte) || parseFloat(_msEx.quantite) || 0) + qte;
+      _msEx.quantite = _msEx.qte;
+      _msEx.date = today();
+      _msEx.articleCode = _msEx.articleCode || _msCode || '';
+      _msEx.articleNom = _msEx.articleNom || (article ? article.designation : '') || '';
+    } else {
+      mainStocks.push({
+        id: 'prod_' + genId(),
+        code: _msCode,
+        designation: article ? article.designation : '',
+        articleCode: _msCode || '',
+        articleNom: article ? article.designation : '',
+        article_id: article_id,
+        qte: qte,
+        quantite: qte,
+        prixUnitaire: prix,
+        date: today(),
+        categorie: key.replace('stock-', '')
+      });
+    }
     localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks));
   } catch(e) {}
 
@@ -7686,6 +7749,351 @@ function deleteAchat(id) {
   setAchats(achats.filter(function(x) { return String(x.id) !== String(id); }));
   toast('Achat supprimé');
   renderPage();
+}
+/* ==================== LIVRAISONS PRODUITS FINIS (BL auto → gestion commerciale à facturer) ==================== */
+function prodClientNames() {
+  try {
+    var c = JSON.parse(localStorage.getItem('mdb_clients')) || [];
+    return c.map(function(x) { return { id: x.id, nom: x.nom || x.name || '' }; }).filter(function(x) { return x.nom; });
+  } catch (e) { return []; }
+}
+function getMainBLs() {
+  try { return JSON.parse(localStorage.getItem('mdb_bl')) || []; } catch (e) { return []; }
+}
+function setMainBLs(v) { try { localStorage.setItem('mdb_bl', JSON.stringify(v)); } catch (e) {} }
+function nextBLNumero() {
+  var maxNum = 0;
+  function scan(arr) {
+    (arr || []).forEach(function(b) {
+      var num = b.numero || '';
+      var idx = num.lastIndexOf('-');
+      if (idx !== -1) { var n = parseInt(num.substring(idx + 1), 10); if (!isNaN(n) && n > maxNum) maxNum = n; }
+    });
+  }
+  scan(getMainBLs());
+  scan(getLivraisons());
+  return 'BL-' + String(maxNum + 1).padStart(3, '0');
+}
+function syncedMainBL(livId) {
+  return getMainBLs().find(function(b) { return b.prodLivId === livId; }) || null;
+}
+
+function render_livraisons() {
+  var livs = getLivraisons().slice().reverse();
+  var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
+  h += '<div><h2 style="margin:0">🚚 Bons de Livraison — Produits Finis</h2>';
+  h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Les BL créés ici sont synchronisés en gestion commerciale (appli principale) comme BL à facturer</p></div>';
+  h += '<button class="btn btn-accent" onclick="showLivraisonModal(null)">+ Nouvelle Livraison</button></div>';
+  if (!livs.length) return h + '<div class="card"><div class="empty">Aucune livraison. Créez votre premier BL.</div></div>';
+  h += '<div class="card"><table><tr><th>N° BL</th><th>Date</th><th>Client</th><th style="text-align:right">Articles</th><th style="text-align:right">Qté totale</th><th style="text-align:right">Montant</th><th>Statut</th><th>Actions</th></tr>';
+  livs.forEach(function(l) {
+    var nArt = (l.lignes || []).length;
+    var tq = 0, mt = 0;
+    (l.lignes || []).forEach(function(ln) { tq += parseFloat(ln.qte) || 0; mt += (parseFloat(ln.qte) || 0) * (parseFloat(ln.pu) || 0); });
+    var sb = syncedMainBL(l.id);
+    var st = sb ? (sb.factureId ? '<span class="badge-done">🧾 Facturé</span>' : '<span class="badge-active">🔗 À facturer</span>') : '<span class="badge-danger">⚠️ Non sync</span>';
+    h += '<tr><td style="font-weight:700;color:var(--accent)">' + escH(l.numero || '-') + '</td>';
+    h += '<td>' + escH(l.date || '-') + '</td>';
+    h += '<td>' + escH(l.clientNom || l.client || '-') + '</td>';
+    h += '<td style="text-align:right">' + nArt + '</td>';
+    h += '<td style="text-align:right;font-weight:700">' + tq + '</td>';
+    h += '<td style="text-align:right">' + fmt(mt) + ' F</td>';
+    h += '<td>' + st + '</td>';
+    h += '<td style="white-space:nowrap">';
+    h += '<button class="btn" onclick="printLivraison(\'' + l.id + '\')" title="Imprimer le BL" style="font-size:.7rem">🖨️</button> ';
+    h += '<button class="btn" onclick="showLivraisonModal(\'' + l.id + '\')" title="Modifier" style="font-size:.7rem">✏️</button> ';
+    h += '<button class="btn btn-red" onclick="deleteLivraison(\'' + l.id + '\')" title="Supprimer" style="font-size:.7rem">🗑️</button>';
+    h += '</td></tr>';
+  });
+  h += '</table></div>';
+  return h;
+}
+
+var _tempLivLines = [];
+function showLivraisonModal(id) {
+  var livs = getLivraisons();
+  var l = id ? livs.find(function(x) { return String(x.id) === String(id); }) : null;
+  if (id && !l) return;
+  if (l) {
+    var sb = syncedMainBL(l.id);
+    if (sb && sb.factureId) return toast('BL déjà facturé en gestion commerciale — modification impossible', 'error');
+  }
+  window._editingLivId = id || null;
+  _tempLivLines = l ? (l.lignes || []).map(function(ln) { return { article_id: ln.article_id || '', code: ln.code || '', designation: ln.designation || '', qte: ln.qte || 0, pu: ln.pu || 0 }; }) : [];
+  var clients = prodClientNames();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:900px">';
+  m += '<h2>' + (l ? '✏️ Modifier le BL ' + escH(l.numero || '') : '🚚 Nouvelle Livraison (BL auto)') + '</h2>';
+  m += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.8rem;margin-bottom:1rem">';
+  m += '<div class="form-group"><label>N° BL * (auto, modifiable)</label><input type="text" id="liv_numero" value="' + escH(l ? l.numero : nextBLNumero()) + '"></div>';
+  m += '<div class="form-group"><label>Date *</label><input type="date" id="liv_date" value="' + escH(l ? l.date : today()) + '"></div>';
+  m += '<div class="form-group"><label>Client *</label><input type="text" id="liv_client" list="livClientsList" placeholder="Nom du client" value="' + escH(l ? (l.clientNom || l.client || '') : '') + '">';
+  m += '<datalist id="livClientsList">';
+  clients.forEach(function(c) { m += '<option value="' + escH(c.nom) + '">'; });
+  m += '</datalist></div>';
+  m += '<div class="form-group"><label>Chauffeur</label><input type="text" id="liv_chauffeur" placeholder="Nom du chauffeur" value="' + escH(l ? (l.chauffeur || '') : '') + '"></div>';
+  m += '</div>';
+  m += '<h3 style="font-size:.85rem;margin-bottom:.5rem">Lignes (produits finis du catalogue)</h3>';
+  m += '<table style="font-size:.8rem"><thead><tr><th>Article (produit fini)</th><th style="text-align:right">Stock dispo</th><th style="text-align:right">Qté *</th><th style="text-align:right">PU (F)</th><th style="text-align:right">Montant</th><th></th></tr></thead><tbody id="livLinesBody"></tbody></table>';
+  m += '<button class="btn" onclick="addLivLine()" style="font-size:.75rem;margin:.5rem 0">+ Ajouter une ligne</button>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
+  m += '<button class="btn btn-accent" onclick="saveLivraison()">✅ ' + (l ? 'Mettre à jour' : 'Enregistrer le BL') + '</button>';
+  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
+  m += '</div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+  if (!_tempLivLines.length) addLivLine();
+  else renderLivLines();
+}
+function livStockOf(articleId) {
+  var q = 0;
+  getStockFinished().forEach(function(s) { if (s.article_id === articleId) q += parseFloat(s.quantite) || 0; });
+  return q;
+}
+function addLivLine() {
+  var arts = getArticles().filter(function(a) { return (a.categorie || 'finished') === 'finished'; });
+  _tempLivLines.push({ article_id: arts.length ? arts[0].id : '', qte: 1, pu: arts.length ? (arts[0].prix_vente || 0) : 0 });
+  renderLivLines();
+}
+function removeLivLine(i) { _tempLivLines.splice(i, 1); renderLivLines(); }
+function onLivArticleChange(i, articleId) {
+  var a = getArticles().find(function(x) { return x.id === articleId; }) || {};
+  _tempLivLines[i].article_id = articleId;
+  _tempLivLines[i].pu = a.prix_vente || 0;
+  renderLivLines();
+}
+function renderLivLines() {
+  var tb = document.getElementById('livLinesBody');
+  if (!tb) return;
+  var arts = getArticles().filter(function(a) { return (a.categorie || 'finished') === 'finished'; });
+  if (!_tempLivLines.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--dim)">Aucune ligne</td></tr>'; return; }
+  var h = '';
+  _tempLivLines.forEach(function(ln, i) {
+    var a = arts.find(function(x) { return x.id === ln.article_id; }) || arts[0] || {};
+    if (!ln.article_id && a.id) ln.article_id = a.id;
+    var dispo = livStockOf(ln.article_id);
+    var mt = (parseFloat(ln.qte) || 0) * (parseFloat(ln.pu) || 0);
+    h += '<tr>';
+    h += '<td><select onchange="onLivArticleChange(' + i + ',this.value)" style="width:100%;padding:.4rem;border:1px solid var(--border);border-radius:6px;font-size:.8rem">';
+    arts.forEach(function(x) { h += '<option value="' + x.id + '"' + (x.id === ln.article_id ? ' selected' : '') + '>' + escH(x.code) + ' — ' + escH(x.designation) + '</option>'; });
+    h += '</select></td>';
+    h += '<td style="text-align:right;font-weight:700;color:' + (dispo > 0 ? 'var(--green)' : 'var(--red)') + '">' + dispo + '</td>';
+    h += '<td><input type="number" min="0" value="' + (ln.qte || '') + '" oninput="_tempLivLines[' + i + '].qte=this.value;renderLivLines()" style="width:80px;padding:.4rem;border:1px solid var(--border);border-radius:6px;text-align:right"></td>';
+    h += '<td><input type="number" min="0" value="' + (ln.pu || '') + '" oninput="_tempLivLines[' + i + '].pu=this.value;renderLivLines()" style="width:100px;padding:.4rem;border:1px solid var(--border);border-radius:6px;text-align:right"></td>';
+    h += '<td style="text-align:right;font-weight:700">' + fmt(mt) + '</td>';
+    h += '<td><button class="btn btn-red" onclick="removeLivLine(' + i + ')" style="font-size:.65rem;padding:2px 6px">🗑️</button></td>';
+    h += '</tr>';
+  });
+  tb.innerHTML = h;
+}
+/* Applique (+1 annulation / -1 sortie) : stock PF + miroir commercial + mouvement */
+function applyLivraisonStock(liv, dir) {
+  var fin = getStockFinished();
+  (liv.lignes || []).forEach(function(ln) {
+    var q = (parseFloat(ln.qte) || 0) * dir;
+    var ex = fin.find(function(s) { return s.article_id && s.article_id === ln.article_id; });
+    if (ex) { ex.quantite = (parseFloat(ex.quantite) || 0) + q; ex.updated_at = new Date().toISOString(); }
+    else if (dir < 0) { fin.push({ id: genId(), article_id: ln.article_id, quantite: q, created_at: new Date().toISOString() }); }
+    try { syncMirrorFinished(ln.article_id); } catch (e) {}
+    var movs = getMovements();
+    movs.push({ id: genId(), date: liv.date || today(), type: dir < 0 ? 'sortie' : 'entree', article_id: ln.article_id, quantite: Math.abs(parseFloat(ln.qte) || 0), reference: liv.numero, motif: (dir < 0 ? 'Livraison ' : 'Annulation livraison ') + liv.numero + (liv.clientNom ? ' — ' + liv.clientNom : ''), created_at: new Date().toISOString() });
+    setMovements(movs);
+  });
+  setStockFinished(fin);
+}
+function pushLivraisonToCommercial(liv) {
+  try {
+    var bls = getMainBLs();
+    bls = bls.filter(function(b) { return b.prodLivId !== liv.id; });
+    var lignes = (liv.lignes || []).map(function(ln) {
+      var a = getArticles().find(function(x) { return x.id === ln.article_id; }) || {};
+      return { articleId: ln.article_id || '', designation: ln.designation || a.designation || '', quantite: parseFloat(ln.qte) || 0, prixUnitaire: parseFloat(ln.pu) || 0 };
+    });
+    bls.push({
+      id: liv.syncedBlId || ('bl_prod_' + liv.id),
+      numero: liv.numero, clientId: liv.clientId || null, clientNom: liv.clientNom || '',
+      dateLivraison: liv.date || today(), chauffeur: liv.chauffeur || '',
+      statut: 'livree', lignes: lignes, bcId: null, factureId: null, raisonNonFacture: '',
+      prodLivId: liv.id, _fromProduction: true
+    });
+    setMainBLs(bls);
+    liv.syncedBlId = 'bl_prod_' + liv.id;
+  } catch (e) {}
+}
+function saveLivraison() {
+  var numero = ((document.getElementById('liv_numero') || {}).value || '').trim();
+  var date = (document.getElementById('liv_date') || {}).value || today();
+  var clientNom = ((document.getElementById('liv_client') || {}).value || '').trim();
+  var chauffeur = ((document.getElementById('liv_chauffeur') || {}).value || '').trim();
+  if (!numero) return toast('N° BL requis', 'error');
+  if (!clientNom) return toast('Client requis', 'error');
+  var lignes = _tempLivLines.filter(function(ln) { return ln.article_id && (parseFloat(ln.qte) || 0) > 0; }).map(function(ln) {
+    var a = getArticles().find(function(x) { return x.id === ln.article_id; }) || {};
+    return { article_id: ln.article_id, code: a.code || '', designation: a.designation || '', qte: parseFloat(ln.qte) || 0, pu: parseFloat(ln.pu) || 0 };
+  });
+  if (!lignes.length) return toast('Ajoutez au moins une ligne avec quantité', 'error');
+  var livs = getLivraisons();
+  var editId = window._editingLivId || null;
+  var old = editId ? livs.find(function(x) { return String(x.id) === String(editId); }) : null;
+  if (old) {
+    var sbOld = syncedMainBL(old.id);
+    if (sbOld && sbOld.factureId) return toast('BL déjà facturé en gestion commerciale — modification impossible', 'error');
+    var dup = livs.find(function(x) { return String(x.id) !== String(old.id) && (x.numero || '').trim().toLowerCase() === numero.toLowerCase(); });
+    if (dup) return toast('N° BL déjà utilisé', 'error');
+    applyLivraisonStock(old, +1);
+  } else {
+    var dup2 = livs.find(function(x) { return (x.numero || '').trim().toLowerCase() === numero.toLowerCase(); });
+    if (dup2) return toast('N° BL déjà utilisé', 'error');
+  }
+  /* Vérifier le stock disponible (après annulation de l'ancien en cas de modification) */
+  var need = {};
+  lignes.forEach(function(ln) { need[ln.article_id] = (need[ln.article_id] || 0) + ln.qte; });
+  var lack = [];
+  Object.keys(need).forEach(function(aid) {
+    var a = getArticles().find(function(x) { return x.id === aid; }) || {};
+    if (livStockOf(aid) < need[aid]) lack.push((a.code || '?') + ' (dispo ' + livStockOf(aid) + ' / demandé ' + need[aid] + ')');
+  });
+  if (lack.length) return toast('Stock insuffisant : ' + lack.join(', '), 'error');
+  var cli = prodClientNames().find(function(c) { return c.nom.trim().toLowerCase() === clientNom.toLowerCase(); }) || {};
+  var liv = old || { id: genId(), created_at: new Date().toISOString() };
+  liv.numero = numero; liv.date = date; liv.clientNom = clientNom; liv.client = clientNom;
+  liv.clientId = cli.id || liv.clientId || null; liv.chauffeur = chauffeur; liv.lignes = lignes;
+  applyLivraisonStock(liv, -1);
+  pushLivraisonToCommercial(liv);
+  if (!old) livs.unshift(liv);
+  else { var ix = livs.findIndex(function(x) { return String(x.id) === String(liv.id); }); if (ix !== -1) livs[ix] = liv; }
+  setLivraisons(livs);
+  window._editingLivId = null;
+  document.getElementById('modalOverlay').remove();
+  toast(old ? 'BL mis à jour ✅ (stock + gestion commerciale)' : 'BL enregistré ✅ (stock déduit + à facturer en gestion commerciale)');
+  renderPage();
+}
+function deleteLivraison(id) {
+  var livs = getLivraisons();
+  var l = livs.find(function(x) { return String(x.id) === String(id); });
+  if (!l) return;
+  var sb = syncedMainBL(l.id);
+  if (sb && sb.factureId) return toast('BL déjà facturé en gestion commerciale — suppression impossible', 'error');
+  if (!confirm2('Supprimer le BL ' + (l.numero || '') + ' ? Le stock sera restauré.')) return;
+  applyLivraisonStock(l, +1);
+  try { setMainBLs(getMainBLs().filter(function(b) { return b.prodLivId !== l.id; })); } catch (e) {}
+  setLivraisons(livs.filter(function(x) { return String(x.id) !== String(id); }));
+  toast('BL supprimé, stock restauré');
+  renderPage();
+}
+function printLivraison(id) {
+  var l = getLivraisons().find(function(x) { return String(x.id) === String(id); });
+  if (!l) return;
+  var tot = 0;
+  var rows = (l.lignes || []).map(function(ln) {
+    var mt = (parseFloat(ln.qte) || 0) * (parseFloat(ln.pu) || 0);
+    tot += mt;
+    return '<tr><td>' + escH(ln.code || '-') + '</td><td>' + escH(ln.designation || '-') + '</td><td style="text-align:right">' + ln.qte + '</td><td style="text-align:right">' + fmt(ln.pu || 0) + '</td><td style="text-align:right">' + fmt(mt) + '</td></tr>';
+  }).join('');
+  var html = '<html><head><meta charset="UTF-8"><title>BL ' + escH(l.numero || '') + '</title>';
+  html += '<style>body{font-family:Arial;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #333;padding:5px 7px}th{background:#f0f0f0}h2{text-align:center}.total{font-weight:700;background:#e2e8f0}</style></head><body>';
+  html += '<h2>BON DE LIVRAISON ' + escH(l.numero || '') + '</h2>';
+  html += '<p><strong>Date :</strong> ' + escH(l.date || '') + ' &nbsp; <strong>Client :</strong> ' + escH(l.clientNom || l.client || '') + (l.chauffeur ? ' &nbsp; <strong>Chauffeur :</strong> ' + escH(l.chauffeur) : '') + '</p>';
+  html += '<table><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">PU (F)</th><th style="text-align:right">Montant (F)</th></tr>' + rows;
+  html += '<tr class="total"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(tot) + '</td></tr></table>';
+  html += '<p style="margin-top:30px;display:flex;justify-content:space-between"><span>Signature client : _________________</span><span>Signature chauffeur : _________________</span></p>';
+  html += '</body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.onload = function() { w.print(); };
+}
+
+/* ==================== FICHE DE STOCK PRODUIT FINI (clic → historique des mouvements) ==================== */
+function showFinishedFiche(stockId) {
+  var fin = getStockFinished();
+  var entry = fin.find(function(s) { return String(s.id) === String(stockId); });
+  if (!entry) return toast('Article introuvable', 'error');
+  var articles = getArticles();
+  var art = entry.article_id ? (articles.find(function(a) { return a.id === entry.article_id; }) || {}) : {};
+  var code = stkCode(entry), des = stkDes(entry);
+  if (!art.id && code && code !== '-') {
+    art = articles.find(function(a) { return (a.code || '').trim().toLowerCase() === String(code).trim().toLowerCase(); }) || {};
+  }
+  var artId = art.id || entry.article_id || '';
+  var codeL = String(code === '-' ? '' : code).trim().toLowerCase();
+  var actuel = 0;
+  fin.forEach(function(s) { if (artId ? s.article_id === artId : String(s.id) === String(stockId)) actuel += parseFloat(s.quantite) || 0; });
+  /* Entrées : productions validées (assemblage) */
+  var eProd = getProductions().filter(function(p) { return p.statut === 'validated' && artId && p.article_id === artId; })
+    .map(function(p) { return { date: p.date || '', src: 'Production ' + (p.numero || ''), qte: parseFloat(p.quantite) || 0 }; });
+  /* Entrées : achats produits finis (même code) */
+  var eAch = [];
+  getAchats().forEach(function(a) {
+    if ((a.category || a.type) !== 'finished') return;
+    (a.items || []).forEach(function(it) {
+      if (codeL && String(it.code || '').trim().toLowerCase() === codeL) {
+        eAch.push({ date: a.date || '', src: 'Achat ' + (a.reference || ''), qte: parseFloat(it.quantity) || 0 });
+      }
+    });
+  });
+  /* Sorties : livraisons */
+  var sLiv = [];
+  getLivraisons().forEach(function(lv) {
+    (lv.lignes || []).forEach(function(ln) {
+      if ((artId && ln.article_id === artId) || (!artId && codeL && String(ln.code || '').trim().toLowerCase() === codeL)) {
+        sLiv.push({ date: lv.date || '', src: 'Livraison ' + (lv.numero || '') + (lv.clientNom ? ' — ' + lv.clientNom : ''), qte: parseFloat(ln.qte) || 0 });
+      }
+    });
+  });
+  var totE = 0, totS = 0;
+  eProd.concat(eAch).forEach(function(e) { totE += e.qte; });
+  sLiv.forEach(function(s) { totS += s.qte; });
+  var initial = actuel - totE + totS;
+  /* Chronologie avec solde courant */
+  var evts = [];
+  eProd.forEach(function(e) { evts.push({ date: e.date, type: 'Entrée', src: e.src, q: e.qte }); });
+  eAch.forEach(function(e) { evts.push({ date: e.date, type: 'Entrée', src: e.src, q: e.qte }); });
+  sLiv.forEach(function(s) { evts.push({ date: s.date, type: 'Sortie', src: s.src, q: -s.qte }); });
+  evts.sort(function(a, b) { return String(a.date).localeCompare(String(b.date)); });
+  window._ficheData = { code: code, des: des, actuel: actuel, initial: initial, totE: totE, totS: totS, evts: evts };
+  var bal = initial;
+  var rows = '<tr style="background:#f8f9fa"><td>-</td><td>🏁 Stock initial</td><td></td><td style="text-align:right;font-weight:700">' + initial + '</td></tr>';
+  evts.forEach(function(e) {
+    bal += e.q;
+    var col = e.q >= 0 ? 'var(--green)' : 'var(--red)';
+    rows += '<tr><td>' + escH(e.date || '-') + '</td><td>' + (e.type === 'Entrée' ? '📥 Entrée' : '📤 Sortie') + ' — ' + escH(e.src) + '</td>';
+    rows += '<td style="text-align:right;font-weight:700;color:' + col + '">' + (e.q >= 0 ? '+' : '') + e.q + '</td>';
+    rows += '<td style="text-align:right;font-weight:700">' + bal + '</td></tr>';
+  });
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:800px">';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem">';
+  m += '<h2 style="margin:0">📋 Fiche de Stock — ' + escH(code) + '</h2>';
+  m += '<button class="btn" onclick="printFinishedFiche()">🖨️ Imprimer</button></div>';
+  m += '<p style="color:var(--dim);font-size:.85rem;margin-top:0">' + escH(des) + '</p>';
+  m += '<div class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">';
+  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem">' + initial + '</div><div class="label">🏁 Stock initial</div></div>';
+  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem;color:var(--green)">+' + totE + '</div><div class="label">📥 Entrées (prod + achats)</div></div>';
+  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem;color:var(--red)">-' + totS + '</div><div class="label">📤 Sorties (livraisons)</div></div>';
+  m += '<div class="stat-card"><div class="value" style="font-size:1.2rem;color:var(--accent)">' + actuel + '</div><div class="label">📊 Stock actuel</div></div>';
+  m += '</div>';
+  m += '<div class="card"><table><tr><th>Date</th><th>Mouvement</th><th style="text-align:right">Qté</th><th style="text-align:right">Solde</th></tr>' + rows + '</table></div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem"><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Fermer</button></div>';
+  m += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+function printFinishedFiche() {
+  var d = window._ficheData;
+  if (!d) return;
+  var bal = d.initial;
+  var rows = '<tr><td>-</td><td>Stock initial</td><td></td><td style="text-align:right">' + d.initial + '</td></tr>';
+  d.evts.forEach(function(e) {
+    bal += e.q;
+    rows += '<tr><td>' + escH(e.date || '-') + '</td><td>' + escH(e.type) + ' — ' + escH(e.src) + '</td><td style="text-align:right">' + (e.q >= 0 ? '+' : '') + e.q + '</td><td style="text-align:right">' + bal + '</td></tr>';
+  });
+  var html = '<html><head><meta charset="UTF-8"><title>Fiche de stock ' + escH(d.code) + '</title>';
+  html += '<style>body{font-family:Arial;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #333;padding:5px 7px}th{background:#f0f0f0}h2{text-align:center}</style></head><body>';
+  html += '<h2>FICHE DE STOCK — ' + escH(d.code) + ' (' + escH(d.des) + ')</h2>';
+  html += '<p><strong>Stock initial :</strong> ' + d.initial + ' &nbsp; <strong>Entrées :</strong> +' + d.totE + ' &nbsp; <strong>Sorties :</strong> -' + d.totS + ' &nbsp; <strong>Stock actuel :</strong> ' + d.actuel + '</p>';
+  html += '<table><tr><th>Date</th><th>Mouvement</th><th style="text-align:right">Qté</th><th style="text-align:right">Solde</th></tr>' + rows + '</table>';
+  html += '</body></html>';
+  var w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.onload = function() { w.print(); };
 }
 
 </script>
