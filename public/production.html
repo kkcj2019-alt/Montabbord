@@ -106,6 +106,9 @@ tbody tr:hover td{background:#e8f1fd}
 /* Bouton hamburger : caché sur desktop, affiché uniquement sur mobile */
 #sidebarOpenBtn { display: none; background: none; border: none; cursor: pointer; color: var(--text); padding: 6px; border-radius: 6px; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 #sidebarOpenBtn:hover { background: var(--border); }
+/* Bouton Retour : toujours visible (desktop + mobile) */
+#navBackBtn { display: inline-flex; align-items: center; justify-content: center; background: none; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; color: var(--text); font-size: 1rem; font-weight: 700; width: 34px; height: 34px; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+#navBackBtn:hover { background: var(--border); color: var(--accent); border-color: var(--accent); }
 @media(max-width:768px) { #sidebarOpenBtn { display: inline-flex; align-items: center; justify-content: center; } }
 
 /* Fiche production : cases ouvertes style tableur (pas de cadre) — clic + saisie directe */
@@ -186,6 +189,7 @@ tbody tr:hover td{background:#e8f1fd}
 <main class="main" id="app">
   <div class="topbar">
     <div style="display:flex;align-items:center;gap:.8rem">
+      <button id="navBackBtn" onclick="goBack()" title="Retour à la page précédente" aria-label="Retour">←</button>
       <button id="sidebarOpenBtn" onclick="toggleSidebar()" title="Afficher le menu" aria-label="Menu"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <h1 id="pageTitle">Tableau de Bord</h1>
       <span id="pageActions" style="display:flex;gap:.4rem;align-items:center"></span>
@@ -403,6 +407,13 @@ document.addEventListener('change', function(e) {
 });
 function navigate(page) {
   autoSaveDraft();
+  /* Historique pour le bouton Retour */
+  if (!window._navHist) window._navHist = [];
+  if (!window._navigatingBack && CURRENT_PAGE && CURRENT_PAGE !== page) {
+    window._navHist.push(CURRENT_PAGE);
+    if (window._navHist.length > 20) window._navHist.shift();
+  }
+  window._navigatingBack = false;
   CURRENT_PAGE = page;
   localStorage.setItem('mdb_prod_currentPage', page);
   renderNav();
@@ -411,6 +422,12 @@ function navigate(page) {
 }
 
 function isMobileView() { return window.innerWidth <= 768; }
+
+function goBack() {
+  var prev = (window._navHist && window._navHist.length) ? window._navHist.pop() : 'dashboard';
+  window._navigatingBack = true;
+  navigate(prev);
+}
 
 function toggleSidebar() {
   /* ☰ : sur mobile ouvre/ferme le tiroir, sur desktop replie/déplie (comme index) */
@@ -2596,7 +2613,24 @@ function filterOP(q) {
 }
 
 /* ==================== STOCK PALETTES ==================== */
-function render_stock_palettes() { return renderStockFiche('stock-palettes', getStockPalettes, 'Fiche de Stock - Palettes', 'showAddStock'); }
+function render_stock_palettes() {
+  syncCatalogueToStock();
+  /* Les palettes = les produits finis : rapatrier d'éventuelles anciennes entrées stock-palettes */
+  try {
+    var pal = getStockPalettes();
+    if (pal.length) {
+      var fin = getStockFinished();
+      pal.forEach(function(p) {
+        var ex = p.article_id ? fin.find(function(f) { return f.article_id === p.article_id; }) : null;
+        if (ex) { ex.quantite = (parseFloat(ex.quantite) || 0) + (parseFloat(p.quantite) || 0); }
+        else { fin.push(p); }
+      });
+      setStockFinished(fin);
+      setStockPalettes([]);
+    }
+  } catch (e) {}
+  return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Palettes (Produits Finis)', 'showAddStock');
+}
 
 /* ==================== STOCK PRODUITS FINIS ==================== */
 /* Le catalogue = les produits finis : chaque article (finished/semi) possède une entrée stock (qte 0 par défaut) */
@@ -3497,7 +3531,7 @@ function render_inventory() {
   h += '<div class="form-group"><label>Type d\'élément à inventer</label>';
   h += '<select id="inv_type" onchange="window._invType=this.value;window._invHidden={};launchInventory()" style="width:100%;padding:.4rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem">';
   var invTypes = [
-    { v: 'all', t: 'Stock actif global' },
+    { v: 'all', t: 'Stock actif global (Matière première)' },
     { v: 'mp', t: 'Matière première (Toutes)' },
     { v: 'mp_bl', t: 'Matière première (BL)' },
     { v: 'mp_spec', t: 'Matière première (Spécifique)' },
@@ -3569,9 +3603,10 @@ function launchInventory() {
   var target = document.getElementById('invContent');
   if (!target) return;
 
-  /* Filtrer par type */
+  /* Filtrer par type — 'all' = onglet Stock Actif Global (Stock → Matière Première) : stockRaw + règle Actif/Tout */
+  function invEtatOk(q) { var et = 'actif'; try { et = getSection('stockRawEtat', 'actif'); } catch (e) {} return et === 'actif' ? (parseFloat(q) || 0) > 0 : true; }
   var filtered = items.filter(function(it) {
-    if (window._invType === 'all') return true;
+    if (window._invType === 'all') return it.store === 'stockRaw' && invEtatOk(it.theo_qte);
     if (window._invType === 'mp') return it.store === 'stockRaw';
     if (window._invType === 'mp_bl') return it.store === 'stockRaw' && (it.source === 'BL' || it.source === 'Matière première (BL)');
     if (window._invType === 'mp_spec') return it.store === 'stockRaw' && (it.source === 'SPECIFIC' || it.source === 'Matière première (Spécifique)');
@@ -3607,7 +3642,7 @@ function launchInventory() {
   if (filtered.length === 0) {
     h += '<div class="empty">Aucun article trouvé pour cette sélection.</div>';
   } else {
-    var hasDim = (window._invType === 'mp' || window._invType === 'mp_bl' || window._invType === 'mp_spec' || window._invType === 'mp_enc' || window._invType === 'semi');
+    var hasDim = (window._invType === 'all' || window._invType === 'mp' || window._invType === 'mp_bl' || window._invType === 'mp_spec' || window._invType === 'mp_enc' || window._invType === 'semi');
     h += '<div style="overflow-x:auto"><table id="invTable">';
     h += '<thead><tr>';
     h += '<th>Code</th><th>Désignation</th><th>Source</th>';
@@ -3763,7 +3798,15 @@ function applyInventoryAsInitial(month, items) {
   var palMap = {};
   palettes.forEach(function(s, i) { palMap[s.code] = i; });
   var finMap = {};
-  finished.forEach(function(s, i) { finMap[s.code] = i; });
+  finished.forEach(function(s, i) {
+    if (s.code) finMap[s.code] = i;
+    if (s.article_id) {
+      try {
+        var _fa = getArticles().find(function(a) { return a.id === s.article_id; }) || {};
+        if (_fa.code) finMap[_fa.code] = i;
+      } catch (e) {}
+    }
+  });
   var merchMap = {};
   merch.forEach(function(s, i) { merchMap[s.code] = i; });
   var consumMap = {};
@@ -3782,10 +3825,8 @@ function applyInventoryAsInitial(month, items) {
         if (idx !== undefined) { semi[idx].quantite = it.real_qte; }
         break;
       case 'stockPalettes':
-        idx = palMap[it.ref];
-        if (idx !== undefined) { palettes[idx].quantite = it.real_qte; }
-        break;
       case 'stockFinished':
+        /* Les palettes = les produits finis : tout est appliqué au stock finis */
         idx = finMap[it.ref];
         if (idx !== undefined) { finished[idx].quantite = it.real_qte; }
         break;
