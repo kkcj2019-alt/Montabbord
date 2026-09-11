@@ -5611,114 +5611,551 @@ function updateSinglePresence(empId, statut) {
   renderPage();
 }
 
-/* ==================== STOCK - EPI ==================== */
-function render_epi() { return renderEpiStock(); }
-function renderEpiStock() {
-  var items = getEpiItems();
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<h3 style="margin:0">🛡️ Stock EPI</h3>';
-  h += '<button class="btn btn-accent" onclick="showNewEpiItem()">+ Nouvel EPI</button></div>';
-  if (!items.length) { h += '<div class="empty">Aucun EPI en stock. Cliquez sur + Nouvel EPI pour ajouter.</div>'; return h; }
-  h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Type</th><th>Taille</th><th style="text-align:right">Stock</th><th>Unité</th><th>Seuil Alerte</th><th>Actions</th></tr>';
-  var tot = 0;
-  items.forEach(function(s) {
-    tot += parseFloat(s.quantite) || 0;
-    h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(s.code || '-') + '</td><td>' + escH(s.designation || '-') + '</td><td>' + escH(s.type || '-') + '</td><td>' + escH(s.taille || '-') + '</td><td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td><td>' + escH(s.unite || 'pièce') + '</td><td>' + (s.seuil_alerte || 0) + '</td><td><button class="btn btn-red" onclick="deleteEpiItem(\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+/* ==================== GESTION EPI — MODULE COMPLET ==================== */
+function getEpiCatalogue() { return getSection('epiCatalogue', []); }
+function setEpiCatalogue(v) { setSection('epiCatalogue', v); }
+function getEpiPurchases() { return getSection('epiPurchases', []); }
+function setEpiPurchases(v) { setSection('epiPurchases', v); }
+function getEpiAttributions() { return getSection('epiAttributions', []); }
+function setEpiAttributions(v) { setSection('epiAttributions', v); }
+
+/* Migration: ancien epiItems → catalogue + stock */
+(function() {
+  try {
+    var old = getEpiItems();
+    var cat = getEpiCatalogue();
+    if (old.length && !cat.length) {
+      var newCat = old.map(function(e) {
+        return { id: e.id, code: e.code || '', designation: e.designation || '', categorie: e.categorie || e.type || '', taille: e.taille || '', unite: e.unite || 'pièce', prix_unitaire: e.prix_unitaire || 0, seuil_minimum: e.seuil_minimum || e.seuil_alerte || 0, stock: e.quantite_stock || e.quantite || 0 };
+      });
+      setEpiCatalogue(newCat);
+    }
+  } catch(e) {}
+})();
+
+function render_epi() {
+  var sub = getSection('epiSubTab', 'catalogue');
+  var h = '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem">';
+  h += '<div><h2 style="margin:0">Gestion EPI</h2><p style="color:var(--dim);font-size:.8rem;margin:2px 0 0">Équipements de Protection Individuelle et consommables RH.</p></div>';
+  h += '<div style="display:flex;gap:.5rem">';
+  h += '<button class="btn" onclick="showConfigEpiModal()" style="font-size:.75rem">⚙️ Configurer Équipements</button>';
+  h += '<button class="btn btn-accent" onclick="showAttribuerEpiModal()">+ Nouvelle Attribution</button>';
+  h += '</div></div>';
+  h += '<div class="tabs" style="margin-bottom:1rem">';
+  var tabs = [['catalogue','📦 Catalogue'],['achats','🛒 Achats'],['attributions','👥 Attributions'],['stock','🛡️ Stock EPI'],['synthese','📊 Synthèse']];
+  tabs.forEach(function(t) { h += '<div class="tab' + (sub === t[0] ? ' active' : '') + '" onclick="setSection(\'epiSubTab\',\'' + t[0] + '\');renderPage()">' + t[1] + '</div>'; });
+  h += '</div>';
+  if (sub === 'catalogue') h += renderEpiCatalogue();
+  else if (sub === 'achats') h += renderEpiAchats();
+  else if (sub === 'attributions') h += renderEpiAttributionsTab();
+  else if (sub === 'stock') h += renderEpiStockTab();
+  else if (sub === 'synthese') h += renderEpiSynthese();
+  return h;
+}
+
+/* === CATALOGUE === */
+function renderEpiCatalogue() {
+  var items = getEpiCatalogue();
+  var q = ((document.getElementById('epiCatSearch') || {}).value || '').toLowerCase();
+  var filtered = q ? items.filter(function(e) { return ((e.code||'') + ' ' + (e.designation||'') + ' ' + (e.categorie||'')).toLowerCase().indexOf(q) !== -1; }) : items;
+  var h = '<div style="display:flex;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<input type="text" id="epiCatSearch" placeholder="Rechercher..." oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px">';
+  h += '<button class="btn btn-accent" onclick="showNouvelEpiModal()" style="margin-left:auto">+ Nouvel EPI</button></div>';
+  if (!filtered.length) return h + '<div class="empty">Aucun EPI dans le catalogue. Cliquez sur + Nouvel EPI pour ajouter.</div>';
+  h += '<div class="card"><table><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th>Taille</th><th>Unité</th><th style="text-align:right">P.U. (FCFA)</th><th style="text-align:right">Seuil min</th><th style="text-align:right">Stock</th><th>Actions</th></tr>';
+  filtered.forEach(function(e) {
+    var alert = (e.stock || 0) <= (e.seuil_minimum || 0);
+    h += '<tr' + (alert ? ' style="background:rgba(239,68,68,.08)"' : '') + '>';
+    h += '<td style="font-weight:600;color:var(--accent)">' + escH(e.code || '-') + '</td>';
+    h += '<td>' + escH(e.designation || '-') + '</td>';
+    h += '<td>' + escH(e.categorie || '-') + '</td>';
+    h += '<td>' + escH(e.taille || '-') + '</td>';
+    h += '<td>' + escH(e.unite || 'pièce') + '</td>';
+    h += '<td style="text-align:right">' + fmtF(e.prix_unitaire || 0) + '</td>';
+    h += '<td style="text-align:right">' + (e.seuil_minimum || 0) + '</td>';
+    h += '<td style="text-align:right;font-weight:700;' + (alert ? 'color:var(--red)' : '') + '">' + (e.stock || 0) + (alert ? ' ⚠️' : '') + '</td>';
+    h += '<td><button class="btn" onclick="editEpiCatalogue(\'' + e.id + '\')" style="font-size:.65rem">✏️</button> <button class="btn btn-red" onclick="deleteEpiCatalogue(\'' + e.id + '\')" style="font-size:.65rem">🗑️</button></td></tr>';
   });
-  h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(items.reduce(function(s,i){return s+(parseFloat(i.quantite)||0);},0)) + '</td><td colspan="3"></td></tr>';
   h += '</table></div>';
   return h;
 }
 
-function showNewEpiItem() {
+function showNouvelEpiModal() {
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
-  m += '<h2>🛡️ Nouvel EPI</h2>';
-  m += formField('epi_code', 'Code', '', 'text', true);
-  m += formField('epi_designation', 'Désignation', '', 'text', true);
-  m += formField('epi_type', 'Type (casque, gant, botte...)', '', 'text', true);
+  m += '<h2>📦 Nouvel EPI</h2>';
   m += '<div class="form-row">';
-  m += formField('epi_taille', 'Taille', '', 'text', false);
-  m += formField('epi_unite', 'Unité', 'pièce', 'text', false);
+  m += formField('ec_code', 'Code', '', 'text', true);
+  m += formField('ec_designation', 'Désignation', '', 'text', true);
   m += '</div>';
   m += '<div class="form-row">';
-  m += formField('epi_qte', 'Quantité', '0', 'number', true);
-  m += formField('epi_seuil', 'Seuil alerte', '5', 'number', false);
+  m += formField('ec_categorie', 'Catégorie (casque, gant, botte...)', '', 'text', false);
+  m += formField('ec_taille', 'Taille', '', 'text', false);
   m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem"><button class="btn btn-accent" onclick="createEpiItem()">✅ Ajouter</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  m += '<div class="form-row">';
+  m += formField('ec_unite', 'Unité', 'pièce', 'text', false);
+  m += formField('ec_prix', 'Prix unitaire (FCFA)', '0', 'number', false);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('ec_stock', 'Stock initial', '0', 'number', false);
+  m += formField('ec_seuil', 'Seuil minimum', '5', 'number', false);
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="saveEpiCatalogue()">✅ Créer</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
   document.body.insertAdjacentHTML('beforeend', m);
 }
-function createEpiItem() {
-  var code = (document.getElementById('epi_code')||{}).value;
-  var des = (document.getElementById('epi_designation')||{}).value;
+
+function saveEpiCatalogue() {
+  var code = (document.getElementById('ec_code')||{}).value;
+  var des = (document.getElementById('ec_designation')||{}).value;
   if (!code || !des) return toast('Code et désignation requis', 'error');
-  var items = getEpiItems();
-  items.push({ id: genId(), code: code, designation: des, type: (document.getElementById('epi_type')||{}).value, taille: (document.getElementById('epi_taille')||{}).value, unite: (document.getElementById('epi_unite')||{}).value, quantite: parseFloat((document.getElementById('epi_qte')||{}).value)||0, seuil_alerte: parseFloat((document.getElementById('epi_seuil')||{}).value)||0 });
-  setEpiItems(items);
-  document.getElementById('modalOverlay').remove();
-  toast('EPI ajouté');
-  renderPage();
-}
-function deleteEpiItem(id) { if(!confirm2('Supprimer ?')) return; setEpiItems(getEpiItems().filter(function(i){return i.id!==id;})); toast('Supprimé'); renderPage(); }
-
-function renderEpiInventory(items) {
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem"><div></div>';
-  h += '<button class="btn btn-accent" onclick="showNewEpi()">+ Nouvel EPI</button></div>';
-  if (items.length === 0) return h + '<div class="empty">Aucun EPI</div>';
-  h += '<div class="card"><table><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th style="text-align:right">Stock</th><th style="text-align:right">Seuil min</th><th style="text-align:right">Prix</th><th>Actions</th></tr>';
-  items.forEach(function(e) {
-    var alert = e.quantite_stock <= (e.seuil_minimum || 0);
-    h += '<tr' + (alert ? ' style="background:rgba(239,68,68,.1)"' : '') + '><td>' + escH(e.code) + '</td><td>' + escH(e.designation) + '</td><td>' + escH(e.categorie || '-') + '</td><td style="text-align:right;font-weight:700">' + (e.quantite_stock || 0) + (alert ? ' ⚠️' : '') + '</td><td style="text-align:right">' + (e.seuil_minimum || 0) + '</td><td style="text-align:right">' + fmtF(e.prix_unitaire || 0) + '</td><td><button class="btn btn-red" onclick="deleteEpi(\'' + e.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
-  });
-  h += '</table></div>';
-  return h;
-}
-
-function showNewEpi() {
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
-  m += '<h2>🦺 Nouvel EPI</h2>';
-  m += formField('epi_code', 'Code', '', 'text', true);
-  m += formField('epi_designation', 'Désignation', '', 'text', true);
-  m += formField('epi_categorie', 'Catégorie', '', 'text', false);
-  m += '<div class="form-row">';
-  m += formField('epi_stock', 'Quantité stock', '', 'number', false);
-  m += formField('epi_seuil', 'Seuil minimum', '', 'number', false);
-  m += '</div>';
-  m += formField('epi_prix', 'Prix unitaire', '', 'number', false);
-  m += '<div style="display:flex;gap:.5rem;margin-top:.8rem">';
-  m += '<button class="btn btn-accent" onclick="createEpi()">✅ Créer</button>';
-  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button>';
-  m += '</div></div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
-}
-
-function createEpi() {
-  var code = document.getElementById('epi_code').value;
-  var designation = document.getElementById('epi_designation').value;
-  if (!code || !designation) return toast('Champs requis', 'error');
-  var items = getEpiItems();
-  items.push({ id: genId(), code: code, designation: designation, categorie: document.getElementById('epi_categorie').value, quantite_stock: parseInt(document.getElementById('epi_stock').value) || 0, seuil_minimum: parseInt(document.getElementById('epi_seuil').value) || 0, prix_unitaire: parseFloat(document.getElementById('epi_prix').value) || 0 });
-  setEpiItems(items);
+  var cat = getEpiCatalogue();
+  cat.push({ id: genId(), code: code, designation: des, categorie: (document.getElementById('ec_categorie')||{}).value, taille: (document.getElementById('ec_taille')||{}).value, unite: (document.getElementById('ec_unite')||{}).value || 'pièce', prix_unitaire: parseFloat((document.getElementById('ec_prix')||{}).value)||0, stock: parseInt((document.getElementById('ec_stock')||{}).value)||0, seuil_minimum: parseInt((document.getElementById('ec_seuil')||{}).value)||0 });
+  setEpiCatalogue(cat);
   document.getElementById('modalOverlay').remove();
   toast('EPI créé');
   renderPage();
 }
 
-function deleteEpi(id) {
-  var epi = getEpiItems().find(function(e) { return e.id === id; });
-  if (!epi) return;
-  var assignments = getEpiAssignments().filter(function(a) { return a.epi_id === id; });
-  var msg = '⚠️ Supprimer l\'EPI ' + (epi.code || '-') + ' — ' + (epi.designation || '') + ' ?\n\n';
-  msg += '• Stock : ' + (epi.quantite_stock || 0) + '\n';
-  if (assignments.length) msg += '• ' + assignments.length + ' affectation(s) seront supprimées\n';
-  msg += '\nConfirmer ?';
+function editEpiCatalogue(id) {
+  var e = getEpiCatalogue().find(function(x) { return x.id === id; });
+  if (!e) return;
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
+  m += '<h2>✏️ Modifier EPI</h2>';
+  m += '<div class="form-row">';
+  m += formField('ec_code', 'Code', e.code, 'text', true);
+  m += formField('ec_designation', 'Désignation', e.designation, 'text', true);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('ec_categorie', 'Catégorie', e.categorie, 'text', false);
+  m += formField('ec_taille', 'Taille', e.taille, 'text', false);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('ec_unite', 'Unité', e.unite, 'text', false);
+  m += formField('ec_prix', 'Prix unitaire (FCFA)', e.prix_unitaire, 'number', false);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('ec_stock', 'Stock', e.stock, 'number', false);
+  m += formField('ec_seuil', 'Seuil minimum', e.seuil_minimum, 'number', false);
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="updateEpiCatalogue(\'' + id + '\')">✅ Enregistrer</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function updateEpiCatalogue(id) {
+  var cat = getEpiCatalogue();
+  var e = cat.find(function(x) { return x.id === id; });
+  if (!e) return;
+  e.code = (document.getElementById('ec_code')||{}).value || e.code;
+  e.designation = (document.getElementById('ec_designation')||{}).value || e.designation;
+  e.categorie = (document.getElementById('ec_categorie')||{}).value;
+  e.taille = (document.getElementById('ec_taille')||{}).value;
+  e.unite = (document.getElementById('ec_unite')||{}).value || 'pièce';
+  e.prix_unitaire = parseFloat((document.getElementById('ec_prix')||{}).value)||0;
+  e.stock = parseInt((document.getElementById('ec_stock')||{}).value)||0;
+  e.seuil_minimum = parseInt((document.getElementById('ec_seuil')||{}).value)||0;
+  setEpiCatalogue(cat);
+  document.getElementById('modalOverlay').remove();
+  toast('EPI modifié');
+  renderPage();
+}
+
+function deleteEpiCatalogue(id) {
+  var e = getEpiCatalogue().find(function(x) { return x.id === id; });
+  if (!e) return;
+  var asg = getEpiAttributions().filter(function(a) { return a.epi_id === id && a.statut === 'actif'; });
+  var msg = 'Supprimer ' + (e.code || '') + ' — ' + (e.designation || '') + ' ?';
+  if (asg.length) msg += '\n\n⚠️ ' + asg.length + ' attribution(s) active(s) seront supprimées.';
   if (!confirm2(msg)) return;
-  setEpiItems(getEpiItems().filter(function(e) { return e.id !== id; }));
-  if (assignments.length) setEpiAssignments(getEpiAssignments().filter(function(a) { return a.epi_id !== id; }));
+  setEpiCatalogue(getEpiCatalogue().filter(function(x) { return x.id !== id; }));
+  setEpiAttributions(getEpiAttributions().filter(function(a) { return a.epi_id !== id; }));
   toast('EPI supprimé');
   renderPage();
 }
 
-/* ==================== RH - CONGES ==================== */
+/* === ACHATS EPI === */
+function renderEpiAchats() {
+  var purchases = getEpiPurchases().slice().reverse();
+  var q = ((document.getElementById('epiAchSearch') || {}).value || '').toLowerCase();
+  var filtered = q ? purchases.filter(function(p) { return ((p.fournisseur||'') + ' ' + (p.acheteur||'')).toLowerCase().indexOf(q) !== -1; }) : purchases;
+  var h = '<div style="display:flex;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<input type="text" id="epiAchSearch" placeholder="Rechercher achat..." oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px">';
+  h += '<button class="btn btn-accent" onclick="showNouvelAchatEpiModal()" style="margin-left:auto">+ Nouvel Achat</button></div>';
+  if (!filtered.length) return h + '<div class="empty">Aucun achat enregistré</div>';
+  h += '<div class="card"><table><tr><th>Date</th><th>Article</th><th>Fournisseur</th><th>Acheteur</th><th style="text-align:right">Qté</th><th style="text-align:right">P.U.</th><th style="text-align:right">Total</th><th>Actions</th></tr>';
+  filtered.forEach(function(p) {
+    (p.lignes || []).forEach(function(l, i) {
+      h += '<tr>';
+      if (i === 0) {
+        h += '<td rowspan="' + (p.lignes||[]).length + '">' + escH(p.date || '-') + '</td>';
+        h += '<td rowspan="' + (p.lignes||[]).length + '" style="display:none"></td>';
+      }
+      h += '<td>' + escH(l.article || '-') + '</td>';
+      if (i === 0) {
+        h += '<td>' + escH(p.fournisseur || '-') + '</td>';
+        h += '<td>' + escH(p.acheteur || '-') + '</td>';
+      }
+      h += '<td style="text-align:right">' + (l.quantite || 0) + '</td>';
+      h += '<td style="text-align:right">' + fmtF(l.prix_unitaire || 0) + '</td>';
+      h += '<td style="text-align:right;font-weight:600">' + fmtF((l.quantite || 0) * (l.prix_unitaire || 0)) + '</td>';
+      if (i === 0) h += '<td rowspan="' + (p.lignes||[]).length + '"><button class="btn btn-red" onclick="deleteEpiPurchase(\'' + p.id + '\')" style="font-size:.65rem">🗑️</button></td>';
+      h += '</tr>';
+    });
+  });
+  h += '</table></div>';
+  return h;
+}
+
+function showNouvelAchatEpiModal() {
+  var cat = getEpiCatalogue();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:650px">';
+  m += '<h2>🛒 Nouvel Achat / Approvisionnement</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Enregistrez plusieurs types d\'EPI pour la même date. Chaque ligne crée un achat et met à jour le stock.</p>';
+  m += '<div class="form-row">';
+  m += formField('pa_date', 'Date d\'achat', today(), 'date', true);
+  m += '<div><label style="font-size:.75rem;color:var(--dim);display:block;margin-bottom:2px">Fournisseur</label><select id="pa_fournisseur" onchange="if(this.value===\'__new__\')document.getElementById(\'pa_fournisseur_new\').style.display=\'block\'"><option value="">-- Sélectionner --</option><option value="__new__">-- Nouveau / Autre --</option></select><input type="text" id="pa_fournisseur_new" placeholder="Nom du fournisseur" style="display:none;margin-top:4px" class="search-box"></div>';
+  m += '</div>';
+  m += formField('pa_acheteur', 'Acheteur', '', 'text', false);
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin:1rem 0 .5rem"><strong style="font-size:.85rem">Lignes EPI</strong><button class="btn" onclick="addAchatEpiLigne()" style="font-size:.7rem">+ Ajouter un EPI</button></div>';
+  m += '<div id="pa_lignes">';
+  m += '<div class="card" style="padding:.5rem;margin-bottom:.5rem;display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:.5rem;align-items:end">';
+  m += '<div><label style="font-size:.7rem;color:var(--dim)">Article *</label><select class="pa_article" style="width:100%"><option value="">Choisir l\'EPI</option>';
+  cat.forEach(function(e) { m += '<option value="' + e.id + '">' + escH(e.code) + ' — ' + escH(e.designation) + '</option>'; });
+  m += '</select></div>';
+  m += '<div><label style="font-size:.7rem;color:var(--dim)">Qté</label><input type="number" class="pa_qte" value="1" min="1" style="width:100%" onchange="updateAchatLigneTotal(this)"></div>';
+  m += '<div><label style="font-size:.7rem;color:var(--dim)">P.U. FCFA</label><input type="number" class="pa_pu" value="0" style="width:100%" onchange="updateAchatLigneTotal(this)"></div>';
+  m += '<div><label style="font-size:.7rem;color:var(--dim)">Total</label><div class="pa_total" style="padding:6px;font-weight:600">0</div></div>';
+  m += '<button class="btn btn-red" onclick="this.closest(\'.card\').remove();updateAchatGrandTotal()" style="font-size:.7rem;align-self:end">🗑️</button>';
+  m += '</div></div>';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin:.5rem 0;font-size:.8rem"><span style="color:var(--dim)">Total général: <strong id="pa_grandTotal">0 FCFA</strong> — <span id="pa_ligneCount">1</span> ligne(s)</span></div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="saveAchatEpi(false)">✅ Enregistrer tout</button><button class="btn" onclick="saveAchatEpi(true)">Enregistrer et ajouter d\'autres</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function addAchatEpiLigne() {
+  var cat = getEpiCatalogue();
+  var el = document.getElementById('pa_lignes');
+  var d = document.createElement('div');
+  d.className = 'card';
+  d.style.cssText = 'padding:.5rem;margin-bottom:.5rem;display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:.5rem;align-items:end';
+  var opts = '<option value="">Choisir l\'EPI</option>';
+  cat.forEach(function(e) { opts += '<option value="' + e.id + '">' + escH(e.code) + ' — ' + escH(e.designation) + '</option>'; });
+  d.innerHTML = '<div><select class="pa_article" style="width:100%">' + opts + '</select></div><div><input type="number" class="pa_qte" value="1" min="1" style="width:100%" onchange="updateAchatLigneTotal(this)"></div><div><input type="number" class="pa_pu" value="0" style="width:100%" onchange="updateAchatLigneTotal(this)"></div><div><div class="pa_total" style="padding:6px;font-weight:600">0</div></div><button class="btn btn-red" onclick="this.closest(\'.card\').remove();updateAchatGrandTotal()" style="font-size:.7rem">🗑️</button>';
+  el.appendChild(d);
+  updateAchatGrandTotal();
+}
+
+function updateAchatLigneTotal(el) {
+  var row = el.closest('.card');
+  var q = parseFloat(row.querySelector('.pa_qte').value) || 0;
+  var p = parseFloat(row.querySelector('.pa_pu').value) || 0;
+  row.querySelector('.pa_total').textContent = fmtF(q * p);
+  updateAchatGrandTotal();
+}
+
+function updateAchatGrandTotal() {
+  var total = 0, count = 0;
+  document.querySelectorAll('#pa_lignes .card').forEach(function(row) {
+    var q = parseFloat(row.querySelector('.pa_qte').value) || 0;
+    var p = parseFloat(row.querySelector('.pa_pu').value) || 0;
+    total += q * p;
+    count++;
+  });
+  var el = document.getElementById('pa_grandTotal');
+  if (el) el.textContent = fmtF(total) + ' FCFA';
+  var el2 = document.getElementById('pa_ligneCount');
+  if (el2) el2.textContent = count;
+}
+
+function saveAchatEpi(addMore) {
+  var date = (document.getElementById('pa_date')||{}).value;
+  if (!date) return toast('Date requise', 'error');
+  var fourSel = (document.getElementById('pa_fournisseur')||{}).value;
+  var four = fourSel === '__new__' ? ((document.getElementById('pa_fournisseur_new')||{}).value || '') : fourSel;
+  var acheteur = (document.getElementById('pa_acheteur')||{}).value || '';
+  var lignes = [];
+  document.querySelectorAll('#pa_lignes .card').forEach(function(row) {
+    var artId = row.querySelector('.pa_article').value;
+    var qte = parseInt(row.querySelector('.pa_qte').value) || 0;
+    var pu = parseFloat(row.querySelector('.pa_pu').value) || 0;
+    if (artId && qte > 0) {
+      var epi = getEpiCatalogue().find(function(e) { return e.id === artId; });
+      lignes.push({ epi_id: artId, article: epi ? (epi.code + ' — ' + epi.designation) : '', quantite: qte, prix_unitaire: pu });
+    }
+  });
+  if (!lignes.length) return toast('Ajoutez au moins une ligne', 'error');
+  var purchases = getEpiPurchases();
+  purchases.push({ id: genId(), date: date, fournisseur: four, acheteur: acheteur, lignes: lignes });
+  setEpiPurchases(purchases);
+  /* Mise à jour stock */
+  var cat = getEpiCatalogue();
+  lignes.forEach(function(l) {
+    var e = cat.find(function(x) { return x.id === l.epi_id; });
+    if (e) e.stock = (e.stock || 0) + l.quantite;
+  });
+  setEpiCatalogue(cat);
+  toast(lignes.length + ' ligne(s) enregistrée(s), stock mis à jour');
+  if (addMore) { document.getElementById('pa_lignes').innerHTML = ''; addAchatEpiLigne(); updateAchatGrandTotal(); }
+  else { document.getElementById('modalOverlay').remove(); renderPage(); }
+}
+
+function deleteEpiPurchase(id) {
+  if (!confirm2('Supprimer cet achat et déduire le stock ?')) return;
+  var purchase = getEpiPurchases().find(function(p) { return p.id === id; });
+  if (purchase) {
+    var cat = getEpiCatalogue();
+    (purchase.lignes || []).forEach(function(l) {
+      var e = cat.find(function(x) { return x.id === l.epi_id; });
+      if (e) e.stock = Math.max(0, (e.stock || 0) - (l.quantite || 0));
+    });
+    setEpiCatalogue(cat);
+  }
+  setEpiPurchases(getEpiPurchases().filter(function(p) { return p.id !== id; }));
+  toast('Achat supprimé, stock déduit');
+  renderPage();
+}
+
+/* === ATTRIBUTIONS === */
+function renderEpiAttributionsTab() {
+  var attribs = getEpiAttributions().slice().reverse();
+  var personnel = getPersonnel();
+  var cat = getEpiCatalogue();
+  var q = ((document.getElementById('epiAsgSearch') || {}).value || '').toLowerCase();
+  var filtered = q ? attribs.filter(function(a) {
+    var emp = personnel.find(function(e) { return e.id === a.employee_id; });
+    var epi = cat.find(function(e) { return e.id === a.epi_id; });
+    return ((emp ? emp.nom+' '+emp.prenoms : '') + ' ' + (epi ? epi.designation : '')).toLowerCase().indexOf(q) !== -1;
+  }) : attribs;
+  var h = '<div style="display:flex;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<input type="text" id="epiAsgSearch" placeholder="Rechercher(nom, équipement...)" oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px"></div>';
+  if (!filtered.length) return h + '<div class="empty">Aucune attribution trouvée</div>';
+  h += '<div class="card"><table><tr><th>Employé</th><th>Équipement</th><th>Date Attribution</th><th>Date Remplacement</th><th>État</th><th>Statut</th><th>Actions</th></tr>';
+  filtered.forEach(function(a) {
+    var emp = personnel.find(function(e) { return e.id === a.employee_id; });
+    var epi = cat.find(function(e) { return e.id === a.epi_id; });
+    h += '<tr>';
+    h += '<td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '—') + '</td>';
+    h += '<td>' + escH(epi ? epi.code + ' — ' + epi.designation : '—') + '</td>';
+    h += '<td>' + escH(a.date_attribution || '-') + '</td>';
+    h += '<td>' + escH(a.date_remplacement || '—') + '</td>';
+    h += '<td>' + escH(a.etat || 'Bon') + '</td>';
+    h += '<td>' + (a.statut === 'actif' ? '<span style="color:var(--green);font-weight:600">Actif</span>' : '<span style="color:var(--dim)">Inactif</span>') + '</td>';
+    h += '<td>';
+    if (a.statut === 'actif') h += '<button class="btn" onclick="returnEpiAttribution(\'' + a.id + '\')" style="font-size:.65rem;background:var(--accent);color:#fff">🔄 Retour</button>';
+    h += ' <button class="btn btn-red" onclick="deleteEpiAttribution(\'' + a.id + '\')" style="font-size:.65rem">🗑️</button>';
+    h += '</td></tr>';
+  });
+  h += '</table></div>';
+  return h;
+}
+
+function showAttribuerEpiModal() {
+  var personnel = getPersonnel();
+  var cat = getEpiCatalogue().filter(function(e) { return (e.stock || 0) > 0; });
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
+  m += '<h2>👥 Attribuer un EPI</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Cela déduira automatiquement 1 unité du stock EPI.</p>';
+  m += '<div style="margin-bottom:1rem"><label style="font-size:.8rem;font-weight:600;display:block;margin-bottom:.3rem">Employé(s) *</label>';
+  m += '<input type="text" id="aeSearch" placeholder="Rechercher un employé..." oninput="filterAeList()" class="search-box" style="width:100%;margin-bottom:.3rem">';
+  m += '<label style="font-size:.75rem;color:var(--dim);cursor:pointer;display:block;margin-bottom:.3rem"><input type="checkbox" id="aeSelectAll" onchange="aeToggleAll(this.checked)"> TOUT SÉLECTIONNER</label>';
+  m += '<div id="aeEmpList" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem">';
+  personnel.forEach(function(e) {
+    m += '<label style="display:flex;align-items:center;gap:.5rem;padding:3px 6px;cursor:pointer;border-bottom:1px solid var(--border);font-size:.78rem">';
+    m += '<input type="checkbox" class="ae-emp" value="' + e.id + '">';
+    m += escH(e.nom + ' ' + (e.prenoms || ''));
+    m += '</label>';
+  });
+  m += '</div><div style="text-align:right;font-size:.7rem;color:var(--dim);margin-top:2px"><span id="aeCount">0</span> employé(s) sélectionné(s)</div></div>';
+  m += '<div class="form-row">';
+  m += '<div><label style="font-size:.8rem;font-weight:600;display:block;margin-bottom:3px">Équipement (EPI) *</label><select id="aeEpi" style="width:100%"><option value="">Choisir l\'EPI</option>';
+  cat.forEach(function(e) { m += '<option value="' + e.id + '">' + escH(e.code) + ' — ' + escH(e.designation) + ' (stock: ' + e.stock + ')</option>'; });
+  m += '</select></div>';
+  m += formField('ae_qte', 'Quantité par pers.', '1', 'number', false);
+  m += '</div>';
+  m += '<div class="form-row">';
+  m += formField('ae_date', 'Date d\'attribution', today(), 'date', false);
+  m += '<div><label style="font-size:.8rem;font-weight:600;display:block;margin-bottom:3px">Statut</label><select id="ae_statut" style="width:100%"><option value="actif">Actif</option><option value="inactif">Inactif</option></select></div>';
+  m += '</div>';
+  m += formField('ae_comment', 'Commentaires', '', 'text', false);
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="saveAttributionEpi()">✅ Confirmer l\'Attribution</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+  document.querySelectorAll('.ae-emp').forEach(function(cb) { cb.addEventListener('change', function() { document.getElementById('aeCount').textContent = document.querySelectorAll('.ae-emp:checked').length; }); });
+}
+
+function filterAeList() {
+  var q = ((document.getElementById('aeSearch')||{}).value || '').toLowerCase();
+  document.querySelectorAll('.ae-emp').forEach(function(cb) {
+    var label = cb.parentElement;
+    cb.parentElement.style.display = label.textContent.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+  });
+}
+
+function aeToggleAll(checked) {
+  document.querySelectorAll('.ae-emp').forEach(function(cb) { if (cb.parentElement.style.display !== 'none') cb.checked = checked; });
+  document.getElementById('aeCount').textContent = document.querySelectorAll('.ae-emp:checked').length;
+}
+
+function saveAttributionEpi() {
+  var checked = document.querySelectorAll('.ae-emp:checked');
+  var epiId = (document.getElementById('aeEpi')||{}).value;
+  var qte = parseInt((document.getElementById('ae_qte')||{}).value) || 1;
+  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
+  if (!epiId) return toast('Choisissez un EPI', 'error');
+  var cat = getEpiCatalogue();
+  var epi = cat.find(function(e) { return e.id === epiId; });
+  var totalNeeded = checked.length * qte;
+  if ((epi.stock || 0) < totalNeeded) return toast('Stock insuffisant (' + (epi.stock || 0) + ' disponible, ' + totalNeeded + ' requis)', 'error');
+  var attribs = getEpiAttributions();
+  var date = (document.getElementById('ae_date')||{}).value || today();
+  var statut = (document.getElementById('ae_statut')||{}).value || 'actif';
+  var comment = (document.getElementById('ae_comment')||{}).value || '';
+  checked.forEach(function(cb) {
+    for (var i = 0; i < qte; i++) {
+      attribs.push({ id: genId(), employee_id: cb.value, epi_id: epiId, date_attribution: date, statut: statut, etat: 'Bon', commentaire: comment });
+    }
+  });
+  setEpiAttributions(attribs);
+  epi.stock = (epi.stock || 0) - totalNeeded;
+  setEpiCatalogue(cat);
+  document.getElementById('modalOverlay').remove();
+  toast(totalNeeded + ' EPI attribué(s) à ' + checked.length + ' employé(s), stock déduit');
+  renderPage();
+}
+
+function returnEpiAttribution(id) {
+  var attribs = getEpiAttributions();
+  var a = attribs.find(function(x) { return x.id === id; });
+  if (!a) return;
+  a.statut = 'inactif';
+  a.date_remplacement = today();
+  setEpiAttributions(attribs);
+  var cat = getEpiCatalogue();
+  var e = cat.find(function(x) { return x.id === a.epi_id; });
+  if (e) e.stock = (e.stock || 0) + 1;
+  setEpiCatalogue(cat);
+  toast('EPI retourné, stock réaugmenté');
+  renderPage();
+}
+
+function deleteEpiAttribution(id) {
+  if (!confirm2('Supprimer cette attribution ?')) return;
+  setEpiAttributions(getEpiAttributions().filter(function(a) { return a.id !== id; }));
+  toast('Attribution supprimée');
+  renderPage();
+}
+
+/* === STOCK EPI === */
+function renderEpiStockTab() {
+  var cat = getEpiCatalogue();
+  var q = ((document.getElementById('epiStockSearch') || {}).value || '').toLowerCase();
+  var filtered = q ? cat.filter(function(e) { return ((e.code||'') + ' ' + (e.designation||'')).toLowerCase().indexOf(q) !== -1; }) : cat;
+  var h = '<div style="display:flex;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<input type="text" id="epiStockSearch" placeholder="Rechercher..." oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px">';
+  h += '<button class="btn btn-accent" onclick="showAjusterStockEpiModal()" style="margin-left:auto">✏️ Ajuster Stock</button></div>';
+  if (!filtered.length) return h + '<div class="empty">Aucun EPI en stock</div>';
+  h += '<div class="card"><table><tr><th>Équipement</th><th style="text-align:right">Quantité</th><th style="text-align:right">Min. Requis</th><th>État du Stock</th><th>Dernière MAJ</th><th>Actions</th></tr>';
+  filtered.forEach(function(e) {
+    var stock = e.stock || 0;
+    var min = e.seuil_minimum || 0;
+    var etat = stock <= 0 ? '🔴 Rupture' : stock <= min ? '🟡 Sous seuil' : '🟢 OK';
+    h += '<tr>';
+    h += '<td style="font-weight:600">' + escH(e.code) + ' — ' + escH(e.designation) + '</td>';
+    h += '<td style="text-align:right;font-weight:700;' + (stock <= min ? 'color:var(--red)' : '') + '">' + stock + '</td>';
+    h += '<td style="text-align:right">' + min + '</td>';
+    h += '<td>' + etat + '</td>';
+    h += '<td>' + escH(e._lastUpdate || '—') + '</td>';
+    h += '<td><button class="btn" onclick="showAjusterStockEpiModal(\'' + e.id + '\')" style="font-size:.65rem">✏️</button></td>';
+    h += '</tr>';
+  });
+  h += '</table></div>';
+  return h;
+}
+
+function showAjusterStockEpiModal(epiId) {
+  var cat = getEpiCatalogue();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
+  m += '<h2>✏️ Ajuster Stock EPI</h2>';
+  m += '<div style="margin-bottom:1rem"><label style="font-size:.8rem;font-weight:600;display:block;margin-bottom:3px">Équipement</label><select id="as_epi" style="width:100%"' + (epiId ? ' disabled' : '') + '>';
+  cat.forEach(function(e) { m += '<option value="' + e.id + '"' + (e.id === epiId ? ' selected' : '') + '>' + escH(e.code) + ' — ' + escH(e.designation) + ' (stock: ' + (e.stock||0) + ')</option>'; });
+  m += '</select></div>';
+  m += '<div class="form-row">';
+  m += formField('as_new_stock', 'Nouveau stock', '', 'number', true);
+  m += formField('as_motif', 'Motif', '', 'text', false);
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="saveAjusterStockEpi()">✅ Ajuster</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function saveAjusterStockEpi() {
+  var epiId = (document.getElementById('as_epi')||{}).value;
+  var newStock = parseInt((document.getElementById('as_new_stock')||{}).value);
+  if (!epiId || isNaN(newStock)) return toast('Champs requis', 'error');
+  var cat = getEpiCatalogue();
+  var e = cat.find(function(x) { return x.id === epiId; });
+  if (!e) return;
+  var old = e.stock || 0;
+  e.stock = newStock;
+  e._lastUpdate = today();
+  setEpiCatalogue(cat);
+  document.getElementById('modalOverlay').remove();
+  toast('Stock ajusté: ' + old + ' → ' + newStock);
+  renderPage();
+}
+
+/* === SYNTHÈSE === */
+function renderEpiSynthese() {
+  var personnel = getPersonnel();
+  var cat = getEpiCatalogue();
+  var attribs = getEpiAttributions().filter(function(a) { return a.statut === 'actif'; });
+  var q = ((document.getElementById('epiSynthSearch') || {}).value || '').toLowerCase();
+  var empWithEpi = {};
+  attribs.forEach(function(a) {
+    if (!empWithEpi[a.employee_id]) empWithEpi[a.employee_id] = [];
+    var epi = cat.find(function(e) { return e.id === a.epi_id; });
+    if (epi) empWithEpi[a.employee_id].push(epi.code + ' — ' + epi.designation);
+  });
+  var rows = Object.keys(empWithEpi).map(function(eid) {
+    var emp = personnel.find(function(e) { return e.id === eid; });
+    return { emp: emp, items: empWithEpi[eid] };
+  }).filter(function(r) {
+    if (!q || !r.emp) return true;
+    return ((r.emp.nom||'') + ' ' + (r.emp.prenoms||'')).toLowerCase().indexOf(q) !== -1;
+  });
+  var h = '<div style="display:flex;gap:.5rem;margin-bottom:1rem;align-items:center">';
+  h += '<input type="text" id="epiSynthSearch" placeholder="Rechercher employé..." oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px"></div>';
+  if (!rows.length) return h + '<div class="empty">Aucune dotation active.</div>';
+  h += '<div class="card"><table><tr><th>Employé</th><th>Équipements en possession (Actifs)</th><th style="text-align:right">Total Articles</th></tr>';
+  rows.forEach(function(r) {
+    h += '<tr>';
+    h += '<td style="font-weight:600">' + escH(r.emp ? r.emp.nom + ' ' + (r.emp.prenoms || '') : '—') + '</td>';
+    h += '<td>' + escH(r.items.join(', ')) + '</td>';
+    h += '<td style="text-align:right;font-weight:700">' + r.items.length + '</td>';
+    h += '</tr>';
+  });
+  h += '</table></div>';
+  return h;
+}
+
+function showConfigEpiModal() {
+  var cat = getEpiCatalogue();
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:500px">';
+  m += '<h2>⚙️ Configurer Équipements</h2>';
+  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Gérer les catégories et paramètres des EPI.</p>';
+  m += '<div style="margin-bottom:1rem"><strong style="font-size:.8rem">Catégories existantes:</strong>';
+  var cats = {};
+  cat.forEach(function(e) { if (e.categorie) cats[e.categorie] = (cats[e.categorie]||0) + 1; });
+  Object.keys(cats).forEach(function(c) { m += '<div style="font-size:.8rem;padding:4px 0">• ' + escH(c) + ' (' + cats[c] + ')</div>'; });
+  if (!Object.keys(cats).length) m += '<div style="font-size:.8rem;color:var(--dim)">Aucune catégorie définie</div>';
+  m += '</div>';
+  m += '<div style="display:flex;gap:.5rem"><input type="text" id="cfgEpiNewCat" placeholder="Nouvelle catégorie..." class="search-box" style="flex:1"><button class="btn btn-accent" onclick="addEpiCategory()">Ajouter</button></div>';
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Fermer</button></div></div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+
+function addEpiCategory() {
+  var val = (document.getElementById('cfgEpiNewCat')||{}).value.trim();
+  if (!val) return;
+  toast('Catégorie "' + val + '" ajoutée. Utilisez-la lors de la création d\'un EPI.');
+  document.getElementById('cfgEpiNewCat').value = '';
+}
 function renderLeavesReadOnly() {
   var leaves = getLeaves().slice().reverse();
   var personnel = getPersonnel();
@@ -5802,38 +6239,6 @@ function closeModal() {
 }
 function formatCurrency(n) { return fmt(n) + ' FCFA'; }
 
-function showEpiTab(tab) {
-  var inv = document.getElementById('tab_epi');
-  var asg = document.getElementById('tab_assign');
-  var content = document.getElementById('epiContent');
-  if (!content) return;
-  if (tab === 'inventory') {
-    if (inv) inv.classList.add('active');
-    if (asg) asg.classList.remove('active');
-    content.innerHTML = renderEpiInventory(getEpiItems());
-  } else {
-    if (asg) asg.classList.add('active');
-    if (inv) inv.classList.remove('active');
-    var assignments = getEpiAssignments();
-    var personnel = getPersonnel();
-    var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem"><div></div>';
-    h += '<button class="btn btn-accent" onclick="showAssignEpi()">+ Affecter EPI</button></div>';
-    if (assignments.length === 0) { content.innerHTML = h + '<div class="empty">Aucune affectation</div>'; return; }
-    h += '<div class="card"><table><tr><th>Employé</th><th>EPI</th><th>Date affectation</th><th>Expiration</th><th>Statut</th></tr>';
-    assignments.forEach(function(a) {
-      var emp = personnel.find(function(e) { return e.id === a.employee_id; });
-      var epi = getEpiItems().find(function(e) { return e.id === a.epi_id; });
-      h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td>';
-      h += '<td>' + escH(epi ? epi.designation : '-') + '</td>';
-      h += '<td>' + escH(a.date_affectation || '-') + '</td>';
-      h += '<td>' + escH(a.date_expiration || '-') + '</td>';
-      h += '<td>' + badgeStatut(a.statut || 'active') + '</td></tr>';
-    });
-    h += '</table></div>';
-    content.innerHTML = h;
-  }
-}
-
 function viewInventory(id) {
   var inv = getInventories().find(function(x) { return x.id === id; });
   if (!inv) return;
@@ -5844,39 +6249,6 @@ function viewInventory(id) {
   m += '<p><strong>Heure:</strong> ' + escH((inv.heure_debut || '-') + ' → ' + (inv.heure_fin || '-')) + '</p>';
   m += '<div style="margin-top:1rem;text-align:right"><button class="btn" onclick="closeModal()">Fermer</button></div>';
   openModal(m);
-}
-
-function showAssignEpi() {
-  var personnel = getPersonnel();
-  var epis = getEpiItems();
-  var m = '<h2>🦺 Affecter un EPI</h2>';
-  m += '<div class="form-group"><label>Employé *</label><select id="asgn_emp">';
-  personnel.forEach(function(p) { m += '<option value="' + p.id + '">' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '</option>'; });
-  m += '</select></div>';
-  m += '<div class="form-group"><label>EPI *</label><select id="asgn_epi">';
-  epis.forEach(function(e) { m += '<option value="' + e.id + '">' + escH(e.code) + ' — ' + escH(e.designation) + '</option>'; });
-  m += '</select></div>';
-  m += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.8rem">';
-  m += formField('asgn_date', 'Date affectation', today(), 'date', true);
-  m += formField('asgn_exp', 'Date expiration', '', 'date', false);
-  m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:1rem">';
-  m += '<button class="btn btn-accent" onclick="saveAssignEpi()">✅ Affecter</button>';
-  m += '<button class="btn" onclick="closeModal()">Annuler</button></div>';
-  openModal(m);
-}
-
-function saveAssignEpi() {
-  var emp = document.getElementById('asgn_emp').value;
-  var epi = document.getElementById('asgn_epi').value;
-  var date = document.getElementById('asgn_date').value;
-  if (!emp || !epi || !date) return toast('Champs requis', 'error');
-  var assignments = getEpiAssignments();
-  assignments.push({ id: genId(), employee_id: emp, epi_id: epi, date_affectation: date, date_expiration: document.getElementById('asgn_exp').value, statut: 'actif' });
-  setEpiAssignments(assignments);
-  closeModal();
-  toast('EPI affecté');
-  renderPage();
 }
 
 /* ==================== STOCK MARCHANDISES ARTICLES ==================== */
