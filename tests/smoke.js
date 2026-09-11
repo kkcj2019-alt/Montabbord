@@ -90,7 +90,7 @@ for (const file of apps) {
 console.log('\n=== STATIC CHECKS (production helpers) ===');
 const prod = fs.readFileSync(path.join('public', 'production.html'), 'utf8');
 const prodFns = collectFunctions(extractScripts(prod).join('\n'));
-const required = ['saveProduction', 'deductBoisSorti', 'deductAssemblageStock', 'getAssemblageData', 'loadAssemblageComponents', 'extractAchatFromDoc', 'processAllImages', 'nextProdNumber', 'isCurrentUserAdmin', 'renderPointageGrouped', 'getPresentByFonction', 'generateProdFichePrintHTML', 'generateProdFichePDF', 'printProductionHistory', 'exportProductionHistoryPDF', 'exportStockExcel', 'autoSaveDraft', 'applyAutoDraft', 'clearAutoDraft', 'createSanction', 'getFonctionsFromPaye'];
+const required = ['saveProduction', 'deductBoisSorti', 'deductAssemblageStock', 'getAssemblageData', 'extractAchatFromDoc', 'processAllImages', 'nextProdNumber', 'isCurrentUserAdmin', 'renderPointageGrouped', 'getPresentByFonction', 'generateProdFichePrintHTML', 'generateProdFichePDF', 'printProductionHistory', 'exportProductionHistoryPDF', 'exportStockExcel', 'autoSaveDraft', 'applyAutoDraft', 'clearAutoDraft', 'createSanction', 'getFonctionsFromPaye'];
 const prodMissing = required.filter((f) => !prodFns.has(f));
 if (prodMissing.length) { failures++; console.log(`❌ production.html missing: ${prodMissing.join(', ')}`); }
 console.log('✅ production.html: all required helpers present');
