@@ -334,7 +334,56 @@ function filterMenus(q) {
   });
 }
 
+/* ===== Auto-draft: mémorise la saisie en cours entre les menus (même app) ===== */
+var _autoDTimer = null;
+function autoSaveDraft() {
+  try {
+    var form = document.getElementById('prod-form');
+    if (!form) return;
+    var draft = { t: Date.now(), v: {} };
+    var el = form.querySelectorAll('input,textarea,select');
+    for (var i = 0; i < el.length; i++) {
+      var f = el[i];
+      if (!f.id) continue;
+      draft.v[f.id] = (f.type === 'checkbox' ? (f.checked ? '1' : '0') : f.value);
+    }
+    sessionStorage.setItem('mdb_prod_autoDraft', JSON.stringify(draft));
+  } catch (e) {}
+}
+function clearAutoDraft() {
+  try { sessionStorage.removeItem('mdb_prod_autoDraft'); } catch (e) {}
+}
+function applyAutoDraft() {
+  try {
+    var raw = sessionStorage.getItem('mdb_prod_autoDraft');
+    if (!raw) return;
+    var draft = JSON.parse(raw);
+    var form = document.getElementById('prod-form');
+    if (!form) return;
+    var el = form.querySelectorAll('input,textarea,select');
+    for (var i = 0; i < el.length; i++) {
+      var f = el[i];
+      if (!f.id || !(f.id in draft.v)) continue;
+      var sv = draft.v[f.id];
+      if (f.type === 'checkbox') f.checked = (sv === '1');
+      else if (f.value === '' || f.value === null || f.value === undefined) f.value = sv;
+    }
+  } catch (e) {}
+}
+document.addEventListener('input', function(e) {
+  if (e.target && e.target.closest && e.target.closest('#prod-form')) {
+    if (_autoDTimer) clearTimeout(_autoDTimer);
+    _autoDTimer = setTimeout(autoSaveDraft, 600);
+  }
+});
+document.addEventListener('change', function(e) {
+  if (e.target && e.target.closest && e.target.closest('#prod-form')) {
+    if (_autoDTimer) clearTimeout(_autoDTimer);
+    _autoDTimer = setTimeout(autoSaveDraft, 300);
+  }
+});
 function navigate(page) {
+  autoSaveDraft();
   CURRENT_PAGE = page;
   localStorage.setItem('mdb_prod_currentPage', page);
   renderNav();
@@ -665,6 +714,19 @@ function render_dashboard() {
   h += kpiCard(volInitial, 'Stock Initial (Global)', '\ud83d\udcca', 'inventory');
   h += kpiCard(volEncours, 'En Cours Production', '\ud83c\udfed', 'history');
   h += kpiCard(pertesVol, 'Bois Perdu (Cumul)', '\u26a0\ufe0f', 'history');
+  h += '</div>';
+
+  h += '<div class="stats-grid">';
+  var rdms = prodMois.filter(function(p) { return p.rendement != null; }).map(function(p) { return p.rendement; });
+  var rendMoy = rdms.length ? rdms.reduce(function(a, b) { return a + b; }, 0) / rdms.length : 0;
+  h += '<div class="stat-card"><div style="position:absolute;top:.55rem;right:.7rem;font-size:1rem;opacity:.55">🎯</div><div class="value" style="color:#22c55e">' + rendMoy.toFixed(1) + '%</div><div class="label">Rendement Moyen (mois)</div></div>';
+  h += '<div class="stat-card"><div style="position:absolute;top:.55rem;right:.7rem;font-size:1rem;opacity:.55">📑</div><div class="value" style="font-size:1.3rem">' + prodMois.length + '</div><div class="label">Fiches Validées (mois)</div></div>';
+  var opsEncours = ops.filter(function(o) { return o.statut !== 'done' && o.statut !== 'canceled' && o.statut !== 'annule'; }).length;
+  h += '<div class="stat-card"><div style="position:absolute;top:.55rem;right:.7rem;font-size:1rem;opacity:.55">🛠️</div><div class="value" style="font-size:1.3rem">' + opsEncours + '</div><div class="label">Ordres Production en cours</div></div>';
+  var mpRupt = rawStock.filter(function(s) { return (parseFloat(s.quantite) || 0) <= 0; }).length;
+  var epiLow = getEpiItems().filter(function(e) { return (e.quantite_stock || 0) <= (e.seuil_minimum || 0); }).length;
+  var nbAlertes = mpRupt + epiLow;
+  h += '<div class="stat-card"><div style="position:absolute;top:.55rem;right:.7rem;font-size:1rem;opacity:.55">🚨</div><div class="value" style="font-size:1.3rem;color:' + (nbAlertes ? 'var(--red)' : 'var(--green)') + '">' + nbAlertes + '</div><div class="label">Alertes Stock (MP + EPI)</div></div>';
   h += '</div>';
 
   h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
@@ -1108,6 +1170,7 @@ function render_production() {
     h += '</div></div>';
   }
 
+  try { setTimeout(function() { applyAutoDraft(); }, 60); } catch (e) {}
   return h;
 }
 
@@ -1955,16 +2018,19 @@ function saveProduction(validate) {
 
   if (mode === 'validate') {
     /* Sortie nette : sortie (-) + entrée encours (reste en stock) + reprise (re-sort) */
-    deductBoisSorti(prod);
+deductBoisSorti(prod);
     /* Deduction assemblage : decrementer stock selon composants utilises */
     deductAssemblageStock(prod);
+    clearAutoDraft();
     localStorage.removeItem('mdb_prod_editId');
     toast('Fiche de Production validée ✅ — Rendement: ' + prod.rendement.toFixed(1) + '%');
     navigate('history');
   } else if (mode === 'brouillon') {
+    clearAutoDraft();
     localStorage.setItem('mdb_prod_editId', prod.id);
     toast('Brouillon enregistré 📝 — continuez la saisie ou reprenez-le plus tard depuis l\'historique');
   } else {
+    clearAutoDraft();
     localStorage.removeItem('mdb_prod_editId');
     toast('Fiche enregistrée 💾 (sans impact stock — validez-la pour impacter les stocks)');
     navigate('history');
@@ -1973,6 +2039,7 @@ function saveProduction(validate) {
 
 function clearDraftEdit() {
   localStorage.removeItem('mdb_prod_editId');
+  clearAutoDraft();
   renderPage();
 }
 
@@ -2095,9 +2162,14 @@ function generateProdFichePDF(p) {
   var opt = { margin: 10, filename: 'Fiche_Production_' + (p.numero || 'Fiche') + '.pdf', image: { type: 'jpeg', quality: 0.98 }, html2canvas: { scale: 2, useCORS: true, logging: false }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' } };
   window.jspdf.jsPDF().html(element, opt).then(function() { document.body.removeChild(element); toast('PDF généré ✅'); });
 }
-function exportProductionHistoryPDF() {
+function printProductionHistory() {
+  var w = window.open('', '_blank');
+  w.document.write(buildProductionHistoryHTML());
+  w.document.close();
+  w.onload = function() { w.print(); };
+}
+function buildProductionHistoryHTML() {
   var prods = getProductions().slice().reverse();
-  var element = document.createElement('div');
   var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Historique Production</title>';
   h += '<style>body{font-family:Arial,sans-serif;margin:20px;font-size:11px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:4px 6px;font-size:10px}th{background:#f0f0f0;text-align:left}tr.total td{font-weight:bold;background:#f5f5f5}.header{display:flex;justify-content:space-between;margin-bottom:1rem}.header h1{margin:0;font-size:16px}</style>';
   h += '</head><body>';
@@ -2109,6 +2181,10 @@ function exportProductionHistoryPDF() {
     h += '<tr><td>' + escH(p.numero || '-') + '</td><td>' + escH(p.date || '-') + '</td><td>' + escH(art ? (art.code + ' — ' + art.designation) : '-') + '</td><td>' + escH(p.chef || '-') + '</td><td style="text-align:right">' + ((p.vol_sortie_bois || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_lattes || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_plots || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + rend + '</td><td>' + (p.statut === 'validated' ? '✅ Validé' : p.statut === 'draft' ? '📝 Brouillon' : p.statut) + '</td></tr>';
   });
   h += '</table></body></html>';
+  return h;
+}
+function exportProductionHistoryPDF() {
+  var h = buildProductionHistoryHTML();
   var element = document.createElement('div');
   element.innerHTML = h;
   document.body.appendChild(element);
@@ -2121,6 +2197,7 @@ function openDraftProd(id) {
   if (!p) return;
   if (!confirm2('Reprendre le brouillon ' + (p.numero || '') + ' dans le formulaire ?\nVous pourrez continuer la saisie puis l\'enregistrer ou la valider.')) return;
   localStorage.setItem('mdb_prod_editId', id);
+  clearAutoDraft();
   navigate('production');
 }
 
@@ -5884,6 +5961,15 @@ maybeInitACSERData();
 renderNav();
 renderPage();
 
+/* Sync temps réel inter-onglets (storage event — même origine) */
+window.addEventListener('storage', function(ev) {
+  var key = ev.key || '';
+  if (key.indexOf('mdb_production') === 0 || key.indexOf('mdb_paye') === 0 || key === 'mdb_employes') {
+    renderNav();
+    renderPage();
+  }
+});
+
 
 /* ==================== SORTIE DE BOIS AUTO-LOOKUP (removed duplicate — kept original at ~1053) ==================== */
 function updateProductionTotals() {
@@ -6460,22 +6546,48 @@ function extractAchatFromDoc(input) {
     var reader = new FileReader();
     reader.onload = function(e) {
       pdfjsLib.getDocument(new Uint8Array(e.target.result)).promise.then(function(pdf) {
-        var pages = [];
-        for (var i = 1; i <= Math.min(pdf.numPages, 3); i++) {
-          pages.push(pdf.getPage(i).then(function(page) {
-            var viewport = page.getViewport({ scale: 2 });
-            var canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            var ctx = canvas.getContext('2d');
-            return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function() {
-              return canvas.toDataURL('image/png');
+        var maxPages = Math.min(pdf.numPages, 5);
+        // 1) extraction de texte Natif (précis + instantané) si le PDF en contient
+        var textTasks = [];
+        for (var ti = 1; ti <= maxPages; ti++) {
+          textTasks.push(pdf.getPage(ti).then(function(page) {
+            return page.getTextContent().then(function(tc) {
+              return tc.items.map(function(it) { return it.str || ''; }).join(' ');
             });
           }));
         }
-        Promise.all(pages).then(function(imgs) {
-          var combined = imgs.join('\n---PAGE BREAK---\n');
-          processImage(imgs[0]); // OCR sur la première page
+        Promise.all(textTasks).then(function(allText) {
+          var joined = allText.join('\n---PAGE BREAK---\n');
+          var cleaned = joined.replace(/\s{2,}/g, ' ').trim();
+          if (cleaned.length > 30) {
+            preview.textContent = joined;
+            preview.style.display = 'block';
+            status.textContent = '✅ Texte extrait du PDF (texte natif) — vérifiez et complétez les champs';
+            applyExtractedAchatData(joined);
+            return;
+          }
+          // 2) sinon fallback: rendu canvas de chaque page + OCR Tesseract
+          var pages = [];
+          for (var pi = 1; pi <= maxPages; pi++) {
+            pages.push(pdf.getPage(pi).then(function(page) {
+              var viewport = page.getViewport({ scale: 2 });
+              var canvas = document.createElement('canvas');
+              canvas.width = viewport.width;
+              canvas.height = viewport.height;
+              var ctx = canvas.getContext('2d');
+              return page.render({ canvasContext: ctx, viewport: viewport }).promise.then(function() {
+                return canvas.toDataURL('image/png');
+              });
+            }));
+          }
+          Promise.all(pages).then(function(imgs) {
+            processAllImages(imgs, function(text) {
+              preview.textContent = text;
+              preview.style.display = 'block';
+              status.textContent = '✅ Texte extrait (OCR) — vérifiez et complétez les champs';
+              applyExtractedAchatData(text);
+            });
+          });
         });
       }).catch(function(err) { status.textContent = '❌ Erreur PDF: ' + err.message; });
     };
@@ -6486,6 +6598,19 @@ function extractAchatFromDoc(input) {
     img.onerror = function() { status.textContent = '❌ Erreur chargement image'; URL.revokeObjectURL(url); };
     img.src = url;
   }
+}
+function processAllImages(imgs, done) {
+  var texts = [];
+  var status = document.getElementById('ach_doc_status');
+  var i = 0;
+  function next() {
+    if (i >= imgs.length) { done(texts.join('\n---PAGE BREAK---\n')); return; }
+    if (typeof Tesseract === 'undefined') { status.textContent = '❌ Tesseract.js non chargé'; return; }
+    Tesseract.recognize(imgs[i], 'fra', { logger: function(m) { if (m.status === 'recognizing text') status.textContent = '🔄 OCR page ' + (i + 1) + '/' + imgs.length + ': ' + Math.round(m.progress * 100) + '%'; }})
+      .then(function(result) { texts.push(result.data.text || ''); i++; next(); })
+      .catch(function(err) { status.textContent = '❌ Erreur OCR: ' + err.message; });
+  }
+  next();
 }
 
 function applyExtractedAchatData(text) {
@@ -6535,7 +6660,7 @@ function applyExtractedAchatData(text) {
   }
 
   // 5. Quantité — nombre avant "pièce", "colis", "qté", "quantité", ou premier gros entier isolé
-  var qteMatch = full.match(/(?:qte|qté|quantite|quantite|colis|pieces?|pièces?)\s*[#:]?\s*(\d+)/i) || full.match(/\b(\d{2,4})\b/);
+  var qteMatch = full.match(/(?:qte|qté|quantite|quantité|colis|pieces?|pièces?)\s*[#:]?\s*(\d+)/i) || full.match(/\b(\d{2,4})\b/);
   if (qteMatch) document.getElementById('ai_qte').value = qteMatch[1];
 
   // 6. Type (Rouge/Blanc)
