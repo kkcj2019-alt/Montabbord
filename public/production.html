@@ -199,6 +199,8 @@ tbody tr:hover td{background:#e8f1fd}
       <span id="pageActions" style="display:flex;gap:.4rem;align-items:center"></span>
     </div>
     <div style="display:flex;gap:.5rem;align-items:center">
+      <label for="globalMonth" style="font-size:.72rem;color:var(--dim);font-weight:600" title="Filtrer toutes les données par mois">Mois</label>
+      <input type="month" id="globalMonth" onchange="setGlobalMonth(this.value)" title="Afficher uniquement les données du mois sélectionné (vide = tout)" style="padding:.4rem .6rem;border:1px solid var(--border);border-radius:8px;font-size:.78rem;color:var(--text);background:#fff;max-width:150px">
       <input type="text" class="search-box" placeholder="🔍 Rechercher..." id="globalSearch" oninput="globalSearchFn(this.value)">
       <span style="font-size:.75rem;color:var(--dim)" id="dateDisplay"></span>
     </div>
@@ -429,6 +431,21 @@ function navigate(page) {
 }
 
 function isMobileView() { return window.innerWidth <= 768; }
+
+/* === Mois global : ne charge que les données du mois sélectionné (vide = tout) === */
+function getGlobalMonth() { return window._globalMonth || ''; }
+function setGlobalMonth(v) {
+  window._globalMonth = v || '';
+  try { localStorage.setItem('mdb_prod_globalMonth', window._globalMonth); } catch (e) {}
+  var inp = document.getElementById('globalMonth');
+  if (inp && inp.value !== window._globalMonth) inp.value = window._globalMonth;
+  renderPage();
+}
+function monthMatch(d) {
+  var gm = getGlobalMonth();
+  if (!gm) return true;
+  return String(d || '').indexOf(gm) === 0;
+}
 
 function goBack() {
   var prev = (window._navHist && window._navHist.length) ? window._navHist.pop() : 'dashboard';
@@ -729,7 +746,7 @@ function getStockVolume() {
 function render_dashboard() {
   var prods = getProductions().filter(function(p) { return p.statut === 'validated'; });
   var ops = getProductionOrders();
-  var thisM = thisMonth();
+  var thisM = getGlobalMonth() || thisMonth();
   var prodMois = prods.filter(function(p) { return (p.date || '').indexOf(thisM) === 0; });
   
   var volStock = getStockVolume();
@@ -2340,8 +2357,8 @@ function updateStockArticle(articleId, qty, type, ref, numero, motifOverride) {
 
 /* ==================== HISTORIQUE ==================== */
 function render_history() {
-  var prods = getProductions().slice().reverse();
-  var losses = getLosses().slice().reverse();
+  var prods = getProductions().filter(function(p) { return monthMatch(p.date); }).slice().reverse();
+  var losses = getLosses().filter(function(l) { return monthMatch(l.date); }).slice().reverse();
   var tab = getSection('historyTab', 'saisies');
 
   var h = '<div class="tabs">';
@@ -2497,7 +2514,7 @@ function restoreBoisSorti(p) {
 
 /* ==================== ORDRES DE PRODUCTION ==================== */
 function render_orders() {
-  var ops = getProductionOrders().slice().reverse();
+  var ops = getProductionOrders().filter(function(o) { return monthMatch(o.date_prevue) || monthMatch(o.date); }).slice().reverse();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
   h += '<input type="text" class="search-box" placeholder="🔍 Rechercher un OP..." oninput="filterOP(this.value)">';
   h += '<button class="btn btn-accent" onclick="showNewOP()">+ Nouvel Ordre</button>';
@@ -3878,7 +3895,7 @@ function updateStockItem(key, id) {
 
 /* ==================== MOUVEMENTS ==================== */
 function render_stock_movements() {
-  var movs = getMovements().slice().reverse();
+  var movs = getMovements().filter(function(m) { return monthMatch(m.date); }).slice().reverse();
   var articles = getArticles();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
   h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'movTable\',this.value)">';
@@ -3943,7 +3960,8 @@ window._invHidden = {};
 window._invType = 'all';
 window._invArticleFilter = 'all';
 function render_inventory() {
-  var invs = getInventories().slice().reverse();
+  var _gmInv = getGlobalMonth();
+  var invs = getInventories().filter(function(x) { return !_gmInv || (x.month || '') === _gmInv; }).slice().reverse();
   var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
   var now = new Date();
   var months = [];
@@ -6840,7 +6858,7 @@ function viewInventory(id) {
 function render_stock_merch_art() { return renderStockFiche('stock-merch', getStockMerch, 'Fiche de Stock - Marchandises', 'showAddStock'); }
 
 function render_achats_history() {
-  var achats = getAchats();
+  var achats = getAchats().filter(function(a) { return monthMatch(a.date); });
   var h = '<div class="card">';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">';
   h += '<h3>📋 Historique des Achats</h3>';
@@ -7000,15 +7018,87 @@ function filterTable(tableId, q) {
   rows.forEach(function(r, i) { if (i === 0) return; r.style.display = r.textContent.toLowerCase().indexOf(q) !== -1 ? '' : 'none'; });
 }
 function globalSearchFn(q) {
-  if (!q) return renderPage();
-  /* Search across articles */
-  var results = [];
-  getArticles().forEach(function(a) {
-    if ((a.code + ' ' + a.designation).toLowerCase().indexOf(q.toLowerCase()) !== -1) results.push('Article: ' + a.code + ' — ' + a.designation);
-  });
-  if (results.length > 0) {
-    document.getElementById('content').innerHTML = '<div class="card"><h3>🔍 Résultats pour "' + escH(q) + '"</h3><ul>' + results.map(function(r) { return '<li>' + escH(r) + '</li>'; }).join('') + '</ul></div>';
+  q = (q || '').trim();
+  if (!q || q.length < 2) return renderPage();
+  var ql = q.toLowerCase();
+  function has() {
+    for (var i = 0; i < arguments.length; i++) {
+      if (String(arguments[i] || '').toLowerCase().indexOf(ql) !== -1) return true;
+    }
+    return false;
   }
+  function goProduct(id) { navigate('history'); setTimeout(function() { viewFicheProd(id); }, 120); }
+  function goAchat(id) { navigate('achats-history'); setTimeout(function() { toggleAccordion('bl_' + id); var el = document.getElementById('arrow_bl_' + id); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }); }, 120); }
+  function goStockRaw(id) {
+    setSection('stockRawTab', 'actif'); setSection('stockRawEtat', 'tout');
+    window._pendingRawHighlight = id; navigate('stock-raw');
+  }
+  window.goProduct = goProduct; window.goAchat = goAchat; window.goStockRaw = goStockRaw;
+  var sections = [];
+  function addSec(icon, title, rows) {
+    if (rows.length) sections.push({ icon: icon, title: title, rows: rows.slice(0, 10), more: rows.length > 10 ? rows.length - 10 : 0 });
+  }
+  /* Articles catalogue */
+  var rArt = [];
+  getArticles().forEach(function(a) {
+    if (has(a.code, a.designation, a.destination)) rArt.push({ t: a.code + ' — ' + a.designation, s: a.destination || a.categorie || '', fn: 'navigate(\'articles\');setTimeout(function(){filterTable(\'artTable\',\'' + q.replace(/'/g, '') + '\')},120)' });
+  });
+  addSec('📑', 'Catalogue Produits', rArt);
+  /* Fiches production */
+  var rProd = [];
+  getProductions().forEach(function(p) {
+    var art = getArticles().find(function(a) { return a.id === p.article_id; }) || {};
+    if (has(p.numero, art.code, art.designation, p.chef)) rProd.push({ t: 'Fiche ' + (p.numero || p.id) + ' — ' + (art.code || '') + ' ' + (art.designation || ''), s: (p.date || '') + ' · ' + (p.statut || ''), fn: 'goProduct(\'' + p.id + '\')' });
+  });
+  addSec('⚙️', 'Fiches Production', rProd);
+  /* Achats */
+  var rAch = [];
+  getAchats().forEach(function(a) {
+    var itemsTxt = (a.items || []).map(function(it) { return (it.colis_number || it.code || '') + ' ' + (it.designation || it.essence || ''); }).join(' ');
+    if (has(a.reference, a.fournisseur, a.receiver_name, itemsTxt)) rAch.push({ t: (a.reference || 'BL') + ' — ' + (a.fournisseur || ''), s: (a.date || '') + ' · ' + ((a.items || []).length) + ' colis', fn: 'goAchat(' + a.id + ')' });
+  });
+  addSec('🛒', 'Achats', rAch);
+  /* Livraisons */
+  var rLiv = [];
+  getLivraisons().forEach(function(l) {
+    if (has(l.numero, l.clientNom, l.client, l.chauffeur)) rLiv.push({ t: (l.numero || 'BL') + ' — ' + (l.clientNom || l.client || ''), s: l.date || '', fn: 'navigate(\'livraisons\')' });
+  });
+  addSec('🚚', 'Livraisons', rLiv);
+  /* Stock MP */
+  var rRaw = [];
+  getStockRaw().forEach(function(s) {
+    if (has(s.code, s.colis_number, s.designation, s.essence, s.fournisseur)) rRaw.push({ t: (s.code || s.colis_number) + ' — ' + (s.designation || s.essence || ''), s: 'Stock: ' + (s.quantite || 0), fn: 'goStockRaw(\'' + s.id + '\')' });
+  });
+  addSec('🪵', 'Stock Matière Première', rRaw);
+  /* Produits finis */
+  var rFin = [];
+  getStockFinished().forEach(function(s) {
+    var art = s.article_id ? (getArticles().find(function(a) { return a.id === s.article_id; }) || {}) : {};
+    var code = s.code || art.code || '', des = s.designation || art.designation || '';
+    if (has(code, des)) rFin.push({ t: code + ' — ' + des, s: 'Stock: ' + (s.quantite || 0), fn: 'showFinishedFiche(\'' + s.id + '\')' });
+  });
+  addSec('📦', 'Produits Finis', rFin);
+  /* Mouvements */
+  var rMov = [];
+  getMovements().forEach(function(m) {
+    var art = m.article_id ? (getArticles().find(function(a) { return a.id === m.article_id; }) || {}) : {};
+    if (has(m.reference, m.motif, art.code, art.designation)) rMov.push({ t: (m.date || '') + ' · ' + (m.type || '') + ' ' + (m.quantite || 0) + ' — ' + (art.code || art.designation || ''), s: m.motif || m.reference || '', fn: 'navigate(\'stock-movements\')' });
+  });
+  addSec('🔄', 'Mouvements', rMov);
+  var h = '<div class="card"><h3>🔍 Résultats pour "' + escH(q) + '" <span style="font-size:.72rem;color:var(--dim)">(toute l\'application Production)</span></h3>';
+  if (!sections.length) h += '<div class="empty">Rien trouvé pour "' + escH(q) + '"</div>';
+  sections.forEach(function(sec) {
+    h += '<h4 style="margin:.9rem 0 .4rem">' + sec.icon + ' ' + sec.title + ' <span style="font-size:.7rem;color:var(--dim)">(' + (sec.rows.length + sec.more) + ')</span></h4>';
+    h += '<table style="font-size:.8rem"><tbody>';
+    sec.rows.forEach(function(r) {
+      h += '<tr><td>' + escH(r.t) + '<br><span style="font-size:.72rem;color:var(--dim)">' + escH(r.s) + '</span></td>';
+      h += '<td style="text-align:right;white-space:nowrap"><button class="btn" onclick="' + r.fn + '" style="font-size:.7rem">Ouvrir →</button></td></tr>';
+    });
+    h += '</tbody></table>';
+    if (sec.more) h += '<div style="font-size:.72rem;color:var(--dim)">… +' + sec.more + ' autres (affinez la recherche)</div>';
+  });
+  h += '</div>';
+  document.getElementById('content').innerHTML = h;
 }
 
 /* ==================== INIT ==================== */
@@ -7384,6 +7474,11 @@ function maybeInitACSERData() {
 /* === Lancement === */
 CURRENT_PAGE = localStorage.getItem('mdb_prod_currentPage') || 'dashboard';
 document.getElementById('dateDisplay').textContent = new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+try {
+  window._globalMonth = localStorage.getItem('mdb_prod_globalMonth') || '';
+  var _gmInp = document.getElementById('globalMonth');
+  if (_gmInp) _gmInp.value = window._globalMonth;
+} catch (e) { window._globalMonth = ''; }
 initSidebarState();
 window.addEventListener('resize', function() { initSidebarState(); });
 maybeInitACSERData();
@@ -7464,7 +7559,7 @@ function render_achats() {
   h += '<button class="btn btn-accent" onclick="showNewAchat(\x27' + activeTab + '\x27)">+ Nouvel Achat ' + getAchatCategoryLabel(activeTab) + '</button>';
   h += '</div>';
 
-  var filteredAchats = achats.filter(function(a) { return (a.category || a.type) === activeTab; });
+  var filteredAchats = achats.filter(function(a) { return (a.category || a.type) === activeTab && monthMatch(a.date); });
 
   if (filteredAchats.length === 0) {
     h += '<div class="card"><div class="empty">Aucun achat enregistré dans la catégorie ' + getAchatCategoryLabel(activeTab) + '. Cliquez sur le bouton ci-dessus pour ajouter un achat.</div></div>';
@@ -8204,7 +8299,7 @@ function syncedMainBL(livId) {
 }
 
 function render_livraisons() {
-  var livs = getLivraisons().slice().reverse();
+  var livs = getLivraisons().filter(function(l) { return monthMatch(l.date); }).slice().reverse();
   var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
   h += '<div><h2 style="margin:0">🚚 Bons de Livraison — Produits Finis</h2>';
   h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Les BL créés ici sont synchronisés en gestion commerciale (appli principale) comme BL à facturer</p></div>';
