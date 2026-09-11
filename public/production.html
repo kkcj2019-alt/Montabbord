@@ -59,6 +59,10 @@ th,td{padding:.55rem .7rem;text-align:left;border:1px solid #94a3b8}
 th{background:linear-gradient(180deg,#f1f5f9,#e2e8f0);color:#0f172a;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0;font-weight:700;z-index:1}
 tbody tr:nth-child(even) td{background:#f8fafc}
 tbody tr:hover td{background:#e8f1fd}
+/* Tableaux stock : en-têtes bleus unifiés (façon onglet Stock BL) */
+#stockTable thead th, #blTable thead th{background:linear-gradient(180deg,#eff6ff,#dbeafe);color:#1e40af;border-color:#bfdbfe}
+#stockTable, #blTable{border-color:#bfdbfe}
+#stockTable td, #blTable td{border-color:#dbeafe}
 .badge-draft{background:#fef3c7;color:#92400e;padding:3px 10px;border-radius:12px;font-size:.7rem;font-weight:600}
 .badge-active{background:#d1fae5;color:#065f46;padding:3px 10px;border-radius:12px;font-size:.7rem;font-weight:600}
 .badge-done{background:#dbeafe;color:#1e40af;padding:3px 10px;border-radius:12px;font-size:.7rem;font-weight:600}
@@ -2746,6 +2750,32 @@ function mpOriginDetail(s, blMap) {
   if (a.fournisseur) parts += ' – ' + a.fournisseur;
   return parts;
 }
+/* Depuis le stock global : clic sur un code → redirige vers son origine (BL déplié / spe surligné / wip) */
+function goToColisOrigin(stockId) {
+  var s = getStockRaw().find(function(x) { return String(x.id) === String(stockId); });
+  if (!s) return;
+  var code = s.code || s.colis_number || '';
+  var a = buildColisBLMap()[code] || null;
+  var o = mpOrigin(s);
+  if (a) {
+    var idx = ((a.items || []).findIndex(function(x) { return (x.colis_number || x.code) === code; }));
+    var vue = (parseFloat(s.quantite) || 0) > 0 ? 'actifs' : 'termines';
+    setSection('stockRawTab', 'bl');
+    setSection('stockBLVue', vue);
+    setSection('stockBLFour', '');
+    window._pendingBlExpand = { achatId: a.id, idx: idx };
+    navigate('stock-raw');
+  } else if (o === 'SPECIFIC') {
+    setSection('stockRawTab', 'spe');
+    window._pendingRawHighlight = stockId;
+    navigate('stock-raw');
+  } else if (o === 'ENCOURS') {
+    setSection('stockRawTab', 'wip');
+    navigate('stock-raw');
+  } else {
+    toast('Origine introuvable pour ' + code, 'error');
+  }
+}
 function semiVol(s) {
   var a = getArticles().find(function(x) { return (x.code || '') === (s.code || ''); });
   if (a) return artUnitVol(a) * (parseFloat(s.quantite) || 0);
@@ -2791,6 +2821,31 @@ function colisSorties(colisCode) {
   });
   out.sort(function(a, b) { return String(a.date).localeCompare(String(b.date)); });
   return out;
+}
+/* Tableau des mouvements d'un colis — partagé entre Stock BL et Stock Spécifique.
+   entree = {date, ref, q0, v0, label} ou null (Création recalculée) ; fallback = {qR, vR} si pas d'entrée stock */
+function colisMouvementsHTML(code, entree, fallback) {
+  var stock = getStockRaw();
+  var entry = stock.find(function(s) { return s.code === code || s.colis_number === code; }) || null;
+  var sorts = colisSorties(code);
+  var qS = 0, vS = 0;
+  sorts.forEach(function(s) { qS += s.qte; vS += s.vol; });
+  var qR = entry ? (parseFloat(entry.quantite) || 0) : (fallback ? fallback.qR : 0);
+  var vR = entry ? (parseFloat(entry.volume) || 0) : (fallback ? fallback.vR : 0);
+  var e = entree || { date: (entry && entry.created_at) || '', ref: '-', q0: qR + qS, v0: vR + vS, label: '🆕 Création' };
+  var aQ = qR - (e.q0 - qS), aV = vR - (e.v0 - vS);
+  var h = '<table style="font-size:.75rem"><thead><tr><th>Date</th><th>Mouvement</th><th>Référence</th><th style="text-align:right">Qté</th><th style="text-align:right">Volume (m³)</th></tr></thead><tbody>';
+  h += '<tr><td>-</td><td>🏁 Stock initial</td><td>-</td><td style="text-align:right">0</td><td style="text-align:right">0.000</td></tr>';
+  h += '<tr><td>' + escH(e.date || '-') + '</td><td>' + e.label + '</td><td>' + escH(e.ref || '') + '</td><td style="text-align:right;font-weight:700;color:var(--green)">+' + e.q0 + '</td><td style="text-align:right">' + (parseFloat(e.v0) || 0).toFixed(3) + '</td></tr>';
+  sorts.forEach(function(s) {
+    h += '<tr><td>' + escH(s.date || '-') + '</td><td>📤 Sortie — Production</td><td>Fiche ' + escH(s.numero || '') + '</td><td style="text-align:right;font-weight:700;color:var(--red)">-' + s.qte + '</td><td style="text-align:right">' + s.vol.toFixed(3) + '</td></tr>';
+  });
+  if (Math.abs(aQ) > 0.0005 || Math.abs(aV) > 0.0000005) {
+    h += '<tr style="background:#fff7ed"><td>-</td><td>⚖️ Ajustement inventaire</td><td>Inventaire</td><td style="text-align:right;font-weight:700;color:var(--accent)">' + (aQ >= 0 ? '+' : '') + (Math.round(aQ * 1000) / 1000) + '</td><td style="text-align:right">' + (aV >= 0 ? '+' : '') + aV.toFixed(3) + '</td></tr>';
+  }
+  h += '<tr style="background:#f8f9fa;font-weight:700"><td>-</td><td>📊 Stock final</td><td>-</td><td style="text-align:right">' + qR + '</td><td style="text-align:right;color:var(--accent)">' + vR.toFixed(3) + '</td></tr>';
+  h += '</tbody></table>';
+  return h;
 }
 function dateLong(d) {
   if (!d) return '-';
@@ -2897,21 +2952,22 @@ function renderStockBLTab() {
       h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + c.vR.toFixed(3) + '</td>';
       h += '</tr>';
       h += '<tr><td colspan="8" style="padding:0;border-top:none"><div id="content_' + mid + '" style="display:none;padding:.6rem 1rem;background:#fff">';
-      h += '<table style="font-size:.75rem"><thead><tr><th>Date</th><th>Mouvement</th><th>Référence</th><th style="text-align:right">Qté</th><th style="text-align:right">Volume (m³)</th></tr></thead><tbody>';
-      h += '<tr><td>-</td><td>🏁 Stock initial</td><td>-</td><td style="text-align:right">0</td><td style="text-align:right">0.000</td></tr>';
-      h += '<tr><td>' + escH(a.date || '-') + '</td><td>📥 Entrée — Achat</td><td>' + escH(a.reference || '') + '</td><td style="text-align:right;font-weight:700;color:var(--green)">+' + c.q0 + '</td><td style="text-align:right">' + c.v0.toFixed(3) + '</td></tr>';
-      c.sorts.forEach(function(s) {
-        h += '<tr><td>' + escH(s.date || '-') + '</td><td>📤 Sortie — Production</td><td>Fiche ' + escH(s.numero || '') + '</td><td style="text-align:right;font-weight:700;color:var(--red)">-' + s.qte + '</td><td style="text-align:right">' + s.vol.toFixed(3) + '</td></tr>';
-      });
-      if (Math.abs(c.aQ) > 0.0005 || Math.abs(c.aV) > 0.0000005) {
-        h += '<tr style="background:#fff7ed"><td>-</td><td>⚖️ Ajustement inventaire</td><td>Inventaire</td><td style="text-align:right;font-weight:700;color:var(--accent)">' + (c.aQ >= 0 ? '+' : '') + (Math.round(c.aQ * 1000) / 1000) + '</td><td style="text-align:right">' + (c.aV >= 0 ? '+' : '') + c.aV.toFixed(3) + '</td></tr>';
-      }
-      h += '<tr style="background:#f8f9fa;font-weight:700"><td>-</td><td>📊 Stock final</td><td>-</td><td style="text-align:right">' + c.qR + '</td><td style="text-align:right;color:var(--accent)">' + c.vR.toFixed(3) + '</td></tr>';
-      h += '</tbody></table></div></td></tr>';
+      h += colisMouvementsHTML(c.code, { date: a.date, ref: a.reference, q0: c.q0, v0: c.v0, label: '📥 Entrée — Achat' }, { qR: c.qR, vR: c.vR });
+      h += '</div></td></tr>';
     });
     h += '</tbody></table></div></td></tr>';
   });
   h += '</tbody></table></div>';
+  if (window._pendingBlExpand) {
+    var _pb = window._pendingBlExpand;
+    window._pendingBlExpand = null;
+    setTimeout(function() {
+      toggleAccordion('blAchat_' + _pb.achatId);
+      if (_pb.idx != null && _pb.idx >= 0) toggleAccordion('blColis_' + _pb.achatId + '_' + _pb.idx);
+      var _br = document.getElementById('blRow_' + _pb.achatId);
+      if (_br) _br.scrollIntoView({ block: 'center' });
+    }, 80);
+  }
   return h;
 }
 function printStockBL() {
@@ -3103,17 +3159,42 @@ function render_stock_raw() {
     var v = stkVol(s);
     totQ += parseFloat(s.quantite) || 0;
     totV += v;
-    h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(s.code || s.colis_number || '-') + '</td>';
+    var _rcode = s.code || s.colis_number || '-';
+    var _rcodeCell = escH(_rcode);
+    var _speDet = '';
+    if (tab === 'spe') {
+      var _pA = blMap[_rcode] || null;
+      var _pIt = null;
+      if (_pA) _pIt = (_pA.items || []).find(function(x) { return (x.colis_number || x.code) === _rcode; }) || null;
+      var _ent = _pA ? { date: _pA.date, ref: _pA.reference, q0: _pIt ? (parseFloat(_pIt.quantity) || 0) : 0, v0: _pIt ? (parseFloat(_pIt.volume) || 0) : 0, label: '📥 Entrée — Achat' } : null;
+      _rcodeCell = '<span onclick="toggleAccordion(\'speColis_' + s.id + '\')" title="Voir les mouvements du colis" style="cursor:pointer;text-decoration:underline dotted"><span id="arrow_speColis_' + s.id + '" style="display:inline-block;transition:transform .2s">›</span> ' + escH(_rcode) + '</span>';
+      _speDet = '<tr><td colspan="8" style="padding:0;border-top:none"><div id="content_speColis_' + s.id + '" style="display:none;padding:.6rem 1rem;background:#fff">' + colisMouvementsHTML(_rcode, _ent, null) + '</div></td></tr>';
+    } else if (tab === 'actif') {
+      _rcodeCell = '<span onclick="goToColisOrigin(\'' + s.id + '\')" title="Aller vers l’origine (BL / Spécifique)" style="cursor:pointer;text-decoration:underline dotted">' + escH(_rcode) + '</span>';
+    }
+    h += '<tr id="rawRow_' + s.id + '"><td style="font-weight:600;color:var(--accent)">' + _rcodeCell + '</td>';
     h += '<td>' + escH(s.designation || s.essence || '-') + '</td>';
     h += '<td style="font-size:.76rem">' + escH(mpOriginDetail(s, blMap)) + '</td>';
     h += '<td style="color:var(--dim)">' + escH(stkDims(s)) + '</td>';
     h += '<td>' + escH(s.zone || s.emplacement || '-') + '</td>';
     h += '<td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td>';
     h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
-    h += '<td style="white-space:nowrap"><button class="btn" onclick="editStockItem(\'stock-raw\',\'' + s.id + '\')" title="Modifier" style="font-size:.7rem">✏️</button> <button class="btn btn-red" onclick="deleteStockItem(\'stock-raw\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+    h += '<td style="white-space:nowrap"><button class="btn" onclick="editStockItem(\'stock-raw\',\'' + s.id + '\')" title="Modifier" style="font-size:.7rem">✏️</button> <button class="btn btn-red" onclick="deleteStockItem(\'stock-raw\',\'' + s.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>' + _speDet;
   });
   h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totQ) + '</td><td style="text-align:right">' + totV.toFixed(3) + '</td><td></td></tr>';
   h += '</table>';
+  if (window._pendingRawHighlight) {
+    var _hid = window._pendingRawHighlight;
+    window._pendingRawHighlight = null;
+    setTimeout(function() {
+      var _r = document.getElementById('rawRow_' + _hid);
+      if (_r) {
+        _r.scrollIntoView({ block: 'center' });
+        _r.style.background = '#fff7ed';
+        setTimeout(function() { _r.style.background = ''; }, 2500);
+      }
+    }, 80);
+  }
   if (items.length === 0) h += '<div class="empty">Aucun bois ' + (etat === 'actifs' ? 'en stock' : 'terminé') + '</div>';
   h += '</div>';
   return h;
