@@ -15769,6 +15769,123 @@ function saveSoldeCollectif(caisseId, fullDate, soldeCode) {
   toast(count + ' solde(s) enregistr\u00e9(s) - Total: ' + fmtMoney(total) + ' (Pi\u00e8ce n\u00b0 ' + np + ')');
   renderCaisseIn(document.getElementById('tresorerieContent'));
 }
+/* ============ SOLDE SALAIRE GROUPE PAR PERIODE ============ */
+/* Quand on clique "Modifier" sur une pièce SOLDE_SALAIRE, on détecte toutes les pièces
+   du même code et même mois (période), et on ouvre un modal groupé pour éditer ensemble */
+function openSoldeGroupeEdit(opId) {
+  var ops = getOperationsCaisse();
+  var o = null;
+  for (var i = 0; i < ops.length; i++) { if (ops[i].id === opId) { o = ops[i]; break; } }
+  if (!o) return;
+  var code = o.code || '';
+  var period = (o.date || '').substring(0, 7);
+  if (!code || !period) { toast('Impossible de détecter la période', 'error'); return; }
+  /* Chercher TOUTES les opérations de même code et même mois */
+  var related = [];
+  for (var j = 0; j < ops.length; j++) {
+    if (ops[j].code === code && (ops[j].date || '').substring(0, 7) === period) related.push(ops[j]);
+  }
+  if (related.length <= 1) {
+    /* Pas d'autres pièces du même mois → édition normale */
+    window._csEditId = opId;
+    editCaisseOpSimple(opId);
+    return;
+  }
+  /* Trier par nom d'employé */
+  related.sort(function(a, b) { return (a.beneficiaireNom || '').localeCompare(b.beneficiaireNom || ''); });
+  var total = 0;
+  for (var k = 0; k < related.length; k++) total += (related[k].montant || 0);
+  var moisLabel = typeof fmtMois === 'function' ? fmtMois(period) : period;
+  var html = '<div style="margin-bottom:10px;padding:8px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);font-size:12px">';
+  html += '<strong style="color:var(--primary)">Code :</strong> ' + escH(code) + ' &mdash; ';
+  html += '<strong>Période :</strong> ' + escH(moisLabel) + ' &mdash; ';
+  html += '<strong>' + related.length + ' opération(s)</strong> &mdash; ';
+  html += '<strong>Total :</strong> <span id="sdgTotalDisplay">' + fmtMoney(total) + '</span> FCFA';
+  html += '</div>';
+  html += '<div style="margin:6px 0"><input type="text" id="sdgSearch" oninput="filterSoldeGroupeRows()" placeholder="Rechercher un employé..." style="width:100%;padding:5px 8px;border:1px solid var(--gray-300);border-radius:6px;font-size:12px;outline:none"></div>';
+  html += '<div style="max-height:350px;overflow:auto">';
+  html += '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="background:var(--gray-50);position:sticky;top:0">';
+  html += '<th style="width:30px;padding:4px 6px"><input type="checkbox" id="sdgSelectAll" onchange="sdgToggleAll(this)" style="cursor:pointer"></th>';
+  html += '<th style="padding:4px 6px;text-align:left">Employé</th>';
+  html += '<th style="width:150px;padding:4px 6px;text-align:left">Pièce n°</th>';
+  html += '<th style="width:140px;padding:4px 6px;text-align:right">Montant (FCFA)</th>';
+  html += '<th style="width:120px;padding:4px 6px;text-align:left">Moyen</th>';
+  html += '</tr></thead><tbody id="sdgTableBody">';
+  for (var m = 0; m < related.length; m++) {
+    var r = related[m];
+    html += '<tr data-opid="' + r.id + '" class="sdg-row">';
+    html += '<td style="padding:4px 6px;text-align:center"><input type="checkbox" class="sdg-cb" checked style="cursor:pointer"></td>';
+    html += '<td style="padding:4px 6px;font-weight:600">' + escH(r.beneficiaireNom || '-') + '</td>';
+    html += '<td style="padding:4px 6px;font-size:11px;color:var(--gray-500)">' + escH(r.numeroPiece || '-') + '</td>';
+    html += '<td style="padding:4px 6px"><input type="number" class="sdg-montant" value="' + (r.montant || 0) + '" min="0" style="width:130px;padding:4px 6px;border:1px solid var(--gray-300);border-radius:6px;font-size:12px;text-align:right" oninput="sdgRecalcTotal()"></td>';
+    html += '<td style="padding:4px 6px;font-size:11px">' + escH(r.moyenPaiement || '-') + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table></div>';
+  html += '<div style="margin-top:8px;padding:6px 8px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:var(--radius);font-size:11px;color:#0369a1">';
+  html += '💡 Cochez uniquement les lignes à modifier. Les montants non cochés restent inchangés.';
+  html += '</div>';
+  window._sdgRelated = related;
+  var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
+  footer += '<button class="btn btn-primary" onclick="saveSoldeGroupeEdits()">Enregistrer (' + related.length + ' ligne' + (related.length > 1 ? 's' : '') + ')</button>';
+  openFormModal('Modifier les soldes — ' + moisLabel, html, footer, 'xwide');
+}
+function filterSoldeGroupeRows() {
+  var q = (document.getElementById('sdgSearch') || {}).value || '';
+  q = q.toLowerCase();
+  var rows = document.querySelectorAll('#sdgTableBody tr');
+  rows.forEach(function(tr) {
+    var nom = (tr.cells[1] || {}).textContent || '';
+    tr.style.display = (!q || nom.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+function sdgToggleAll(cb) {
+  var cbs = document.querySelectorAll('#sdgTableBody .sdg-cb');
+  cbs.forEach(function(c) { c.checked = cb.checked; });
+}
+function sdgRecalcTotal() {
+  var total = 0;
+  var rows = document.querySelectorAll('#sdgTableBody tr');
+  rows.forEach(function(tr) {
+    var cb = tr.querySelector('.sdg-cb');
+    var inp = tr.querySelector('.sdg-montant');
+    if (cb && cb.checked && inp) total += parseFloat(inp.value) || 0;
+  });
+  var el = document.getElementById('sdgTotalDisplay');
+  if (el) el.textContent = fmtMoney(total);
+}
+function saveSoldeGroupeEdits() {
+  var related = window._sdgRelated || [];
+  if (!related.length) { toast('Aucune opération à sauvegarder', 'error'); return; }
+  var ops = getOperationsCaisse();
+  var updated = 0;
+  var rows = document.querySelectorAll('#sdgTableBody tr');
+  rows.forEach(function(tr) {
+    var cb = tr.querySelector('.sdg-cb');
+    if (!cb || !cb.checked) return;
+    var opId = tr.getAttribute('data-opid');
+    var inp = tr.querySelector('.sdg-montant');
+    var newMontant = parseFloat(inp ? inp.value : 0) || 0;
+    if (newMontant <= 0) return;
+    for (var i = 0; i < ops.length; i++) {
+      if (ops[i].id === opId) {
+        ops[i].montant = newMontant;
+        updated++;
+        break;
+      }
+    }
+  });
+  if (updated > 0) {
+    DB.set('mdb_operationsCaisse', ops);
+    try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch(e) {}
+    toast(updated + ' opération(s) modifiée(s)');
+  } else {
+    toast('Aucune ligne cochée', 'error');
+    return;
+  }
+  closeModal();
+  renderCaisseIn(document.getElementById('tresorerieContent'));
+}
 function enregistrerRemboursementAcompte(id) {
   var list = DB.get('mdb_acomptesPrets') || [];
   for (var i = 0; i < list.length; i++) { if (list[i].id === id) { var mensualite = list[i].montantMensuel || list[i].montant || 0; list[i].montantRembourse = (list[i].montantRembourse || 0) + mensualite; if (list[i].montantRembourse >= list[i].montant) { list[i].montantRembourse = list[i].montant; list[i].statut = 'rembourse'; } list[i].preleve = true; list[i].moisPreleve = list[i].moisDeduction || getToday().substring(0, 7); break; } }
@@ -23880,173 +23997,6 @@ function toggleSaisieForm() {
 }
 
 
-function editCaisseOp(id) {
-  var ops = getOperationsCaisse();
-  var o = null;
-  for (var i = 0; i < ops.length; i++) { if (ops[i].id === id) { o = ops[i]; break; } }
-  if (!o) return;
-  /* Remise collective : ouvrir le modal de r\u00e9partition au lieu du formulaire simple */
-  if (o.collective) {
-    window._apFromCaisse = true;
-    openAcomptePretCollectifModal(o.groupeId || o.id);
-    return;
-  }
-  /* Mémoriser id d'édition AVANT toggleBeneficiaire pour que le libellé soit préservé */
-  window._csEditId = id;
-  window._csPreserveLibelle = true;
-  /* Fill form with operation data */
-  var dateEl = document.getElementById('csDate');
-  var heureEl = document.getElementById('csHeure');
-  var sensEl = document.getElementById('csSens');
-  var codeHidden = document.getElementById('csCode');
-  var montantEl = document.getElementById('csMontant');
-  var typeEl = document.getElementById('csType');
-  var execEl = document.getElementById('csExecutant');
-  var moyenEl = document.getElementById('csMoyen');
-  var transEl = document.getElementById('csTrans');
-  var tiersEl = document.getElementById('csTiers');
- if (dateEl && o.date) {
-    var dayPart = o.date.substring(8, 10);
-    dateEl.value = parseInt(dayPart) || '';
-    var monthPart = o.date.substring(5, 7);
-    var yearPart = o.date.substring(0, 4);
-    if (monthPart && yearPart) {
-      window._csSelMonth = monthPart;
-      window._csSelYear = yearPart;
-      var mSel = document.getElementById('csSelMonth');
-      var ySel = document.getElementById('csSelYear');
-      if (mSel) mSel.value = monthPart;
-      if (ySel) ySel.value = yearPart;
-      saveAppState();
-    }
-  }
-  if (heureEl) heureEl.value = o.heure || '';
-  if (sensEl) { sensEl.value = o.sens || 'sortie'; onStaticSensChange(); }
-  if (codeHidden) codeHidden.value = o.codeId || '';
-  /* Fill autocomplete Code & Libelle — preserve edited libelle exactly as saved */
-  var codes = getCodesCaisse();
-  var _foundCode = false;
-  for (var c = 0; c < codes.length; c++) {
-    if (codes[c].id === o.codeId) {
-      var codeInput = document.getElementById('csCodeContainerInput');
-      var libInput = document.getElementById('csLibelleContainerInput');
-      if (codeInput) codeInput.value = codes[c].code;
-      if (libInput) libInput.value = (o.libelle != null && o.libelle !== '') ? o.libelle : codes[c].libelle;
-      _foundCode = true;
-      break;
-    }
-  }
-  if (!_foundCode) {
-    var codeInput2 = document.getElementById('csCodeContainerInput');
-    var libInput2 = document.getElementById('csLibelleContainerInput');
-    if (libInput2) libInput2.value = o.libelle || '';
-    // code remains empty if no master code
-  }
-  // Sauvegarder libelle/sens/code avant que toggleBeneficiaire ne les efface
-  var _savedLib = document.getElementById('csLibelleContainerInput') ? document.getElementById('csLibelleContainerInput').value : '';
-  var _savedSens = document.getElementById('csSens') ? document.getElementById('csSens').value : '';
-  var _savedCodeInp = document.getElementById('csCodeContainerInput') ? document.getElementById('csCodeContainerInput').value : '';
-  var _savedCodeH = codeHidden ? codeHidden.value : '';
-  if (montantEl) montantEl.value = fmtSep(o.montant || 0);
-  if (typeEl) {
-    var mappedType = o.apType || o.beneficiaireType || 'libre';
-    typeEl.value = mappedType;
-    window._csBenefType = '';
-    /* Pre-set hidden for toggleBeneficiaire to pick up as selected value */
-    if (o.beneficiaireId) {
-      var _prefix = '';
-      if (mappedType === 'acompte' || mappedType === 'pret' || o.beneficiaireType === 'employe') _prefix = 'emp_';
-      else if (o.beneficiaireType === 'fournisseur') _prefix = 'frn_';
-      else if (o.beneficiaireType === 'client' && o.beneficiaireId !== 'company_self') _prefix = 'cli_';
-      var _oldBh = document.getElementById('csBenefContainerHidden');
-      if (_oldBh) _oldBh.value = _prefix + o.beneficiaireId;
-    }
-    toggleBeneficiaire();
-    // Restaurer libellé/sens/code exactement comme enregistrés
-    if (document.getElementById('csLibelleContainerInput')) document.getElementById('csLibelleContainerInput').value = _savedLib;
-    if (document.getElementById('csSens')) document.getElementById('csSens').value = _savedSens;
-    if (document.getElementById('csCodeContainerInput')) document.getElementById('csCodeContainerInput').value = _savedCodeInp;
-    if (codeHidden) codeHidden.value = _savedCodeH;
-    window._csPreserveLibelle = false;
-    /* Restore acompte/pret extra fields */
-    if (o.apType === 'acompte' || o.apType === 'pret') {
-      var apList2 = DB.get('mdb_acomptesPrets') || [];
-      var _apRec = null;
-      for (var _api2 = 0; _api2 < apList2.length; _api2++) { if (apList2[_api2].caisseOpId === o.id || apList2[_api2].id === o.acomptePretId) { _apRec = apList2[_api2]; break; } }
-      if (_apRec) {
-        var dureeEl2 = document.getElementById('csAPDuree');
-        if (dureeEl2) { dureeEl2.value = _apRec.dureeMois || 0; dureeEl2.disabled = (o.apType === 'acompte'); }
-        var moisEl2 = document.getElementById('csAPMoisDeduction');
-        if (moisEl2) moisEl2.value = _apRec.moisDeduction || (window._csSelYear + '-' + window._csSelMonth);
-        calcCsAPMensualite();
-      }
-    }
-  }
-  if (o.beneficiaireId || o.beneficiaireNom) {
-    var benH = document.getElementById('csBenefContainerHidden');
-    var benI = document.getElementById('csBenefContainerInput');
-    if (benH) benH.value = (o.beneficiaireType === 'employe' ? 'emp_' : o.beneficiaireType === 'fournisseur' ? 'frn_' : o.beneficiaireType === 'client' && o.beneficiaireId && o.beneficiaireId !== 'company_self' ? 'cli_' : '') + (o.beneficiaireId || '');
-    if (benI) benI.value = o.beneficiaireNom || '';
-  }
-  if (o.typeOp === 'transfert' && o.caisseDestId) {
-    var csDestEl = document.getElementById('csCaisseDest');
-    if (csDestEl) csDestEl.value = o.caisseDestId;
-    /* SHOW DATE FIELD when EDITING a transfer: can write/modify date */
-    var dateEl = document.getElementById('csDate');
-    if (dateEl) {
-      var dayPart = o.date ? o.date.substring(8, 10) : '';
-      dateEl.value = dayPart || '';
-    }
-  }
-  if (o.remettant) {
-    var remInput = document.getElementById('csRemettantContainerInput');
-    var remHidden = document.getElementById('csRemettantContainerHidden');
-    if (remInput) remInput.value = o.remettant;
-    if (remHidden) remHidden.value = o.remettant;
-  }
-  if (execEl) { execEl.value = o.executant || ''; onExecutantChange(); }
-  if (moyenEl) moyenEl.value = o.moyenPaiement || '';
-  var fraisEditEl = document.getElementById('csFrais');
-  if (fraisEditEl) { fraisEditEl.value = o.frais || 0; fraisEditEl.dataset.manual = ''; }
-  toggleTransNum();
-  if (transEl && o.numeroTransaction) transEl.value = o.numeroTransaction;
-  if (tiersEl) tiersEl.value = o.observations || '';
-  /* Restore montantCharge */
-  var chargeEl = document.getElementById('csMontantCharge');
-  if (chargeEl) chargeEl.value = o.montantCharge || 0;
-  /* Restore caisseId */
-  var caisseIdEl = document.getElementById('csCaisseId');
-  if (caisseIdEl && o.caisseId) caisseIdEl.value = o.caisseId;
-  /* Restore frais */
-  var fraisEl = document.getElementById('csFrais');
-  if (fraisEl) fraisEl.value = o.frais || 0;
-  /* Restore linkedOpId */
-  var linkedEl = document.getElementById('csLinkedOpId');
-  if (linkedEl) linkedEl.value = o.linkedOpId || '';
-  /* Store edit id */
-  window._csEditId = id;
-  /* Update button */
-  var btn = document.getElementById('csValiderBtn');
-  if (btn) btn.textContent = 'Modifier';
-  /* Show validation code field if editing a received transfer */
-  try{
-    var _valGroup = document.getElementById('csValidationGroup');
-    if(_valGroup){
-      var _isRecv = o && o.typeOp==='transfert' && o.sens==='entree' && o.caisseId===(currentUser && currentUser.caisseId || '');
-      _valGroup.style.display = _isRecv ? '' : 'none';
-      var _valInput = document.getElementById('csValidationCode');
-      if(_valInput) _valInput.value='';
-    }
-  }catch(e){}
-  /* Expand form if collapsed */
-  var body = document.getElementById('csFormBody');
-  if (body && body.style.display === 'none') toggleSaisieForm();
-  /* Scroll to form */
-  var form = document.getElementById('csSaisieForm');
-  if (form) form.scrollIntoView({behavior:'smooth', block:'start'});
-}
-
-
 function toggleSaisieForm() {
   var body = document.getElementById('csFormBody');
   var icon = document.getElementById('csToggleIcon');
@@ -24059,20 +24009,31 @@ function toggleSaisieForm() {
 }
 
 function editCaisseOp(id) {
+  var ops = getOperationsCaisse();
+  var o = null;
+  for (var i = 0; i < ops.length; i++) { if (ops[i].id === id) { o = ops[i]; break; } }
+  if (!o) return;
+  /* Remise collective : ouvrir le modal de répartition au lieu du formulaire simple */
+  if (o.collective) {
+    window._apFromCaisse = true;
+    openAcomptePretCollectifModal(o.groupeId || o.id);
+    return;
+  }
+  /* Solde salaire/indemnité : détecter toutes les pièces du même mois et ouvrir modal groupé */
+  if (o.code && CS_PERIOD_CODES.indexOf(o.code) !== -1 && o.date) {
+    openSoldeGroupeEdit(id);
+    return;
+  }
+  /* Édition normale */
+  editCaisseOpSimple(id);
+}
+function editCaisseOpSimple(id) {
   window._csEditId = id;
   window._csPreserveLibelle = true;
   var ops = getOperationsCaisse();
   var o = null;
   for (var i = 0; i < ops.length; i++) { if (ops[i].id === id) { o = ops[i]; break; } }
   if (!o) { window._csPreserveLibelle = false; return; }
-  /* Remise collective : ouvrir le modal de r\u00e9partition au lieu du formulaire simple */
-  if (o.collective) {
-    window._apFromCaisse = true;
-    window._csPreserveLibelle = false;
-    openAcomptePretCollectifModal(o.groupeId || o.id);
-    return;
-  }
-  /* Fill form with operation data */
   var dateEl = document.getElementById('csDate');
   var heureEl = document.getElementById('csHeure');
   var sensEl = document.getElementById('csSens');
