@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-09-17-01";
+      window.__APP_VERSION = "2026-09-18-01";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -11949,7 +11949,12 @@
       /* Calcule {j, n, r} d'une fiche jour. Priorité aux heures réellement pointées,
          repli sur h_j/h_n manuels (pointage groupé, saisie libre) si aucun créneau. */
       function ptCalcDay(rec, isR) {
-        if (!rec || rec.present === false) return {j:0, n:0, r:0};
+        if (!rec || (rec.present === false && !rec.absent_paye)) return {j:0, n:0, r:0};
+        if (rec.absent_paye) {
+          var aj = parseHeure(rec.h_j_manual || ""), an = parseHeure(rec.h_n_manual || "");
+          if (isR) return {j:0, n:0, r:aj + an};
+          return {j:aj, n:an, r:0};
+        }
         var hasJ = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin;
         var hasN = rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin;
         var c = ptCoreCalc({
@@ -12111,6 +12116,9 @@
               ) {
                 cell =
                   '<span style="color:#d97706;font-weight:700">FS</span>';
+              } else if (rec.absent_paye && (hJ + hN + hR > 0)) {
+                cell = '<span style="color:#b45309;font-weight:700">AP: ' + ptFmtHM(hJ + hN + hR) + "</span>";
+                bg = "background:#fffbeb;border-color:#fcd34d;";
               } else if (isR && (hR > 0 || rec.present === true)) {
                 cell = hR > 0
                   ? '<span style="color:#ea580c;font-weight:700">' + ptFmtR(hR) + "</span>"
@@ -12157,6 +12165,9 @@
               if (cps.length) cpT = " | " + cps.join(", ");
               if (rec.h_libres && parseFloat(rec.h_libres) > 0) cpT += " | +" + rec.h_libres + "h libres";
               if (rec.obs) cpT += " | Obs: " + escH(rec.obs);
+              if (rec.paye_sans_travail) cpT += " | Payé sans travail";
+              if (rec.pst_a_rattraper) cpT += " | À rattraper";
+              if (rec.absent_paye) cpT += " | Absent payé (faute entreprise)";
               if (rec.jour_rattrapage) cpT += " | Jour de rattrapage";
             }
             var onclick = "";
@@ -12705,9 +12716,16 @@
           '<input type="number" id="pe-libres" value="' + (rec && rec.h_libres ? rec.h_libres : 0) + '" min="0" step="0.25" ' + dis + ' oninput="ptEditRecalc()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.85rem"></div>' +
           '</div>';
         html += '<div id="pe-summary" style="margin-top:12px;font-size:.85rem;font-weight:700"></div>';
+        var pstOn = rec && rec.paye_sans_travail;
+        var absPlain = rec && rec.present === false && !rec.absent_paye;
+        var absPayeOn = rec && rec.absent_paye === true;
         html += '<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;font-size:.82rem">' +
-          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="pe-pst" ' + (rec && rec.paye_sans_travail ? "checked" : "") + ' ' + dis + '> Payé sans travail</label>' +
-          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pe-abs" ' + (rec && rec.present === false ? "checked" : "") + ' ' + dis + '> Marquer expressément absent</label>' +
+          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="pe-pst" ' + (pstOn ? "checked" : "") + ' ' + dis + ' onchange="peTogglePst()"> Payé sans travail</label>' +
+          '<div id="pe-pst-sub" style="display:' + (pstOn ? "" : "none") + ';margin-left:26px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 10px">' +
+          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="pe-pst-rattrap" ' + (rec && rec.pst_a_rattraper ? "checked" : "") + ' ' + dis + '> À rattraper ? (ces heures payées seront dues)</label></div>' +
+          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pe-abs" ' + ((absPlain || absPayeOn) ? "checked" : "") + ' ' + dis + ' onchange="peToggleAbs()"> Marquer expressément absent</label>' +
+          '<div id="pe-abs-sub" style="display:' + ((absPlain || absPayeOn) ? "" : "none") + ';margin-left:26px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:8px 10px">' +
+          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer;color:#92400e"><input type="checkbox" id="pe-abs-paye" ' + (absPayeOn ? "checked" : "") + ' ' + dis + '> Payé quand même (faute entreprise : 8h payées, à rattraper)</label></div>' +
           '</div>';
         html += '<div style="margin-top:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px">' +
           '<div style="font-size:.82rem;font-weight:700;color:#ea580c;margin-bottom:8px">Gestion des heures à rattraper</div>' +
@@ -12770,6 +12788,16 @@
           return false;
         } catch(e){ return true; }
       }
+      function peTogglePst() {
+        var s = document.getElementById("pe-pst-sub");
+        var c = document.getElementById("pe-pst");
+        if (s) s.style.display = (c && c.checked) ? "" : "none";
+      }
+      function peToggleAbs() {
+        var s = document.getElementById("pe-abs-sub");
+        var c = document.getElementById("pe-abs");
+        if (s) s.style.display = (c && c.checked) ? "" : "none";
+      }
       function ptEditUnlock() {
         var ctx = window._peCtx || {};
         function doUnlock(msg) {
@@ -12798,6 +12826,9 @@
         function g(id){ return (document.getElementById(id) || {}).value || ""; }
         function gc(id){ return !!((document.getElementById(id) || {}).checked); }
         var absent = gc("pe-abs");
+        var pst = gc("pe-pst");
+        var pstR = pst && gc("pe-pst-rattrap");
+        var absPaye = absent && gc("pe-abs-paye");
         var rattrap = gc("pe-rattrap");
         if (!rec) {
           rec = {id:DB.id(), employee_id:empId, date:dk, present:true, h_j_manual:"", h_n_manual:""};
@@ -12810,7 +12841,9 @@
         rec.n_reprise = g("pe-np2") || ""; rec.n_fin = g("pe-nf") || "";
         rec.rendement = gc("pe-rend");
         rec.h_libres = parseFloat(g("pe-libres")) || 0;
-        rec.paye_sans_travail = gc("pe-pst");
+        rec.paye_sans_travail = pst;
+        rec.pst_a_rattraper = pstR;
+        rec.absent_paye = absPaye;
         rec.rattrap_gagnees = parseFloat(g("pe-hg")) || 0;
         rec.rattrap_utilisees = parseFloat(g("pe-hu")) || 0;
         rec.jour_rattrapage = rattrap;
@@ -12818,11 +12851,26 @@
         var emp = null;
         try { emp = getPersonnel().find(function(p){ return p.id === empId; }); } catch(e){}
         var isR = (emp && emp.rendement === true) || rec.rendement === true;
-        if (absent || rattrap) {
+        function storeH(h){
+          h = Math.round((parseFloat(h) || 0)*100)/100;
+          if (h <= 0) return "";
+          return getFormatHeures() === "hhmm" ? ptFmtHM(h) : String(h);
+        }
+        if ((absent && !absPaye) || rattrap) {
           rec.present = false;
+          rec.absent_paye = false;
           rec.h_j_manual = ""; rec.h_n_manual = "";
+        } else if (absPaye) {
+          /* Absent mais payé (faute entreprise) : 8h payées + 8h à rattraper */
+          rec.present = false;
+          rec.j_arrivee = ""; rec.j_pause = ""; rec.j_reprise = ""; rec.j_fin = "";
+          rec.n_arrivee = ""; rec.n_pause = ""; rec.n_reprise = ""; rec.n_fin = "";
+          rec.h_libres = 0;
+          rec.h_j_manual = storeH(8); rec.h_n_manual = "";
+          rec.rattrap_gagnees = 8;
         } else {
           rec.present = true;
+          rec.absent_paye = false;
           var hasTimes = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin ||
                          rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin || rec.h_libres;
           if (hasTimes) {
@@ -12831,13 +12879,15 @@
               na:rec.n_arrivee, np1:rec.n_pause, np2:rec.n_reprise, nf:rec.n_fin,
               libres:rec.h_libres, isR:isR
             });
-            function storeH(h){
-              h = Math.round((parseFloat(h) || 0)*100)/100;
-              if (h <= 0) return "";
-              return getFormatHeures() === "hhmm" ? ptFmtHM(h) : String(h);
-            }
             if (isR) { rec.h_j_manual = storeH(c.r); rec.h_n_manual = ""; }
             else { rec.h_j_manual = storeH(c.j); rec.h_n_manual = storeH(c.n); }
+          }
+          /* Payé sans travail + à rattraper : les heures payées deviennent dues */
+          if (pst && pstR) {
+            var cred = parseHeure(rec.h_j_manual || "") + parseHeure(rec.h_n_manual || "");
+            if (isR) cred = parseHeure(rec.h_j_manual || "");
+            if (cred <= 0) cred = 8;
+            rec.rattrap_gagnees = Math.round(cred*100)/100;
           }
         }
         setPointageData(pts);
@@ -12930,9 +12980,13 @@
               if (hJ===0 && hN===0 && hR===0 && rec.present===true && !isRf) hJ=8;
               var ptStr = ptTimesStr(rec);
               if (isRf) {
-                if (hR>0) { jStr=ptFmtR(hR); total=ptFmtR(hR); tR+=hR; }
+                if (rec.absent_paye) {
+                  var apH = parseHeure(rec.h_j_manual || "") + parseHeure(rec.h_n_manual || "");
+                  if (apH > 0) { jStr=apH.toFixed(1); total=apH.toFixed(1); tR+=apH; }
+                }
+                else if (hR>0) { jStr=ptFmtR(hR); total=ptFmtR(hR); tR+=hR; }
                 else if (rec.present===true) { jStr="RENDEMENT"; total="RENDEMENT"; }
-                if (rec.present===false) { obs="Absent"; }
+                if (rec.present===false && !rec.absent_paye) { obs="Absent"; }
               } else {
                 if (hJ>0) { jStr=hJ.toFixed(1); tJ+=hJ; }
                 if (hN>0) { nStr=hN.toFixed(1); tN+=hN; }
@@ -12940,8 +12994,9 @@
                 if (rec.present===false) { obs="Absent"; }
               }
               if (rec.faute_societe) obs="Faute société";
-              if (rec.paye_sans_travail) obs="Payé sans travail";
+              if (rec.paye_sans_travail) obs = "Payé sans travail" + (rec.pst_a_rattraper ? " — à rattraper" : "");
               if (rec.jour_rattrapage) obs="Jour de rattrapage";
+              if (rec.absent_paye) obs="Absent payé (faute entreprise) — à rattraper";
               var rg = parseFloat(rec.rattrap_gagnees) || 0, ru = parseFloat(rec.rattrap_utilisees) || 0;
               if (rg > 0 || ru > 0) {
                 obs = (obs ? obs+" — " : "") + "Rattrapage (+" + rg + "h / -" + ru + "h)";
@@ -13041,15 +13096,18 @@
         var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
         var emps = getPersonnelActifs().filter(function(p){
           if (p.en_paie===false) return false;
-          return empCategorie(p)==="titulaire";
+          var c = empCategorie(p);
+          return c==="titulaire" || c==="journalier";
         });
         var html = '<div style="padding:20px">' +
-          '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (Standard 173.33h)</h3>' +
-          '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Génération automatique des 8h de travail pour les employés de type Standard.</p>' +
-          '<div class="form-group" style="margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
-          '<select id="gen-periode" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois ('+mois+')</option><option value="empty">Jours vides uniquement</option></select></div>' +
+          '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
+          '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Génération automatique des 8h de travail pour les employés Journaliers et Forfait (Standard).</p>' +
+          '<div class="form-group" style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
+          '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois ('+mois+')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option></select></div>' +
+          '<div id="gen-day-wrap" class="form-group" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
+          '<input type="date" id="gen-day" value="'+new Date().toISOString().slice(0,10)+'" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
           '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">Employés concernés</div>' +
-          '<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:.8rem;border-bottom:1px solid #f0f0f0"><input type="checkbox" id="gen-select-all" checked onchange="genToggleAll()"> Tout sélectionner</label>' +
+          '<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:.8rem;border-bottom:1px solid #f0f0f0"><input type="checkbox" id="gen-select-all" checked onchange="genToggleAll();genUpdateCount()"> Tout sélectionner</label>' +
           '<div id="gen-emp-list" style="max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:16px"></div>' +
           '<div style="display:flex;justify-content:flex-end;gap:10px">' +
             '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
@@ -13059,9 +13117,22 @@
         var list = document.getElementById("gen-emp-list");
         if (list) {
           list.innerHTML = emps.map(function(p){
-            return '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:.8rem"><input type="checkbox" class="gen-emp-cb" value="'+p.id+'" checked><strong>'+escH(p.matricule||"")+'</strong> '+escH(p.nom)+(p.prenoms?' '+escH(p.prenoms):'')+'</label>';
+            var tag = empCategorie(p)==="journalier"
+              ? '<span style="font-size:.62rem;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:1px 7px">Jour</span>'
+              : '<span style="font-size:.62rem;color:#7c3aed;background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:1px 7px">Forfait</span>';
+            return '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:.8rem"><input type="checkbox" class="gen-emp-cb" value="'+p.id+'" checked onchange="genUpdateCount()"><strong>'+escH(p.matricule||"")+'</strong> '+escH(p.nom)+(p.prenoms?' '+escH(p.prenoms):'')+' '+tag+'</label>';
           }).join("");
         }
+      }
+      function genTogglePeriode() {
+        var v = (document.getElementById("gen-periode")||{}).value || "all";
+        var w = document.getElementById("gen-day-wrap");
+        if (w) w.style.display = (v === "day") ? "" : "none";
+      }
+      function genUpdateCount() {
+        var n = document.querySelectorAll(".gen-emp-cb:checked").length;
+        var b = document.getElementById("gen-apply-btn");
+        if (b) b.textContent = "Générer pour " + n + " employé(s)";
       }
       function genToggleAll() { var c=(document.getElementById("gen-select-all")||{}).checked; document.querySelectorAll(".gen-emp-cb").forEach(function(cb){cb.checked=c;}); }
       function genApply() {
@@ -13069,30 +13140,43 @@
         if (cbs.length===0) { toast("Sélectionnez au moins un employé","error"); return; }
         var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
         var periode = (document.getElementById("gen-periode")||{}).value || "all";
+        var day = (document.getElementById("gen-day")||{}).value || "";
+        if (periode === "day" && !day) { toast("Choisissez le jour à générer","error"); return; }
         var year = parseInt(mois.split("-")[0]), mIdx = parseInt(mois.split("-")[1])-1;
         var daysInMonth = new Date(year,mIdx+1,0).getDate();
         var pts = getPointageData();
         var store8 = getFormatHeures()==="hhmm" ? "8:00" : "8";
-        var count=0;
-        cbs.forEach(function(cb){
-          var eid = cb.value;
+        var dks = [];
+        if (periode === "day") {
+          dks.push(day);
+        } else {
           for (var d=1;d<=daysInMonth;d++){
             var dk = mois+"-"+(d<10?"0":"")+d;
             var dw = new Date(year,mIdx,d).getDay();
             if (dw===0||dw===6) continue;
+            dks.push(dk);
+          }
+        }
+        var count=0, skipped=0, skippedAP=0;
+        cbs.forEach(function(cb){
+          var eid = cb.value;
+          dks.forEach(function(dk){
             var idx = pts.findIndex(function(r){ return r.employee_id===eid && r.date===dk; });
-            if (periode==="empty" && idx!==-1) continue;
+            if (idx !== -1 && pts[idx].protege === true) { skipped++; return; }
+            if (idx !== -1 && pts[idx].absent_paye === true) { skippedAP++; return; }
+            if (periode==="empty" && idx!==-1) return;
             if (idx===-1) {
               pts.push({id:DB.id(), employee_id:eid, date:dk, present:true, h_j_manual:store8, h_n_manual:""});
               count++;
             } else {
               pts[idx].present = true;
               pts[idx].h_j_manual = store8;
+              count++;
             }
-          }
+          });
         });
         setPointageData(pts);
-        toast(count+" jour(s) généré(s) pour "+cbs.length+" employé(s)","success");
+        toast(count+" jour(s) généré(s) pour "+cbs.length+" employé(s)"+(skipped ? " — "+skipped+" verrouillé(s) ignoré(s)" : "")+(skippedAP ? " — "+skippedAP+" absent(s) payé(s) conservé(s)" : ""),"success");
         closePtModal();
         renderPtRecap();
       }
