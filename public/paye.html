@@ -12678,6 +12678,7 @@
       var faceMode = "jour";
       function startFaceRec(mode) {
         faceMode = mode;
+        if (typeof faceResetConfirm === "function") faceResetConfirm();
         var bj = document.getElementById("face-btn-jour");
         var bn = document.getElementById("face-btn-nuit");
         if (bj) bj.style.outline = (mode === "jour") ? "3px solid #16a34a" : "none";
@@ -12887,9 +12888,20 @@
         renderPtRecap();
         return "ok";
       }
+      /* --- Reconnaissance stricte : anti-confusion entre sosies --- */
+      var FACE_MATCH_THRESHOLD = 0.5;   /* distance max pour accepter une identité (était 0.6) */
+      var FACE_MATCH_MARGIN = 0.08;     /* écart min exigé avec le 2e meilleur candidat */
+      var FACE_CONFIRM_FRAMES = 5;      /* nb de détections consécutives identiques avant de pointer */
+      var FACE_DUPLICATE_THRESHOLD = 0.45; /* seuil doublon : même visage déjà enrôlé sur un autre employé */
+      function faceResetConfirm() {
+        window._faceConfirm = {id:null, count:0, locked:null};
+      }
       function matchFace(detections, mode) {
         var result = document.getElementById("face-result");
+        var status = document.getElementById("face-status");
         var personnel = getPersonnel().filter(function(p){ return p.face_descriptor && p.en_paie!==false; });
+        if (!window._faceConfirm) faceResetConfirm();
+        var fc = window._faceConfirm;
         if (personnel.length===0) {
           if (result) result.innerHTML = '<div style="padding:8px;background:#fef3c7;border-radius:6px;font-size:.8rem">Aucun visage enregistré. Utilisez la fonctionnalité "Enregistrer un visage" dans les paramètres.</div>';
           return;
@@ -12899,29 +12911,57 @@
           catch(e){ return null; }
         }).filter(Boolean);
         if (descs.length===0) return;
-        var bestMatch = null, bestDist = 0.6;
+        /* Classement : toutes les détections × tous les enrôlés, trié par distance */
+        var ranked = [];
         detections.forEach(function(det){
           var detDesc = det.descriptor;
+          if (!detDesc) return;
           descs.forEach(function(d){
-            var dist = faceapi.euclideanDistance(detDesc, d.descriptor);
-            if (dist < bestDist) { bestDist = dist; bestMatch = d; }
+            try { ranked.push({d:d, dist:faceapi.euclideanDistance(detDesc, d.descriptor)}); } catch(e){}
           });
         });
-        if (bestMatch) {
-          /* Anti-rebond : ignorer les re-détections < 8s (même employé + même section + même moment) */
-          var nowTs = Date.now();
-          window._faceLastSeen = window._faceLastSeen || {};
-          var ck = bestMatch.id + "|" + mode + "|" + faceMoment;
-          if (window._faceLastSeen[ck] && (nowTs - window._faceLastSeen[ck] < 8000)) return;
-          window._faceLastSeen[ck] = nowTs;
-          var shortName = faceShortName(bestMatch.name);
-          var heure = new Date().toTimeString().slice(0,5);
-          facePointer(bestMatch.id, shortName, heure, mode, faceMoment);
+        ranked.sort(function(a,b){ return a.dist - b.dist; });
+        var top1 = ranked[0] || null;
+        if (!top1 || top1.dist >= FACE_MATCH_THRESHOLD) {
+          /* Personne inconnue : on libère le verrou et le compteur */
+          fc.id = null; fc.count = 0; fc.locked = null;
+          if (status && detections.length > 0) status.textContent = "Visage non reconnu — regardez bien la caméra, visage éclairé...";
+          return;
         }
+        /* Nouvelle personne devant la caméra : on libère l'ancien verrou */
+        if (fc.locked && fc.locked !== top1.d.id) { fc.locked = null; fc.id = null; fc.count = 0; }
+        if (fc.locked === top1.d.id) return; /* déjà pointé : attendre qu'il s'éloigne */
+        /* Ambiguïté (sosie) : le 2e candidat est trop proche du 1er → on ne tranche pas */
+        var top2diff = null;
+        for (var r = 1; r < ranked.length; r++) {
+          if (ranked[r].d.id !== top1.d.id) { top2diff = ranked[r]; break; }
+        }
+        if (top2diff && (top2diff.dist - top1.dist) < FACE_MATCH_MARGIN) {
+          fc.id = null; fc.count = 0;
+          if (status) status.textContent = "Ressemblance trop proche entre 2 employés — restez fixe face caméra...";
+          return;
+        }
+        /* Confirmation temporelle : la même identité doit gagner N fois de suite */
+        var short1 = faceShortName(top1.d.name);
+        if (fc.id === top1.d.id) fc.count++; else { fc.id = top1.d.id; fc.count = 1; }
+        if (fc.count < FACE_CONFIRM_FRAMES) {
+          if (status) status.textContent = "Vérification " + short1 + "... " + fc.count + "/" + FACE_CONFIRM_FRAMES;
+          return;
+        }
+        /* Identité confirmée → pointage */
+        fc.id = null; fc.count = 0; fc.locked = top1.d.id;
+        var nowTs = Date.now();
+        window._faceLastSeen = window._faceLastSeen || {};
+        var ck = top1.d.id + "|" + mode + "|" + faceMoment;
+        if (window._faceLastSeen[ck] && (nowTs - window._faceLastSeen[ck] < 8000)) return;
+        window._faceLastSeen[ck] = nowTs;
+        var heure = new Date().toTimeString().slice(0,5);
+        facePointer(top1.d.id, short1, heure, mode, faceMoment);
       }
       function stopFaceRec() {
         if (faceStream) { faceStream.getTracks().forEach(function(t){t.stop();}); faceStream=null; }
         faceModelsLoaded = false;
+        if (typeof faceResetConfirm === "function") faceResetConfirm();
       }
       function toggleMasquerStandard() {
         ptHideStandard = !ptHideStandard;
@@ -13059,12 +13099,40 @@
               if (status) status.innerHTML = '<span style="color:#dc2626">Aucun visage détecté. Regardez la caméra et réessayez.</span>';
               return;
             }
+            /* Qualité : visage de face, bien cadré */
+            var score = (result.detection && typeof result.detection.score === "number") ? result.detection.score : 1;
+            if (score < 0.5) {
+              if (status) status.innerHTML = '<span style="color:#dc2626">⛔ Capture de mauvaise qualité (score '+score.toFixed(2)+'). Placez-vous face caméra, visage éclairé, puis réessayez.</span>';
+              return;
+            }
+            /* Anti-doublon : ce visage est-il déjà enrôlé sur un AUTRE employé ? */
+            var empSelId = (document.getElementById("fv-emp")||{}).value || "";
+            var dupEmp = null, dupDist = 99;
+            try {
+              getPersonnel().filter(function(p){ return p.face_descriptor && p.en_paie !== false && p.id !== empSelId; })
+              .forEach(function(p){
+                try {
+                  var dd = faceapi.euclideanDistance(result.descriptor, new Float32Array(JSON.parse(p.face_descriptor)));
+                  if (dd < dupDist) { dupDist = dd; dupEmp = p; }
+                } catch(e){}
+              });
+            } catch(e){}
+            if (dupEmp && dupDist < FACE_DUPLICATE_THRESHOLD) {
+              if (preview) preview.style.display = "none";
+              if (saveBtn) saveBtn.style.display = "none";
+              if (status) status.innerHTML = '<span style="color:#dc2626">⛔ <strong>Visage déjà enregistré</strong> pour <strong>'+escH(dupEmp.nom)+' '+escH(dupEmp.prenoms||'')+'</strong> (matricule '+escH(dupEmp.matricule||"-")+').<br>Enregistrement refusé : sélectionnez <strong>'+escH(dupEmp.nom)+'</strong> pour mettre à jour son Face ID, ou supprimez le doublon dans le tableau ci-dessous.</span>';
+              return;
+            }
             fvDescriptor = Array.from(result.descriptor);
             if (preview && previewImg) {
               previewImg.src = canvas.toDataURL("image/jpeg",0.8);
               preview.style.display = "";
             }
-            if (status) status.innerHTML = '<span style="color:#16a34a;font-weight:600">✓ Visage capturé avec succès</span>';
+            var sameEmp = null;
+            try { sameEmp = getPersonnel().find(function(p){ return p.id === empSelId; }); } catch(e){}
+            if (status) status.innerHTML = (sameEmp && sameEmp.face_descriptor)
+              ? '<span style="color:#16a34a;font-weight:600">✓ Visage capturé — mise à jour du Face ID de '+escH(sameEmp.nom)+'</span>'
+              : '<span style="color:#16a34a;font-weight:600">✓ Visage capturé avec succès</span>';
             if (saveBtn) saveBtn.style.display = "";
           }).catch(function(err){
             if (status) status.innerHTML = '<span style="color:#dc2626">Erreur: '+escH(err.message)+'</span>';
@@ -13077,9 +13145,10 @@
         var personnel = getPersonnel();
         var emp = personnel.find(function(p){ return p.id === empId; });
         if (!emp) { toast("Employé introuvable","error"); return; }
+        var isUpdate = !!emp.face_descriptor;
         emp.face_descriptor = JSON.stringify(fvDescriptor);
         setPersonnel(personnel);
-        toast("Visage enregistré pour " + emp.nom + " " + (emp.prenoms||""), "success");
+        toast((isUpdate ? "Face ID mis à jour pour " : "Visage enregistré pour ") + emp.nom + " " + (emp.prenoms||""), "success");
         fvDescriptor = null;
         var preview = document.getElementById("fv-preview");
         if (preview) preview.style.display = "none";
@@ -13103,6 +13172,35 @@
         }
         var withFace = personnel.filter(function(p){ return p.face_descriptor; });
         var html = '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px;color:#374151">Visages enregistrés ('+withFace.length+'/'+getPersonnel().filter(function(p){ return p.en_paie !== false; }).length+')</div>';
+        /* Doublons suspects : même visage enrôlé sur 2 employés → la reco peut se tromper */
+        try {
+          if (typeof faceapi !== "undefined" && withFace.length > 1) {
+            var dupPairs = [];
+            for (var di = 0; di < withFace.length; di++) {
+              var ddi;
+              try { ddi = new Float32Array(JSON.parse(withFace[di].face_descriptor)); } catch(e){ continue; }
+              for (var dj = di+1; dj < withFace.length; dj++) {
+                try {
+                  var ddj = new Float32Array(JSON.parse(withFace[dj].face_descriptor));
+                  if (faceapi.euclideanDistance(ddi, ddj) < 0.5) dupPairs.push({a:withFace[di], b:withFace[dj]});
+                } catch(e){}
+              }
+            }
+            if (dupPairs.length > 0) {
+              html += '<div style="margin-bottom:10px;padding:10px 12px;background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;font-size:.75rem;color:#92400e">';
+              html += '<div style="font-weight:700;margin-bottom:6px">⚠ Doublon suspect : même visage sur 2 employés — la reconnaissance peut pointer le mauvais. Supprimez le mauvais côté.</div>';
+              dupPairs.forEach(function(pr){
+                html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">'
+                  + '<span><strong>'+escH(pr.a.matricule||"")+'</strong> '+escH(pr.a.nom)+'</span><span>↔</span>'
+                  + '<span><strong>'+escH(pr.b.matricule||"")+'</strong> '+escH(pr.b.nom)+'</span>'
+                  + '<button onclick="fvDelete(\''+pr.a.id+'\')" style="padding:2px 8px;font-size:.7rem;color:#dc2626;border:1px solid #fecaca;border-radius:10px;background:#fff;cursor:pointer">Supprimer '+escH(pr.a.matricule||"")+'</button>'
+                  + '<button onclick="fvDelete(\''+pr.b.id+'\')" style="padding:2px 8px;font-size:.7rem;color:#dc2626;border:1px solid #fecaca;border-radius:10px;background:#fff;cursor:pointer">Supprimer '+escH(pr.b.matricule||"")+'</button>'
+                  + '</div>';
+              });
+              html += '</div>';
+            }
+          }
+        } catch(e){}
         html += '<div style="overflow-x:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">'
           + '<table style="width:100%;border-collapse:collapse;font-size:.78rem">'
           + '<thead><tr style="background:#f9fafb;text-align:left">'
