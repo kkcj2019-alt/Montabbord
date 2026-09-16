@@ -11829,6 +11829,41 @@
         else if (tab === "recap") renderPtRecap();
         else loadPointage();
       }
+      /* ==================== AUTOCOMPLETE EMPLOYE ==================== */
+      function empAutocomplete(q) {
+        var list = getPersonnelActifs();
+        var ff = document.getElementById("pt-fonction-filter");
+        var fsel = ff ? ff.value : "";
+        if (fsel && fsel !== "Toutes les fonctions") {
+          list = list.filter(function (p) { return p.fonction === fsel; });
+        }
+        q = (q || "").toLowerCase().trim();
+        var matches = list.filter(function (p) {
+          var name = ((p.nom || "") + " " + (p.prenoms || "")).toLowerCase();
+          var mat = (p.matricule || "").toLowerCase();
+          return !q || name.indexOf(q) !== -1 || mat.indexOf(q) !== -1;
+        }).slice(0, 25);
+        var sug = document.getElementById("pt-emp-suggestions");
+        if (!sug) return;
+        if (!q || matches.length === 0) { sug.style.display = "none"; return; }
+        sug.innerHTML = matches.map(function (p) {
+          var fullName = escH(p.nom) + (p.prenoms ? " " + escH(p.prenoms) : "");
+          return '<div onmousedown="selectEmpAutocomplete(\'' + p.id + '\',\'' + escH(p.nom) + ' ' + escH(p.prenoms || '') + '\',\'' + escH(p.matricule || '') + '\')" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:.8rem;display:flex;justify-content:space-between;align-items:center">' +
+            '<div><strong style="font-weight:600">' + escH(p.matricule || "") + '</strong> ' + fullName + '<div style="font-size:.68rem;color:#999">' + escH(p.fonction || "") + '</div></div>' +
+            '</div>';
+        }).join("");
+        sug.style.display = "";
+      }
+      function selectEmpAutocomplete(id, name, matricule) {
+        var ptEl = document.getElementById("pt-select-emp");
+        if (ptEl) ptEl.value = id;
+        var searchEl = document.getElementById("pt-emp-search");
+        if (searchEl) searchEl.value = matricule + " " + name;
+        document.getElementById("pt-emp-suggestions").style.display = "none";
+        if (ptCurrentTab === "montage") loadPointageMontage();
+        else if (ptCurrentTab === "recap") renderPtRecap();
+        else loadPointage();
+      }
       function ptFmtHM(h) {
         h = parseFloat(h) || 0;
         var H = Math.floor(h + 1e-9),
@@ -11888,6 +11923,15 @@
           emps.length +
           ' employés)</h3>' +
           '<button class="btn btn-sec" style="padding:4px 12px" onclick="window.print()">🖨 Imprimer</button></div>';
+        /* Pointage groupé : barre d'action au-dessus du tableau */
+        html +=
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:.5rem;padding:6px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px">' +
+          '<span style="font-size:.75rem;font-weight:700;color:#334155">Pointage groupé :</span>' +
+          '<input type="date" id="pt-group-date" value="' + new Date().toISOString().slice(0,10) + '" style="padding:4px 8px;font-size:.75rem;border:1px solid #cbd5e1;border-radius:6px">' +
+          '<button class="btn" style="padding:5px 12px;font-size:.72rem" onclick="markAllPresent()">✓ Marquer tous présent</button>' +
+          '<button class="btn btn-sec" style="padding:5px 12px;font-size:.72rem" onclick="markAllAbsent()">✗ Marquer tous absent</button>' +
+          '<button class="btn btn-sec" style="padding:5px 12px;font-size:.72rem;color:#dc2626" onclick="clearAllDay()"> Effacer tous</button>' +
+          '</div>';
         html +=
           '<div style="font-size:.72rem;color:var(--dim);margin-bottom:.5rem;display:flex;gap:14px;flex-wrap:wrap;align-items:center">' +
           '<span>Cliquez sur une case ▶ <span style="color:#16a34a;font-weight:700">Présent (8h)</span> → <span style="color:#dc2626;font-weight:700">Absent</span> → <span style="color:#94a3b8">non pointé</span></span>' +
@@ -12064,6 +12108,88 @@
             toast("Absence enregistrée (" + dk + ")");
           }
         }
+        renderPtRecap();
+      }
+      /* Pointage groupé : employés filtrés (même logique que le récap) */
+      function _ptGroupEmps() {
+        var ff = document.getElementById("pt-fonction-filter");
+        var fsel = ff && ff.value ? ff.value : "Toutes les fonctions";
+        return getPersonnelActifs().filter(function (p) {
+          if (p.en_paie === false) return false;
+          if (empCategorie(p) === "externe") return false;
+          if (fsel !== "Toutes les fonctions" && p.fonction !== fsel) return false;
+          return true;
+        });
+      }
+      function _ptGroupDate() {
+        var el = document.getElementById("pt-group-date");
+        return el ? el.value : new Date().toISOString().slice(0, 10);
+      }
+      function markAllPresent() {
+        var dk = _ptGroupDate();
+        if (!dk) { toast("Choisissez une date", "error"); return; }
+        var emps = _ptGroupEmps();
+        if (!emps.length) { toast("Aucun employé filtré", "error"); return; }
+        var pts = getPointageData();
+        var store8 = getFormatHeures() === "hhmm" ? "8:00" : "8";
+        var count = 0;
+        emps.forEach(function (p) {
+          var idx = pts.findIndex(function (r) { return r.employee_id === p.id && r.date === dk; });
+          if (idx === -1) {
+            pts.push({ id: DB.id(), employee_id: p.id, date: dk, present: true, h_j_manual: store8, h_n_manual: "" });
+            count++;
+          } else {
+            var rec = pts[idx];
+            if (rec.present !== true || (!rec.h_j_manual && !rec.h_n_manual)) {
+              rec.present = true;
+              rec.h_j_manual = store8;
+              rec.h_n_manual = "";
+              count++;
+            }
+          }
+        });
+        setPointageData(pts);
+        toast(count + " employé(s) marqué(s) présent(s) le " + dk, "success");
+        renderPtRecap();
+      }
+      function markAllAbsent() {
+        var dk = _ptGroupDate();
+        if (!dk) { toast("Choisissez une date", "error"); return; }
+        var emps = _ptGroupEmps();
+        if (!emps.length) { toast("Aucun employé filtré", "error"); return; }
+        var pts = getPointageData();
+        var count = 0;
+        emps.forEach(function (p) {
+          var idx = pts.findIndex(function (r) { return r.employee_id === p.id && r.date === dk; });
+          if (idx === -1) {
+            pts.push({ id: DB.id(), employee_id: p.id, date: dk, present: false, h_j_manual: "", h_n_manual: "" });
+            count++;
+          } else {
+            var rec = pts[idx];
+            rec.present = false;
+            rec.h_j_manual = "";
+            rec.h_n_manual = "";
+            count++;
+          }
+        });
+        setPointageData(pts);
+        toast(count + " employé(s) marqué(s) absent(s) le " + dk);
+        renderPtRecap();
+      }
+      function clearAllDay() {
+        var dk = _ptGroupDate();
+        if (!dk) { toast("Choisissez une date", "error"); return; }
+        var emps = _ptGroupEmps();
+        if (!emps.length) { toast("Aucun employé filtré", "error"); return; }
+        if (!confirm("Effacer le pointage de " + dk + " pour " + emps.length + " employés ?")) return;
+        var pts = getPointageData();
+        var count = 0;
+        emps.forEach(function (p) {
+          var idx = pts.findIndex(function (r) { return r.employee_id === p.id && r.date === dk; });
+          if (idx !== -1) { pts.splice(idx, 1); count++; }
+        });
+        setPointageData(pts);
+        toast(count + " jour(s) effacé(s) pour le " + dk);
         renderPtRecap();
       }
       function loadPointageMontage() {
