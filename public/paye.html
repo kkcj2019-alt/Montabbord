@@ -12607,8 +12607,8 @@
             '<video id="face-video" autoplay playsinline style="width:100%;max-width:480px;border-radius:8px;border:2px solid #ddd"></video>' +
             '<canvas id="face-canvas" style="display:none"></canvas>' +
             '<div id="face-status" style="margin-top:8px;font-size:.8rem;color:#666">Chargement des modèles...</div>' +
-            '<div id="face-result" style="margin-top:8px"></div>' +
           '</div>' +
+          '<div id="face-result" style="margin-top:8px;margin-bottom:16px"></div>' +
           '<div id="face-manual-container" style="display:none;margin-bottom:16px;text-align:left">' +
             '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px">' +
             '<div style="font-size:.8rem;font-weight:600;margin-bottom:10px">Pointage manuel (mode dégradé — caméra indisponible)</div>' +
@@ -12696,16 +12696,34 @@
         var pts = getPointageData();
         var storeH = getFormatHeures()==="hhmm" ? ptFmtHM(parseHeure(heure)) : String(parseHeure(heure));
         var idx = pts.findIndex(function(r){ return r.employee_id===emp.id && r.date===dk; });
+        var shortM = faceShortName(emp.nom + " " + (emp.prenoms||""));
+        var crenM = (faceMode === "nuit") ? "NUIT" : "JOUR";
+        var result = document.getElementById("face-result");
+        if (idx !== -1 && pts[idx].present) {
+          if (result) result.innerHTML = '<div style="padding:14px;background:#422006;border:2px solid #d97706;border-radius:12px;text-align:center">'
+            + '<div style="font-size:1rem;font-weight:800;color:#fbbf24;letter-spacing:.5px">⚠ ATTENTION</div>'
+            + '<div style="font-size:1rem;font-weight:700;color:#fde68a;margin-top:4px">'+escH(shortM)+'</div>'
+            + '<div style="margin-top:8px;padding:8px;background:rgba(217,119,6,.25);border:1px solid #d97706;border-radius:8px;font-size:.9rem;font-weight:700;color:#fef3c7">⚠ présence déjà enregistrée</div>'
+            + '<div style="font-size:.75rem;color:#fcd34d;margin-top:6px">Créneau '+crenM+'</div></div>';
+          faceSpeak(shortM + ", présence déjà enregistrée");
+          if (matInput) matInput.value = "";
+          return;
+        }
         if (idx === -1) {
-          pts.push({id:DB.id(), employee_id:emp.id, date:dk, present:true, h_j_manual:storeH, h_n_manual:""});
+          var recM = {id:DB.id(), employee_id:emp.id, date:dk, present:true, h_j_manual:"", h_n_manual:""};
+          if (faceMode === "nuit") recM.h_n_manual = storeH; else recM.h_j_manual = storeH;
+          pts.push(recM);
         } else {
           pts[idx].present = true;
-          pts[idx].h_j_manual = storeH;
+          if (faceMode === "nuit") pts[idx].h_n_manual = storeH; else pts[idx].h_j_manual = storeH;
         }
         setPointageData(pts);
-        var result = document.getElementById("face-result");
-        if (result) result.innerHTML = '<div style="padding:10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:.85rem">✓ <strong>'+escH(emp.nom)+' '+escH(emp.prenoms||'')+'</strong> pointé à '+heure+' ('+faceMode+')</div>';
-        toast(emp.nom + " pointé à " + heure, "success");
+        if (result) result.innerHTML = '<div style="padding:14px;background:#052e16;border:2px solid #16a34a;border-radius:12px;text-align:center">'
+          + '<div style="font-size:1rem;font-weight:800;color:#4ade80;letter-spacing:.5px">✓ POINTAGE '+crenM+'</div>'
+          + '<div style="font-size:1.05rem;font-weight:700;color:#fff;margin-top:4px">'+escH(shortM)+'</div>'
+          + '<div style="font-size:.8rem;color:#bbf7d0;margin-top:4px">Créneau '+crenM+' • pointé à '+heure+'</div></div>';
+        toast(shortM + " pointé (" + crenM + " • " + heure + ")", "success");
+        faceSpeak(shortM + ", pointage " + crenM + " enregistré");
         if (matInput) matInput.value = "";
         renderPtRecap();
       }
@@ -12776,6 +12794,22 @@
             if (faceStream) requestAnimationFrame(function(){ detectFacesLoop(mode); });
           });
       }
+      /* Nom court : 2 premiers mots (ex "Kanga Kouamé Christian Junior" -> "Kanga Kouamé") */
+      function faceShortName(full) {
+        if (!full) return "";
+        var parts = String(full).trim().split(/\s+/);
+        return parts.slice(0,2).join(" ");
+      }
+      /* Annonce vocale du pointage (nom court + creneau) */
+      function faceSpeak(msg) {
+        try {
+          if (!("speechSynthesis" in window)) return;
+          window.speechSynthesis.cancel();
+          var u = new SpeechSynthesisUtterance(msg);
+          u.lang = "fr-FR"; u.rate = 0.95;
+          window.speechSynthesis.speak(u);
+        } catch(e){}
+      }
       function matchFace(detections, mode) {
         var result = document.getElementById("face-result");
         var personnel = getPersonnel().filter(function(p){ return p.face_descriptor && p.en_paie!==false; });
@@ -12797,17 +12831,45 @@
           });
         });
         if (bestMatch) {
+          /* Anti-rebond : ignorer les re-détections < 8s pour le même employé */
+          var nowTs = Date.now();
+          window._faceLastSeen = window._faceLastSeen || {};
+          if (window._faceLastSeen[bestMatch.id] && (nowTs - window._faceLastSeen[bestMatch.id] < 8000)) return;
+          window._faceLastSeen[bestMatch.id] = nowTs;
+          var shortName = faceShortName(bestMatch.name);
+          var creneau = (mode === "nuit") ? "NUIT" : "JOUR";
           var dk = new Date().toISOString().slice(0,10);
           var pts = getPointageData();
           var heure = new Date().toTimeString().slice(0,5);
           var storeH = getFormatHeures()==="hhmm" ? heure : String(parseInt(heure.split(":")[0])+parseInt(heure.split(":")[1])/60);
           var idx = pts.findIndex(function(r){ return r.employee_id===bestMatch.id && r.date===dk; });
-          if (idx===-1) {
-            pts.push({id:DB.id(), employee_id:bestMatch.id, date:dk, present:true, h_j_manual:storeH, h_n_manual:""});
-          } else { pts[idx].present=true; pts[idx].h_j_manual=storeH; }
-          setPointageData(pts);
-          if (result) result.innerHTML = '<div style="padding:10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;font-size:.85rem">✓ <strong>'+escH(bestMatch.name)+'</strong> pointé à '+heure+' ('+mode+')</div>';
-          toast(bestMatch.name+" pointé à "+heure, "success");
+          var dejaVu = (idx !== -1 && pts[idx].present);
+          if (!dejaVu) {
+            if (idx===-1) {
+              var rec = {id:DB.id(), employee_id:bestMatch.id, date:dk, present:true, h_j_manual:"", h_n_manual:""};
+              if (mode === "nuit") rec.h_n_manual = storeH; else rec.h_j_manual = storeH;
+              pts.push(rec);
+            } else {
+              pts[idx].present=true;
+              if (mode === "nuit") pts[idx].h_n_manual=storeH; else pts[idx].h_j_manual=storeH;
+            }
+            setPointageData(pts);
+            if (result) result.innerHTML = '<div style="padding:14px;background:#052e16;border:2px solid #16a34a;border-radius:12px;text-align:center">'
+              + '<div style="font-size:1rem;font-weight:800;color:#4ade80;letter-spacing:.5px">✓ POINTAGE ' + creneau + '</div>'
+              + '<div style="font-size:1.05rem;font-weight:700;color:#fff;margin-top:4px">'+escH(shortName)+'</div>'
+              + '<div style="font-size:.8rem;color:#bbf7d0;margin-top:4px">Créneau ' + creneau + ' • pointé à '+heure+'</div></div>';
+            toast(shortName+" pointé ("+creneau+" • "+heure+")", "success");
+            faceSpeak(shortName + ", pointage " + creneau + " enregistré");
+            renderPtRecap();
+          } else {
+            var hDeja = (mode === "nuit" ? pts[idx].h_n_manual : pts[idx].h_j_manual) || heure;
+            if (result) result.innerHTML = '<div style="padding:14px;background:#422006;border:2px solid #d97706;border-radius:12px;text-align:center">'
+              + '<div style="font-size:1rem;font-weight:800;color:#fbbf24;letter-spacing:.5px">⚠ ATTENTION</div>'
+              + '<div style="font-size:1rem;font-weight:700;color:#fde68a;margin-top:4px">'+escH(shortName)+'</div>'
+              + '<div style="margin-top:8px;padding:8px;background:rgba(217,119,6,.25);border:1px solid #d97706;border-radius:8px;font-size:.9rem;font-weight:700;color:#fef3c7">⚠ présence déjà enregistrée</div>'
+              + '<div style="font-size:.75rem;color:#fcd34d;margin-top:6px">Créneau ' + creneau + ' • déjà pointé à '+escH(String(hDeja))+'</div></div>';
+            faceSpeak(shortName + ", présence déjà enregistrée");
+          }
         }
       }
       function stopFaceRec() {
@@ -12824,15 +12886,20 @@
       /* ==================== ENREGISTREMENT VISAGES (FACE ID) ==================== */
       function showModalEnregistrerVisage() {
         var personnel = getPersonnel().filter(function(p){ return p.en_paie !== false; });
-        var html = '<div style="padding:20px">' +
-          '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Enregistrement biométrique</h3>' +
-          '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Sélectionnez un employé, centrez votre visage et cliquez "Capturer". Le descripteur facial sera sauvegardé.</p>' +
-          '<div class="form-group" style="margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Employé</label>' +
-          '<select id="fv-emp" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="">Sélectionner...</option>' +
+        var html = '<div style="padding:20px;max-height:82vh;overflow-y:auto">' +
+          '<h3 style="font-size:1rem;font-weight:700;margin:0">📷 Enregistrement Biométrique</h3>' +
+          '<p style="font-size:.78rem;color:#666;margin:4px 0 14px">Consultez le statut d\'enrôlement facial des employés et ajoutez-en de nouveaux.</p>' +
+          '<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center">' +
+          '<input id="fv-search" oninput="fvFilterTable(this.value)" placeholder="🔍 Rechercher employé ou matricule" style="flex:1;min-width:200px;padding:8px 14px;border:1px solid #e5e7eb;border-radius:20px;font-size:.8rem;background:#fafafa">' +
+          '<button class="btn" onclick="fvFocusEnroll()" style="padding:8px 16px;background:#f97316;color:white;border:none;border-radius:20px;font-weight:600;font-size:.8rem;white-space:nowrap">👤➕ Enrôler un visage</button>' +
+          '</div>' +
+          '<div id="fv-enroll-panel" style="display:none;margin-bottom:12px;border:1px solid #fed7aa;background:#fff7ed;border-radius:10px;padding:14px">' +
+          '<div class="form-group" style="margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Employé à enrôler</label>' +
+          '<select id="fv-emp" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="">Sélectionner...</option>' +
           personnel.map(function(p){ return '<option value="'+p.id+'">'+escH(p.matricule||"")+' - '+escH(p.nom)+' '+escH(p.prenoms||"")+' ('+escH(p.fonction||"-")+')</option>'; }).join("") +
           '</select></div>' +
           '<div id="fv-camera" style="display:none;margin-bottom:12px;text-align:center">' +
-          '<video id="fv-video" autoplay playsinline muted style="width:100%;max-width:480px;border-radius:8px;border:2px solid #ddd"></video>' +
+          '<video id="fv-video" autoplay playsinline muted style="width:100%;max-width:480px;border-radius:8px;border:2px solid #f97316"></video>' +
           '<canvas id="fv-canvas" style="display:none"></canvas>' +
           '<div id="fv-status" style="margin-top:8px;font-size:.8rem;color:#666"></div>' +
           '<div id="fv-preview" style="margin-top:8px;display:none"><img id="fv-preview-img" style="width:120px;height:120px;border-radius:50%;border:3px solid #16a34a;object-fit:cover"><div style="font-size:.75rem;color:#16a34a;margin-top:4px">Visage capturé</div></div>' +
@@ -12841,15 +12908,17 @@
           '<div style="font-size:.85rem;color:#92400e">Caméra indisponible. Enregistrement facial impossible sur cet appareil.</div>' +
           '<div style="font-size:.78rem;color:#a16207;margin-top:6px">Utilisez un téléphone ou un ordinateur avec caméra.</div>' +
           '</div>' +
-          '<div style="display:flex;gap:10px;justify-content:center">' +
+          '<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
           '<button id="fv-capture-btn" class="btn" onclick="fvCapture()" style="display:none;padding:8px 20px;background:#16a34a;color:white;border:none;border-radius:6px;font-weight:600">📸 Capturer</button>' +
           '<button id="fv-save-btn" class="btn" onclick="fvSave()" style="display:none;padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">✓ Enregistrer le visage</button>' +
           '</div>' +
-          '<div id="fv-list" style="margin-top:16px;border-top:1px solid #e5e7eb;padding-top:12px"></div>' +
+          '</div>' +
+          '<div id="fv-list" style="margin-top:4px"></div>' +
           '<div style="margin-top:12px;text-align:right"><button class="btn btn-sec" onclick="fvStop();closePtModal()" style="padding:8px 20px">Fermer</button></div></div>';
         openPtModal(html);
-        fvRefreshList();
-        document.getElementById("fv-emp").addEventListener("change", function(){
+        fvRefreshList("");
+        var empSel = document.getElementById("fv-emp");
+        if (empSel) empSel.addEventListener("change", function(){
           var cam = document.getElementById("fv-camera");
           var cap = document.getElementById("fv-capture-btn");
           if (this.value) {
@@ -12862,6 +12931,26 @@
             if (cap) cap.style.display = "none";
           }
         });
+      }
+      /* Filtre live du tableau biométrique */
+      function fvFilterTable(q) { fvRefreshList(q); }
+      /* Affiche le panneau d'enrôlement */
+      function fvFocusEnroll() {
+        var panel = document.getElementById("fv-enroll-panel");
+        if (panel) { panel.style.display = ""; panel.scrollIntoView({behavior:"smooth", block:"nearest"}); }
+        var sel = document.getElementById("fv-emp");
+        if (sel) sel.focus();
+      }
+      /* Enrôler directement un employé depuis le tableau */
+      function fvEnrollFor(empId) {
+        fvFocusEnroll();
+        var sel = document.getElementById("fv-emp");
+        if (sel) {
+          sel.value = empId;
+          var ev;
+          try { ev = new Event("change", {bubbles:true}); } catch(e){ ev = document.createEvent("HTMLEvents"); ev.initEvent("change", true, false); }
+          sel.dispatchEvent(ev);
+        }
       }
       var fvStream = null;
       var fvDescriptor = null;
@@ -12951,28 +13040,51 @@
         if (saveBtn) saveBtn.style.display = "none";
         var status = document.getElementById("fv-status");
         if (status) status.textContent = "Visage enregistré. Sélectionnez un autre employé ou fermez.";
-        fvRefreshList();
+        fvRefreshList((document.getElementById("fv-search")||{}).value || "");
       }
-      function fvRefreshList() {
+      function fvRefreshList(q) {
         var list = document.getElementById("fv-list");
         if (!list) return;
+        q = (q || "").trim().toLowerCase();
         var personnel = getPersonnel().filter(function(p){ return p.en_paie !== false; });
-        var withFace = personnel.filter(function(p){ return p.face_descriptor; });
-        var withoutFace = personnel.filter(function(p){ return !p.face_descriptor; });
-        var html = '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">Visages enregistrés ('+withFace.length+'/'+personnel.length+')</div>';
-        if (withFace.length > 0) {
-          html += '<div style="max-height:200px;overflow-y:auto;margin-bottom:8px">';
-          withFace.forEach(function(p){
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:.78rem">' +
-              '<span><strong>'+escH(p.matricule||"")+'</strong> '+escH(p.nom)+' '+escH(p.prenoms||'')+'</span>' +
-              '<button onclick="fvDelete(\''+p.id+'\')" style="padding:2px 8px;font-size:.7rem;color:#dc2626;border:1px solid #fecaca;border-radius:4px;background:white;cursor:pointer">Supprimer</button>' +
-              '</div>';
+        if (q) {
+          personnel = personnel.filter(function(p){
+            var mat = (p.matricule||"").toLowerCase();
+            var name = ((p.nom||"") + " " + (p.prenoms||"")).toLowerCase();
+            return mat.indexOf(q) !== -1 || name.indexOf(q) !== -1;
           });
-          html += '</div>';
         }
-        if (withoutFace.length > 0) {
-          html += '<div style="font-size:.75rem;color:#999">Sans visage : ' + withoutFace.map(function(p){ return escH(p.nom); }).join(", ") + '</div>';
+        var withFace = personnel.filter(function(p){ return p.face_descriptor; });
+        var html = '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px;color:#374151">Visages enregistrés ('+withFace.length+'/'+getPersonnel().filter(function(p){ return p.en_paie !== false; }).length+')</div>';
+        html += '<div style="overflow-x:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff">'
+          + '<table style="width:100%;border-collapse:collapse;font-size:.78rem">'
+          + '<thead><tr style="background:#f9fafb;text-align:left">'
+          + '<th style="padding:10px 12px;color:#6b7280;font-weight:600">Matricule</th>'
+          + '<th style="padding:10px 12px;color:#6b7280;font-weight:600">Nom et Prénoms</th>'
+          + '<th style="padding:10px 12px;color:#6b7280;font-weight:600">Département</th>'
+          + '<th style="padding:10px 12px;color:#6b7280;font-weight:600;text-align:center">Statut Biométrique</th>'
+          + '<th style="padding:10px 12px;color:#6b7280;font-weight:600;text-align:right">Actions</th>'
+          + '</tr></thead><tbody>';
+        if (personnel.length === 0) {
+          html += '<tr><td colspan="5" style="padding:16px;text-align:center;color:#9ca3af">Aucun employé trouvé</td></tr>';
         }
+        personnel.forEach(function(p){
+          var enrolled = !!p.face_descriptor;
+          var pill = enrolled
+            ? '<span style="display:inline-block;padding:3px 12px;border-radius:20px;background:#16a34a;color:#fff;font-size:.7rem;font-weight:600">✓ Enregistré</span>'
+            : '<span style="display:inline-block;padding:3px 12px;border-radius:20px;background:#fef2f2;color:#dc2626;border:1px solid #fecaca;font-size:.7rem;font-weight:600">⊙ Non enregistré</span>';
+          var act = enrolled
+            ? '<button onclick="fvDelete(\''+p.id+'\')" title="Supprimer le visage" style="padding:4px 8px;font-size:.8rem;color:#dc2626;border:none;background:transparent;cursor:pointer">🗑</button>'
+            : '<button onclick="fvEnrollFor(\''+p.id+'\')" title="Enrôler ce visage" style="padding:4px 12px;font-size:.7rem;color:#fff;background:#f97316;border:none;border-radius:14px;cursor:pointer;font-weight:600">Enrôler</button>';
+          html += '<tr style="border-top:1px solid #f3f4f6">'
+            + '<td style="padding:10px 12px;font-weight:500">'+escH(p.matricule||"")+'</td>'
+            + '<td style="padding:10px 12px">'+escH(p.nom)+' '+escH(p.prenoms||'')+'</td>'
+            + '<td style="padding:10px 12px;color:#4b5563">'+escH(p.service||p.departement||"-")+'</td>'
+            + '<td style="padding:10px 12px;text-align:center">'+pill+'</td>'
+            + '<td style="padding:10px 12px;text-align:right">'+act+'</td>'
+            + '</tr>';
+        });
+        html += '</tbody></table></div>';
         list.innerHTML = html;
       }
       function fvDelete(empId) {
@@ -12981,7 +13093,7 @@
         var emp = personnel.find(function(p){ return p.id === empId; });
         if (emp) { emp.face_descriptor = null; setPersonnel(personnel); }
         toast("Visage supprimé");
-        fvRefreshList();
+        fvRefreshList((document.getElementById("fv-search")||{}).value || "");
       }
       function fvStop() {
         if (fvStream) { fvStream.getTracks().forEach(function(t){t.stop();}); fvStream=null; }
