@@ -11884,6 +11884,104 @@
       }
       /* Récapitulatif mensuel + pointage groupé : tous les employés, jours 1-31.
          Cliquez sur une case pour pointer : Présent (8h) → Absent → non pointé. */
+      /* ============ CALCUL HEURES JOUR/NUIT/RENDEMENT (nuit = 21h-05h) ============ */
+      function ptToMin(t) {
+        if (t === null || t === undefined || t === "") return null;
+        var m = String(t).trim().match(/^(\d{1,2})[:hH](\d{2})$/);
+        if (!m) return null;
+        var h = parseInt(m[1],10), mm = parseInt(m[2],10);
+        if (h > 23 || mm > 59) return null;
+        return h*60+mm;
+      }
+      function ptIsNightMin(min) {
+        var m = ((min % 1440) + 1440) % 1440;
+        return m >= 21*60 || m < 5*60;
+      }
+      /* Répartit un intervalle [sMin, eMin[ minute par minute entre jour et nuit */
+      function ptSplitRange(sMin, eMin) {
+        var j = 0, n = 0;
+        if (sMin === null || eMin === null || eMin <= sMin) return {j:0, n:0};
+        if (eMin - sMin > 1440) eMin = sMin + 1440;
+        for (var t = sMin; t < eMin; t++) { if (ptIsNightMin(t)) n++; else j++; }
+        return {j:j/60, n:n/60};
+      }
+      /* Paires travaillées : [arrivée→pause] + [reprise→fin].
+         allowSingle : si pas de pause (arrivée+fin seuls) → un seul intervalle. */
+      function ptIntervals(a, p1, p2, f, allowSingle) {
+        var A = ptToMin(a), P1 = ptToMin(p1), P2 = ptToMin(p2), F = ptToMin(f);
+        var out = [];
+        function push(s, e) {
+          if (s === null || e === null) return;
+          if (e <= s) e += 1440;
+          var dur = e - s;
+          if (dur <= 0 || dur > 1440) return;
+          out.push([s, e]);
+        }
+        if (A !== null && P1 !== null) push(A, P1);
+        if (P2 !== null && F !== null) push(P2, F);
+        if (out.length === 0 && allowSingle && A !== null && F !== null) push(A, F);
+        return out;
+      }
+      function ptSplitIntervals(iv) {
+        var j = 0, n = 0;
+        iv.forEach(function(r){ var s = ptSplitRange(r[0], r[1]); j += s.j; n += s.n; });
+        return {j:j, n:n};
+      }
+      function ptDurIntervals(iv) {
+        var t = 0;
+        iv.forEach(function(r){ t += (r[1]-r[0])/60; });
+        return t;
+      }
+      function ptFmtR(h) {
+        h = Math.round((parseFloat(h) || 0)*100)/100;
+        return "R+" + h + "h";
+      }
+      /* Coeur de calcul partagé (modale + récap + fiche).
+         isR : rendement → pas de découpage J/N, pas d'intervalle unique implicite. */
+      function ptCoreCalc(o) {
+        var jIv = ptIntervals(o.ja, o.jp1, o.jp2, o.jf, !o.isR);
+        var nIv = ptIntervals(o.na, o.np1, o.np2, o.nf, !o.isR);
+        var libres = parseFloat(o.libres) || 0;
+        if (o.isR) return {j:0, n:0, r: ptDurIntervals(jIv) + ptDurIntervals(nIv) + libres};
+        var s = ptSplitIntervals(jIv.concat(nIv));
+        return {j: s.j + libres, n: s.n, r: 0};
+      }
+      /* Calcule {j, n, r} d'une fiche jour. Priorité aux heures réellement pointées,
+         repli sur h_j/h_n manuels (pointage groupé, saisie libre) si aucun créneau. */
+      function ptCalcDay(rec, isR) {
+        if (!rec || rec.present === false) return {j:0, n:0, r:0};
+        var hasJ = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin;
+        var hasN = rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin;
+        var c = ptCoreCalc({
+          ja:rec.j_arrivee, jp1:rec.j_pause, jp2:rec.j_reprise, jf:rec.j_fin,
+          na:rec.n_arrivee, np1:rec.n_pause, np2:rec.n_reprise, nf:rec.n_fin,
+          libres:rec.h_libres, isR:isR
+        });
+        if (!isR) {
+          if (!hasJ) { c.j = parseHeure(rec.h_j_manual || ""); }
+          else if (c.j === 0) { var lj = parseHeure(rec.h_j_manual || ""); if (lj > 0) c.j = lj; }
+          if (!hasN) { c.n = parseHeure(rec.h_n_manual || ""); }
+          else if (c.n === 0) { var ln = parseHeure(rec.h_n_manual || ""); if (ln > 0) c.n = ln; }
+        }
+        return c;
+      }
+      function ptTimesStr(rec) {
+        if (!rec) return "-";
+        function rng(a, b) {
+          if (a && b) return a + "-" + b;
+          if (a) return a + "-?";
+          if (b) return "?-" + b;
+          return "";
+        }
+        var parts = [];
+        var j = [rng(rec.j_arrivee, rec.j_pause), rng(rec.j_reprise, rec.j_fin)].filter(Boolean).join(" / ");
+        var n = [rng(rec.n_arrivee, rec.n_pause), rng(rec.n_reprise, rec.n_fin)].filter(Boolean).join(" / ");
+        if (j) parts.push(j);
+        if (n) parts.push("Nuit: " + n);
+        var l = parseFloat(rec.h_libres) || 0;
+        if (l > 0) parts.push("+" + l + "h libres");
+        return parts.length ? parts.join(" | ") : "-";
+      }
       function renderPtRecap() {
         var cont = document.getElementById("pt-recap-container");
         if (!cont) return;
@@ -11946,7 +12044,7 @@
           '</div>';
         html +=
           '<div style="font-size:.72rem;color:var(--dim);margin-bottom:.5rem;display:flex;gap:14px;flex-wrap:wrap;align-items:center">' +
-          '<span>Cliquez sur une case ▶ <span style="color:#16a34a;font-weight:700">Présent (8h)</span> → <span style="color:#dc2626;font-weight:700">Absent</span> → <span style="color:#94a3b8">non pointé</span></span>' +
+          '<span>Cliquez sur une case pour modifier le pointage horaire (créneaux, observations, verrou)</span>' +
           '<span><span style="display:inline-block;width:10px;height:10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:2px"></span> présent</span>' +
           '<span><span style="display:inline-block;width:10px;height:10px;background:#fef2f2;border:1px solid #fecaca;border-radius:2px"></span> absent</span>' +
           '<span><span style="display:inline-block;width:10px;height:10px;background:#fef3c7;border:1px solid #fcd34d;border-radius:2px"></span> week-end (non modifiable)</span>' +
@@ -11966,11 +12064,12 @@
             "</th>";
         }
         html +=
-          '<th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL JH</th><th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL NH</th><th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL H</th></tr></thead><tbody>';
+          '<th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL JH</th><th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL NH</th><th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL R</th><th style="padding:4px 6px;border:1px solid var(--border);background:#f1f5f9;text-align:right">TOTAL H</th></tr></thead><tbody>';
         emps.forEach(function (p) {
           var cat = empCategorie(p);
           var tJ = 0,
-            tN = 0;
+            tN = 0,
+            tR = 0;
           var present = false;
           var clickable = cat !== "externe";
           var row =
@@ -11990,22 +12089,16 @@
             var cell = '<span style="color:#94a3b8">-</span>',
               bg = "";
             if (rec) {
-              var hJ = 0,
-                hN = 0;
-              if (
-                rec.h_j_manual !== undefined &&
-                rec.h_j_manual !== ""
-              )
-                hJ = parseHeure(rec.h_j_manual);
-              if (
-                rec.h_n_manual !== undefined &&
-                rec.h_n_manual !== ""
-              )
-                hN = parseHeure(rec.h_n_manual);
-              if (hJ === 0 && hN === 0 && rec.present === true) hJ = 8;
+              var isR = (p.rendement === true) || (rec.rendement === true);
+              var cc = ptCalcDay(rec, isR);
+              var hJ = cc.j,
+                hN = cc.n,
+                hR = cc.r;
+              if (hJ === 0 && hN === 0 && hR === 0 && rec.present === true && !isR) hJ = 8;
               if (
                 hJ > 0 ||
                 hN > 0 ||
+                hR > 0 ||
                 rec.present === true ||
                 rec.faute_societe === true
               )
@@ -12013,10 +12106,16 @@
               if (
                 rec.faute_societe === true &&
                 hJ === 0 &&
-                hN === 0
+                hN === 0 &&
+                hR === 0
               ) {
                 cell =
                   '<span style="color:#d97706;font-weight:700">FS</span>';
+              } else if (isR && (hR > 0 || rec.present === true)) {
+                cell = hR > 0
+                  ? '<span style="color:#ea580c;font-weight:700">' + ptFmtR(hR) + "</span>"
+                  : '<span style="color:#ea580c;font-weight:700">RENDEMENT</span>';
+                bg = "background:#fff7ed;border-color:#fed7aa;";
               } else if (hJ > 0 || hN > 0) {
                 cell = "";
                 if (hJ > 0)
@@ -12042,6 +12141,7 @@
               }
               tJ += hJ;
               tN += hN;
+              tR += hR;
             }
             var cpT = "";
             if (rec) {
@@ -12059,7 +12159,7 @@
             var onclick = "";
             if (!we2 && clickable)
               onclick =
-                ' onclick="toggleRecapDay(\'' +
+                ' onclick="showModalEditPointage(\'' +
                 p.id +
                 "','" +
                 dk +
@@ -12072,7 +12172,7 @@
               (we2
                 ? "Week-end"
                 : clickable
-                  ? "Cliquer : Présent (8h) → Absent → Effacer"
+                  ? "Modifier le pointage horaire"
                   : "Externe : jours saisis ailleurs") +
               cpT +
               '"' +
@@ -12083,7 +12183,7 @@
           }
           var totH =
             cat === "journalier" || cat === "externe"
-              ? (tJ + tN).toFixed(1) + "h"
+              ? (tJ + tN + tR).toFixed(1) + "h"
               : present
                 ? "173.33h"
                 : "0.0h";
@@ -12092,6 +12192,8 @@
             tJ.toFixed(1) +
             'h</td><td style="padding:3px 6px;border:1px solid var(--border);text-align:right;font-weight:700;color:#7c3aed">' +
             tN.toFixed(1) +
+            'h</td><td style="padding:3px 6px;border:1px solid var(--border);text-align:right;font-weight:700;color:#ea580c">' +
+            tR.toFixed(1) +
             'h</td><td style="padding:3px 6px;border:1px solid var(--border);text-align:right;font-weight:800">' +
             totH +
             "</td></tr>";
@@ -12378,6 +12480,181 @@
         renderPtRecap();
       }
 
+      /* --- MODAL MODIFIER LE POINTAGE HORAIRE (clic sur une case du récap) --- */
+      function peTimeField(id, label, val, dis) {
+        return '<div><label style="font-size:.7rem;color:#666">' + label + '</label>' +
+          '<input type="time" id="' + id + '" value="' + escH(val || "") + '" ' + dis + ' oninput="ptEditRecalc()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:8px;font-size:.82rem;background:#f8fafc;box-sizing:border-box"></div>';
+      }
+      function showModalEditPointage(empId, dk) {
+        window._peCtx = {empId:empId, dk:dk};
+        var emp = null;
+        try { emp = getPersonnel().find(function(p){ return p.id === empId; }); } catch(e){}
+        if (!emp) { toast("Employé introuvable","error"); return; }
+        var pts = getPointageData();
+        var rec = pts.find(function(r){ return r.employee_id === empId && r.date === dk; }) || null;
+        var locked = rec && rec.protege === true && !(window._ptUnlocked && window._ptUnlocked[rec.id]);
+        var dis = locked ? "disabled" : "";
+        var dLbl = String(dk).split("-").reverse().join("/");
+        function gv(k){ return rec ? (rec[k] || "") : ""; }
+        var nuitOn = !!(gv("n_arrivee") || gv("n_pause") || gv("n_reprise") || gv("n_fin"));
+        var html = '<div style="padding:20px;max-width:580px;max-height:86vh;overflow-y:auto">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+            '<div><h3 style="font-size:1.05rem;font-weight:800;margin:0">Modifier le pointage horaire</h3>' +
+            '<div style="font-size:.8rem;color:#666;margin-top:2px">' + escH(emp.nom) + ' ' + (emp.prenoms ? escH(emp.prenoms) : '') + ' — ' + dLbl + '</div></div>' +
+            (locked
+              ? '<span style="font-size:.7rem;font-weight:700;color:#b45309;background:#fef3c7;border:1px solid #fcd34d;border-radius:12px;padding:3px 10px;white-space:nowrap">🔒 Verrouillé</span>'
+              : (rec && rec.protege ? '<span style="font-size:.7rem;font-weight:700;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:3px 10px;white-space:nowrap">🔓 Protégé (déverrouillé)</span>' : '')) +
+            '<button onclick="closePtModal()" style="border:none;background:transparent;font-size:1.1rem;cursor:pointer;color:#999">✕</button>' +
+          '</div>';
+        if (locked) {
+          html += '<div style="margin-top:12px;padding:12px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;font-size:.8rem;color:#92400e">' +
+            '<div style="font-weight:700;margin-bottom:8px">🔒 Pointage verrouillé. Saisissez le code de validation admin pour déverrouiller.</div>' +
+            '<div style="display:flex;gap:8px"><input type="password" id="pe-code" placeholder="Code admin" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:6px">' +
+            '<button class="btn" onclick="ptEditUnlock()" style="padding:8px 14px;background:#fff;border:1px solid #f59e0b;color:#b45309;border-radius:6px;font-weight:700;font-size:.78rem;white-space:nowrap">🔑 Déverrouiller (Admin)</button></div></div>';
+        }
+        html += '<div style="margin-top:12px"><label style="font-size:.8rem;font-weight:700">Observations</label>' +
+          '<textarea id="pe-obs" ' + dis + ' placeholder="Observation du jour..." style="width:100%;min-height:56px;padding:8px;border:1px solid #ddd;border-radius:8px;font-size:.8rem;margin-top:4px;box-sizing:border-box">' + escH(gv("obs")) + '</textarea></div>';
+        html += '<div style="font-size:.85rem;font-weight:800;margin:14px 0 8px">Pointage Jour</div>' +
+          '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">' +
+          peTimeField("pe-ja", "Arrivée", gv("j_arrivee"), dis) +
+          peTimeField("pe-jp1", "Pause début", gv("j_pause"), dis) +
+          peTimeField("pe-jp2", "Pause fin", gv("j_reprise"), dis) +
+          peTimeField("pe-jf", "Départ", gv("j_fin"), dis) +
+          '</div>';
+        html += '<div style="margin-top:10px"><button id="pe-nuit-btn" class="btn btn-sec" onclick="ptEditToggleNuit()" ' + (locked ? "disabled" : "") + ' style="padding:5px 14px;font-size:.75rem;border-radius:14px">' + (nuitOn ? "🌙 Masquer Nuit" : "🌙 Activer Nuit") + '</button></div>' +
+          '<div id="pe-nuit-wrap" style="display:' + (nuitOn ? "" : "none") + ';margin-top:8px">' +
+          '<div style="font-size:.85rem;font-weight:800;margin:0 0 8px;color:#7c3aed">Pointage Nuit <span style="font-weight:400;font-size:.7rem;color:#666">(la part 21h–05h compte en nuit)</span></div>' +
+          '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">' +
+          peTimeField("pe-na", "Arrivée", gv("n_arrivee"), dis) +
+          peTimeField("pe-np1", "Pause début", gv("n_pause"), dis) +
+          peTimeField("pe-np2", "Pause fin", gv("n_reprise"), dis) +
+          peTimeField("pe-nf", "Départ", gv("n_fin"), dis) +
+          '</div></div>';
+        var rendChk = (emp.rendement === true) || (rec && rec.rendement === true);
+        html += '<div style="display:flex;gap:12px;align-items:flex-end;margin-top:12px;flex-wrap:wrap">' +
+          '<label style="font-size:.8rem;display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap"><input type="checkbox" id="pe-rend" ' + (rendChk ? "checked" : "") + ' ' + dis + ' oninput="ptEditRecalc()"> Rendement (R)</label>' +
+          '<div style="flex:1;min-width:150px"><label style="font-size:.75rem;font-weight:600">Heures libres (+)</label>' +
+          '<input type="number" id="pe-libres" value="' + (rec && rec.h_libres ? rec.h_libres : 0) + '" min="0" step="0.25" ' + dis + ' oninput="ptEditRecalc()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.85rem"></div>' +
+          '</div>';
+        html += '<div id="pe-summary" style="margin-top:12px;font-size:.85rem;font-weight:700"></div>';
+        html += '<div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;font-size:.82rem">' +
+          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="pe-pst" ' + (rec && rec.paye_sans_travail ? "checked" : "") + ' ' + dis + '> Payé sans travail</label>' +
+          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pe-abs" ' + (rec && rec.present === false ? "checked" : "") + ' ' + dis + '> Marquer expressément absent</label>' +
+          '</div>';
+        html += '<div style="margin-top:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px">' +
+          '<div style="font-size:.82rem;font-weight:700;color:#ea580c;margin-bottom:8px">Gestion des heures à rattraper</div>' +
+          '<div style="display:flex;gap:12px;margin-bottom:8px">' +
+          '<div style="flex:1"><label style="font-size:.72rem">Heures gagnées</label><input type="number" id="pe-hg" value="' + (rec && rec.rattrap_gagnees ? rec.rattrap_gagnees : 0) + '" min="0" step="0.5" ' + dis + ' style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px"></div>' +
+          '<div style="flex:1"><label style="font-size:.72rem">Heures utilisées (Rattrapage)</label><input type="number" id="pe-hu" value="' + (rec && rec.rattrap_utilisees ? rec.rattrap_utilisees : 0) + '" min="0" step="0.5" ' + dis + ' style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px"></div>' +
+          '</div>' +
+          '<label style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="pe-rattrap" ' + (rec && rec.jour_rattrapage ? "checked" : "") + ' ' + dis + '> Marquer comme jour de rattrapage (sera absent au pointage)</label>' +
+          '</div>';
+        html += '<label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:.82rem;cursor:pointer"><input type="checkbox" id="pe-protege" ' + (rec && rec.protege ? "checked" : "") + ' ' + dis + '> <span style="color:#16a34a">✔</span> Protéger (empêche modification non-admin)</label>';
+        html += '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px">' +
+          '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
+          (locked ? '' : '<button class="btn" onclick="ptEditSave()" style="padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">Enregistrer</button>') +
+          '</div></div>';
+        openPtModal(html);
+        ptEditRecalc();
+      }
+      function ptEditToggleNuit() {
+        var w = document.getElementById("pe-nuit-wrap");
+        var b = document.getElementById("pe-nuit-btn");
+        if (!w) return;
+        var show = (w.style.display === "none");
+        w.style.display = show ? "" : "none";
+        if (b) b.textContent = show ? "🌙 Masquer Nuit" : "🌙 Activer Nuit";
+      }
+      function ptEditRecalc() {
+        var sum = document.getElementById("pe-summary");
+        if (!sum) return;
+        function g(id){ return (document.getElementById(id) || {}).value || ""; }
+        var isR = !!((document.getElementById("pe-rend") || {}).checked);
+        var c = ptCoreCalc({
+          ja:g("pe-ja"), jp1:g("pe-jp1"), jp2:g("pe-jp2"), jf:g("pe-jf"),
+          na:g("pe-na"), np1:g("pe-np1"), np2:g("pe-np2"), nf:g("pe-nf"),
+          libres:parseFloat(g("pe-libres")) || 0, isR:isR
+        });
+        if (isR) {
+          sum.innerHTML = c.r > 0
+            ? '<span style="color:#ea580c">' + ptFmtR(c.r) + '</span> <span style="font-weight:400;font-size:.75rem;color:#666">(rendement)</span>'
+            : '<span style="color:#ea580c">RENDEMENT</span> <span style="font-weight:400;font-size:.75rem;color:#666">(aucune heure pointée)</span>';
+        } else {
+          sum.innerHTML = 'Jour: <strong>' + c.j.toFixed(1) + 'h (' + ptFmtHM(c.j) + ')</strong> &nbsp; Nuit: <strong style="color:#7c3aed">' + c.n.toFixed(1) + 'h (' + ptFmtHM(c.n) + ')</strong> &nbsp; Total: <strong>' + (c.j + c.n).toFixed(1) + 'h (' + ptFmtHM(c.j + c.n) + ')</strong>';
+        }
+      }
+      function ptEditUnlock() {
+        var code = ((DB.getMain("mdb_entreprise") || {}).validationCode || "").trim();
+        if (!code) { toast("Aucun code de validation configuré — Entreprise > Code de validation","error"); return; }
+        var input = (document.getElementById("pe-code") || {}).value || "";
+        if (input.trim() !== code) { toast("Code incorrect","error"); return; }
+        var ctx = window._peCtx || {};
+        var pts = getPointageData();
+        var rec = pts.find(function(r){ return r.employee_id === ctx.empId && r.date === ctx.dk; });
+        window._ptUnlocked = window._ptUnlocked || {};
+        if (rec) window._ptUnlocked[rec.id] = true;
+        toast("Pointage déverrouillé","success");
+        showModalEditPointage(ctx.empId, ctx.dk);
+      }
+      function ptEditSave() {
+        var ctx = window._peCtx || {};
+        var empId = ctx.empId, dk = ctx.dk;
+        if (!empId || !dk) return;
+        var pts = getPointageData();
+        var idx = pts.findIndex(function(r){ return r.employee_id === empId && r.date === dk; });
+        var rec = idx !== -1 ? pts[idx] : null;
+        if (rec && rec.protege === true && !(window._ptUnlocked && window._ptUnlocked[rec.id])) { toast("Pointage verrouillé — déverrouillage admin requis","error"); return; }
+        function g(id){ return (document.getElementById(id) || {}).value || ""; }
+        function gc(id){ return !!((document.getElementById(id) || {}).checked); }
+        var absent = gc("pe-abs");
+        var rattrap = gc("pe-rattrap");
+        if (!rec) {
+          rec = {id:DB.id(), employee_id:empId, date:dk, present:true, h_j_manual:"", h_n_manual:""};
+          pts.push(rec);
+        }
+        rec.obs = g("pe-obs");
+        rec.j_arrivee = g("pe-ja") || ""; rec.j_pause = g("pe-jp1") || "";
+        rec.j_reprise = g("pe-jp2") || ""; rec.j_fin = g("pe-jf") || "";
+        rec.n_arrivee = g("pe-na") || ""; rec.n_pause = g("pe-np1") || "";
+        rec.n_reprise = g("pe-np2") || ""; rec.n_fin = g("pe-nf") || "";
+        rec.rendement = gc("pe-rend");
+        rec.h_libres = parseFloat(g("pe-libres")) || 0;
+        rec.paye_sans_travail = gc("pe-pst");
+        rec.rattrap_gagnees = parseFloat(g("pe-hg")) || 0;
+        rec.rattrap_utilisees = parseFloat(g("pe-hu")) || 0;
+        rec.jour_rattrapage = rattrap;
+        rec.protege = gc("pe-protege");
+        var emp = null;
+        try { emp = getPersonnel().find(function(p){ return p.id === empId; }); } catch(e){}
+        var isR = (emp && emp.rendement === true) || rec.rendement === true;
+        if (absent || rattrap) {
+          rec.present = false;
+          rec.h_j_manual = ""; rec.h_n_manual = "";
+        } else {
+          rec.present = true;
+          var hasTimes = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin ||
+                         rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin || rec.h_libres;
+          if (hasTimes) {
+            var c = ptCoreCalc({
+              ja:rec.j_arrivee, jp1:rec.j_pause, jp2:rec.j_reprise, jf:rec.j_fin,
+              na:rec.n_arrivee, np1:rec.n_pause, np2:rec.n_reprise, nf:rec.n_fin,
+              libres:rec.h_libres, isR:isR
+            });
+            function storeH(h){
+              h = Math.round((parseFloat(h) || 0)*100)/100;
+              if (h <= 0) return "";
+              return getFormatHeures() === "hhmm" ? ptFmtHM(h) : String(h);
+            }
+            if (isR) { rec.h_j_manual = storeH(c.r); rec.h_n_manual = ""; }
+            else { rec.h_j_manual = storeH(c.j); rec.h_n_manual = storeH(c.n); }
+          }
+        }
+        setPointageData(pts);
+        toast("Pointage enregistré (" + dk + ")","success");
+        closePtModal();
+        renderPtRecap();
+      }
+
       /* --- MODAL FICHES --- */
       function showModalFiches() {
         var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
@@ -12448,7 +12725,7 @@
           doc.text("Employé : "+emp.nom+" "+(emp.prenoms||"")+" ("+emp.matricule+") | Mois : "+mois+" | Fonction : "+(emp.fonction||"-"),105,22,{align:"center"});
           var cols = ["Date","Pointages","Jour(H)","Nuit(H)","Total(H)","Observations"];
           var rows = [];
-          var tJ=0, tN=0;
+          var tJ=0, tN=0, tR=0;
           for (var d=1;d<=daysInMonth;d++){
             var dk = mois+"-"+(d<10?"0":"")+d;
             var dw = new Date(year,mIdx,d).getDay();
@@ -12456,22 +12733,36 @@
             var rec = empPts.find(function(r){ return r.date===dk; });
             var jStr="-",nStr="-",total="-",obs="";
             if (rec) {
-              var hJ = parseHeure(rec.h_j_manual||"");
-              var hN = parseHeure(rec.h_n_manual||"");
-              if (hJ===0 && hN===0 && rec.present===true) hJ=8;
-              if (hJ>0) { jStr=hJ.toFixed(1); tJ+=hJ; }
-              if (hN>0) { nStr=hN.toFixed(1); tN+=hN; }
-              if (hJ>0||hN>0) total=(hJ+hN).toFixed(1);
-              if (rec.present===false && hJ===0 && hN===0) { obs="Absent"; }
+              var isRf = (emp.rendement===true)||(rec.rendement===true);
+              var ccf = ptCalcDay(rec, isRf);
+              var hJ = ccf.j, hN = ccf.n, hR = ccf.r;
+              if (hJ===0 && hN===0 && hR===0 && rec.present===true && !isRf) hJ=8;
+              var ptStr = ptTimesStr(rec);
+              if (isRf) {
+                if (hR>0) { jStr=ptFmtR(hR); total=ptFmtR(hR); tR+=hR; }
+                else if (rec.present===true) { jStr="RENDEMENT"; total="RENDEMENT"; }
+                if (rec.present===false) { obs="Absent"; }
+              } else {
+                if (hJ>0) { jStr=hJ.toFixed(1); tJ+=hJ; }
+                if (hN>0) { nStr=hN.toFixed(1); tN+=hN; }
+                if (hJ>0||hN>0) total=(hJ+hN).toFixed(1);
+                if (rec.present===false) { obs="Absent"; }
+              }
               if (rec.faute_societe) obs="Faute société";
-            } else if (we) { obs="Week-end"; }
-            rows.push([dk,jStr,jStr==="-"?"-":jStr,nStr==="-"?"-":nStr,total,obs]);
+              if (rec.paye_sans_travail) obs="Payé sans travail";
+              if (rec.jour_rattrapage) obs="Jour de rattrapage";
+              if (rec.obs) obs = (obs ? obs+" — " : "") + rec.obs;
+              rows.push([dk,ptStr,jStr==="-"?"-":jStr,nStr==="-"?"-":nStr,total,obs]);
+            } else {
+              if (we) obs="Week-end";
+              rows.push([dk,"-","-","-","-",obs]);
+            }
           }
           doc.autoTable({head:[cols],body:rows,startY:26,theme:"striped",
             headStyles:{fillColor:[60,60,60],textColor:255,fontSize:7},
             styles:{fontSize:6},columnStyles:{0:{cellWidth:22},1:{cellWidth:50}}});
           doc.setFontSize(8); doc.setFont("helvetica","bold");
-          doc.text("Total JH: "+tJ.toFixed(1)+"h | NH: "+tN.toFixed(1)+"h | Total: "+(tJ+tN).toFixed(1)+"h",105,285,{align:"center"});
+          doc.text("Total JH: "+tJ.toFixed(1)+"h | NH: "+tN.toFixed(1)+"h | R: "+tR.toFixed(1)+"h | Total: "+(tJ+tN+tR).toFixed(1)+"h",105,285,{align:"center"});
         });
         var fn = "Fiches_Pointage_"+mois+".pdf";
         if (isPrint) { window.open(doc.output("bloburl"),"_blank"); }
