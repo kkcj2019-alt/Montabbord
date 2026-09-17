@@ -5222,12 +5222,16 @@
       /* Catalogue = base de rubriques : TOUTES visibles sur chaque bulletin avec montant saisissable.
          Montant résolu : individuel (bulletin/pointage) > override > défaut catalogue si assigné > 0.
          Les rubriques à 0 ne sortent pas sur le bulletin calculé ni à l'impression. */
-      function getPrimesSpecEmp(empId) {
+      function getPrimesSpecEmp(empId, mois) {
         var primes = getPrimesSpec();
-        var indivPrimes = getEmpIndivPrimesList(empId);
+        var indivPrimes = getEmpIndivPrimesList(empId, mois);
         var indivById = {};
+        /* Sans mois précis d'abord, puis le mois demandé écrase (prioritaire) */
         indivPrimes.forEach(function (ip) {
-          indivById[ip.primeId] = ip;
+          if (!ip.mois) indivById[ip.primeId] = ip;
+        });
+        indivPrimes.forEach(function (ip) {
+          if (ip.mois) indivById[ip.primeId] = ip;
         });
         var allPrimes = primes.map(function (p) {
           var copy = Object.assign({}, p);
@@ -5393,7 +5397,7 @@
         html += '<th style="position:sticky;top:0;background:#faf5ff;z-index:2;padding:6px;border:1px solid var(--border)">PRIME PROD.' + (cfg.seuil ? '<div style="font-weight:400;font-size:.6rem">seuil ' + cfg.seuil + '</div>' : '') + '</th></tr></thead><tbody>';
         emps.forEach(function(e){
           var eff = {};
-          try { getPrimesSpecEmp(e.id).forEach(function(x){ eff[x.id] = x; }); } catch(errEff){}
+          try { getPrimesSpecEmp(e.id, mois).forEach(function(x){ eff[x.id] = x; }); } catch(errEff){}
           var pan = 0, mont = {total:0, prime:0};
           try { pan = getPanierTotal(e.id, mois) || 0; } catch(errPan){}
           try { mont = calcMontageMensuel(e.id, mois) || {total:0, prime:0}; } catch(errMont){}
@@ -5406,7 +5410,7 @@
             var amt = (x && (x._hasOverride || x._individual)) ? x.montant : "";
             html += '<td style="padding:4px;border:1px solid var(--border);text-align:center;white-space:nowrap">' +
               '<input type="checkbox" ' + (on ? "checked" : "") + ' onchange="pmeAttribution(\'' + p.id + '\',\'' + e.id + '\',this.checked)" title="Attribuer" style="width:14px;height:14px;vertical-align:middle">' +
-              '<input type="number" min="0" step="500" value="' + amt + '" placeholder="' + fmtF(p.montant) + '" title="Montant spécifique (vide = montant global)" onchange="pmeMontant(\'' + p.id + '\',\'' + e.id + '\',this.value)" style="width:76px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:.7rem;text-align:right;margin-left:4px"></td>';
+              '<input type="number" min="0" step="500" value="' + amt + '" placeholder="' + fmtF(p.montant) + '" title="Montant du mois (vide = montant global)" onchange="pmeMontant(\'' + p.id + '\',\'' + e.id + '\',this.value)" style="width:76px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:.7rem;text-align:right;margin-left:4px"></td>';
           });
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#16a34a;font-weight:700">' + (pan > 0 ? fmtF(pan) : "—") + '</td>';
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' + (mont.total > 0 ? fmtF(mont.total) : "—") + '</td>';
@@ -5442,18 +5446,20 @@
         renderPrimeEmpMatrix();
       }
       function pmeMontant(primeId, empId, val) {
+        var mois = "";
+        try { mois = getPayeMonth(); } catch(eM){}
         var primes = getPrimesSpec();
         var p = null;
         for (var i = 0; i < primes.length; i++) if (primes[i].id === primeId) { p = primes[i]; break; }
         if (!p) return;
-        p.overrides = p.overrides || {};
-        if (val === "" || val == null) delete p.overrides[empId];
-        else {
-          p.overrides[empId] = parseFloat(val) || 0;
+        if (val === "" || val == null) {
+          try { removeEmpIndivPrime(empId, primeId, mois || undefined); } catch(eRm){}
+        } else {
+          var label = p.type === "custom" ? (p.label || "Prime") : (p.label || p.type);
+          try { addEmpIndivPrime(empId, primeId, parseFloat(val) || 0, label, mois || undefined); } catch(eAd){}
           p.employes = p.employes || [];
-          if (p.employes.indexOf(empId) === -1) p.employes.push(empId);
+          if (p.employes.indexOf(empId) === -1) { p.employes.push(empId); setPrimesSpec(primes); }
         }
-        setPrimesSpec(primes);
         renderPrimeEmpMatrix();
       }
       function pmeBase(empId, val) {
@@ -5998,36 +6004,48 @@
       function setEmpIndivPrimes(v) {
         setPayeSection("empIndivPrimes", v);
       }
-      function addEmpIndivPrime(empId, primeId, montant, label) {
+      /* Primes individuelles MENSUELLES : le montant de janvier ≠ février.
+         Sans mois (données anciennes) = valable tous les mois. */
+      function addEmpIndivPrime(empId, primeId, montant, label, mois) {
         var all = getEmpIndivPrimes();
         if (!all[empId]) all[empId] = [];
-        var existing = all[empId].find(function (p) {
-          return p.primeId === primeId;
-        });
+        var mKey = mois || "";
+        var existing = null;
+        for (var i = 0; i < all[empId].length; i++) {
+          var p = all[empId][i];
+          if (p.primeId === primeId && (p.mois || "") === mKey) { existing = p; break; }
+        }
         if (existing) {
           existing.montant = parseFloat(montant) || 0;
           existing.label = label;
+          if (mois) existing.mois = mois;
         } else {
-          all[empId].push({
+          var rec = {
             primeId: primeId,
             montant: parseFloat(montant) || 0,
             label: label || "Prime",
-          });
+          };
+          if (mois) rec.mois = mois;
+          all[empId].push(rec);
         }
         setEmpIndivPrimes(all);
       }
-      function removeEmpIndivPrime(empId, primeId) {
+      function removeEmpIndivPrime(empId, primeId, mois) {
         var all = getEmpIndivPrimes();
         if (all[empId]) {
           all[empId] = all[empId].filter(function (p) {
-            return p.primeId !== primeId;
+            if (p.primeId !== primeId) return true;
+            if (mois) return p.mois !== mois;
+            return false;
           });
           setEmpIndivPrimes(all);
         }
       }
-      function getEmpIndivPrimesList(empId) {
+      function getEmpIndivPrimesList(empId, mois) {
         var all = getEmpIndivPrimes();
-        return all[empId] || [];
+        var list = all[empId] || [];
+        if (!mois) return list;
+        return list.filter(function (ip) { return !ip.mois || ip.mois === mois; });
       }
       /* Gestion des primes depuis le bulletin */
       function updateEmpIndivPrime(empId, primeId, montant, label) {
@@ -6122,12 +6140,13 @@
       function bulUpdateGain(empId, mois, itemId, type, val) {
         var v = parseFloat(val) || 0;
         if (type === 'catalogue') {
+          /* Montant MENSUEL : n'écrase plus le montant global du catalogue */
           var primes = getPrimesSpec();
+          var plabel = '';
           for (var pi = 0; pi < primes.length; pi++) {
-            if (primes[pi].id === itemId) { primes[pi].montant = v; break; }
+            if (primes[pi].id === itemId) { plabel = primes[pi].label || primes[pi].type || ''; break; }
           }
-          setPrimesSpec(primes);
-          addEmpIndivPrime(empId, itemId, v, (primes[pi] || {}).label || '');
+          addEmpIndivPrime(empId, itemId, v, plabel, mois);
         } else if (type === 'manual') {
           var lines = getManualLinesEmp(empId, mois);
           for (var li = 0; li < lines.length; li++) {
@@ -18299,7 +18318,7 @@
           });
         /* ===== Indemnités spéciales (Art.116 CGI - exo ITS 10%) ===== */
         /* Lues depuis la config centralisée dans Données de Salaire > Primes Spéciales */
-        var primesSpecActives = getPrimesSpecEmp(emp.id);
+        var primesSpecActives = getPrimesSpecEmp(emp.id, mois);
         primesSpecActives.forEach(function (p) {
           var LABELS = {
             sursalaire: "Sursalaire",
@@ -18334,6 +18353,10 @@
               p.type === "ind_salissure"
                 ? stats.businessPresent + "/" + stats.businessDays
                 : Math.round(_ratioEff * 10000) / 100 + "%";
+          } else if (!isProrata && _isSalaireLike) {
+            /* Éléments mensuels fixes (sursalaire, responsabilité...) : base horaire comme le salaire */
+            var _baseH = (stats.totalBaseHours || stats.normalHours || 0);
+            if (_baseH > 0) tauxDisp = _baseH.toFixed(2).replace(".", ",");
           }
           /* Toutes les rubriques de l'onglet Éléments de paie apparaissent sur le bulletin :
              un montant vide (0) reste saisissable à l'écran et est masqué à l'impression */
@@ -19001,7 +19024,7 @@
             '<div style="text-align:center;padding:2rem;color:var(--dim)">Sélectionnez un employé et un mois</div>';
           return;
         }
-        var primes = getPrimesSpecEmp(empId);
+        var primes = getPrimesSpecEmp(empId, mois);
         var LABELS = {
           ind_representation: "Prime de représentation",
           ind_deplacement: "Prime de déplacement",
@@ -19060,11 +19083,15 @@
         var cp = getPrimesSpec().find(function (x) {
           return x.id === primeId;
         });
+        var m = "";
+        try { m = (document.getElementById("pt-mois") || {}).value || ""; } catch(ePm){}
+        if (!m) { try { m = getPayeMonth(); } catch(ePm2){} }
         addEmpIndivPrime(
           empId,
           primeId,
           mt,
           cp ? cp.label || cp.type : "Prime",
+          m || undefined,
         );
         toast("Montant mis à jour : " + fmtF(mt) + " F/mois");
       }
@@ -19232,42 +19259,7 @@
           }
 
           var rows = "";
-          var prevCat = "";
-          var catMap = {
-            11: "Rémunération",
-            21: "Rémunération",
-            22: "Indemnités & Primes",
-            23.1: "Indemnités & Primes",
-            23.2: "Indemnités & Primes",
-            23.3: "Indemnités & Primes",
-            23.4: "Indemnités & Primes",
-            24: "Congés & Gratification",
-            25: "Indemnités & Primes",
-            26: "Congés & Gratification",
-            27: "Montage & Production",
-            28: "Montage & Production",
-            29: "Prime de Panier",
-            41: "Avantages en nature",
-            42: "Avantages en nature",
-            43: "Avantages en nature",
-            45: "Avantages en nature",
-          };
           gainItems.forEach(function (i) {
-            var cat =
-              catMap[i.n] ||
-              (parseInt(i.n, 10) >= 30 && parseInt(i.n, 10) <= 39
-                ? "Indemnités & Primes"
-                : "");
-            if (cat && cat !== prevCat) {
-              rows +=
-                '<tr style="background:#e0e7ff"><td colspan="9" style="' +
-                B +
-                P +
-                'font-weight:800;font-size:.78rem;color:#3730a3;letter-spacing:.5px">' +
-                cat +
-                "</td></tr>";
-              prevCat = cat;
-            }
             rows += buildRow(i);
           });
 
@@ -23816,39 +23808,7 @@
           return r;
         }
         var rowsP = "";
-        var catMapP = {
-          11: "Rémunération",
-          21: "Rémunération",
-          22: "Indemnités & Primes",
-          23.1: "Indemnités & Primes",
-          23.2: "Indemnités & Primes",
-          23.3: "Indemnités & Primes",
-          23.4: "Indemnités & Primes",
-          24: "Congés & Gratification",
-          25: "Indemnités & Primes",
-          26: "Congés & Gratification",
-          27: "Montage & Production",
-          28: "Montage & Production",
-          29: "Prime de Panier",
-          41: "Avantages en nature",
-          42: "Avantages en nature",
-          43: "Avantages en nature",
-          45: "Avantages en nature",
-        };
-        var prevCatP = "";
         gainItemsP.forEach(function (i) {
-          var cat =
-            catMapP[i.n] ||
-            (parseInt(i.n, 10) >= 30 && parseInt(i.n, 10) <= 39
-              ? "Indemnités & Primes"
-              : "");
-          if (cat && cat !== prevCatP) {
-            rowsP +=
-              '<tr style="background:#e0e7ff"><td colspan="8" style="font-weight:800;font-size:10px;color:#3730a3;letter-spacing:.5px">' +
-              cat +
-              "</td></tr>";
-            prevCatP = cat;
-          }
           rowsP += buildRowP(i);
         });
         rowsP +=
