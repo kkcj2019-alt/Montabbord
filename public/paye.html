@@ -18105,6 +18105,10 @@
           daysPresent = 0,
           businessDays = 0,
           businessPresent = 0;
+        /* Compteurs pour le prorata HEURES : faute société (payée) et jours
+           avec montage seul sans heures (payés comme présence) */
+        var fauteDays = 0,
+          montageOnlyDays = 0;
         var hJour = 0,
           hNuit = 0,
           normalHours = 0;
@@ -18141,6 +18145,7 @@
             if (rec.faute_societe === true && isWeekday && hJ === 0 && hN === 0 && !rec.present) {
               businessPresent++;
               daysPresent++;
+              fauteDays++;
               if (!isJ) totalBaseHours += 8;
             }
             hJour += hJ;
@@ -18167,12 +18172,14 @@
               if (hJ === 0 && hN === 0 && rec.faute_societe !== true) {
                 daysPresent++;
                 if (isWeekday) businessPresent++;
+                if (isWeekday) montageOnlyDays++;
               }
             }
           } else if (montageDaysSet[dk] === true && !isJ) {
             /* Jour avec montage mais sans pointage horaire : présent pour transport/ancienneté */
             daysPresent++;
             if (isWeekday) businessPresent++;
+            if (isWeekday) montageOnlyDays++;
           }
         }
         /* Pointé = heures, présence, montage, faute société. Sans aucun pointage : pas de salaire. */
@@ -18256,6 +18263,9 @@
           daysPresent: daysPresent,
           businessDays: businessDays,
           businessPresent: businessPresent,
+          fauteDays: fauteDays,
+          montageOnlyDays: montageOnlyDays,
+          isForfaitBase: isForfaitBase,
           normalHours: normalHours,
           hJour: hJour,
           hNuit: hNuit,
@@ -18269,6 +18279,34 @@
         var base = getSalaireAuMois(emp, mois);
         var hourly = base / 173.33;
         var items = [];
+        /* ===== PRORATA HEURES (méthode des heures réelles : taux horaire = salaire / heures du mois) =====
+           Heures du mois (Href) = 8h x jours ouvrés. Heures effectuées = heures normales
+           réellement pointées (8h par défaut si présent sans heures saisies, HS exclues)
+           + 8h par jour de faute société (chômage technique payé) ou de montage seul.
+           Forfait : heures réellement pointées (règle inchangée). Sans pointage : 0. */
+        var Href = 0,
+          heuresEff = 0,
+          ratioH = 0;
+        if (stats.isForfaitBase) {
+          Href = 173.33;
+          heuresEff = Math.min(stats.totalBaseHours || 0, 173.33);
+          if (!stats.hasPointage) heuresEff = 0;
+          if (heuresEff < 0) heuresEff = 0;
+          ratioH = heuresEff / 173.33;
+        } else {
+          Href = 8 * (stats.businessDays || 0);
+          heuresEff =
+            (stats.normalHours || 0) +
+            8 * ((stats.fauteDays || 0) + (stats.montageOnlyDays || 0));
+          if (Href > 0 && heuresEff > Href) heuresEff = Href;
+          if (!stats.hasPointage) heuresEff = 0;
+          if (heuresEff < 0) heuresEff = 0;
+          ratioH = Href > 0 ? heuresEff / Href : 0;
+          if (ratioH > 1) ratioH = 1;
+        }
+        var heuresEffFmt = heuresEff.toFixed(2).replace(".", ",") + "h";
+        var HrefFmt = (Math.round(Href * 100) / 100).toString().replace(".", ",") + "h";
+        var ratioHpct = Math.round(ratioH * 10000) / 100 + "%";
         /* Journaliers & externes : pas de CNPS, pas d'imp\u00f4ts (ITS/CMU), pas d'avantages.
            Journalier = taux journalier x jours point\u00e9s. Externe = montant forfaitaire. */
         var catEmp = empCategorie(emp);
@@ -18455,24 +18493,35 @@
             },
           };
         }
-        var salCat = (base / 173.33) * stats.totalBaseHours;
+        /* Salaire catégoriel : salaire x heures effectuées / heures du mois.
+           Taux affiché = jours de présence + nombre d'heures. */
+        var salCat = Math.round(base * ratioH);
         items.push({
           n: "11",
           label: "Salaire catégoriel",
           base: base,
-          taux: stats.totalBaseHours.toFixed(2).replace(".", ","),
-          gain: Math.round(salCat),
+          taux:
+            stats.businessPresent +
+            "j/" +
+            stats.businessDays +
+            " · " +
+            heuresEffFmt +
+            "/" +
+            HrefFmt,
+          gain: salCat,
           ret: 0,
         });
+        /* Prime d'ancienneté (art.55 CCI 1977 : 2% après 2 ans + 1%/an),
+           calculée sur le salaire et réduite au prorata des heures en cas d'absence */
         if (emp.date_entree && stats.hasPointage) {
           var years = calcAge(emp.date_entree);
           if (years >= 2) {
-            var anc = base * (years * 0.01);
+            var anc = Math.round(base * (years * 0.01) * ratioH);
             items.push({
               n: "21",
               label: "Prime d'ancienneté",
               base: base,
-              taux: years + ",00",
+              taux: years + ",00" + (ratioH < 1 ? " (" + ratioHpct + ")" : ""),
               gain: anc,
               ret: 0,
             });
@@ -18523,26 +18572,20 @@
             ret: 0,
           });
         var primeT = getPrimeMois(emp.id, mois);
+        /* Prorata JOURS (transport) : jours avec transport payé / jours ouvrés.
+           Utilisé pour les indemnités journalières (salissure, déplacement, tenue, caisse). */
         var primeRatio =
           stats.businessDays > 0 && isJ !== true
             ? stats.transportDays / stats.businessDays
             : 1;
-        var salaireRatio =
-          stats.businessDays > 0 && isJ !== true
-            ? stats.businessPresent / stats.businessDays
-            : 1;
         if (primeT > 0) {
-          // Prime générique : considérée comme salaire, donc au prorata des jours ouvrés présents (faute société comptée), pas du transport
-          var _primeRatioEff = primeRatio;
-          // Si prime est de type salaire, utiliser le ratio salaire (qui inclut faute société)
-          _primeRatioEff = salaireRatio;
-          var primeProRata = Math.round(primeT * _primeRatioEff);
+          // Prime générique : considérée comme salaire, donc au prorata des HEURES effectuées
+          var primeProRata = Math.round(primeT * ratioH);
           items.push({
             n: "25",
             label: "Prime",
             base: primeT,
-            taux:
-              _primeRatioEff < 1 ? Math.round(_primeRatioEff * 10000) / 100 + "%" : "",
+            taux: ratioH < 1 ? ratioHpct + " (" + heuresEffFmt + ")" : "",
             gain: primeProRata,
             ret: 0,
           });
@@ -18592,14 +18635,14 @@
           var num = p.num || "30";
           var montant = parseFloat(p.montant) || 0;
           var isProrata = p.prorata !== false;
-          // Sursalaire jamais proratisé
-          if (p.type === "sursalaire") isProrata = false;
+          /* Sursalaire = élément de salaire -> TOUJOURS proratisé aux HEURES comme la base.
+             Salissure/déplacement/tenue/caisse = forfaits journaliers -> prorata JOURS (transport).
+             Faute société déjà incluse dans ratioH (heures payées). */
           // Salissure : prorata jours réellement travaillés comme le transport (même taux)
           if (p.type === "ind_salissure") isProrata = true;
-          // Logique faute société : pour les éléments considérés comme salaire (base, sursalaire, responsabilité, fonction...), si absence due à l'employeur, on paie au prorata des jours ouvrés présents incluant faute société (salaireRatio), pas du transport
           var _isSalaireLike = p.type === "sursalaire" || p.type === "ind_responsabilite" || p.type === "ind_fonction" || p.type === "ind_representation" || p.type === "custom";
           var _ratioEff = primeRatio;
-          if (_isSalaireLike && isProrata) _ratioEff = salaireRatio;
+          if (_isSalaireLike && isProrata) _ratioEff = ratioH;
           else if (p.type === "ind_salissure") _ratioEff = primeRatio;
           var pm = isProrata ? Math.round(montant * _ratioEff) : montant;
           var _hasPres = ((stats.businessPresent || 0) > 0) || (((stats.hJour || 0) + (stats.hNuit || 0)) > 0);
@@ -18608,19 +18651,15 @@
           if (!_hasPres) pm = 0;
           var tauxDisp = "";
           if (isProrata && _ratioEff < 1) {
-            tauxDisp =
-              p.type === "ind_salissure"
-                ? stats.businessPresent + "/" + stats.businessDays
-                : Math.round(_ratioEff * 10000) / 100 + "%";
+            /* Taux = jours de présence pour les journalières, nombre d'heures pour les salariales */
+            if (p.type === "ind_salissure")
+              tauxDisp = stats.transportDays + "/" + stats.businessDays;
+            else if (_isSalaireLike && p.type !== "custom") tauxDisp = heuresEffFmt;
+            else tauxDisp = Math.round(_ratioEff * 10000) / 100 + "%";
           } else if (_isSalaireLike) {
-            /* Prime forfaitaire custom (ex : production) : coefficient 1, pas de taux horaire.
-               La logique faute-société (salaireRatio) reste inchangée. */
+            /* Prime forfaitaire custom (ex : production) : coefficient 1 quand mois complet */
             if (p.type === "custom") { tauxDisp = "1"; }
-            else {
-              /* Taux = heures réellement pointées (fonction du pointage) ; vide si aucun pointage */
-              var _baseH = (stats.totalBaseHours || stats.normalHours || 0);
-              if (_hasPres && _baseH > 0) tauxDisp = _baseH.toFixed(2).replace(".", ",");
-            }
+            else if (_hasPres && heuresEff > 0) tauxDisp = heuresEffFmt;
           }
           /* Toutes les rubriques de l'onglet Éléments de paie apparaissent sur le bulletin :
              un montant vide (0) reste saisissable à l'écran et est masqué à l'impression */
@@ -19005,7 +19044,7 @@
             its: itsBrut - ricf,
             acomptes: ap.acomptes,
             prets: ap.prets,
-            prime: Math.round(primeT * (salaireRatio || 1)),
+            prime: Math.round(primeT * ratioH),
             transport: stats.transport,
             cmu: cmuCount * 500,
             itsBrut: itsBrut,
