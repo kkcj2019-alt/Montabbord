@@ -5980,6 +5980,20 @@
         try { last = new Date(parseInt((mois || "").slice(0, 4), 10), parseInt(mm, 10), 0).getDate(); } catch (eP) {}
         return "DU 01/" + mm + " AU " + last + "/" + mm + "/" + yy;
       }
+      /* Saisies bulletin journalier/externe : overrides mensuels par rubrique.
+         Clés : tauxJ, forfait, hs, anciennete, transport, salissure, conges, autres.
+         0/vide = valeur automatique. (production -> primeProdMan, prime -> primesMois, gratif -> gratif) */
+      function getBulJOverrides(empId, mois) {
+        var m = getPayeSection("bulJOverrides", {}) || {};
+        return m[empId + "|" + mois] || {};
+      }
+      function setBulJOverride(empId, mois, key, val) {
+        var m = getPayeSection("bulJOverrides", {}) || {};
+        var k = empId + "|" + mois;
+        if (!m[k]) m[k] = {};
+        m[k][key] = parseFloat(val) || 0;
+        setPayeSection("bulJOverrides", m);
+      }
       /* Lignes manuelles ajoutées directement sur le bulletin */
       function getManualLines() {
         return getPayeSection("manualLines", {});
@@ -6218,6 +6232,14 @@
       }
       function bulUpdatePrimeProd(empId, mois, val) {
         setPrimeProdMan(empId, mois, parseFloat(val) || 0);
+        generateBulletin();
+      }
+      function bulUpdateGratif(empId, mois, val) {
+        setGratif(empId, mois, parseFloat(val) || 0);
+        generateBulletin();
+      }
+      function bulUpdateJovr(empId, mois, key, val) {
+        setBulJOverride(empId, mois, key, parseFloat(val) || 0);
         generateBulletin();
       }
       function bulRemoveLine(empId, mois, itemId, type) {
@@ -18345,6 +18367,9 @@
         if (catEmp === "journalier" || catEmp === "externe") {
           var apJ = getAPForMonth(emp.id, mois);
           var primeJ = getPrimeMois(emp.id, mois);
+          /* Saisies bulletin J/E (toutes lignes modifiables) : overrides mensuels par rubrique */
+          var jovr = getBulJOverrides(emp.id, mois);
+          var hsOvr = (jovr.hs || 0) > 0 ? jovr.hs : 0;
           var totalBrutJ = 0;
           var thJ = 0,
             tauxJ = 0,
@@ -18356,6 +18381,8 @@
                 parseFloat(emp.salaire_base) ||
                 0,
             );
+            /* Saisie bulletin : forfait mensuel modifiable (0 = valeur du contrat) */
+            if ((jovr.forfait || 0) > 0) mfJ = Math.round(jovr.forfait);
             joursExt = getExternJours(emp.id, mois);
             var mfPaye = mfJ;
             /* Sans jours saisis (non pointé) : aucun versement */
@@ -18386,6 +18413,8 @@
               parseFloat(emp.salaire_base) ||
               0;
             thJ = tauxJ / 8;
+            /* Saisie bulletin : taux journalier modifiable (0 = valeur du contrat) */
+            if ((jovr.tauxJ || 0) > 0) { tauxJ = jovr.tauxJ; thJ = tauxJ / 8; }
             if (stats.normalHours > 0)
               items.push({
                 n: "11",
@@ -18432,6 +18461,14 @@
                 ret: 0,
               });
           }
+          /* Saisie bulletin J/E : montant HS manuel remplace les lignes par tranches */
+          if (hsOvr > 0) {
+            var _hsH = catEmp === "journalier"
+              ? ((stats.hs15 || 0) + (stats.hs50 || 0) + (stats.hs75 || 0) + (stats.hs100 || 0)).toFixed(1).replace(".", ",") + "h"
+              : "";
+            items = items.filter(function (i) { return !/^H\. (Suppl|Nuit)/.test(i.label || ""); });
+            items.push({ n: "23", label: "Heures Suppl.", base: hsOvr, taux: _hsH, gain: hsOvr, ret: 0 });
+          }
           if (primeJ > 0 && stats.hasPointage)
             items.push({
               n: "25",
@@ -18475,6 +18512,14 @@
               ret: 0,
             });
           ptRemonterMontage(items);
+          /* Saisies bulletin J/E : rubriques manuelles (base saisie, gain = base), avant totalisation */
+          if ((jovr.anciennete || 0) > 0) items.push({ n: "21", label: "Prime d'ancienneté", base: jovr.anciennete, taux: "", gain: jovr.anciennete, ret: 0 });
+          if ((jovr.transport || 0) > 0) items.push({ n: "22", label: "Prime de transport", base: jovr.transport, taux: "", gain: jovr.transport, ret: 0 });
+          if ((jovr.salissure || 0) > 0) items.push({ n: "32", label: "Prime de Salissure", base: jovr.salissure, taux: "", gain: jovr.salissure, ret: 0 });
+          var congeAutoJ = getCongePaie(emp.id, mois);
+          var congeEffJ = (jovr.conges || 0) > 0 ? jovr.conges : congeAutoJ;
+          if (congeEffJ > 0) items.push({ n: "24", label: "Congés", base: congeEffJ, taux: "", gain: congeEffJ, ret: 0 });
+          if ((jovr.autres || 0) > 0) items.push({ n: "37", label: "Autres Primes Fixes", base: jovr.autres, taux: "", gain: jovr.autres, ret: 0 });
           totalBrutJ = items.reduce(function (s, i) {
             return s + i.gain;
           }, 0);
@@ -19531,10 +19576,10 @@
         var prodGain = gainRx(/^Prime de Production/);
         var prodMan = getPrimeProdMan(emp.id, mois);
         var montageGain = gainOf("Rémunération Montage");
-        var arrondiRet = 0;
-        items.forEach(function (i) {
-          if ((i.label || "") === "Arrondi" && (i.ret || 0) !== 0) arrondiRet = i.ret;
-        });
+        var jovrM = getBulJOverrides(emp.id, mois);
+        function ovrVal(key, fallback) {
+          return (jovrM[key] || 0) > 0 ? jovrM[key] : (fallback || 0);
+        }
         /* Période du mois pour le libellé production : "DU 01/08 AU 31/08/26" */
         var prodLabel = "Prime de Production " + moisPeriodeLabel(mois);
         var rows = [];
@@ -19542,27 +19587,33 @@
           var tauxJ = totals.tauxJ || 0;
           var thJ = totals.th || 0;
           var hs = (st.hs15 || 0) + (st.hs50 || 0) + (st.hs75 || 0) + (st.hs100 || 0);
-          rows.push({ label: "Base mensuelle ou Journalière", base: tauxJ > 0 ? fmt(tauxJ) : "", baseVal: 0, taux: (st.daysPresent || 0) + "j", gain: gainOf("Heures normales (Jour)"), ret: 0, edit: null });
-          rows.push({ label: "Heures Suppl.", base: thJ > 0 ? fmt(thJ) : "", baseVal: 0, taux: hs > 0 ? hs.toFixed(1).replace(".", ",") + "h" : "", gain: gainRx(/^H\. (Suppl|Nuit)/), ret: 0, edit: null });
+          var hsAuto = gainRx(/^H\. (Suppl|Nuit)/) + gainOf("Heures Suppl.");
+          var hsEff = (jovrM.hs || 0) > 0 ? jovrM.hs : hsAuto;
+          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: tauxJ, taux: (st.daysPresent || 0) + "j", gain: gainOf("Heures normales (Jour)"), ret: 0, edit: "tauxJ" });
+          rows.push({ label: "Heures Suppl.", base: "", baseVal: hsEff, taux: hs > 0 ? hs.toFixed(1).replace(".", ",") + "h" : "", gain: hsEff, ret: 0, edit: "hs" });
         } else {
           var mfJ = parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0;
+          var mfEff = (jovrM.forfait || 0) > 0 ? Math.round(jovrM.forfait) : mfJ;
           var jExt = getExternJours(emp.id, mois);
-          rows.push({ label: "Base mensuelle ou Journalière", base: mfJ > 0 ? fmt(mfJ) : "", baseVal: 0, taux: (jExt > 0 ? jExt : 30) + "j/30", gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: null });
+          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: (jExt > 0 ? jExt : 30) + "j/30", gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
           rows.push(zero("Heures Suppl."));
         }
-        rows.push(zero("Prime d'ancienneté"));
-        rows.push(zero("Prime de transport"));
+        var ancG = gainOf("Prime d'ancienneté");
+        rows.push({ label: "Prime d'ancienneté", base: "", baseVal: ovrVal("anciennete", ancG), taux: "", gain: ancG, ret: 0, edit: "anciennete" });
+        var trG = gainOf("Prime de transport");
+        rows.push({ label: "Prime de transport", base: "", baseVal: ovrVal("transport", trG), taux: "", gain: trG, ret: 0, edit: "transport" });
         rows.push({ label: prodLabel, base: "", baseVal: prodMan > 0 ? prodMan : prodGain, taux: "1", gain: prodGain, ret: 0, edit: "prod" });
-        rows.push(zero("Prime de Salissure"));
-        rows.push(zero("Prime Exceptionnelle"));
-        rows.push({ label: "Gratification", base: gratif > 0 ? fmt(gratif) : "", baseVal: 0, taux: "", gain: gratif, ret: 0, edit: null });
-        rows.push(zero("Congés"));
-        rows.push(zero("Autres Primes Fixes"));
+        var salG = gainOf("Prime de Salissure");
+        rows.push({ label: "Prime de Salissure", base: "", baseVal: ovrVal("salissure", salG), taux: "", gain: salG, ret: 0, edit: "salissure" });
+        rows.push({ label: "Prime Exceptionnelle", base: "", baseVal: primeJ, taux: "", gain: primeJ, ret: 0, edit: "prime" });
+        rows.push({ label: "Gratification", base: "", baseVal: gratif, taux: "", gain: gratif, ret: 0, edit: "gratif" });
+        var cgG = gainOf("Congés");
+        rows.push({ label: "Congés", base: "", baseVal: ovrVal("conges", cgG), taux: "", gain: cgG, ret: 0, edit: "conges" });
+        var auG = gainOf("Autres Primes Fixes");
+        rows.push({ label: "Autres Primes Fixes", base: "", baseVal: ovrVal("autres", auG), taux: "", gain: auG, ret: 0, edit: "autres" });
         if (montageGain > 0) rows.push({ label: "Rémunération Montage", base: fmt(montageGain), baseVal: 0, taux: "", gain: montageGain, ret: 0, edit: null });
-        rows.push({ label: "Prime du mois", base: "", baseVal: primeJ, taux: "", gain: primeJ, ret: 0, edit: "prime" });
         if (ap.acomptes > 0) rows.push({ label: "Acompte", base: fmt(ap.acomptes), baseVal: 0, taux: "1", gain: 0, ret: ap.acomptes, edit: null });
         if (ap.prets > 0) rows.push({ label: "Prêts", base: fmt(ap.prets), baseVal: 0, taux: "1", gain: 0, ret: ap.prets, edit: null });
-        if (arrondiRet !== 0) rows.push({ label: "Arrondi", base: "", baseVal: 0, taux: "", gain: 0, ret: arrondiRet, edit: null });
         return rows;
       }
       function generateBulletin() {
@@ -19725,6 +19776,10 @@
               baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdatePrimeMois(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
             } else if (r.edit === "prod") {
               baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdatePrimeProd(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
+            } else if (r.edit === "gratif") {
+              baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateGratif(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
+            } else if (r.edit) {
+              baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateJovr(\'' + empId + '\',\'' + mois + '\',\'' + r.edit + '\',this.value)"></td>';
             } else {
               baseCell = tdR(r.base || "");
             }
@@ -19983,7 +20038,7 @@
           }, 0);
           h +=
             '<div style="background:#f1f5f9;color:#0f172a;border:1.5px solid #cbd5e1;padding:.8rem 1rem;margin-top:1rem;border-radius:8px">';
-          if (arrondiVal > 0)
+          if (!isSimple && arrondiVal > 0)
             h +=
               '<div style="text-align:right;font-size:.8rem;color:#64748b;margin-bottom:4px">Arrondi : ' +
               fmt(arrondiVal) +
@@ -23973,8 +24028,37 @@
               dateEntreeB(emp) +
               "</div></div></div>";
           }
+          var isSimpleB = catEmp === "journalier" || catEmp === "externe";
           h +=
             '<table><thead><tr><th>N\u00b0</th><th>D\u00e9signation</th><th style="text-align:right">Base</th><th style="text-align:center">Taux</th><th style="text-align:right">Gains</th><th style="text-align:right">Retenues</th></tr></thead><tbody>';
+          if (isSimpleB) {
+            /* Journalier/externe : mêmes rubriques simplifiées qu'à l'écran (sans saisie) */
+            var srowsB = getSimpleBulletinRows(emp, mois, calc);
+            var totGB = 0, totRB = 0;
+            srowsB.forEach(function (r) {
+              var bB = r.edit ? (r.baseVal > 0 ? fmt(r.baseVal) : "") : (r.base || "");
+              h +=
+                "<tr><td></td><td>" +
+                escH(r.label) +
+                '</td><td style="text-align:right">' +
+                bB +
+                '</td><td style="text-align:center">' +
+                escH(r.taux || "") +
+                '</td><td style="text-align:right;font-weight:700">' +
+                (r.gain > 0 ? fmt(r.gain) : "") +
+                '</td><td style="text-align:right;font-weight:700;color:#dc2626">' +
+                (r.ret > 0 ? fmt(r.ret) : "") +
+                "</td></tr>";
+              totGB += (r.gain > 0 ? r.gain : 0);
+              totRB += (r.ret > 0 ? r.ret : 0);
+            });
+            h +=
+              '</tbody><tfoot><tr class="tot"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right;color:#16a34a">' +
+              fmt(totGB) +
+              '</td><td style="text-align:right">' +
+              fmt(totRB) +
+              "</td></tr></tfoot></table>";
+          } else {
           calc.items.forEach(function (i) {
             if (!i.label) return;
             h +=
@@ -24002,6 +24086,7 @@
               }, 0),
             ) +
             "</td></tr></tfoot></table>";
+          }
           var arrV = calc.items.reduce(function (s, i) {
             return s + (i.label === "Arrondi" ? i.ret || 0 : 0);
           }, 0);
@@ -24236,28 +24321,8 @@
             dateEntreeB(emp) +
             "</div></div>";
           if (empCategorie(emp) === "journalier") {
-            var stP = calc.stats || {};
-            var hsP =
-              (stP.hs15 || 0) +
-              (stP.hs50 || 0) +
-              (stP.hs75 || 0) +
-              (stP.hs100 || 0);
-            h +=
-              '<div style="display:flex;border-bottom:1px solid #000"><div style="flex:1;padding:4px 6px;border-right:1px solid #000"><strong>Taux journalier:</strong> ' +
-              fmt(calc.totals.tauxJ || 0) +
-              " F | Taux horaire: " +
-              fmt(calc.totals.th || 0) +
-              '</div><div style="flex:1;padding:4px 6px"><strong>Prime du mois:</strong> ' +
-              fmt(calc.totals.prime || 0) +
-              " F</div></div>";
-            h +=
-              '<div style="display:flex"><div style="flex:1;padding:4px 6px;border-right:1px solid #000"><strong>Heures (Jour):</strong> ' +
-              (stP.hJour || 0).toFixed(1) +
-              'h</div><div style="flex:1;padding:4px 6px"><strong>Heures (Nuit):</strong> ' +
-              (stP.hNuit || 0).toFixed(1) +
-              "h | <strong>HS:</strong> " +
-              hsP.toFixed(1) +
-              "h</div></div></div>";
+            /* Détails (taux, heures, primes) affichés dans le tableau : pas de récap dupliqué */
+            h += "</div>";
           } else {
             var sitLabelP = emp.situation_matrimoniale || "-";
             var nbEnfantsP =
@@ -24432,7 +24497,7 @@
         var arrondiValP = calc.items.reduce(function (s, i) {
           return s + (i.label === "Arrondi" ? i.ret || 0 : 0);
         }, 0);
-        if (arrondiValP > 0)
+        if (!isSimpleP && arrondiValP > 0)
           h +=
             '<div style="text-align:right;font-size:9px;color:#666">Arrondi : ' +
             fmt(arrondiValP) +
