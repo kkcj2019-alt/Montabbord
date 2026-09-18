@@ -5958,10 +5958,21 @@
         var m = getPayeSection("primesMois", {}) || {};
         return parseFloat(m[empId + "|" + mois]) || 0;
       }
-      function setPrimeMois(empId, mois, val) {
+        function setPrimeMois(empId, mois, val) {
         var m = getPayeSection("primesMois", {}) || {};
         m[empId + "|" + mois] = parseFloat(val) || 0;
         setPayeSection("primesMois", m);
+      }
+      /* Prime de Production saisie manuellement (bulletin journalier/externe) :
+         prioritaire sur le montage ; 0 = retour automatique au montage */
+      function getPrimeProdMan(empId, mois) {
+        var m = getPayeSection("primeProdMan", {}) || {};
+        return parseFloat(m[empId + "|" + mois]) || 0;
+      }
+      function setPrimeProdMan(empId, mois, val) {
+        var m = getPayeSection("primeProdMan", {}) || {};
+        m[empId + "|" + mois] = parseFloat(val) || 0;
+        setPayeSection("primeProdMan", m);
       }
       /* Lignes manuelles ajoutées directement sur le bulletin */
       function getManualLines() {
@@ -6193,6 +6204,14 @@
           }
           setManualLines(all);
         }
+        generateBulletin();
+      }
+      function bulUpdatePrimeMois(empId, mois, val) {
+        setPrimeMois(empId, mois, parseFloat(val) || 0);
+        generateBulletin();
+      }
+      function bulUpdatePrimeProd(empId, mois, val) {
+        setPrimeProdMan(empId, mois, parseFloat(val) || 0);
         generateBulletin();
       }
       function bulRemoveLine(empId, mois, itemId, type) {
@@ -18429,13 +18448,17 @@
               gain: montageJ.total,
               ret: 0,
             });
-          if (montageJ.prime > 0)
+          /* Prime de Production : auto depuis le montage, ou saisie manuelle (prioritaire).
+             Taux toujours 1 : gain = base x 1. */
+          var prodMan = getPrimeProdMan(emp.id, mois);
+          var primeProdEff = prodMan > 0 ? prodMan : montageJ.prime;
+          if (primeProdEff > 0)
             items.push({
               n: "28",
               label: "Prime de Production",
-              base: montageJ.prime,
-              taux: "",
-              gain: montageJ.prime,
+              base: primeProdEff,
+              taux: "1",
+              gain: primeProdEff,
               ret: 0,
             });
           ptRemonterMontage(items);
@@ -18493,26 +18516,19 @@
             },
           };
         }
-        /* Salaire catégoriel : salaire x heures effectuées / heures du mois.
-           Taux affiché = jours de présence + nombre d'heures. */
+/* Salaire catégoriel : salaire x heures effectuées / heures du mois.
+   Taux affiché = nombre d'heures effectuées (prorata du mois). */
         var salCat = Math.round(base * ratioH);
         items.push({
           n: "11",
           label: "Salaire catégoriel",
           base: base,
-          taux:
-            stats.businessPresent +
-            "j/" +
-            stats.businessDays +
-            " · " +
-            heuresEffFmt +
-            "/" +
-            HrefFmt,
+          taux: heuresEffFmt,
           gain: salCat,
           ret: 0,
         });
-        /* Prime d'ancienneté (art.55 CCI 1977 : 2% après 2 ans + 1%/an),
-           calculée sur le salaire et réduite au prorata des heures en cas d'absence */
+/* Prime d'ancienneté (art.55 CCI 1977 : 2% après 2 ans + 1%/an),
+   calculée sur le salaire et réduite au prorata des heures en cas d'absence */
         if (emp.date_entree && stats.hasPointage) {
           var years = calcAge(emp.date_entree);
           if (years >= 2) {
@@ -18521,7 +18537,7 @@
               n: "21",
               label: "Prime d'ancienneté",
               base: base,
-              taux: years + ",00" + (ratioH < 1 ? " (" + ratioHpct + ")" : ""),
+              taux: years + ",00",
               gain: anc,
               ret: 0,
             });
@@ -18642,7 +18658,8 @@
           if (p.type === "ind_salissure") isProrata = true;
           var _isSalaireLike = p.type === "sursalaire" || p.type === "ind_responsabilite" || p.type === "ind_fonction" || p.type === "ind_representation" || p.type === "custom";
           var _ratioEff = primeRatio;
-          if (_isSalaireLike && isProrata) _ratioEff = ratioH;
+          if (p.type === "custom") _ratioEff = 1;
+          else if (_isSalaireLike && isProrata) _ratioEff = ratioH;
           else if (p.type === "ind_salissure") _ratioEff = primeRatio;
           var pm = isProrata ? Math.round(montant * _ratioEff) : montant;
           var _hasPres = ((stats.businessPresent || 0) > 0) || (((stats.hJour || 0) + (stats.hNuit || 0)) > 0);
@@ -18650,16 +18667,17 @@
              Le taux affiché est fonction du pointage (heures réellement pointées). */
           if (!_hasPres) pm = 0;
           var tauxDisp = "";
-          if (isProrata && _ratioEff < 1) {
+          /* Personnalisées (production, primes forfaitaires) : taux = 1 (100%) quand mois complet */
+          if (p.type === "custom") { tauxDisp = "1"; }
+          else if (isProrata && _ratioEff < 1) {
             /* Taux = jours de présence pour les journalières, nombre d'heures pour les salariales */
             if (p.type === "ind_salissure")
               tauxDisp = stats.transportDays + "/" + stats.businessDays;
-            else if (_isSalaireLike && p.type !== "custom") tauxDisp = heuresEffFmt;
+            else if (_isSalaireLike) tauxDisp = heuresEffFmt;
             else tauxDisp = Math.round(_ratioEff * 10000) / 100 + "%";
           } else if (_isSalaireLike) {
-            /* Prime forfaitaire custom (ex : production) : coefficient 1 quand mois complet */
-            if (p.type === "custom") { tauxDisp = "1"; }
-            else if (_hasPres && heuresEff > 0) tauxDisp = heuresEffFmt;
+            /* Prime forfaitaire non custom : coefficient 1 quand mois complet */
+            if (_hasPres && heuresEff > 0) tauxDisp = heuresEffFmt;
           }
           /* Toutes les rubriques de l'onglet Éléments de paie apparaissent sur le bulletin :
              un montant vide (0) reste saisissable à l'écran et est masqué à l'impression */
@@ -19466,6 +19484,67 @@
         h += "</div>";
         return h;
       }
+      /* Lignes du bulletin simplifié (journalier / externe), mappées sur les VRAIES
+         données de calculatePayroll. Ordre fixe :
+         Base, Heures Suppl., ancienneté, transport, Production, Salissure,
+         Exceptionnelle, Gratification, Congés, Autres, [Montage], Prime du mois,
+         Acompte, Prêts. Chaque ligne : {label, base (texte), baseVal, taux, gain, ret, edit}
+         (edit = "prime"|"prod" pour saisie au niveau BASE, gain = base x taux). */
+      function getSimpleBulletinRows(emp, mois, calc) {
+        var cat = empCategorie(emp);
+        var st = (calc && calc.stats) || {};
+        var items = (calc && calc.items) || [];
+        var totals = (calc && calc.totals) || {};
+        function gainOf(lbl) {
+          var s = 0;
+          items.forEach(function (i) {
+            if ((i.label || "") === lbl) s += (i.gain > 0 ? i.gain : 0);
+          });
+          return s;
+        }
+        function gainRx(rx) {
+          var s = 0;
+          items.forEach(function (i) {
+            if (rx.test(i.label || "")) s += (i.gain > 0 ? i.gain : 0);
+          });
+          return s;
+        }
+        function zero(lbl) {
+          return { label: lbl, base: "", baseVal: 0, taux: "", gain: 0, ret: 0, edit: null };
+        }
+        var ap = getAPForMonth(emp.id, mois);
+        var primeJ = totals.prime || 0;
+        var gratif = totals.gratif || 0;
+        var prodGain = gainOf("Prime de Production");
+        var prodMan = getPrimeProdMan(emp.id, mois);
+        var montageGain = gainOf("Rémunération Montage");
+        var rows = [];
+        if (cat === "journalier") {
+          var tauxJ = totals.tauxJ || 0;
+          var thJ = totals.th || 0;
+          var hs = (st.hs15 || 0) + (st.hs50 || 0) + (st.hs75 || 0) + (st.hs100 || 0);
+          rows.push({ label: "Base mensuelle ou Journalière", base: tauxJ > 0 ? fmt(tauxJ) : "", baseVal: 0, taux: (st.daysPresent || 0) + "j", gain: gainOf("Heures normales (Jour)"), ret: 0, edit: null });
+          rows.push({ label: "Heures Suppl.", base: thJ > 0 ? fmt(thJ) : "", baseVal: 0, taux: hs > 0 ? hs.toFixed(1).replace(".", ",") + "h" : "", gain: gainRx(/^H\. (Suppl|Nuit)/), ret: 0, edit: null });
+        } else {
+          var mfJ = parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0;
+          var jExt = getExternJours(emp.id, mois);
+          rows.push({ label: "Base mensuelle ou Journalière", base: mfJ > 0 ? fmt(mfJ) : "", baseVal: 0, taux: (jExt > 0 ? jExt : 30) + "j/30", gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: null });
+          rows.push(zero("Heures Suppl."));
+        }
+        rows.push(zero("Prime d'ancienneté"));
+        rows.push(zero("Prime de transport"));
+        rows.push({ label: "Prime de Production", base: "", baseVal: prodMan > 0 ? prodMan : prodGain, taux: "1", gain: prodGain, ret: 0, edit: "prod" });
+        rows.push(zero("Prime de Salissure"));
+        rows.push(zero("Prime Exceptionnelle"));
+        rows.push({ label: "Gratification", base: gratif > 0 ? fmt(gratif) : "", baseVal: 0, taux: "", gain: gratif, ret: 0, edit: null });
+        rows.push(zero("Congés"));
+        rows.push(zero("Autres Primes Fixes"));
+        if (montageGain > 0) rows.push({ label: "Rémunération Montage", base: fmt(montageGain), baseVal: 0, taux: "", gain: montageGain, ret: 0, edit: null });
+        rows.push({ label: "Prime du mois", base: "", baseVal: primeJ, taux: "", gain: primeJ, ret: 0, edit: "prime" });
+        if (ap.acomptes > 0) rows.push({ label: "Acompte", base: "", baseVal: 0, taux: "", gain: 0, ret: ap.acomptes, edit: null });
+        if (ap.prets > 0) rows.push({ label: "Prêts", base: "", baseVal: 0, taux: "", gain: 0, ret: ap.prets, edit: null });
+        return rows;
+      }
       function generateBulletin() {
         var out = document.getElementById("paie-output");
         try {
@@ -19574,6 +19653,7 @@
           var cotItems = calc.items.filter(function (i) {
             return i.label && isCot(i);
           });
+
           // Arrondi toujours en dernière position
           cotItems.sort(function (a, b) {
             var aA = (a.label || "").toLowerCase().trim() === "arrondi" ? 1 : 0;
@@ -19581,23 +19661,17 @@
             return aA - bA;
           });
 
+          // ===== buildRow pour tableau standard CDI/CDD (9 colonnes) =====
           function buildRow(i) {
-            var isGray =
-              ["22", "23", "24", "25", "26", "31", "32", "81", "82"].indexOf(
-                i.n,
-              ) >= 0;
+            var isGray = ["22", "23", "24", "25", "26", "31", "32", "81", "82"].indexOf(i.n) >= 0;
             var bg = isGray ? "background:#d1d5db;" : "";
             var baseStr = i.base > 0 ? fmt(i.base) : "";
-            var retStr =
-              i.ret > 0 ? fmt(i.ret) : i.ret < 0 ? "-" + fmt(-i.ret) : "";
+            var retStr = i.ret > 0 ? fmt(i.ret) : i.ret < 0 ? "-" + fmt(-i.ret) : "";
             var tauxPatStr = i.tauxPat || "";
             var retPatStr = i.retPat > 0 ? fmt(i.retPat) : "";
-            var gainCell = '';
-            var removeBtn = '';
-            var rowZeroCls =
-              i._editable && i._type && (i.gain || 0) <= 0
-                ? ' class="row-zero"'
-                : "";
+            var gainCell = "";
+            var removeBtn = "";
+            var rowZeroCls = i._editable && i._type && (i.gain || 0) <= 0 ? ' class="row-zero"' : "";
             if (i._editable && i._type && i._id) {
               gainCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (i.gain || 0) + '" min="0" step="500" style="width:80px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateGain(\'' + empId + '\',\'' + mois + '\',\'' + i._id + '\',\'' + i._type + '\',this.value)"></td>';
               removeBtn = '<td style="text-align:center;padding:2px"><button class="btn btn-red" style="padding:1px 5px;font-size:.6rem;border:none;color:#fff" onclick="bulRemoveLine(\'' + empId + '\',\'' + mois + '\',\'' + i._id + '\',\'' + i._type + '\')">✕</button></td>';
@@ -19620,74 +19694,122 @@
             );
           }
 
+          // Simple (5 colonnes) pour journalier/externe, standard (9 colonnes) sinon
+          var isSimple = catBul === "journalier" || catBul === "externe";
+
+          // ===== LIGNES DU TABLEAU : simple 5 colonnes (journalier/externe) vs standard 9 colonnes =====
+          // Ligne du tableau simple : saisie au niveau BASE (gain = base x taux)
+          function buildSimpleRow(r) {
+            var baseCell;
+            if (r.edit === "prime") {
+              baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdatePrimeMois(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
+            } else if (r.edit === "prod") {
+              baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdatePrimeProd(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
+            } else {
+              baseCell = tdR(r.base || "");
+            }
+            return (
+              "<tr>" +
+              tdL(escH(r.label)) +
+              baseCell +
+              tdC(escH(r.taux || "")) +
+              tdR(r.gain > 0 ? fmt(r.gain) : "") +
+              tdR(r.ret > 0 ? fmt(r.ret) : "") +
+              "</tr>"
+            );
+          }
+
           var rows = "";
-          gainItems.forEach(function (i) {
-            rows += buildRow(i);
-          });
+          var totGain = 0, totRet = 0, totRetPat = 0;
+          if (isSimple) {
+            // Journalier / externe : lignes mappées sur les VRAIES données du calcul (voir getSimpleBulletinRows)
+            var srows = getSimpleBulletinRows(emp, mois, calc);
+            srows.forEach(function (r) {
+              rows += buildSimpleRow(r);
+              totGain += (r.gain > 0 ? r.gain : 0);
+              totRet += (r.ret > 0 ? r.ret : 0);
+            });
+            rows +=
+              "<tr style='background:#f1f5f9;font-weight:800'>" +
+              tdL("<strong>TOTAL</strong>") +
+              tdR("") +
+              tdC("") +
+              tdR(fmt(totGain), true) +
+              tdR(fmt(totRet), true) +
+              "</tr>";
+          } else {
 
-          // --- Lignes 40 / 41 / 42 dans le TBODY, comme dans le PDF ---
-          rows +=
-            "<tr>" +
-            tdC("40") +
-            tdBrut("Total brut") +
-            tdC("") +
-            tdR(fmt(calc.totals.brut), true) +
-            tdR("") +
-            tdC("") +
-            tdR("") +
-            td("", "") +
-            "</tr>" +
-            "<tr>" +
-            tdC("41") +
-            tdBrut("Brut fiscal") +
-            tdC("") +
-            tdR(fmt(calc.totals.brutFiscal), true) +
-            tdR("") +
-            tdC("") +
-            tdR("") +
-            td("", "") +
-            "</tr>" +
-            "<tr>" +
-            tdC("42") +
-            tdBrut("Brut social") +
-            tdC("") +
-            tdR(fmt(calc.totals.brutSocial), true) +
-            tdR("") +
-            tdC("") +
-            tdR("") +
-            td("", "") +
-            "</tr>";
+            gainItems.forEach(function (i) {
+              rows += buildRow(i);
+            });
+            // --- Lignes 40 / 41 / 42 dans le TBODY, comme dans le PDF ---
+            rows +=
+              "<tr>" +
+              tdC("40") +
+              tdBrut("Total brut") +
+              tdC("") +
+              tdR(fmt(calc.totals.brut), true) +
+              tdR("") +
+              tdC("") +
+              tdR("") +
+              tdC("") +
+              tdR("") +
+              td("", "") +
+              "</tr>" +
+              "<tr>" +
+              tdC("41") +
+              tdBrut("Brut fiscal") +
+              tdC("") +
+              tdR(fmt(calc.totals.brutFiscal), true) +
+              tdR("") +
+              tdC("") +
+              tdR("") +
+              tdC("") +
+              tdR("") +
+              td("", "") +
+              "</tr>" +
+              "<tr>" +
+              tdC("42") +
+              tdBrut("Brut social") +
+              tdC("") +
+              tdR(fmt(calc.totals.brutSocial), true) +
+              tdR("") +
+              tdC("") +
+              tdR("") +
+              tdC("") +
+              tdR("") +
+              td("", "") +
+              "</tr>";
 
-          rows +=
-            '<tr style="background:#fef3c7"><td colspan="9" style="' +
-            B +
-            P +
-            'font-weight:800;font-size:.78rem;color:#92400e;letter-spacing:.5px">Cotisations & Retenues</td></tr>';
-          cotItems.forEach(function (i) {
-            rows += buildRow(i);
-          });
+            rows +=
+              '<tr style="background:#fef3c7"><td colspan="9" style="' +
+              B +
+              P +
+              'font-weight:800;font-size:.78rem;color:#92400e;letter-spacing:.5px">Cotisations & Retenues</td></tr>';
+            cotItems.forEach(function (i) {
+              rows += buildRow(i);
+            });
+            totGain = calc.totals.brut;
+            totRet = calc.items.reduce(function (s, i) {
+              return s + (i.ret > 0 ? i.ret : 0);
+            }, 0);
+            totRetPat = calc.items.reduce(function (s, i) {
+              return s + (i.retPat > 0 ? i.retPat : 0);
+            }, 0);
 
-          // Totaux colonnes (dernière ligne du tableau) — corrigé double comptage
-          var totGain = calc.totals.brut;
-          var totRet = calc.items.reduce(function (s, i) {
-            return s + (i.ret > 0 ? i.ret : 0);
-          }, 0);
-          var totRetPat = calc.items.reduce(function (s, i) {
-            return s + (i.retPat > 0 ? i.retPat : 0);
-          }, 0);
-
-          rows +=
-            '<tr style="background:#f1f5f9;font-weight:800">' +
-            tdC("") +
-            tdL("<strong>TOTAL</strong>") +
-            td("", "") +
-            td("", "") +
-            tdR(fmt(totGain), true) +
-            tdR(fmt(totRet), true) +
-            tdC("") +
-            tdR(fmt(totRetPat), true) +
-            td("", "") +
-            "</tr>";
+            rows +=
+              '<tr style="background:#f1f5f9;font-weight:800">' +
+              tdC("") +
+              tdL("<strong>TOTAL</strong>") +
+              td("", "") +
+              td("", "") +
+              tdR(fmt(totGain), true) +
+              tdR(fmt(totRet), true) +
+              tdC("") +
+              tdR(fmt(totRetPat), true) +
+              td("", "") +
+              "</tr>";
+          }
 
           // --- HTML du bulletin ---
           var h =
@@ -19731,27 +19853,8 @@
               "<br><strong>Date d\u0027entr\u00e9e:</strong> " +
               dateEntreeB(emp) +
               "</div>";
-            var mfBul =
-              parseFloat(emp.montant_forfaitaire) ||
-              parseFloat(emp.salaire_base) ||
-              0;
-            var jExt = getExternJours(emp.id, mois);
-            var mfProrata =
-              jExt > 0 && jExt < 30 ? Math.round((mfBul * jExt) / 30) : mfBul;
-            h +=
-              "<div><strong>Forfait mensuel:</strong> " +
-              fmt(mfBul) +
-              " F" +
-              (jExt > 0 && jExt < 30
-                ? ' <span style="color:var(--dim)">(prorata ' +
-                  jExt +
-                  "j/30 = " +
-                  fmt(mfProrata) +
-                  " F)</span>"
-                : "") +
-              "<br><strong>Jours facturés:</strong> " +
-              (jExt > 0 ? jExt : 30) +
-              "j</div></div>";
+            // Détails (forfait, jours, prorata) affichés dans le tableau : on ferme juste la grille
+            h += "</div>";
           } else {
             h +=
               "<div><strong>Matricule:</strong> " +
@@ -19769,28 +19872,8 @@
               "</div>";
             var catBul2 = empCategorie(emp);
             if (catBul2 === "journalier") {
-              var stB = calc.stats || {};
-              var hsB =
-                (stB.hs15 || 0) +
-                (stB.hs50 || 0) +
-                (stB.hs75 || 0) +
-                (stB.hs100 || 0);
-              h +=
-                "<div><strong>Taux journalier:</strong> " +
-                fmt(calc.totals.tauxJ || 0) +
-                "<br><strong>Taux horaire:</strong> " +
-                fmt(calc.totals.th || 0) +
-                "<br>";
-              h +=
-                "<strong>Heures (Jour):</strong> " +
-                (stB.hJour || 0).toFixed(1) +
-                "h<br><strong>Heures (Nuit):</strong> " +
-                (stB.hNuit || 0).toFixed(1) +
-                "h<br><strong>Heures supp.:</strong> " +
-                hsB.toFixed(1) +
-                "h<br><strong>Prime du mois:</strong> " +
-                fmt(calc.totals.prime || 0) +
-                " F</div></div>";
+              // Détails (taux, heures, prime) affichés dans le tableau : on ferme juste la grille
+              h += "</div>";
             } else {
               var sitLabel = emp.situation_matrimoniale || "-";
               var nbEnfants =
@@ -19818,49 +19901,63 @@
             }
           }
 
-          // Tableau
+          // Tableau : 5 colonnes pour journalier/externe, 9 colonnes pour CDI/CDD
           h += bulDoublonsHtml(calc.items);
+          h += '<table style="width:100%;border-collapse:collapse;font-size:10.5px">';
+          if (isSimple) {
+            h +=
+              "<thead>" +
+              "<tr>" +
+              '<th style="' + B + 'text-align:left;padding:3px">DESIGNATION</th>' +
+              '<th style="' + B + 'text-align:right;padding:3px;width:90px">BASE</th>' +
+              '<th style="' + B + 'text-align:center;padding:3px;width:80px">NBRE/TAUX</th>' +
+              '<th style="' + B + 'text-align:right;padding:3px;width:90px">GAINS</th>' +
+              '<th style="' + B + 'text-align:right;padding:3px;width:90px">RETENUES</th>' +
+              "</tr>" +
+              "</thead>";
+          } else {
+            h +=
+              "<thead>" +
+              "<tr>" +
+              '<th rowspan="2" style="' +
+              B +
+              'text-align:center;padding:3px;width:28px">N°</th>' +
+              '<th rowspan="2" style="' +
+              B +
+              'text-align:left;padding:3px;width:200px">DESIGNATION</th>' +
+              '<th rowspan="2" style="' +
+              B +
+              'text-align:right;padding:3px;width:75px">BASE</th>' +
+              '<th colspan="2" style="' +
+              B +
+              'text-align:center;padding:3px">PART SALARIALE</th>' +
+              '<th colspan="3" style="' +
+              B +
+              'text-align:center;padding:3px">PART PATRONALE</th>' +
+              "</tr>" +
+              "<tr>" +
+              '<th style="' +
+              B +
+              'text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
+              '<th style="' +
+              B +
+              'text-align:right;padding:3px;width:65px">GAINS</th>' +
+              '<th style="' +
+              B +
+              'text-align:right;padding:3px;width:65px">RETENUE</th>' +
+              '<th style="' +
+              B +
+              'text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
+              '<th style="' +
+              B +
+              'text-align:right;padding:3px;width:65px">RETENUE</th>' +
+              '<th style="' +
+              B +
+              'text-align:center;padding:3px;width:30px"></th>' +
+              "</tr>" +
+              "</thead>";
+          }
           h +=
-            '<table style="width:100%;border-collapse:collapse;font-size:10.5px">' +
-            "<thead>" +
-            "<tr>" +
-            '<th rowspan="2" style="' +
-            B +
-            'text-align:center;padding:3px;width:28px">N°</th>' +
-            '<th rowspan="2" style="' +
-            B +
-            'text-align:left;padding:3px;width:200px">DESIGNATION</th>' +
-            '<th rowspan="2" style="' +
-            B +
-            'text-align:right;padding:3px;width:75px">BASE</th>' +
-            '<th colspan="2" style="' +
-            B +
-            'text-align:center;padding:3px">PART SALARIALE</th>' +
-            '<th colspan="3" style="' +
-            B +
-            'text-align:center;padding:3px">PART PATRONALE</th>' +
-            "</tr>" +
-            "<tr>" +
-            '<th style="' +
-            B +
-            'text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
-            '<th style="' +
-            B +
-            'text-align:right;padding:3px;width:65px">GAINS</th>' +
-            '<th style="' +
-            B +
-            'text-align:right;padding:3px;width:65px">RETENUE</th>' +
-            '<th style="' +
-            B +
-            'text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
-            '<th style="' +
-            B +
-            'text-align:right;padding:3px;width:65px">RETENUE</th>' +
-            '<th style="' +
-            B +
-            'text-align:center;padding:3px;width:30px"></th>' +
-            "</tr>" +
-            "</thead>" +
             "<tbody>" +
             rows +
             "</tbody>" +
@@ -24223,64 +24320,97 @@
           r += "</tr>";
           return r;
         }
+        var isSimpleP = empCategorie(emp) === "journalier" || empCategorie(emp) === "externe";
         var rowsP = "";
-        gainItemsP.forEach(function (i) {
-          rowsP += buildRowP(i);
-        });
-        rowsP +=
-          '<tr><td>40</td><td style="font-weight:bold;text-align:center">Total brut</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right;font-weight:700">' +
-          fmt(calc.totals.brut) +
-          '</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right"></td></tr>';
-        rowsP +=
-          '<tr><td>41</td><td style="font-weight:bold;text-align:center">Brut fiscal</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right;font-weight:700">' +
-          fmt(calc.totals.brutFiscal) +
-          '</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right"></td></tr>';
-        rowsP +=
-          '<tr><td>42</td><td style="font-weight:bold;text-align:center">Brut social</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right;font-weight:700">' +
-          fmt(calc.totals.brutSocial) +
-          '</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right"></td></tr>';
-        rowsP +=
-          '<tr style="background:#fef3c7"><td colspan="8" style="font-weight:800;font-size:10px;color:#92400e;letter-spacing:.5px">Cotisations & Retenues</td></tr>';
-        cotItemsP.forEach(function (i) {
-          rowsP += buildRowP(i);
-        });
-        var totGainP =
-          gainItemsP.reduce(function (s, i) {
-            return s + (i.gain > 0 ? i.gain : 0);
-          }, 0) + calc.totals.brut;
-        var totRetP = calc.items.reduce(function (s, i) {
-          return s + (i.ret > 0 ? i.ret : 0);
-        }, 0);
-        var totRetPatP = calc.items.reduce(function (s, i) {
-          return s + (i.retPat > 0 ? i.retPat : 0);
-        }, 0);
-        rowsP +=
-          '<tr><td></td><td></td><td></td><td></td><td style="text-align:right;font-weight:700">' +
-          fmt(totGainP) +
-          '</td><td style="text-align:right;font-weight:700">' +
-          fmt(totRetP) +
-          '</td><td></td><td style="text-align:right;font-weight:700">' +
-          fmt(totRetPatP) +
-          "</td></tr>";
+        var totGainP = 0, totRetP = 0, totRetPatP = 0;
+        if (isSimpleP) {
+          // Journalier / externe : mêmes lignes simplifiées qu'à l'écran (sans saisie)
+          var srowsP = getSimpleBulletinRows(emp, mois, calc);
+          srowsP.forEach(function (r) {
+            var bP = r.edit ? (r.baseVal > 0 ? fmt(r.baseVal) : "") : (r.base || "");
+            rowsP += "<tr><td>" + escH(r.label) + "</td><td style='text-align:right'>" + bP + "</td><td style='text-align:center'>" + escH(r.taux || "") + "</td><td style='text-align:right;font-weight:700'>" + (r.gain > 0 ? fmt(r.gain) : "") + "</td><td style='text-align:right;font-weight:700;color:#dc2626'>" + (r.ret > 0 ? fmt(r.ret) : "") + "</td></tr>";
+            totGainP += (r.gain > 0 ? r.gain : 0);
+            totRetP += (r.ret > 0 ? r.ret : 0);
+          });
+          rowsP +=
+            '<tr><td colspan="3" style="font-weight:700">TOTAL</td><td style="text-align:right;font-weight:700">' +
+            fmt(totGainP) +
+            '</td><td style="text-align:right;font-weight:700">' +
+            fmt(totRetP) +
+            "</td></tr>";
+        } else {
+          gainItemsP.forEach(function (i) {
+            rowsP += buildRowP(i);
+          });
+          rowsP +=
+            '<tr><td>40</td><td style="font-weight:bold;text-align:center">Total brut</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right;font-weight:700">' +
+            fmt(calc.totals.brut) +
+            '</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right"></td></tr>';
+          rowsP +=
+            '<tr><td>41</td><td style="font-weight:bold;text-align:center">Brut fiscal</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right;font-weight:700">' +
+            fmt(calc.totals.brutFiscal) +
+            '</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right"></td></tr>';
+          rowsP +=
+            '<tr><td>42</td><td style="font-weight:bold;text-align:center">Brut social</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right;font-weight:700">' +
+            fmt(calc.totals.brutSocial) +
+            '</td><td style="text-align:right"></td><td style="text-align:center"></td><td style="text-align:right"></td></tr>';
+          rowsP +=
+            '<tr style="background:#fef3c7"><td colspan="8" style="font-weight:800;font-size:10px;color:#92400e;letter-spacing:.5px">Cotisations & Retenues</td></tr>';
+          cotItemsP.forEach(function (i) {
+            rowsP += buildRowP(i);
+          });
+          totGainP =
+            gainItemsP.reduce(function (s, i) {
+              return s + (i.gain > 0 ? i.gain : 0);
+            }, 0) + calc.totals.brut;
+          totRetP = calc.items.reduce(function (s, i) {
+            return s + (i.ret > 0 ? i.ret : 0);
+          }, 0);
+          totRetPatP = calc.items.reduce(function (s, i) {
+            return s + (i.retPat > 0 ? i.retPat : 0);
+          }, 0);
+          rowsP +=
+            '<tr><td></td><td></td><td></td><td></td><td style="text-align:right;font-weight:700">' +
+            fmt(totGainP) +
+            '</td><td style="text-align:right;font-weight:700">' +
+            fmt(totRetP) +
+            '</td><td></td><td style="text-align:right;font-weight:700">' +
+            fmt(totRetPatP) +
+            "</td></tr>";
+        }
 
+        h += '<table style="width:100%;border-collapse:collapse;font-size:10.5px">';
+        if (isSimpleP) {
+          h +=
+            "<thead>" +
+            "<tr>" +
+            '<th style="border:1px solid #000;text-align:left;padding:3px">DESIGNATION</th>' +
+            '<th style="border:1px solid #000;text-align:right;padding:3px;width:75px">BASE</th>' +
+            '<th style="border:1px solid #000;text-align:center;padding:3px;width:65px">NBRE/TAUX</th>' +
+            '<th style="border:1px solid #000;text-align:right;padding:3px;width:75px">GAINS</th>' +
+            '<th style="border:1px solid #000;text-align:right;padding:3px;width:75px">RETENUES</th>' +
+            "</tr>" +
+            "</thead>";
+        } else {
+          h +=
+            "<thead>" +
+            "<tr>" +
+            '<th rowspan="2" style="border:1px solid #000;text-align:center;padding:3px;width:28px">N\u00b0</th>' +
+            '<th rowspan="2" style="border:1px solid #000;text-align:left;padding:3px;width:200px">DESIGNATION</th>' +
+            '<th rowspan="2" style="border:1px solid #000;text-align:right;padding:3px;width:75px">BASE</th>' +
+            '<th colspan="2" style="border:1px solid #000;text-align:center;padding:3px">PART SALARIALE</th>' +
+            '<th colspan="2" style="border:1px solid #000;text-align:center;padding:3px">PART PATRONALE</th>' +
+            "</tr>" +
+            "<tr>" +
+            '<th style="border:1px solid #000;text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
+            '<th style="border:1px solid #000;text-align:right;padding:3px;width:65px">GAINS</th>' +
+            '<th style="border:1px solid #000;text-align:right;padding:3px;width:65px">RETENUE</th>' +
+            '<th style="border:1px solid #000;text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
+            '<th style="border:1px solid #000;text-align:right;padding:3px;width:65px">RETENUE</th>' +
+            "</tr>" +
+            "</thead>";
+        }
         h +=
-          '<table style="width:100%;border-collapse:collapse;font-size:10.5px">' +
-          "<thead>" +
-          "<tr>" +
-          '<th rowspan="2" style="border:1px solid #000;text-align:center;padding:3px;width:28px">N\u00b0</th>' +
-          '<th rowspan="2" style="border:1px solid #000;text-align:left;padding:3px;width:200px">DESIGNATION</th>' +
-          '<th rowspan="2" style="border:1px solid #000;text-align:right;padding:3px;width:75px">BASE</th>' +
-          '<th colspan="2" style="border:1px solid #000;text-align:center;padding:3px">PART SALARIALE</th>' +
-          '<th colspan="2" style="border:1px solid #000;text-align:center;padding:3px">PART PATRONALE</th>' +
-          "</tr>" +
-          "<tr>" +
-          '<th style="border:1px solid #000;text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
-          '<th style="border:1px solid #000;text-align:right;padding:3px;width:65px">GAINS</th>' +
-          '<th style="border:1px solid #000;text-align:right;padding:3px;width:65px">RETENUE</th>' +
-          '<th style="border:1px solid #000;text-align:center;padding:3px;width:55px">Nbre/taux</th>' +
-          '<th style="border:1px solid #000;text-align:right;padding:3px;width:65px">RETENUE</th>' +
-          "</tr>" +
-          "</thead>" +
           "<tbody>" +
           rowsP +
           "</tbody>" +
