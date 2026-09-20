@@ -2977,6 +2977,50 @@ function csPeriodeBuildLibelle(base, mv) {
   if (!b) return base;
   return b + '/Mois de ' + label;
 }
+function csExtractPeriodeFromLibelle(lib) {
+  if (!lib) return '';
+  var s = String(lib).toLowerCase();
+  var mYm = s.match(/\b(20\d{2})[-/](0[1-9]|1[0-2])\b/);
+  if (mYm) return mYm[1] + '-' + mYm[2];
+  var mMm = s.match(/\b(0[1-9]|1[0-2])[-/](20\d{2})\b/);
+  if (mMm) return mMm[2] + '-' + mMm[1];
+  var monthMap = {
+    'janvier': '01', 'janv': '01', 'jan': '01',
+    'fevrier': '02', 'février': '02', 'fevr': '02', 'fev': '02',
+    'mars': '03', 'mar': '03',
+    'avril': '04', 'avr': '04',
+    'mai': '05',
+    'juin': '06', 'jun': '06',
+    'juillet': '07', 'juil': '07', 'jul': '07',
+    'aout': '08', 'août': '08', 'aou': '08', 'aû': '08',
+    'septembre': '09', 'sept': '09', 'sep': '09',
+    'octobre': '10', 'oct': '10',
+    'novembre': '11', 'nov': '11',
+    'decembre': '12', 'décembre': '12', 'dec': '12'
+  };
+  for (var mName in monthMap) {
+    var reg = new RegExp('\\b' + mName + '\\b.*?\\b(20\\d{2})\\b', 'i');
+    var match = s.match(reg);
+    if (match) return match[1] + '-' + monthMap[mName];
+  }
+  for (var mName in monthMap) {
+    var reg2 = new RegExp('\\b(20\\d{2})\\b.*?\\b' + mName + '\\b', 'i');
+    var match2 = s.match(reg2);
+    if (match2) return match2[1] + '-' + monthMap[mName];
+  }
+  return '';
+}
+function csExtractPeriodeFromOp(o) {
+  if (!o) return '';
+  if (o.periode && /^\d{4}-\d{2}$/.test(o.periode)) return o.periode;
+  if (o.mois && /^\d{4}-\d{2}$/.test(o.mois)) return o.mois;
+  if (o.apMoisDeduction && /^\d{4}-\d{2}$/.test(o.apMoisDeduction)) return o.apMoisDeduction;
+  if (o.libelle) {
+    var p = csExtractPeriodeFromLibelle(o.libelle);
+    if (p) return p;
+  }
+  return (o.date || '').substring(0, 7);
+}
 function updatePeriodeVisibility() {
   var col = document.getElementById('csColPeriode');
   if (!col) return;
@@ -15010,7 +15054,7 @@ function openAcomptePretCollectifModal(groupeId) {
   if (isEdit && groupAps.length > 0) masterDuree = groupAps[0].dureeMois || 0;
   var repartiTotal = 0;
   for (var rt = 0; rt < groupAps.length; rt++) repartiTotal += groupAps[rt].montant || 0;
-  var masterMois = (masterOp && masterOp.apMoisDeduction) ? masterOp.apMoisDeduction : (groupAps.length > 0 && groupAps[0].moisDeduction ? groupAps[0].moisDeduction : '');
+  var masterMois = (masterOp && masterOp.apMoisDeduction) ? masterOp.apMoisDeduction : (groupAps.length > 0 && groupAps[0].moisDeduction ? groupAps[0].moisDeduction : (masterOp ? csExtractPeriodeFromOp(masterOp) : ''));
   var moisLabel = masterType === 'pret' ? 'Mois d\u00e9but pr\u00e9l\u00e8vement' : 'Mois de d\u00e9duction';
   var html = '';
   if (isEdit && masterOp) {
@@ -15840,21 +15884,28 @@ function openSoldeGroupeEdit(opId) {
   if (!o) return;
   var code = o.code || '';
   var codeId = o.codeId || '';
-  var period = (o.date || '').substring(0, 7);
+  var period = csExtractPeriodeFromOp(o) || (o.date || '').substring(0, 7);
   var fullDate = o.date || getToday();
   var caisseId = o.caisseId || '';
   if (!code || !period) { toast('Impossible de détecter la période', 'error'); return; }
-  /* Chercher TOUTES les opérations de même code et même mois */
+  /* Chercher TOUTES les opérations de même code et même période (ou même groupeId) */
   var related = [];
   for (var j = 0; j < ops.length; j++) {
-    if (ops[j].code === code && (ops[j].date || '').substring(0, 7) === period) related.push(ops[j]);
+    if (ops[j].code === code) {
+      if (o.groupeId && ops[j].groupeId && ops[j].groupeId === o.groupeId) {
+        related.push(ops[j]);
+      } else {
+        var opPeriod = csExtractPeriodeFromOp(ops[j]) || (ops[j].date || '').substring(0, 7);
+        if (opPeriod === period) related.push(ops[j]);
+      }
+    }
   }
   if (related.length === 0) { related.push(o); }
   /* Trier par nom d'employé */
   related.sort(function(a, b) { return (a.beneficiaireNom || '').localeCompare(b.beneficiaireNom || ''); });
   var total = 0;
   for (var k = 0; k < related.length; k++) total += (related[k].montant || 0);
-  var moisLabel = typeof fmtMois === 'function' ? fmtMois(period) : period;
+  var moisLabel = csPeriodeMonthLabel(period) || (typeof fmtMois === 'function' ? fmtMois(period) : period);
   var employes = getEmployes();
   employes.sort(function(a, b) { return (a.nom || '').localeCompare(b.nom || ''); });
   /* Construire les options employé une fois pour toutes */
@@ -16011,6 +16062,7 @@ function saveSoldeGroupeEdits() {
           ops[j].moyenPaiement = moy;
           ops[j].numeroTransaction = numTx;
           ops[j].observations = obs;
+          ops[j].periode = period;
           updated++;
           break;
         }
@@ -16028,6 +16080,7 @@ function saveSoldeGroupeEdits() {
       ops.push({
         id: DB.genId(), numeroPiece: np, date: fullDate,
         heure: '', codeId: codeId, code: code, libelle: libelle,
+        periode: period,
         montant: montant, sens: 'sortie', moyenPaiement: moy, numeroTransaction: numTx,
         beneficiaireType: 'employe', beneficiaireId: empId, beneficiaireNom: empNom,
         observations: obs, remettant: rem, executant: '', imprime: false,
@@ -24358,6 +24411,11 @@ function editCaisseOpSimple(id) {
   toggleTransNum();
   if (transEl && o.numeroTransaction) transEl.value = o.numeroTransaction;
   if (tiersEl) tiersEl.value = o.observations || '';
+  var periodeMoisEl = document.getElementById('csPeriodeMois');
+  if (periodeMoisEl && typeof csExtractPeriodeFromOp === 'function') {
+    var pExtracted = csExtractPeriodeFromOp(o);
+    if (pExtracted) periodeMoisEl.value = pExtracted;
+  }
   /* Restore montantCharge */
   var chargeEl = document.getElementById('csMontantCharge');
   if (chargeEl) chargeEl.value = o.montantCharge || 0;
