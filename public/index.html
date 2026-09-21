@@ -1609,6 +1609,10 @@ setTimeout(function () {
     }} catch (eVS) {}
 }, 500);
 var BACKUP_MAX_VERSIONS = 2;
+/* Garde-fou cloud : au-dela de ce poids, le push SILENCIEUX (auto) est ignore
+   avec alerte (un snapshot de 300 Mo pousse toutes les heures = egress explose).
+   Le push MANUEL reste possible (choix explicite, taille affichee). */
+var CLOUD_PUSH_MAX_BYTES = 50 * 1024 * 1024;
 function getBackupMeta() {
   try { return JSON.parse(localStorage.getItem('mdb_backup_meta')) || []; } catch(e) { return []; }
 }
@@ -1774,13 +1778,18 @@ function pushBackupToCloud(slotIndex) {
     var backup = JSON.parse(localStorage.getItem('mdb_backup_' + entry.index));
     if (!backup) { toast('Donn\u00e9es introuvables', 'error'); return; }
     var ts = entry.ts;
+    var _wBytes = 0;
+    try { _wBytes = JSON.stringify(backup).length; } catch(eWB) {}
+    if (_wBytes > CLOUD_PUSH_MAX_BYTES) {
+      try { toast('Attention : snapshot de ' + Math.round(_wBytes / 1048576) + ' Mo — push cloud manuel quand meme', 'error'); } catch(eWM) {}
+    }
     firebaseDb.collection('enterprises').doc(currentUser.id).collection('backups').doc(String(ts)).set({
       data: backup,
       createdAt: new Date(ts).toISOString(),
       size: entry.size,
       keys: entry.keys
     }).then(function() {
-      toast('Sauvegarde envoy\u00e9e vers le cloud');
+      toast('Sauvegarde envoyée vers le cloud' + (_wBytes > 1048576 ? ' (' + Math.round(_wBytes / 1048576) + ' Mo)' : ''));
     }).catch(function(e) {
       toast('Erreur cloud: ' + e.message, 'error');
     });
@@ -1799,7 +1808,18 @@ function silentCloudBackup() {
     var newest = meta.reduce(function(aX, bX) { return (bX.ts > aX.ts) ? bX : aX; }, meta[0]);
     var backup = JSON.parse(localStorage.getItem('mdb_backup_' + newest.index));
     if (!backup) return;
-    var _newHash = JSON.stringify(backup).length + '|' + (newest.ts||0);
+    var _jsonBackup = '';
+    try { _jsonBackup = JSON.stringify(backup); } catch(eSJ) { return; }
+    /* Garde-fou : jamais de push silencieux d'un snapshot geant (egress) */
+    if (_jsonBackup.length > CLOUD_PUSH_MAX_BYTES) {
+      if (!window._lastHeavyWarn || Date.now() - window._lastHeavyWarn > 24 * 3600 * 1000) {
+        window._lastHeavyWarn = Date.now();
+        try { toast('Snapshot trop lourd (' + Math.round(_jsonBackup.length / 1048576) + ' Mo) : push cloud auto ignore — purgez les vieux snapshots / l\'historique', 'error'); } catch(eHW) {}
+      }
+      console.warn('[MDB] Push cloud silencieux ignore : snapshot de ' + Math.round(_jsonBackup.length / 1048576) + ' Mo > ' + Math.round(CLOUD_PUSH_MAX_BYTES / 1048576) + ' Mo.');
+      return;
+    }
+    var _newHash = _jsonBackup.length + '|' + (newest.ts||0);
     if (window._lastBackupHash && window._lastBackupHash === _newHash) return;
     window._lastBackupHash = _newHash;
     var tsX = newest.ts;
@@ -1863,15 +1883,26 @@ function pruneCloudBackups() {
     var _keep = (typeof BACKUP_MAX_VERSIONS === 'number' && BACKUP_MAX_VERSIONS > 0) ? BACKUP_MAX_VERSIONS : 2;
     window.SB_CLIENT.from('backups').select('ts').eq('enterprise_id', _uid).order('ts', { ascending: false }).then(function(res) {
       var rows = (res && res.data) || [];
-      if (!res.error && rows.length > _keep) {
-        for (var di = _keep; di < rows.length; di++) {
-          (function(_ts) {
-            window.SB_CLIENT.from('backups').delete().eq('enterprise_id', _uid).eq('ts', _ts).then(function(){}, function(){});
-          })(rows[di].ts);
-        }
-        console.log('[MDB] Rotation cloud backups: ' + (rows.length - _keep) + ' ancien(s) supprime(s), ' + _keep + ' garde(s).');
+      if (res && res.error) { console.warn('[MDB] Rotation cloud backups: lecture impossible: ' + (res.error.message || JSON.stringify(res.error))); return; }
+      if (rows.length <= _keep) { console.log('[MDB] Rotation cloud backups: rien a purger (' + rows.length + ' snapshot(s), garde ' + _keep + ').'); return; }
+      var _total = rows.length - _keep, _ok = 0, _ko = 0, _firstErr = '';
+      var _done1 = function() {
+        console.log('[MDB] Rotation cloud backups: ' + _ok + ' supprime(s), ' + _ko + ' echec(s) sur ' + _total + ' (garde ' + _keep + ').' + (_firstErr ? ' Premiere erreur: ' + _firstErr : ''));
+        if (_ko > 0) { try { toast('Purge cloud: ' + _ko + ' suppression(s) en echec — verifiez les droits Supabase (RLS DELETE)', 'error'); } catch(eT) {} }
+      };
+      for (var di = _keep; di < rows.length; di++) {
+        (function(_ts) {
+          window.SB_CLIENT.from('backups').delete().eq('enterprise_id', _uid).eq('ts', _ts).then(function(r2) {
+            if (r2 && r2.error) { _ko++; if (!_firstErr) _firstErr = (r2.error.message || JSON.stringify(r2.error)); }
+            else _ok++;
+            if (_ok + _ko === _total) _done1();
+          }, function(eD) {
+            _ko++; if (!_firstErr) _firstErr = (eD && eD.message) || String(eD);
+            if (_ok + _ko === _total) _done1();
+          });
+        })(rows[di].ts);
       }
-    }).catch(function(){});
+    }).catch(function(eC) { console.warn('[MDB] Rotation cloud backups: ' + ((eC && eC.message) || eC)); });
   } catch(ePCB) {}
 }
 function startAutoBackup() {
