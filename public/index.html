@@ -1457,8 +1457,18 @@ function pushToCloud() {
   var ind = document.getElementById('syncIndicator');
   if (ind) ind.textContent = '\u21bb Sync...';
   /* Convergence : lire le cloud d'abord et FUSIONNER (union par ID, la version locale gagne)
-     pour qu'un appareil ou onglet périmé ne puisse plus écraser des données récentes. */
-  firebaseDb.collection('enterprises').doc(currentUser.id).get().then(function(doc) {
+     pour qu'un appareil ou onglet périmé ne puisse plus écraser des données récentes.
+     Anti-egress : si le snapshot temps reel vient de livrer l'etat cloud (<25s), on le
+     reutilise au lieu de re-telecharger tout le document a chaque ecriture. */
+  var _cloudP;
+  try {
+    if (window._lastCloudData && window._lastCloudAt && (Date.now() - window._lastCloudAt) < 25000) {
+      _cloudP = Promise.resolve({ exists: true, data: function() { return window._lastCloudData; } });
+    } else {
+      _cloudP = firebaseDb.collection('enterprises').doc(currentUser.id).get();
+    }
+  } catch(eCP) { _cloudP = firebaseDb.collection('enterprises').doc(currentUser.id).get(); }
+  _cloudP.then(function(doc) {
     var cloud = (doc && doc.exists) ? doc.data() : {};
     var data = {};
     for (var i = 0; i < batch.length; i++) {
@@ -1688,6 +1698,7 @@ function createFullBackup() {
         var refB = firebaseDb.collection('enterprises').doc(currentUser.id).collection('backups').doc(String(newEntry.ts));
         refB.set({data: backup, createdAt: new Date(newEntry.ts).toISOString(), size: newEntry.size, keys: newEntry.keys});
       } catch(e) {}
+      try { pruneCloudBackups(); } catch(ePB) {}
     }
   } catch(e) {}
 }
@@ -1840,11 +1851,34 @@ function renderBackupManager() {
   html += '</div></div>';
   return html;
 }
+/* Rotation cloud des sauvegardes : la table `backups` grossissait sans limite
+   (un snapshot complet toutes les 30 min) -> Database Size a 182% du quota gratuit.
+   On ne telecharge que les timestamps (select ts = quelques octets, egress negligeable)
+   puis on supprime tout sauf les BACKUP_MAX_VERSIONS plus recents. */
+function pruneCloudBackups() {
+  try {
+    if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
+    if (!currentUser || !currentUser.id || !window.SB_CLIENT) return;
+    var _uid = currentUser.id;
+    var _keep = (typeof BACKUP_MAX_VERSIONS === 'number' && BACKUP_MAX_VERSIONS > 0) ? BACKUP_MAX_VERSIONS : 2;
+    window.SB_CLIENT.from('backups').select('ts').eq('enterprise_id', _uid).order('ts', { ascending: false }).then(function(res) {
+      var rows = (res && res.data) || [];
+      if (!res.error && rows.length > _keep) {
+        for (var di = _keep; di < rows.length; di++) {
+          (function(_ts) {
+            window.SB_CLIENT.from('backups').delete().eq('enterprise_id', _uid).eq('ts', _ts).then(function(){}, function(){});
+          })(rows[di].ts);
+        }
+        console.log('[MDB] Rotation cloud backups: ' + (rows.length - _keep) + ' ancien(s) supprime(s), ' + _keep + ' garde(s).');
+      }
+    }).catch(function(){});
+  } catch(ePCB) {}
+}
 function startAutoBackup() {
   if (_autoBackupTimer) return;
   _autoBackupTimer = setInterval(function() {
     if (currentUser && currentUser.id) createFullBackup();
-  }, 1800000);
+  }, 14400000); /* 4h (etait 30 min : chaque snapshot partait au cloud sans rotation) */
 }
 
 /* ===== Pierres tombales : les suppressions sont mémorisées pour ne jamais ressusciter ===== */
@@ -3931,6 +3965,7 @@ function doFirebaseLoginInner() {
           window._freshLogin = true;
           try { showApp(); if(window._mdbFatal) _mdbFatal('\u2705 CONNEXION R\u00c9USSIE \u2014 app ouverte (page=' + currentPage + ')'); } catch(eSA) { console.error('[Login] showApp error:', eSA); if(window._mdbFatal) _mdbFatal('ERREUR showApp: ' + String((eSA&&eSA.stack)||eSA).slice(0,600)); }
           startRealtimeSync(adminUid);
+          try { setTimeout(function(){ pruneCloudBackups(); }, 15000); } catch(ePCB2) {}
           _receivingSnapshot = false;
         });
     }).catch(function(e) {
@@ -4676,6 +4711,7 @@ function startRealtimeSync(uid) {
     if (!doc.exists) return;
     window._syncApplying = true;
     var data = doc.data();
+    try { window._lastCloudData = data; window._lastCloudAt = Date.now(); } catch(eLC) {} /* Cache anti-egress pour pushToCloud */
     _receivingSnapshot = true;
     try {
     var changed = false;
