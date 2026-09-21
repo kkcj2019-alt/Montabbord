@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-08-31-01';try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION); location.reload(true);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-21-05';try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION); location.reload(true);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbCheckVersion(){
@@ -9211,8 +9211,9 @@ function onHdrPeriodChange() {
   var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo');
   DB.set('mdb_dashRange', { from: fEl ? fEl.value : '', to: tEl ? tEl.value : '' });
   if (currentPage === 'dashboard') renderDashboard();
+  else if (currentPage === 'tresorerie' && typeof renderTresorerieActiveTab === 'function') renderTresorerieActiveTab();
 }
-function resetHdrPeriod() { DB.set('mdb_dashRange', {}); if (currentPage === 'dashboard') renderDashboard(); else { var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo'); if (fEl) fEl.value = ''; if (tEl) tEl.value = ''; } }
+function resetHdrPeriod() { DB.set('mdb_dashRange', {}); if (currentPage === 'dashboard') renderDashboard(); else if (currentPage === 'tresorerie' && typeof renderTresorerieActiveTab === 'function') renderTresorerieActiveTab(); else { var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo'); if (fEl) fEl.value = ''; if (tEl) tEl.value = ''; } }
 function onHeaderPeriodeChange() { if (currentPage === 'dashboard') renderDashboard(); }
 // Boutons "+ Saisie caisse" du tableau de bord : ouvrent directement une fenêtre avec le même
 // formulaire "Saisie rapide" du module Trésorerie (types libre/acompte/pret/fournisseur/client...),
@@ -14615,7 +14616,7 @@ function renderAcomptesPrets() {
       '<td class="text-right fw-600" style="color:var(--warning)">' + fmtMoney(po2.montant || 0) + '</td>' +
       '<td>-</td>' +
       '<td><span class="badge badge-warning">En attente</span></td>' +
-      '<td><button class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px" onclick="openAcomptePretCollectifModal(\'' + po2.groupeId + '\')">R\u00e9partir</button></td></tr>';
+      '<td><button class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px" onclick="openCollectifNewUIByGroupe(\'' + po2.groupeId + '\')">R\u00e9partir</button></td></tr>';
   }
   for (var i = 0; i < acomptes.length; i++) {
     var a4 = acomptes[i];
@@ -14983,8 +14984,8 @@ function toggleApPreleve(id, empId) {
 function openAcomptePretModal(id) {
   var a = null;
   if (id) { var list = DB.get('mdb_acomptesPrets') || []; for (var i = 0; i < list.length; i++) { if (list[i].id === id) { a = list[i]; break; } } }
-  /* Acompte issu d'une remise collective : ouvrir le modal collectif du groupe */
-  if (a && a.groupeId) { window._apFromCaisse = false; openAcomptePretCollectifModal(a.groupeId); return; }
+  /* Acompte issu d'une remise collective : ouvrir la nouvelle UI collective du groupe (plus d'ancien modal) */
+  if (a && a.groupeId) { openCollectifNewUIByGroupe(a.groupeId); return; }
   var employes = getEmployes();
   /* Pré-remplissage Exécutant : fiche, sinon opération de caisse liée, sinon vide */
   var execPrefill = (a && a.executant) ? a.executant : '';
@@ -24386,6 +24387,13 @@ function renderCaisseIn(el) {
   var ops = [];
   var opsBefore = [];
   var _seenOpIds = {};
+  /* Plage perso barre haute (jj/mm/aaaa) : filtre aussi la vue caisse (solde début = tout ce qui précède la plage) */
+  var _drgF = {};
+  try { _drgF = DB.get('mdb_dashRange') || {}; } catch(eDR) {}
+  var rangeFrom = _drgF.from || '', rangeTo = _drgF.to || '';
+  var rangeActive = !!(rangeFrom || rangeTo);
+  window._csRangeActive = rangeActive;
+  window._csRangeLabel = rangeActive ? ('Plage du ' + (rangeFrom ? rangeFrom.split('-').reverse().join('/') : '…') + ' au ' + (rangeTo ? rangeTo.split('-').reverse().join('/') : '…')) : '';
   for (var fi = 0; fi < allOps.length; fi++) {
     /* Anti-doublon changement de caisse : une même opération (même id) ne doit jamais s'afficher 2 fois dans une vue */
     var _oidX = allOps[fi].id;
@@ -24396,7 +24404,14 @@ function renderCaisseIn(el) {
     if (!canSeeAll && !canUserAccessCaisse(currentUser, ocId2)) { continue; }
     if (!caisseMatch) continue;
     if (allPeriods) { ops.push(allOps[fi]); continue; }
-    if (opDate.indexOf(prefix) === 0) ops.push(allOps[fi]);
+    if (opDate.indexOf(prefix) === 0) {
+      if (rangeActive && ((rangeFrom && opDate < rangeFrom) || (rangeTo && opDate > rangeTo))) {
+        /* Avant la plage : compte dans le solde début (cohérence du solde fin) ; après : exclu */
+        if (rangeFrom && opDate < rangeFrom && !allOps[fi].brouillon) opsBefore.push(allOps[fi]);
+        continue;
+      }
+      ops.push(allOps[fi]);
+    }
     else if (opDate < prefix + '-32' && !allOps[fi].brouillon) opsBefore.push(allOps[fi]);
   }
   var totalEntrees = 0, totalSorties = 0, totalFraisMois = 0;
@@ -24435,6 +24450,9 @@ function renderCaisseIn(el) {
   html += '<span style="font-size:10px;color:#94a3b8;display:flex;align-items:center;gap:4px"><kbd style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:3px;padding:1px 5px;font-size:10px;font-family:inherit">Entr\u00e9e</kbd> valider</span>';
   html += '</div>';
   html += '</div>';
+  if (rangeActive) {
+    html += '<div style="margin:-2px 0 8px;padding:6px 10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:11px;color:#1d4ed8;display:flex;align-items:center;gap:8px;flex-wrap:wrap">\uD83D\uDD0E ' + escH(window._csRangeLabel) + ' \u2014 tableau et totaux filtr\u00e9s sur cette plage<button class="btn btn-outline btn-sm" onclick="resetHdrPeriod()" style="font-size:10px;padding:2px 8px">Reset plage</button></div>';
+  }
   var alrtesRep = DB.get('mdb_alertesRepartition') || {};
   var disEqAlerte = null;
   for (var _ak2 in alrtesRep) {
@@ -24991,6 +25009,40 @@ function toggleSaisieForm() {
 /* Édition d'une pièce collective (acompte/prêt) dans la NOUVELLE UI : pré-remplit le
    formulaire + le tableau collectif puis ouvre la grande modale (comme à la création).
    Retourne true si pris en charge, false pour repli vers l'ancien éditeur. */
+/* Ouvre TOUJOURS la nouvelle UI de remise collective (l'ancien modal apc ne doit plus réapparaître) :
+   retrouve la pièce par groupeId (ou id), navigue vers Trésorerie si besoin, puis pré-remplit l'éditeur. */
+function openCollectifNewUIByGroupe(groupeId) {
+  try {
+    if (!groupeId) { toast('Groupe collectif introuvable', 'error'); return false; }
+    var opsAll = getOperationsCaisse();
+    var target = null, i;
+    for (i = 0; i < opsAll.length; i++) { if (opsAll[i].groupeId === groupeId) { target = opsAll[i]; break; } }
+    if (!target) { for (i = 0; i < opsAll.length; i++) { if (opsAll[i].id === groupeId) { target = opsAll[i]; break; } } }
+    if (!target) { toast('Pi\u00e8ce collective introuvable en caisse', 'error'); return false; }
+    window._apFromCaisse = true;
+    var needNav = (typeof currentPage === 'undefined' || currentPage !== 'tresorerie') || !document.getElementById('csCollectifBody');
+    if (needNav && typeof navigateTo === 'function') {
+      try {
+        try { window._tresorerieTab = ''; } catch(eT0) {}
+        navigateTo('tresorerie');
+      } catch(eN) {}
+    }
+    try { if (typeof editCaisseCollectifNewUI === 'function' && editCaisseCollectifNewUI(target.id)) return true; } catch(eE) {}
+    /* Dernier recours : réessai court après rendu (navigation éventuellement asynchrone) */
+    try {
+      var _tid = target.id;
+      setTimeout(function() {
+        try {
+          if (!document.getElementById('csCollectifBody')) { toast('Impossible d\u2019ouvrir la remise collective', 'error'); return; }
+          if (typeof editCaisseCollectifNewUI === 'function' && !editCaisseCollectifNewUI(_tid)) toast('Remise collective non \u00e9ditable pour cette p\u00e9riode', 'error');
+        } catch(eR) {}
+      }, 400);
+      return true;
+    } catch(eT) {}
+    toast('Impossible d\u2019ouvrir la remise collective', 'error');
+    return false;
+  } catch(eO) { try { toast('Impossible d\u2019ouvrir la remise collective', 'error'); } catch(eT2) {} return false; }
+}
 function editCaisseCollectifNewUI(opId) {
   try {
     var opsAll = getOperationsCaisse();
@@ -25103,11 +25155,11 @@ function editCaisseOp(id) {
   var o = null;
   for (var i = 0; i < ops.length; i++) { if (ops[i].id === id) { o = ops[i]; break; } }
   if (!o) return;
-  /* Remise collective acompte/prêt : nouvelle UI pré-remplie (grande modale) ; repli ancien éditeur sinon */
+  /* Remise collective acompte/prêt : nouvelle UI pré-remplie ; jamais l'ancien éditeur */
   if (o.collective) {
     window._apFromCaisse = true;
     try { if (typeof editCaisseCollectifNewUI === 'function' && editCaisseCollectifNewUI(o.id)) return; } catch(eECN) { console.warn('[Edit] collectif:', eECN); }
-    openAcomptePretCollectifModal(o.groupeId || o.id);
+    try { toast('Remise collective non \u00e9ditable pour cette p\u00e9riode', 'error'); } catch(eTE) {}
     return;
   }
   /* Solde salaire/indemnité : toujours ouvrir le modal groupé (permet d'ajouter d'autres employés) */
