@@ -15231,17 +15231,36 @@ function openAcomptePretCollectifModal(groupeId) {
   var groupAps = [];
   var masterOp = null;
   var isEdit = !!groupeId;
+  var pieceNo = '';
+  var groupOpsModal = [];
   if (isEdit) {
     var apAll = DB.get('mdb_acomptesPrets') || [];
-    for (var gi = 0; gi < apAll.length; gi++) { if (apAll[gi].groupeId === groupeId) groupAps.push(apAll[gi]); }
     var opsAll = getOperationsCaisse();
     for (var go = 0; go < opsAll.length; go++) { if (opsAll[go].groupeId === groupeId) { masterOp = opsAll[go]; break; } }
+    /* REPLI 1 : entrée via un op sans groupeId (on a reçu o.id) → cet op devient masterOp */
+    if (!masterOp) { for (var go2 = 0; go2 < opsAll.length; go2++) { if (opsAll[go2].id === groupeId) { masterOp = opsAll[go2]; break; } } }
+    for (var gi = 0; gi < apAll.length; gi++) { if (apAll[gi].groupeId === groupeId) groupAps.push(apAll[gi]); }
+    pieceNo = (masterOp && masterOp.numeroPiece) || (groupAps.length > 0 ? (groupAps[0].numeroPiece || '') : '');
+    if (groupAps.length === 0 && pieceNo) {
+      var rebased = false;
+      /* REPLI 2b : des fiches partagent ce n° de pièce sous un AUTRE groupeId → adopter ce groupe */
+      for (var gi2 = 0; gi2 < apAll.length; gi2++) {
+        if (apAll[gi2].numeroPiece === pieceNo && apAll[gi2].groupeId && apAll[gi2].groupeId !== groupeId) { groupeId = apAll[gi2].groupeId; rebased = true; break; }
+      }
+      if (rebased) { for (var gi4 = 0; gi4 < apAll.length; gi4++) { if (apAll[gi4].groupeId === groupeId) groupAps.push(apAll[gi4]); } }
+      /* REPLI 2 : fiches sans groupeId mais même n° de pièce → adopter */
+      else { for (var gi3 = 0; gi3 < apAll.length; gi3++) { if (!apAll[gi3].groupeId && apAll[gi3].numeroPiece === pieceNo) groupAps.push(apAll[gi3]); } }
+    }
   }
   /* Total de la pièce = somme des opérations du groupe (une par employé, même numéro de pièce) */
   var groupTotal = 0;
   if (isEdit) {
     var opsAllT = getOperationsCaisse();
-    for (var goto = 0; goto < opsAllT.length; goto++) { if (opsAllT[goto].groupeId === groupeId) groupTotal += (opsAllT[goto].montant || 0); }
+    for (var goto = 0; goto < opsAllT.length; goto++) {
+      var _ot = opsAllT[goto];
+      if (_ot.groupeId === groupeId) { groupTotal += (_ot.montant || 0); groupOpsModal.push(_ot); }
+      else if (pieceNo && !_ot.groupeId && _ot.numeroPiece === pieceNo) { groupTotal += (_ot.montant || 0); groupOpsModal.push(_ot); }
+    }
   }
   var masterType = 'acompte';
   if (isEdit && masterOp && masterOp.apType) masterType = masterOp.apType;
@@ -15302,6 +15321,15 @@ function openAcomptePretCollectifModal(groupeId) {
     tbody.parentNode.appendChild(remDl);
     var prefills = {};
     for (var pf = 0; pf < groupAps.length; pf++) prefills[groupAps[pf].employeId] = groupAps[pf];
+    /* REPLI 3 : opérations de la pièce sans fiche (lots anciens) → lignes pré-remplies */
+    for (var go4 = 0; go4 < groupOpsModal.length; go4++) {
+      (function(_op) {
+        if (!_op.beneficiaireId || _op.pendingDetail || prefills[_op.beneficiaireId]) return;
+        var _moy = _op.moyenPaiement || '';
+        if (_op.numeroTransaction) _moy += '/' + _op.numeroTransaction;
+        prefills[_op.beneficiaireId] = { employeId: _op.beneficiaireId, employeNom: _op.beneficiaireNom || '', montant: _op.montant || 0, dureeMois: 0, montantMensuel: 0, moisDeduction: _op.apMoisDeduction || (typeof masterMois !== 'undefined' ? masterMois : '') || '', moyen: _moy, remettant: _op.remettant || '', executant: _op.executant || '', notes: _op.observations || '' };
+      })(groupOpsModal[go4]);
+    }
     var empById = {};
     for (var ebi = 0; ebi < employes.length; ebi++) empById[employes[ebi].id] = employes[ebi];
     var masterRemettant = (masterOp && masterOp.remettant) || '';
@@ -15944,6 +15972,13 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
   var groupOps = [];
   var pieceTotal = 0;
   for (var gpi = 0; gpi < ops.length; gpi++) { if (ops[gpi].groupeId === groupeId) { groupOps.push(ops[gpi]); pieceTotal += (ops[gpi].montant || 0); } }
+  /* REPLI pièces anciennes : opérations sans groupeId mais même numéro de pièce */
+  if (groupOps.length === 0) {
+    var _npR = (masterOp && masterOp.numeroPiece) || '';
+    if (!_npR) { var _lr0 = DB.get('mdb_acomptesPrets') || []; for (var _k0 = 0; _k0 < _lr0.length; _k0++) { if (_lr0[_k0].groupeId === groupeId && _lr0[_k0].numeroPiece) { _npR = _lr0[_k0].numeroPiece; break; } } }
+    if (_npR) { for (var gpi2 = 0; gpi2 < ops.length; gpi2++) { if (!ops[gpi2].groupeId && ops[gpi2].numeroPiece === _npR) { groupOps.push(ops[gpi2]); pieceTotal += (ops[gpi2].montant || 0); } } }
+  }
+  if (!masterOp && groupOps.length > 0) masterOp = groupOps[0];
   /* \u00c9quilibre : pour une r\u00e9partition d'une pi\u00e8ce existante, on signale le d\u00e9s\u00e9quilibre mais on permet quand m\u00eame de valider */
   var repartitionDesequilibree = groupOps.length > 0 && pieceTotal > 0 && Math.abs(total - pieceTotal) > 0.009;
   if (repartitionDesequilibree) {
@@ -15960,6 +15995,7 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
   /* Num\u00e9ro de pi\u00e8ce : partag\u00e9 par toutes les op\u00e9rations du groupe */
   var np = masterOp ? (masterOp.numeroPiece || '') : '';
   if (!np && groupOps.length > 0) np = groupOps[0].numeroPiece || '';
+  if (!np) { var _lrN = DB.get('mdb_acomptesPrets') || []; for (var _kn = 0; _kn < _lrN.length; _kn++) { if (_lrN[_kn].groupeId === groupeId && _lrN[_kn].numeroPiece) { np = _lrN[_kn].numeroPiece; break; } } }
   if (!np) np = generatePieceNumber(defaultCaisseId, opDate);
   /* Code caisse (ACOMPTE/PRET) : conserver celui s\u00e9lectionn\u00e9 sinon r\u00e9soudre automatiquement pour ne jamais perdre le code */
   var apCodeId = '';
@@ -16020,7 +16056,7 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
         if (mensEl2 && parseFloat(mensEl2.value) > 0) mensualite = Math.round(parseFloat(mensEl2.value));
       }
       var existingIdx = -1;
-      for (var eai = 0; eai < list.length; eai++) { if (list[eai].groupeId === groupeId && list[eai].employeId === empId2) { existingIdx = eai; break; } }
+      for (var eai = 0; eai < list.length; eai++) { if ((list[eai].groupeId === groupeId || (!list[eai].groupeId && np && list[eai].numeroPiece === np)) && list[eai].employeId === empId2) { existingIdx = eai; break; } }
       /* Opération caisse propre à l'employé (même numéro de pièce partagé par tout le groupe) */
       var opRow = null;
       for (var gro = 0; gro < groupOps.length; gro++) { if (groupOps[gro].beneficiaireId === empId2) { opRow = groupOps[gro]; break; } }
@@ -16041,6 +16077,7 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
         opRow.apType = type;
         opRow.apMoisDeduction = moisDed2;
         opRow.pendingDetail = false;
+        opRow.groupeId = opRow.groupeId || groupeId;
         opRow.caisseId = defaultCaisseId;
       } else {
         opRow = {id: DB.genId(), numeroPiece: np, date: opDate, heure: '', codeId: apCodeId, code: apCodeLabel, libelle: opLib, montant: montant2, sens: 'sortie', moyenPaiement: moyen2, numeroTransaction: numTrans || numeroTransaction, beneficiaireType: 'employe', beneficiaireId: empId2, beneficiaireNom: empNom, observations: obs2 || notes, remettant: rem2, executant: exe2, imprime: false, montantCharge: 0, caisseId: defaultCaisseId, reversed: false, collective: true, groupeId: groupeId, pendingDetail: false, apType: type, apMoisDeduction: moisDed2};
