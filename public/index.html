@@ -14975,6 +14975,12 @@ function openAcomptePretModal(id) {
   /* Acompte issu d'une remise collective : ouvrir le modal collectif du groupe */
   if (a && a.groupeId) { window._apFromCaisse = false; openAcomptePretCollectifModal(a.groupeId); return; }
   var employes = getEmployes();
+  /* Pré-remplissage Exécutant : fiche, sinon opération de caisse liée, sinon vide */
+  var execPrefill = (a && a.executant) ? a.executant : '';
+  if (!execPrefill && a && a.caisseOpId) {
+    var _opsEx = getOperationsCaisse();
+    for (var ox = 0; ox < _opsEx.length; ox++) { if (_opsEx[ox].id === a.caisseOpId && _opsEx[ox].executant) { execPrefill = _opsEx[ox].executant; break; } }
+  }
   var html = '';
   html += '<div class="form-group"><label>Type *</label><select id="apType"><option value="acompte"' + (a && a.type === 'acompte' ? ' selected' : '') + '>Acompte</option><option value="pret"' + (a && a.type === 'pret' ? ' selected' : '') + '>Pr\u00eat</option></select></div>';
   html += '<div id="apIndivFields">';
@@ -14992,6 +14998,7 @@ function openAcomptePretModal(id) {
         + '</div>';
   html += '<div class="form-group"><label>Motif</label><input type="text" id="apMotif" value="' + escH(a ? a.motif || '' : '') + '"></div>';
   html += '<div class="form-group"><label>Notes</label><input type="text" id="apNotes" value="' + escH(a ? a.notes || '' : '') + '"></div>';
+  html += '<div class="form-group"><label>Ex\u00e9cutant</label><input type="text" id="apExecutant" value="' + escH(execPrefill) + '" placeholder="Nom de l\u2019ex\u00e9cutant"></div>';
   html += '</div>';
   if (!id) {
     html += '<div style="border-top:1px solid var(--gray-200);margin-top:12px;padding-top:8px"><label style="cursor:pointer;display:flex;align-items:center;gap:6px;font-weight:600;color:var(--primary)"><input type="checkbox" id="apCollectif" onchange="toggleApCollectif()" style="accent-color:var(--primary)">Remise collective</label></div>';
@@ -15004,12 +15011,15 @@ function openAcomptePretModal(id) {
   openFormModal(a ? 'Modifier acompte / pr\u00eat' : 'Nouvel acompte / pr\u00eat', html, footer);
   if (a && a.employeId) {
     var empList2 = getEmployes();
+    var empInput = document.getElementById('apEmployeInput');
     for (var ei = 0; ei < empList2.length; ei++) {
       if (empList2[ei].id === a.employeId) {
-        document.getElementById('apEmployeInput').value = empList2[ei].nom;
+        empInput.value = empList2[ei].nom;
         break;
       }
     }
+    /* Repli : si l'employé n'est plus dans la liste, afficher quand même le nom enregistré */
+    if (!empInput.value && a.employeNom) empInput.value = a.employeNom;
     calcApMensualite();
   }
 }
@@ -15157,18 +15167,19 @@ function saveAcomptePret(id) {
   var moisDeduction = document.getElementById('apMoisDeduction').value;
   var motif = document.getElementById('apMotif').value.trim();
   var notes = document.getElementById('apNotes').value.trim();
+  var executant = document.getElementById('apExecutant') ? document.getElementById('apExecutant').value.trim() : '';
   if (!employeId || montant <= 0) { toast('Employ\u00e9 et montant sont obligatoires', 'error'); return; }
   var montantMensuel = (type === 'pret' && duree > 0) ? Math.round(montant / duree) : 0;
   var employeNom = '';
   var empList = getEmployes();
   for (var i = 0; i < empList.length; i++) { if (empList[i].id === employeId) { employeNom = empList[i].nom; break; } }
   var list = DB.get('mdb_acomptesPrets') || [];
-  var data = {id: id || DB.genId(), type: type, employeId: employeId, employeNom: employeNom, montant: montant, dureeMois: type === 'pret' ? duree : 0, montantMensuel: montantMensuel, moisDeduction: moisDeduction, motif: motif, notes: notes, date: getToday(), statut: 'en_cours', montantRembourse: 0};
+  var data = {id: id || DB.genId(), type: type, employeId: employeId, employeNom: employeNom, montant: montant, dureeMois: type === 'pret' ? duree : 0, montantMensuel: montantMensuel, moisDeduction: moisDeduction, motif: motif, notes: notes, executant: executant, date: getToday(), statut: 'en_cours', montantRembourse: 0};
   if (id) {
     for (var i = 0; i < list.length; i++) {
-      if (list[i].id === id) { data.date = list[i].date; data.montantRembourse = list[i].montantRembourse || 0; data.caisseOpId = list[i].caisseOpId || ''; data.numeroPiece = list[i].numeroPiece || ''; data.preleve = list[i].preleve || false; data.moisPreleve = list[i].moisPreleve || ''; data.statut = list[i].statut || 'en_cours'; list[i] = data; break; }
+      if (list[i].id === id) { data.date = list[i].date; data.montantRembourse = list[i].montantRembourse || 0; data.caisseOpId = list[i].caisseOpId || ''; data.numeroPiece = list[i].numeroPiece || ''; data.preleve = list[i].preleve || false; data.moisPreleve = list[i].moisPreleve || ''; data.statut = list[i].statut || 'en_cours'; data.echeances = list[i].echeances || data.echeances; list[i] = data; break; }
     }
-    /* Sync apType, montant, employe on linked caisse operation */
+    /* Sync apType, montant, employe, executant on linked caisse operation */
     if (data.caisseOpId) {
       var opsSync = getOperationsCaisse();
       for (var osi = 0; osi < opsSync.length; osi++) {
@@ -15177,6 +15188,7 @@ function saveAcomptePret(id) {
           opsSync[osi].montant = montant;
           opsSync[osi].beneficiaireId = employeId;
           opsSync[osi].beneficiaireNom = employeNom;
+          opsSync[osi].executant = executant;
           opsSync[osi].libelle = (type === 'acompte' ? 'Acompte employ\u00e9 : ' : 'Pr\u00eat employ\u00e9 : ') + employeNom;
           break;
         }
@@ -15193,7 +15205,7 @@ function saveAcomptePret(id) {
       numeroPiece = generatePieceNumber(defaultCaisseId, getToday());
       caisseOpId = opId;
       var ops = getOperationsCaisse();
-      ops.push({id: opId, numeroPiece: numeroPiece, date: getToday(), heure: '', codeId: '', libelle: type === 'acompte' ? 'Acompte employ\u00e9 : ' + employeNom : 'Pr\u00eat employ\u00e9 : ' + employeNom, montant: montant, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', numeroTransaction: '', beneficiaireType: 'employe', beneficiaireId: employeId, beneficiaireNom: employeNom, tiers: motif || notes, observations: motif || notes, remettant: employeNom, imprime: false, montantCharge: 0, caisseId: defaultCaisseId, reversed: false, acomptePretId: data.id, apType: type});
+      ops.push({id: opId, numeroPiece: numeroPiece, date: getToday(), heure: '', codeId: '', libelle: type === 'acompte' ? 'Acompte employ\u00e9 : ' + employeNom : 'Pr\u00eat employ\u00e9 : ' + employeNom, montant: montant, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', numeroTransaction: '', beneficiaireType: 'employe', beneficiaireId: employeId, beneficiaireNom: employeNom, tiers: motif || notes, observations: motif || notes, remettant: employeNom, executant: executant, imprime: false, montantCharge: 0, caisseId: defaultCaisseId, reversed: false, acomptePretId: data.id, apType: type});
       DB.set('mdb_operationsCaisse', ops);
     }
     data.caisseOpId = caisseOpId;
@@ -15615,6 +15627,22 @@ function apcRecalcDureeFromMensualite() {
   /* Quand on édite une mensualité par ligne, on préserve la durée globale ;
      on recalcule juste si l'utilisateur frappe aussi le champ global Mensualité */
 }
+function calcApcRowMensualite(el) {
+  /* Recalcule la mensualité de LA ligne dont on saisit la durée (ou le montant) : montant_ligne / durée_ligne.
+     Ne touche pas aux mensualités déjà saisies manuellement. */
+  try {
+    var tr = el ? el.closest('tr') : null;
+    if (!tr) { calcApcMensualite(); return; }
+    var dEl = tr.querySelector('.apc-duree');
+    var meEl = tr.querySelector('.apc-montant');
+    var mEl = tr.querySelector('.apc-mensualite');
+    if (!dEl || !meEl || !mEl) return;
+    var d = parseInt(dEl.value) || 0;
+    var av = parseFloat(meEl.value) || 0;
+    var mv = parseFloat(mEl.value) || 0;
+    if (mv <= 0 && d > 0 && av > 0) mEl.value = Math.round(av / d);
+  } catch (eRow) {}
+}
 function calcApcDuree() {
   var mensuel = parseInt(document.getElementById('apcMensualite').value) || 0;
   var d = document.getElementById('apcDuree');
@@ -15662,8 +15690,8 @@ function apcBuildRow(empId, pre, masterType, masterMois, masterRemettant, master
   tr.innerHTML =
     '<td style="text-align:center"><input type="checkbox" class="apc-check" title="S\u00e9lectionner cet employ\u00e9" style="cursor:pointer"></td>' +
     '<td style="white-space:nowrap"><select class="apc-employe" onchange="apcEmployeChanged(this)" style="width:100%;font-size:11px;padding:2px">' + apcEmployeOptions(empId) + '</select></td>' +
-    '<td><input type="number" class="apc-montant" min="0" value="' + (mont > 0 ? mont : '') + '" style="width:100%;min-width:110px;font-size:14px;font-weight:800;padding:4px 6px" placeholder="0" onkeydown="apcMontantKey(event,this)" oninput="updateApcBalance()"></td>' +
-    '<td><input type="number" class="apc-duree" min="1" value="' + escH(dureeV) + '" style="width:100%;font-size:12px;padding:2px" placeholder="0" oninput="calcApcMensualite()"></td>' +
+    '<td><input type="number" class="apc-montant" min="0" value="' + (mont > 0 ? mont : '') + '" style="width:100%;min-width:110px;font-size:14px;font-weight:800;padding:4px 6px" placeholder="0" onkeydown="apcMontantKey(event,this)" oninput="updateApcBalance();calcApcRowMensualite(this)"></td>' +
+    '<td><input type="number" class="apc-duree" min="1" value="' + escH(dureeV) + '" style="width:100%;font-size:12px;padding:2px" placeholder="0" oninput="calcApcRowMensualite(this)"></td>' +
     '<td><input type="month" class="apc-moisded" value="' + moisd + '" style="width:100%;font-size:12px;padding:2px"></td>' +
     '<td><input type="number" class="apc-mensualite" min="0" value="' + (mens !== '' ? mens : '') + '" style="width:100%;font-size:12px;padding:2px" placeholder="auto" oninput="apcRecalcDureeFromMensualite()"></td>' +
     '<td><input type="text" class="apc-moyen" list="apcMoyenList" value="' + escH(moyen) + '" placeholder="Wave/0707..." style="width:100%;font-size:11px;padding:2px"></td>' +
