@@ -781,6 +781,28 @@ function ptPXMonthStats(empId, ym, arr) {
   return { hs15: r2(hs15), hs50: r2(hs50), hs75: r2(hs75), hs100: r2(hs100) };
 }
 function ptPXDash(v) { return v > 0 ? (Math.round(v * 10) / 10) + 'h' : '<span style="color:#cbd5e1">—</span>'; }
+/* Mois sélectionné de la grille (YYYY-MM) */
+function ptPXSelMois() {
+  var mEl = document.getElementById('ptMonth'), yEl = document.getElementById('ptYear');
+  var m = mEl && mEl.value ? parseInt(mEl.value, 10) : (new Date().getMonth() + 1);
+  var y = yEl && yEl.value ? parseInt(yEl.value, 10) : new Date().getFullYear();
+  if (isNaN(m) || m < 1 || m > 12) m = new Date().getMonth() + 1;
+  if (isNaN(y)) y = new Date().getFullYear();
+  return y + '-' + (m < 10 ? '0' : '') + m;
+}
+/* Employés actifs du mois affiché (même filtre que la Paye) */
+function ptPXEmpsActifs() {
+  var ym = ptPXSelMois();
+  return getPersonnel().filter(function(p) {
+    return ptPXVisible(p, ym) && p.en_paie !== false;
+  }).sort(function(a, b) { return String(a.matricule || '').localeCompare(String(b.matricule || ''), undefined, { numeric: true, sensitivity: 'base' }); });
+}
+/* Employé au forfait 173.33h/mois (même règle que la Paye) */
+function ptPXEstForfait(p) {
+  if (!p || p.en_paie === false) return false;
+  try { if (ptPXEmpCat(p) === 'externe') return false; } catch(e) {}
+  return (p.mode_pointage || 'journalier') === 'forfait';
+}
 /* Texte + couleur d'une case jour (style module Paye) */
 function ptPXCell(rec, isConge, isWeekend) {
   if (!rec && isConge) return { txt: 'C', bg: '#eff6ff', title: 'Congé' };
@@ -6006,12 +6028,12 @@ function renderPointageGrouped() {
   h += '</div>';
 
   h += '<div style="display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:1rem">';
-  h += '<button class="btn" onclick="printPointageFiches()" style="font-size:.75rem">🖨️ Imprimer</button>';
-  h += '<button class="btn" onclick="exportPointagePDF()" style="font-size:.75rem">📄 PDF</button>';
+  h += '<button class="btn" onclick="window.print()" title="Imprimer la grille affichée" style="font-size:.75rem">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="showPrintFichesModal()" title="Choisir les employés puis télécharger le PDF" style="font-size:.75rem">📄 PDF</button>';
   h += '<button class="btn" onclick="showPrintFichesModal()" style="font-size:.75rem">📋 Fiches</button>';
-  h += '<button class="btn" onclick="showEffacerPointagesModal()" style="font-size:.75rem;background:var(--red);color:#fff">🗑️ Effacer pointages</button>';
-  h += '<button class="btn" onclick="showGenererMoisModal()" style="font-size:.75rem;background:var(--accent);color:#fff">📅 Générer mois complet</button>';
-  h += '<button class="btn btn-accent" onclick="showPointageGroupeModal()" style="font-size:.75rem">👥 Pointage groupé</button>';
+  h += '<button class="btn" onclick="showModalEffacer()" style="font-size:.75rem;background:var(--red);color:#fff">🗑️ Effacer pointages</button>';
+  h += '<button class="btn" onclick="showModalGenererMois()" style="font-size:.75rem;background:var(--accent);color:#fff">📅 Générer mois complet</button>';
+  h += '<button class="btn btn-accent" onclick="showModalPointageGroupe()" style="font-size:.75rem">👥 Pointage groupé</button>';
   h += '<button class="btn" onclick="renderPage()" style="font-size:.75rem">🔄 Actualiser</button>';
   h += '</div>';
   h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem;flex-wrap:wrap;gap:10px">';
@@ -6195,223 +6217,471 @@ function savePointageCell(empId, dateStr, del) {
   renderPage();
 }
 
-/* ==================== MODAL POINTAGE GROUPE ==================== */
-function showPointageGroupeModal() {
-  var funcs = getFonctionsFromPaye();
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:600px">';
-  m += '<h2>👥 Pointage groupé</h2>';
-  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Sélectionnez les employés et saisissez les horaires à appliquer</p>';
-  m += formField('pgDate', 'Date', today(), 'date', true);
-  m += '<label style="display:flex;align-items:center;gap:.3rem;margin:.8rem 0;cursor:pointer;color:var(--red)"><input type="checkbox" id="pgMarquerAbsent"> Marquer comme absent (pour tous les employés sélectionnés)</label>';
-  m += '<div class="card" style="padding:.8rem;margin-bottom:.8rem">';
-  m += '<strong style="font-size:.8rem">Horaires globaux à appliquer</strong>';
-  m += '<div class="form-row" style="margin-top:.5rem">';
-  m += formField('pgArrivee', 'Arrivée', '08:00', 'time', false);
-  m += formField('pgPauseDeb', 'Pause début', '12:00', 'time', false);
-  m += '</div><div class="form-row">';
-  m += formField('pgPauseFin', 'Pause fin', '13:00', 'time', false);
-  m += formField('pgDepart', 'Départ', '17:00', 'time', false);
-  m += '</div>';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;margin-top:.5rem;cursor:pointer"><input type="checkbox" id="pgNuit"> Pointage Nuit</label>';
-  m += '</div>';
-  m += '<div class="card" style="padding:.8rem;margin-bottom:.8rem">';
-  m += '<strong style="font-size:.8rem;color:var(--accent)">Gestion des heures à rattraper (Groupé)</strong>';
-  m += '<div class="form-row" style="margin-top:.5rem">';
-  m += formField('pgHeuresGagnees', 'Heures gagnées', '0', 'number', false);
-  m += formField('pgHeuresRattrapage', 'Heures utilisées (Rattrapage)', '0', 'number', false);
-  m += '</div>';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;margin-top:.5rem;cursor:pointer"><input type="checkbox" id="pgMarquerRattrapage"> Marquer comme jour de rattrapage (groupe)</label>';
-  m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-bottom:.8rem;align-items:center">';
-  m += '<select id="pgFonctionFilter" onchange="renderPointageGroupeList()" style="min-width:160px"><option value="">Toutes les fonctions</option>';
-  funcs.forEach(function(f) { m += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
-  m += '</select>';
-  m += '<input type="text" id="pgSearch" placeholder="Nom ou matricule..." oninput="renderPointageGroupeList()" class="search-box" style="min-width:150px">';
-  m += '</div>';
-  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="pgSelectAll" onchange="pgToggleAll(this.checked)"> Tout sélectionner (<span id="pgCount">0</span> sélectionné(s))</label>';
-  m += '<span style="font-size:.75rem;color:var(--dim)">Présents ce jour</span>';
-  m += '</div>';
-  m += '<div id="pgEmployeeList" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem"></div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="applyPointageGroupe()">✅ Appliquer</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
-  m += '</div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
-  renderPointageGroupeList();
+/* ==================== MODAL POINTAGE GROUPE (identique module Paye) ==================== */
+function showModalPointageGroupe() {
+  var today = getToday();
+  var emps = ptPXEmpsActifs();
+  var html = '<div style="padding:20px;max-width:1180px;margin:0 auto;max-height:92vh;overflow-y:auto">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><h3 style="font-size:1.1rem;font-weight:700;margin:0">Pointage groupé</h3><button onclick="closePtModal()" style="border:none;background:transparent;font-size:1.1rem;cursor:pointer;color:#999">✕</button></div>' +
+    '<p style="font-size:.78rem;color:#666;margin:4px 0 16px">Sélectionnez les employés et saisissez les horaires à appliquer</p>' +
+    '<div style="margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Date</label><br>' +
+    '<input type="date" id="pg-date" value="' + today + '" onchange="pgFilterEmps()" style="padding:6px 10px;width:180px;border:1px solid #ddd;border-radius:6px"></div>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem;cursor:pointer;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pg-absent-all" onchange="pgToggleMotif();pgRefreshSummaries()"> Marquer comme absent (pour tous les employés sélectionnés)</label>' +
+    '<div id="pg-motif-wrap" style="display:none;margin-bottom:12px"><label style="font-size:.75rem;font-weight:600">Motif d\'absence (sera dans les observations de chacun + fiche)</label>' +
+    '<input type="text" id="pg-motif" placeholder="Ex : Absence non justifiée..." style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.8rem;box-sizing:border-box"></div>' +
+    '<div style="font-size:.8rem;font-weight:600;margin-bottom:4px">Horaires globaux à appliquer <span style="font-weight:400;font-size:.68rem;color:#666">— cochez la case pour appliquer ce créneau</span></div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-arr" checked oninput="pgRefreshSummaries()"> Arrivée<br><input type="time" id="pg-arr-v" value="08:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-pdeb" checked oninput="pgRefreshSummaries()"> Pause début<br><input type="time" id="pg-pdeb-v" value="12:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-pfin" checked oninput="pgRefreshSummaries()"> Pause fin<br><input type="time" id="pg-pfin-v" value="13:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-dep" checked oninput="pgRefreshSummaries()"> Départ<br><input type="time" id="pg-dep-v" value="17:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '</div>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem;cursor:pointer"><input type="checkbox" id="pg-nuit" onchange="pgToggleNuit();pgRefreshSummaries()"> <span style="color:#7c3aed;font-weight:600">Pointage Nuit</span></label>' +
+    '<div id="pg-nuit-block" style="display:none;margin-bottom:10px;padding:10px;background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px">' +
+    '<div style="font-size:.75rem;font-weight:700;color:#7c3aed;margin-bottom:6px">Horaires globaux NUIT (la part 21h–05h comptera en nuit)</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-narr" checked oninput="pgRefreshSummaries()"> Arrivée<br><input type="time" id="pg-narr-v" value="20:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-npdeb" oninput="pgRefreshSummaries()"> Pause début<br><input type="time" id="pg-npdeb-v" value="00:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-npfin" oninput="pgRefreshSummaries()"> Pause fin<br><input type="time" id="pg-npfin-v" value="01:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '<label style="font-size:.75rem"><input type="checkbox" id="pg-ndep" checked oninput="pgRefreshSummaries()"> Départ<br><input type="time" id="pg-ndep-v" value="05:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
+    '</div></div>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:.72rem;cursor:pointer;color:#94a3b8"><input type="checkbox" id="pg-lock" checked> Verrouiller après pointage (code admin requis pour modifier)</label>' +
+    '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:14px">' +
+    '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">Gestion des heures à rattraper (Groupé)</div>' +
+    '<div style="display:flex;gap:12px;margin-bottom:8px">' +
+    '<div style="flex:1"><label style="font-size:.72rem">Heures gagnées</label><input type="number" id="pg-hg" value="0" min="0" step="0.5" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:4px"></div>' +
+    '<div style="flex:1"><label style="font-size:.72rem">Heures utilisées (Rattrapage)</label><input type="number" id="pg-hu" value="0" min="0" step="0.5" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:4px"></div>' +
+    '</div>' +
+    '<label style="font-size:.75rem;cursor:pointer"><input type="checkbox" id="pg-rattrapage"> Marquer comme jour de rattrapage (groupe)</label>' +
+    '</div>' +
+    '<div style="display:flex;gap:10px;margin-bottom:12px">' +
+    '<div style="flex:1;min-width:140px"><label style="font-size:.72rem;font-weight:600">Filtrer par fonction</label>' +
+    '<select id="pg-fonction" onchange="pgFilterEmps()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="Toutes les fonctions">Toutes les fonctions</option></select></div>' +
+    '<div style="flex:1;min-width:140px"><label style="font-size:.72rem;font-weight:600">Filtrer par département</label>' +
+    '<select id="pg-filtre-departement" onchange="pgFilterEmps()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="">Tous les départements</option></select></div>' +
+    '<div style="flex:1;min-width:140px"><label style="font-size:.72rem;font-weight:600">Rechercher un employé</label>' +
+    '<input type="text" id="pg-search" placeholder="Nom ou matricule..." oninput="pgFilterEmps()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
+    '</div>' +
+    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;font-size:.8rem;flex-wrap:wrap">' +
+    '<label style="cursor:pointer"><input type="checkbox" id="pg-select-all" onchange="pgToggleAll()"> Tout sélectionner (<span id="pg-count">0</span> sélectionné(s))</label>' +
+    '<button class="btn" onclick="pgSelectPresent()" style="padding:4px 12px;font-size:.72rem">👥 Présents ce jour</button>' +
+    '<span id="pg-total" style="color:#666">' + emps.length + ' affiché(s)</span>' +
+    '</div>' +
+    '<div id="pg-emp-list" style="max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:16px;background:#f1f5f9;padding:8px;display:flex;flex-direction:column;gap:8px"></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:10px">' +
+    '<button class="btn" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
+    '<button class="btn" onclick="pgApply()" id="pg-apply-btn" style="padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">Pointer (0)</button>' +
+    '</div></div>';
+  openPtModal(html, true);
+  pgFilterEmps();
+  var ff = document.getElementById('pg-fonction');
+  if (ff) { getFonctionsFromPaye().forEach(function(f) { ff.innerHTML += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; }); }
+  var fd = document.getElementById('pg-filtre-departement');
+  if (fd) { getServicesShared().forEach(function(d) { fd.innerHTML += '<option value="' + escH(d) + '">' + escH(d) + '</option>'; }); }
 }
-
-function renderPointageGroupeList() {
-  var personnel = getPersonnel();
-  var ptPaye = getPointagePaye();
-  var date = (document.getElementById('pgDate') || {}).value || today();
-  var foncFilter = (document.getElementById('pgFonctionFilter') || {}).value;
-  var search = ((document.getElementById('pgSearch') || {}).value || '').toLowerCase();
-  var filtered = personnel;
-  if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
-  if (search) filtered = filtered.filter(function(e) { return ((e.nom || '') + ' ' + (e.prenoms || '') + ' ' + (e.matricule || '')).toLowerCase().indexOf(search) !== -1; });
-  var presentIds = [];
-  for (var k = 0; k < ptPaye.length; k++) {
-    var _r = ptPaye[k];
-    if (!_r || _r.date !== date) continue;
-    if (_r.present === true) presentIds.push(_r.employee_id);
-    else if (_r.present !== false) { var _cc = ptPXDay(_r); if (_cc.j + _cc.n > 0) presentIds.push(_r.employee_id); }
+function pgFilterEmps() {
+  var prevChecked = {};
+  document.querySelectorAll('.pg-emp-cb:checked').forEach(function(cb) { prevChecked[cb.value] = true; });
+  var search = (document.getElementById('pg-search') || {}).value || '';
+  var fonction = (document.getElementById('pg-fonction') || {}).value || 'Toutes les fonctions';
+  var departement = (document.getElementById('pg-filtre-departement') || {}).value || '';
+  search = search.toLowerCase().trim();
+  var emps = ptPXEmpsActifs().filter(function(p) {
+    if (fonction !== 'Toutes les fonctions' && p.fonction !== fonction) return false;
+    if (departement && (p.service || '') !== departement) return false;
+    if (search) {
+      var name = ((p.nom || '') + ' ' + (p.prenoms || '')).toLowerCase();
+      var mat = (p.matricule || '').toLowerCase();
+      if (name.indexOf(search) === -1 && mat.indexOf(search) === -1) return false;
+    }
+    return true;
+  });
+  var mois = ptPXSelMois();
+  var dk = (document.getElementById('pg-date') || {}).value || getToday();
+  var allPts = getPointagePaye().filter(function(p) { return p && (p.date || '').indexOf(mois) === 0; });
+  var list = document.getElementById('pg-emp-list');
+  if (!list) return;
+  list.innerHTML = emps.map(function(p) {
+    var rec = null;
+    for (var i = 0; i < allPts.length; i++) { if (allPts[i].employee_id === p.id && allPts[i].date === dk) { rec = allPts[i]; break; } }
+    var hJ = rec && rec.h_j_manual ? ptPXParseH(rec.h_j_manual) : 0;
+    var hN = rec && rec.h_n_manual ? ptPXParseH(rec.h_n_manual) : 0;
+    var marked = rec && (rec.present === true || hJ > 0 || hN > 0);
+    var status = marked ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:700;color:#15803d;background:#dcfce7;border:1px solid #bbf7d0;border-radius:20px;padding:2px 10px;white-space:nowrap">● Pointé</span>' : '<span style="display:inline-flex;align-items:center;font-size:.7rem;font-weight:600;color:#94a3b8;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:2px 10px;white-space:nowrap">En attente</span>';
+    var rendChip = (p.rendement === true)
+      ? ' <span style="display:inline-flex;align-items:center;gap:3px;font-size:.62rem;font-weight:700;color:#ea580c;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:1px 7px;vertical-align:middle;white-space:nowrap">Rendement</span>' : '';
+    return '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:.8rem;min-width:0;box-shadow:0 1px 3px rgba(15,23,42,.06)">' +
+      '<div style="display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap">' +
+      '<input type="checkbox" class="pg-emp-cb" value="' + p.id + '" onchange="pgUpdateCount()" style="flex-shrink:0;width:17px;height:17px;accent-color:#f97316;cursor:pointer">' +
+      '<div style="flex-shrink:0;font-size:.7rem;color:#fff;font-weight:800;background:#1e293b;border-radius:6px;padding:3px 8px;min-width:36px;text-align:center">' + escH(p.matricule || '—') + '</div>' +
+      '<div style="flex:1;min-width:140px;font-size:.9rem;line-height:1.3"><strong style="color:#0f172a">' + escH(p.nom + ' ' + (p.prenoms || '')) + '</strong>' + rendChip + '</div>' +
+      '<div style="flex-shrink:0;font-size:.7rem;font-weight:600;color:#475569;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:2px 10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escH(p.fonction || 'Sans fonction') + '</div>' +
+      '<span id="pgs-st-' + p.id + '" style="flex-shrink:0">' + status + '</span></div>' +
+      '<div style="margin:6px 0 2px 26px;padding:8px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;min-width:0">' +
+      '<div style="font-size:.65rem;color:#64748b;font-weight:700;margin-bottom:4px">HEURES PERSO (prioritaires sur les horaires globaux)</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">' +
+      pgPersoField(p.id, 'ja', 'Arr') + pgPersoField(p.id, 'jp1', 'Pause déb') +
+      pgPersoField(p.id, 'jp2', 'Pause fin') + pgPersoField(p.id, 'jf', 'Dép') +
+      '<label style="font-size:.68rem;display:flex;gap:4px;align-items:center;cursor:pointer;color:#7c3aed;font-weight:700"><input type="checkbox" id="pgp-' + p.id + '-n" onchange="pgTogglePersoNuit(\'' + p.id + '\');pgRefreshSummaries()"> Nuit</label>' +
+      '</div>' +
+      '<div id="pgp-' + p.id + '-nwrap" style="display:none;margin-top:6px">' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">' +
+      pgPersoField(p.id, 'na', 'Arr N') + pgPersoField(p.id, 'np1', 'Pause déb N') +
+      pgPersoField(p.id, 'np2', 'Pause fin N') + pgPersoField(p.id, 'nf', 'Dép N') +
+      '</div></div>' +
+      '<div id="pgs-' + p.id + '" style="font-size:.7rem;color:#16a34a;font-weight:600;margin-top:4px"></div>' +
+      '</div></div>';
+  }).join('');
+  var tot = document.getElementById('pg-total');
+  if (tot) tot.textContent = emps.length + ' affiché(s)';
+  document.querySelectorAll('.pg-emp-cb').forEach(function(cb) { if (prevChecked[cb.value]) cb.checked = true; });
+  pgUpdateCount();
+  pgRefreshSummaries();
+}
+function pgPersoField(empId, suf, label) {
+  return '<div><label style="font-size:.62rem;color:#64748b">' + label + '</label><br>' +
+    '<input type="time" id="pgp-' + empId + '-' + suf + '" oninput="pgRefreshSummaries()" style="width:96px;padding:3px 4px;border:1px solid #ddd;border-radius:5px;font-size:.72rem"></div>';
+}
+function pgToggleNuit() {
+  var b = document.getElementById('pg-nuit-block');
+  var c = document.getElementById('pg-nuit');
+  if (b) b.style.display = (c && c.checked) ? '' : 'none';
+}
+function pgToggleMotif() {
+  var w = document.getElementById('pg-motif-wrap');
+  var c = document.getElementById('pg-absent-all');
+  if (w) w.style.display = (c && c.checked) ? '' : 'none';
+}
+function pgTogglePersoNuit(empId) {
+  var w = document.getElementById('pgp-' + empId + '-nwrap');
+  var c = document.getElementById('pgp-' + empId + '-n');
+  if (w) w.style.display = (c && c.checked) ? '' : 'none';
+}
+function pgSelectPresent() {
+  var dk = (document.getElementById('pg-date') || {}).value || '';
+  var pts = getPointagePaye();
+  document.querySelectorAll('.pg-emp-cb').forEach(function(cb) {
+    var rec = null;
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i] && pts[i].employee_id === cb.value && pts[i].date === dk) { rec = pts[i]; break; }
+    }
+    cb.checked = !!(rec && rec.present === true);
+  });
+  pgUpdateCount();
+}
+function pgGlobVal(id) {
+  var cb = document.getElementById(id);
+  if (cb && cb.checked) return (document.getElementById(id + '-v') || {}).value || '';
+  return '';
+}
+function pgPersVal(id) {
+  var el = document.getElementById(id);
+  return (el && el.value) || '';
+}
+function pgEff(empId, dk) {
+  var pts = getPointagePaye();
+  var rec = null;
+  for (var i = 0; i < pts.length; i++) {
+    if (pts[i] && pts[i].employee_id === empId && pts[i].date === dk) { rec = pts[i]; break; }
   }
-  var el = document.getElementById('pgEmployeeList');
-  if (!el) return;
-  var h = '';
-  filtered.forEach(function(e) {
-    var isPresent = presentIds.indexOf(e.id) !== -1;
-    h += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
-    h += '<input type="checkbox" class="pg-emp" value="' + e.id + '"' + (isPresent ? ' checked' : '') + '>';
-    h += '<span style="font-size:.78rem"><strong>' + escH(e.matricule || '—') + '</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + '</span>';
-    h += '<span style="margin-left:auto;font-size:.65rem;color:var(--dim)">' + escH((e.fonction || '').toUpperCase()) + '</span>';
-    h += '</label>';
+  function slot(persSuf, globId, oldKey) {
+    var pv = pgPersVal('pgp-' + empId + '-' + persSuf);
+    if (pv) return pv;
+    var gv = pgGlobVal(globId);
+    if (gv) return gv;
+    return rec ? (rec[oldKey] || '') : '';
+  }
+  var nightPers = !!((document.getElementById('pgp-' + empId + '-n') || {}).checked);
+  var nightGlob = !!((document.getElementById('pg-nuit') || {}).checked);
+  var e = {
+    ja: slot('ja', 'pg-arr', 'j_arrivee'),
+    jp1: slot('jp1', 'pg-pdeb', 'j_pause'),
+    jp2: slot('jp2', 'pg-pfin', 'j_reprise'),
+    jf: slot('jf', 'pg-dep', 'j_fin'),
+    na: '', np1: '', np2: '', nf: ''
+  };
+  if (nightPers || nightGlob) {
+    e.na = slot('na', 'pg-narr', 'n_arrivee');
+    e.np1 = slot('np1', 'pg-npdeb', 'n_pause');
+    e.np2 = slot('np2', 'pg-npfin', 'n_reprise');
+    e.nf = slot('nf', 'pg-ndep', 'n_fin');
+  }
+  return e;
+}
+function pgRefreshSummaries() {
+  if (!document.getElementById('pg-emp-list')) return;
+  var dk = (document.getElementById('pg-date') || {}).value || '';
+  var absentAll = !!((document.getElementById('pg-absent-all') || {}).checked);
+  var pts = getPointagePaye();
+  document.querySelectorAll('.pg-emp-cb').forEach(function(cb) {
+    var id = cb.value;
+    var sum = document.getElementById('pgs-' + id);
+    var st = document.getElementById('pgs-st-' + id);
+    var emp = null;
+    try { emp = getPersonnel().find(function(p) { return p.id === id; }); } catch(e) {}
+    var isR = !!(emp && emp.rendement === true);
+    var rec = null;
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i] && pts[i].employee_id === id && pts[i].date === dk) { rec = pts[i]; break; }
+    }
+    if (absentAll) {
+      if (sum) sum.innerHTML = '<span style="color:#dc2626">Absent</span>';
+      if (st) st.innerHTML = '<span style="color:#dc2626;font-weight:600;font-size:.72rem">Absent</span>';
+      return;
+    }
+    var e = pgEff(id, dk);
+    var c = ptPXCalcInputs({ ja: e.ja, jp1: e.jp1, jp2: e.jp2, jf: e.jf, na: e.na, np1: e.np1, np2: e.np2, nf: e.nf, libres: 0 }, isR);
+    var txt;
+    if (isR) txt = c.r > 0 ? '<span style="color:#ea580c;font-weight:700">R+' + c.r + 'h</span>' : '<span style="color:#999">—</span>';
+    else if (c.j > 0 || c.n > 0) txt = 'J: ' + c.j.toFixed(1) + 'h' + (c.n > 0 ? ' | N: ' + c.n.toFixed(1) + 'h' : '');
+    else txt = '<span style="color:#999">—</span>';
+    if (sum) sum.innerHTML = txt;
+    var pointed = !!(rec && rec.present === true);
+    if (st) st.innerHTML = pointed
+      ? '<span style="color:#16a34a;font-weight:600;font-size:.72rem">Pointé</span>'
+      : '<span style="color:#999;font-size:.72rem">—</span>';
   });
-  el.innerHTML = h || '<div style="padding:.5rem;color:var(--dim);font-size:.8rem">Aucun employé</div>';
-  document.getElementById('pgCount').textContent = filtered.length;
+}
+function pgToggleAll() {
+  var checked = (document.getElementById('pg-select-all') || {}).checked;
+  document.querySelectorAll('.pg-emp-cb').forEach(function(cb) { cb.checked = checked; });
+  pgUpdateCount();
+}
+function pgUpdateCount() {
+  var count = document.querySelectorAll('.pg-emp-cb:checked').length;
+  var el = document.getElementById('pg-count');
+  if (el) el.textContent = count;
+  var btn = document.getElementById('pg-apply-btn');
+  if (btn) btn.textContent = 'Pointer (' + count + ')';
 }
 
-function pgToggleAll(checked) {
-  document.querySelectorAll('.pg-emp').forEach(function(cb) { cb.checked = checked; });
-}
-
-function applyPointageGroupe() {
-  var date = (document.getElementById('pgDate') || {}).value || today();
-  var absent = (document.getElementById('pgMarquerAbsent') || {}).checked;
-  var arr = (document.getElementById('pgArrivee') || {}).value || '08:00';
-  var p1 = (document.getElementById('pgPauseDeb') || {}).value || '12:00';
-  var p2 = (document.getElementById('pgPauseFin') || {}).value || '13:00';
-  var dep = (document.getElementById('pgDepart') || {}).value || '17:00';
-  var nuit = (document.getElementById('pgNuit') || {}).checked;
-  var hG = parseFloat((document.getElementById('pgHeuresGagnees') || {}).value) || 0;
-  var hR = parseFloat((document.getElementById('pgHeuresRattrapage') || {}).value) || 0;
-  var isRatt = (document.getElementById('pgMarquerRattrapage') || {}).checked;
-  var checked = document.querySelectorAll('.pg-emp:checked');
-  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
-  /* Même format que le module Paye (mdb_paye.pointage) */
-  var arr2 = getPointagePaye();
-  var count = 0;
-  checked.forEach(function(cb) {
-    var empId = cb.value;
-    var idx = -1;
-    for (var i = 0; i < arr2.length; i++) { if (arr2[i] && arr2[i].employee_id === empId && arr2[i].date === date) { idx = i; break; } }
-    var rec = { employee_id: empId, date: date, present: !absent, j_arrivee: absent ? '' : arr, j_pause: absent ? '' : p1, j_reprise: absent ? '' : p2, j_fin: absent ? '' : dep, h_j_manual: absent ? '' : '8', h_n_manual: (!absent && nuit) ? '8' : '', rattrap_gagnees: hG, rattrap_utilisees: hR, jour_rattrapage: !!isRatt };
-    if (idx !== -1) { rec.id = arr2[idx].id || genId(); arr2[idx] = rec; }
-    else { rec.id = genId(); arr2.push(rec); }
-    count++;
-  });
-  setPointagePaye(arr2);
-  document.getElementById('modalOverlay').remove();
-  toast('Pointage groupé appliqué à ' + count + ' employé(s)');
-  renderPage();
-}
-
-/* ==================== MODAL GENERER MOIS COMPLET ==================== */
-function showGenererMoisModal() {
+function pgApply() {
+  var cbs = document.querySelectorAll('.pg-emp-cb:checked');
+  if (cbs.length === 0) { toast('Sélectionnez au moins un employé', 'error'); return; }
+  var dk = (document.getElementById('pg-date') || {}).value;
+  if (!dk) { toast('Choisissez une date', 'error'); return; }
+  var absentAll = (document.getElementById('pg-absent-all') || {}).checked;
+  var motif = ((document.getElementById('pg-motif') || {}).value || '').trim();
+  var rattrapage = (document.getElementById('pg-rattrapage') || {}).checked;
+  var hg = parseFloat((document.getElementById('pg-hg') || {}).value) || 0;
+  var hu = parseFloat((document.getElementById('pg-hu') || {}).value) || 0;
+  var autoLock = !!((document.getElementById('pg-lock') || {}).checked);
+  var pts = getPointagePaye();
   var personnel = getPersonnel();
-  var funcs = getFonctionsFromPaye();
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:500px">';
-  m += '<h2>📅 Générer pointage (Standard 173.33h)</h2>';
-  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Génération automatique des 8h de travail pour les employés de type Standard</p>';
-  m += formField('gmPeriode', 'Période à générer', 'Tout le mois (' + (new Date().getMonth()+1) + '/' + new Date().getFullYear() + ')', 'text', false);
-  m += '<strong style="font-size:.8rem;margin:1rem 0 .5rem;display:block">Employés concernés</strong>';
-  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="gmSelectAll" onchange="gmToggleAll(this.checked)"> Tout sélectionner</label>';
-  m += '<span id="gmCount" style="font-size:.75rem;color:var(--dim)">' + personnel.length + ' employé(s)</span>';
-  m += '</div>';
-  m += '<div id="gmEmployeeList" style="max-height:250px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem">';
-  personnel.forEach(function(e) {
-    m += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
-    m += '<input type="checkbox" class="gm-emp" value="' + e.id + '" checked>';
-    m += '<span style="font-size:.78rem"><strong>[' + escH(e.matricule || '—') + ']</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + '</span>';
-    m += '</label>';
+  var needCode = false;
+  cbs.forEach(function(cb) {
+    var r = null;
+    for (var i = 0; i < pts.length; i++) { if (pts[i] && pts[i].employee_id === cb.value && pts[i].date === dk) { r = pts[i]; break; } }
+    if (r && r.protege === true && !(window._ptUnlocked && window._ptUnlocked[r.id])) needCode = true;
   });
-  m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="applyGenererMois()">📅 Générer pour ' + personnel.length + ' employé(s)</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
-  m += '</div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
-}
-
-function gmToggleAll(checked) {
-  document.querySelectorAll('.gm-emp').forEach(function(cb) { cb.checked = checked; });
-}
-
-function applyGenererMois() {
-  var now = new Date();
-  var mSel = document.getElementById('ptMonth'), ySel = document.getElementById('ptYear');
-  var year = ySel ? parseInt(ySel.value) || now.getFullYear() : now.getFullYear();
-  var month = mSel ? parseInt(mSel.value) || (now.getMonth() + 1) : (now.getMonth() + 1);
-  var daysInMonth = new Date(year, month, 0).getDate();
-  var checked = document.querySelectorAll('.gm-emp:checked');
-  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
-  var arr = getPointagePaye();
-  var count = 0;
-  checked.forEach(function(cb) {
-    var empId = cb.value;
-    for (var d = 1; d <= daysInMonth; d++) {
-      var dt = new Date(year, month - 1, d);
-      if (dt.getDay() === 0 || dt.getDay() === 6) continue;
-      var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-      var found = false;
-      for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].employee_id === empId && arr[i].date === dateStr) { found = true; break; } }
-      if (!found) { arr.push({ id: genId(), employee_id: empId, date: dateStr, present: true, h_j_manual: '8', h_n_manual: '' }); count++; }
+  if (needCode && !ptIsAdmin()) { toast('Pointages verrouillés — admin requis', 'error'); return; }
+  function storeH(h) {
+    h = Math.round((parseFloat(h) || 0) * 100) / 100;
+    if (h <= 0) return '';
+    return String(h);
+  }
+  var count = 0, locked = 0;
+  cbs.forEach(function(cb) {
+    var eid = cb.value;
+    var idx = -1;
+    for (var i = 0; i < pts.length; i++) { if (pts[i] && pts[i].employee_id === eid && pts[i].date === dk) { idx = i; break; } }
+    var emp = {};
+    for (var k = 0; k < personnel.length; k++) { if (personnel[k].id === eid) { emp = personnel[k]; break; } }
+    var isR = (emp.rendement === true);
+    if (absentAll) {
+      var r0 = idx !== -1 ? pts[idx] : { id: genId(), employee_id: eid, date: dk };
+      if (idx === -1) pts.push(r0);
+      r0.present = false;
+      r0.h_j_manual = ''; r0.h_n_manual = '';
+      r0.j_arrivee = ''; r0.j_pause = ''; r0.j_reprise = ''; r0.j_fin = '';
+      r0.n_arrivee = ''; r0.n_pause = ''; r0.n_reprise = ''; r0.n_fin = '';
+      r0.h_libres = 0;
+      r0.obs = motif;
+      r0.rattrap_gagnees = hg; r0.rattrap_utilisees = hu; r0.jour_rattrapage = rattrapage;
+      count++;
+    } else {
+      var e = pgEff(eid, dk);
+      var rec2 = idx !== -1 ? pts[idx] : { id: genId(), employee_id: eid, date: dk };
+      if (idx === -1) pts.push(rec2);
+      rec2.j_arrivee = e.ja; rec2.j_pause = e.jp1; rec2.j_reprise = e.jp2; rec2.j_fin = e.jf;
+      rec2.n_arrivee = e.na; rec2.n_pause = e.np1; rec2.n_reprise = e.np2; rec2.n_fin = e.nf;
+      rec2.rattrap_gagnees = hg; rec2.rattrap_utilisees = hu; rec2.jour_rattrapage = rattrapage;
+      if (rattrapage) {
+        rec2.present = false;
+        rec2.h_j_manual = ''; rec2.h_n_manual = '';
+      } else {
+        rec2.present = true;
+        var c = ptPXCalcInputs({ ja: e.ja, jp1: e.jp1, jp2: e.jp2, jf: e.jf, na: e.na, np1: e.np1, np2: e.np2, nf: e.nf, libres: 0 }, isR);
+        if (isR) { rec2.h_j_manual = storeH(c.r); rec2.h_n_manual = ''; }
+        else { rec2.h_j_manual = storeH(c.j); rec2.h_n_manual = storeH(c.n); }
+      }
+      var fullJ = e.ja && e.jp1 && e.jp2 && e.jf;
+      var fullN = e.na && e.np1 && e.np2 && e.nf;
+      if (autoLock && (fullJ || fullN) && !rattrapage) { rec2.protege = true; locked++; }
+      count++;
     }
   });
-  setPointagePaye(arr);
-  document.getElementById('modalOverlay').remove();
-  toast(count + ' pointages générés automatiquement');
+  setPointagePaye(pts);
+  toast(count + ' employé(s) pointé(s) le ' + dk + (locked ? ' — ' + locked + ' verrouillé(s) 🔒' : ''), 'success');
+  closePtModal();
   renderPage();
 }
 
-/* ==================== MODAL EFFACER POINTAGES ==================== */
-function showEffacerPointagesModal() {
-  var funcs = getFonctionsFromPaye();
-  var now = new Date();
-  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:500px">';
-  m += '<h2 style="color:var(--red)">🗑️ Effacer des pointages</h2>';
-  m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">Sélectionnez la période et filtrez les employés pour effacer les pointages.</p>';
-  m += '<div class="form-row">';
-  m += formField('epDateDebut', 'Date début', now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-01', 'date', true);
-  m += formField('epDateFin', 'Date fin', now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(), 'date', true);
-  m += '</div>';
-  m += '<div class="form-row">';
-  m += '<div><label style="font-size:.75rem;color:var(--dim);display:block;margin-bottom:2px">Type de pointage</label><select id="epType" style="width:100%"><option value="">Tous les types</option><option value="jour">Jour</option><option value="nuit">Nuit</option></select></div>';
-  m += '<div><label style="font-size:.75rem;color:var(--dim);display:block;margin-bottom:2px">Fonction</label><select id="epFonction" style="width:100%"><option value="">Toutes les fonctions</option>';
-  funcs.forEach(function(f) { m += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; });
-  m += '</select></div></div>';
-  m += '<strong style="font-size:.8rem;margin:1rem 0 .5rem;display:block">Employés concernés <span id="epCount" style="font-weight:400;color:var(--dim)">(0 sélectionné(s))</span></strong>';
-  m += '<div style="display:flex;justify-content:flex-end;margin-bottom:.5rem"><label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" id="epSelectAll" onchange="epToggleAll(this.checked)"> Tout sélectionner</label></div>';
-  m += '<div id="epEmployeeList" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:.3rem">';
-  getPersonnel().forEach(function(e) {
-    m += '<label style="display:flex;align-items:center;gap:.5rem;padding:4px 6px;cursor:pointer;border-bottom:1px solid var(--border)">';
-    m += '<input type="checkbox" class="ep-emp" value="' + e.id + '">';
-    m += '<span style="font-size:.78rem"><strong>[' + escH(e.matricule || '—') + ']</strong> ' + escH(e.nom + ' ' + (e.prenoms || '')) + '</span>';
-    m += '</label>';
+/* ==================== MODAL GENERER MOIS COMPLET (identique module Paye) ==================== */
+function showModalGenererMois() {
+  var mois = ptPXSelMois();
+  var emps = ptPXEmpsActifs().filter(ptPXEstForfait);
+  var html = '<div style="padding:20px">' +
+    '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
+    '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
+    '<div style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
+    '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois (' + mois + ')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option></select></div>' +
+    '<div id="gen-day-wrap" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
+    '<input type="date" id="gen-day" value="' + getToday() + '" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
+    '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">Employés concernés</div>' +
+    '<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:.8rem;border-bottom:1px solid #f0f0f0"><input type="checkbox" id="gen-select-all" checked onchange="genToggleAll();genUpdateCount()"> Tout sélectionner</label>' +
+    '<div id="gen-emp-list" style="max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:16px"></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:10px">' +
+    '<button class="btn" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
+    '<button class="btn" onclick="genApply()" id="gen-apply-btn" style="padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">Générer pour ' + emps.length + ' employé(s)</button>' +
+    '</div></div>';
+  openPtModal(html);
+  var list = document.getElementById('gen-emp-list');
+  if (list) {
+    list.innerHTML = emps.map(function(p) {
+      var tag = ptPXEstForfait(p)
+        ? '<span style="font-size:.62rem;color:#7c3aed;background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:1px 7px">Forfait</span>'
+        : '<span style="font-size:.62rem;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:1px 7px">Jour</span>';
+      return '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:.8rem"><input type="checkbox" class="gen-emp-cb" value="' + p.id + '" checked onchange="genUpdateCount()"><strong>' + escH(p.matricule || '') + '</strong> ' + escH(p.nom) + (p.prenoms ? ' ' + escH(p.prenoms) : '') + ' ' + tag + '</label>';
+    }).join('');
+  }
+}
+function genTogglePeriode() {
+  var v = (document.getElementById('gen-periode') || {}).value || 'all';
+  var w = document.getElementById('gen-day-wrap');
+  if (w) w.style.display = (v === 'day') ? '' : 'none';
+}
+function genUpdateCount() {
+  var n = document.querySelectorAll('.gen-emp-cb:checked').length;
+  var b = document.getElementById('gen-apply-btn');
+  if (b) b.textContent = 'Générer pour ' + n + ' employé(s)';
+}
+function genToggleAll() { var c = (document.getElementById('gen-select-all') || {}).checked; document.querySelectorAll('.gen-emp-cb').forEach(function(cb) { cb.checked = c; }); }
+function genApply() {
+  var cbs = document.querySelectorAll('.gen-emp-cb:checked');
+  if (cbs.length === 0) { toast('Sélectionnez au moins un employé', 'error'); return; }
+  var mois = ptPXSelMois();
+  var periode = (document.getElementById('gen-periode') || {}).value || 'all';
+  var day = (document.getElementById('gen-day') || {}).value || '';
+  if (periode === 'day' && !day) { toast('Choisissez le jour à générer', 'error'); return; }
+  var year = parseInt(mois.split('-')[0], 10), mIdx = parseInt(mois.split('-')[1], 10) - 1;
+  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+  var pts = getPointagePaye();
+  var dks = [];
+  if (periode === 'day') {
+    dks.push(day);
+  } else {
+    for (var d = 1; d <= daysInMonth; d++) {
+      var dk = mois + '-' + (d < 10 ? '0' : '') + d;
+      var dw = new Date(year, mIdx, d).getDay();
+      if (dw === 0 || dw === 6) continue;
+      dks.push(dk);
+    }
+  }
+  var count = 0, skipped = 0, skippedAP = 0;
+  cbs.forEach(function(cb) {
+    var eid = cb.value;
+    dks.forEach(function(dk) {
+      var idx = -1;
+      for (var i = 0; i < pts.length; i++) { if (pts[i] && pts[i].employee_id === eid && pts[i].date === dk) { idx = i; break; } }
+      if (idx !== -1 && pts[idx].protege === true) { skipped++; return; }
+      if (idx !== -1 && pts[idx].absent_paye === true) { skippedAP++; return; }
+      if (periode === 'empty' && idx !== -1) return;
+      if (idx === -1) {
+        pts.push({
+          id: genId(), employee_id: eid, date: dk, present: true, h_j_manual: '8', h_n_manual: '',
+          j_arrivee: '08:00', j_pause: '12:00', j_reprise: '13:00', j_fin: '17:00',
+          n_arrivee: '', n_pause: '', n_reprise: '', n_fin: ''
+        });
+        count++;
+      } else {
+        pts[idx].present = true;
+        pts[idx].h_j_manual = '8';
+        pts[idx].j_arrivee = '08:00'; pts[idx].j_pause = '12:00';
+        pts[idx].j_reprise = '13:00'; pts[idx].j_fin = '17:00';
+        count++;
+      }
+    });
   });
-  m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-red" onclick="applyEffacerPointages()">🗑️ Confirmer la suppression</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div>';
-  m += '</div></div>';
-  document.body.insertAdjacentHTML('beforeend', m);
+  setPointagePaye(pts);
+  toast(count + ' jour(s) généré(s) pour ' + cbs.length + ' employé(s)' + (skipped ? ' — ' + skipped + ' verrouillé(s) ignoré(s)' : '') + (skippedAP ? ' — ' + skippedAP + ' absent(s) payé(s) conservé(s)' : ''), 'success');
+  closePtModal();
+  renderPage();
 }
 
-function epToggleAll(checked) {
-  document.querySelectorAll('.ep-emp').forEach(function(cb) { cb.checked = checked; });
+/* ==================== MODAL EFFACER POINTAGES (identique module Paye) ==================== */
+function showModalEffacer() {
+  var mois = ptPXSelMois();
+  var y = mois.split('-')[0], m = mois.split('-')[1];
+  var debut = y + '-' + m + '-01';
+  var fin = y + '-' + m + '-' + new Date(parseInt(y, 10), parseInt(m, 10), 0).getDate();
+  var html = '<div style="padding:20px">' +
+    '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px;color:#dc2626">Effacer des pointages</h3>' +
+    '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Sélectionnez la période et filtrez les employés pour effacer les pointages.</p>' +
+    '<div style="display:flex;gap:12px;margin-bottom:12px">' +
+    '<div style="flex:1"><label style="font-size:.78rem;font-weight:600">Date début</label><input type="date" id="eff-debut" value="' + debut + '" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
+    '<div style="flex:1"><label style="font-size:.78rem;font-weight:600">Date fin</label><input type="date" id="eff-fin" value="' + fin + '" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:12px;margin-bottom:12px">' +
+    '<div style="flex:1"><label style="font-size:.78rem;font-weight:600">Type de pointage</label><select id="eff-type" onchange="effFilterEmps()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tous les types</option><option value="journalier">Journalier</option><option value="titulaire">Titulaire (173.33h)</option><option value="externe">Externe</option></select></div>' +
+    '<div style="flex:1"><label style="font-size:.78rem;font-weight:600">Fonction</label><select id="eff-fonction" onchange="effFilterEmps()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="Toutes les fonctions">Toutes les fonctions</option></select></div>' +
+    '</div>' +
+    '<div style="color:#dc2626;font-size:.8rem;font-weight:600;margin-bottom:8px">Employés concernés (<span id="eff-count">0</span> sélectionné(s))</div>' +
+    '<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:.8rem;border-bottom:1px solid #f0f0f0"><input type="checkbox" id="eff-select-all" onchange="effToggleAll()"> Tout sélectionner</label>' +
+    '<div id="eff-emp-list" style="max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:16px"></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:10px">' +
+    '<button class="btn" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
+    '<button class="btn" onclick="effConfirm()" style="padding:8px 20px;background:#dc2626;color:white;border:none;border-radius:6px;font-weight:600">🗑 Confirmer la suppression</button>' +
+    '</div></div>';
+  openPtModal(html);
+  effFilterEmps();
+  var ff = document.getElementById('eff-fonction');
+  if (ff) { getFonctionsFromPaye().forEach(function(f) { ff.innerHTML += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; }); }
 }
-
-function applyEffacerPointages() {
-  var d1 = (document.getElementById('epDateDebut') || {}).value;
-  var d2 = (document.getElementById('epDateFin') || {}).value;
-  if (!d1 || !d2) return toast('Dates requises', 'error');
-  var checked = document.querySelectorAll('.ep-emp:checked');
-  if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
-  var empIds = Array.from(checked).map(function(cb) { return cb.value; });
-  if (!confirm2('Supprimer les pointages du ' + d1 + ' au ' + d2 + ' pour ' + empIds.length + ' employé(s) ?')) return;
-  var arr = getPointagePaye().filter(function(p) {
-    if (!p || p.date < d1 || p.date > d2) return true;
-    return empIds.indexOf(p.employee_id) === -1;
+function effFilterEmps() {
+  var fct = (document.getElementById('eff-fonction') || {}).value || 'Toutes les fonctions';
+  var typ = (document.getElementById('eff-type') || {}).value || 'all';
+  var emps = ptPXEmpsActifs().filter(function(p) {
+    if (fct !== 'Toutes les fonctions' && p.fonction !== fct) return false;
+    if (typ !== 'all') { var c = ptPXEmpCat(p); if (typ === 'journalier' && c !== 'journalier') return false; if (typ === 'titulaire' && c !== 'titulaire') return false; if (typ === 'externe' && c !== 'externe') return false; }
+    return true;
   });
-  setPointagePaye(arr);
-  document.getElementById('modalOverlay').remove();
-  toast('Pointages supprimés');
+  var list = document.getElementById('eff-emp-list');
+  if (!list) return;
+  list.innerHTML = emps.map(function(p) {
+    return '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:.8rem"><input type="checkbox" class="eff-emp-cb" value="' + p.id + '" onchange="effUpdateCount()"><strong>' + escH(p.matricule || '') + '</strong> ' + escH(p.nom) + (p.prenoms ? ' ' + escH(p.prenoms) : '') + '</label>';
+  }).join('');
+  effUpdateCount();
+}
+function effToggleAll() { var c = (document.getElementById('eff-select-all') || {}).checked; document.querySelectorAll('.eff-emp-cb').forEach(function(cb) { cb.checked = c; }); effUpdateCount(); }
+function effUpdateCount() { var n = document.querySelectorAll('.eff-emp-cb:checked').length; var el = document.getElementById('eff-count'); if (el) el.textContent = n; }
+function effConfirm() {
+  var cbs = document.querySelectorAll('.eff-emp-cb:checked');
+  if (cbs.length === 0) { toast('Sélectionnez au moins un employé', 'error'); return; }
+  var debut = (document.getElementById('eff-debut') || {}).value;
+  var fin = (document.getElementById('eff-fin') || {}).value;
+  if (!debut || !fin) { toast('Dates obligatoires', 'error'); return; }
+  if (!confirm2('Supprimer les pointages du ' + debut + ' au ' + fin + ' pour ' + cbs.length + ' employé(s) ?')) return;
+  var pts = getPointagePaye();
+  var ids = {};
+  cbs.forEach(function(cb) { ids[cb.value] = true; });
+  var count = 0;
+  for (var i = pts.length - 1; i >= 0; i--) {
+    if (pts[i] && ids[pts[i].employee_id] && pts[i].date >= debut && pts[i].date <= fin) { pts.splice(i, 1); count++; }
+  }
+  setPointagePaye(pts);
+  toast(count + ' pointage(s) supprimé(s)', 'success');
+  closePtModal();
   renderPage();
 }
 
@@ -6465,13 +6735,19 @@ function buildFichePointageHTML(emp) {
   var now = new Date();
   var year = now.getFullYear();
   var month = now.getMonth() + 1;
+  var ym = year + '-' + (month < 10 ? '0' : '') + month;
+  var montSetF = {};
+  try {
+    var _pmf = JSON.parse(localStorage.getItem('mdb_paye') || '{}').pointageMontage || [];
+    for (var mi = 0; mi < _pmf.length; mi++) { var _mm = _pmf[mi]; if (_mm && _mm.employee_id === emp.id && (_mm.date || '').indexOf(ym) === 0 && (_mm.quantite || 0) > 0) montSetF[_mm.date] = true; }
+  } catch(e) {}
   var daysInMonth = new Date(year, month, 0).getDate();
   var monthNames = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
   var html = '<html><head><style>body{font-family:Arial,sans-serif;font-size:11px;margin:20px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #ccc;padding:4px 6px;text-align:left}th{background:#f0f0f0;font-size:10px}td{font-size:10px}.header{text-align:center;margin-bottom:15px}.summary{margin-top:15px;display:flex;gap:20px}.summary-box{border:1px solid #ccc;padding:8px;flex:1}</style></head><body>';
   html += '<div class="header"><strong>Fiche de pointage détaillée</strong></div>';
   html += '<div style="font-size:10px;margin-bottom:10px">Employé: <strong>' + escH(emp.nom + ' ' + (emp.prenoms || '')) + '</strong> | Matricule: ' + escH(emp.matricule || '—') + ' | Fonction: ' + escH((emp.fonction || '').toUpperCase()) + '</div>';
   html += '<table><tr><th>Date</th><th>Pointages</th><th>Jour (H)</th><th>Nuit (H)</th><th>Total (H)</th><th>Rendement</th><th>Observations</th></tr>';
-  var totalJour = 0, totalNuit = 0;
+  var totalJour = 0, totalNuit = 0, totalR = 0, gTot = 0, uTot = 0;
   for (var d = 1; d <= daysInMonth; d++) {
     var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
     var dt = new Date(year, month - 1, d);
@@ -6479,25 +6755,52 @@ function buildFichePointageHTML(emp) {
     var label = dayNames[dt.getDay()] + ' ' + String(d).padStart(2,'0') + '/' + String(month).padStart(2,'0');
     var p = null;
     for (var fi = 0; fi < pres.length; fi++) { if (pres[fi] && pres[fi].employee_id === emp.id && pres[fi].date === dateStr) { p = pres[fi]; break; } }
-    var cc = p ? ptPXDay(p) : { j: 0, n: 0 };
-    var ptg = '-';
+    var jStr = '-', nStr = '-', total = '-', rend = '-', obs = '';
     if (p) {
+      var isRf = (emp.rendement === true) || (p.rendement === true);
+      var cc = ptPXDay(p, isRf);
+      var hJ = cc.j, hN = cc.n, hR = cc.r;
+      if (hJ === 0 && hN === 0 && hR === 0 && p.present === true && !isRf) hJ = 8;
+      var ptg = '-';
       if (p.j_arrivee || p.j_fin) ptg = (p.j_arrivee || '?') + '-' + (p.j_fin || '?');
       else if (p.h_j_manual) ptg = p.h_j_manual + (p.h_n_manual ? ' / N:' + p.h_n_manual : '');
       else if (p.present === false) ptg = 'Absent';
       else ptg = 'Présent';
+      if (isRf) {
+        rend = 'R';
+        if (hR > 0) { jStr = 'R+' + hR + 'h'; total = 'R+' + hR + 'h'; totalR += hR; }
+        else if (montSetF[dateStr]) { jStr = 'R'; total = 'R'; }
+        else if (p.present === true) { jStr = 'RENDEMENT'; total = 'RENDEMENT'; }
+        if (p.present === false && !p.absent_paye) obs = 'Absent';
+      } else {
+        if (hJ > 0) { jStr = hJ; totalJour += hJ; }
+        if (hN > 0) { nStr = hN; totalNuit += hN; }
+        if (hJ > 0 || hN > 0) total = Math.round((hJ + hN) * 100) / 100;
+        if (p.present === false) obs = 'Absent';
+      }
+      if (p.faute_societe) obs = 'Faute société';
+      if (p.paye_sans_travail) obs = 'Payé sans travail' + (p.pst_a_rattraper ? ' — à rattraper' : '');
+      if (p.jour_rattrapage) obs = 'Jour de rattrapage';
+      if (p.absent_paye) obs = 'Absent payé (faute entreprise) — à rattraper';
+      if (montSetF[dateStr]) obs = (obs ? obs + ' — ' : '') + 'Montage (rendement)';
+      var rg = parseFloat(p.rattrap_gagnees) || 0, ru = parseFloat(p.rattrap_utilisees) || 0;
+      if (rg > 0 || ru > 0) { obs = (obs ? obs + ' — ' : '') + 'Rattrapage (+' + rg + 'h / -' + ru + 'h)'; gTot += rg; uTot += ru; }
+      if (p.obs) obs = (obs ? obs + ' — ' : '') + p.obs;
+      html += '<tr><td>' + label + '</td><td>' + escH(ptg) + '</td><td>' + jStr + '</td><td>' + nStr + '</td><td>' + total + '</td><td>' + rend + '</td><td>' + escH(obs) + '</td></tr>';
+    } else {
+      var dwx = new Date(year, month - 1, d).getDay();
+      if (dwx === 0 || dwx === 6) obs = 'Week-end';
+      else if (montSetF[dateStr] && emp.rendement === true) { jStr = 'R'; total = 'R'; rend = 'R'; obs = 'Montage (rendement)'; }
+      html += '<tr><td>' + label + '</td><td>-</td><td>' + jStr + '</td><td>' + nStr + '</td><td>' + total + '</td><td>' + rend + '</td><td>' + escH(obs) + '</td></tr>';
     }
-    var hj = Math.round(cc.j * 100) / 100, hn = Math.round(cc.n * 100) / 100;
-    totalJour += hj;
-    totalNuit += hn;
-    html += '<tr><td>' + label + '</td><td>' + escH(ptg) + '</td><td>' + hj + '</td><td>' + hn + '</td><td>' + Math.round((hj + hn) * 100) / 100 + '</td><td>' + (p && p.rendement ? 'R' : '-') + '</td><td>' + escH(p ? ((p.present === false ? 'Absent' : 'Présent') + (p.obs ? ' — ' + p.obs : '')) : '') + '</td></tr>';
   }
   html += '</table>';
   html += '<div class="summary">';
-  totalJour = Math.round(totalJour * 100) / 100; totalNuit = Math.round(totalNuit * 100) / 100;
-  html += '<div class="summary-box"><strong>Total Heures Jour :</strong> ' + totalJour + 'h<br><strong>Total Heures Nuit :</strong> ' + totalNuit + 'h<br><strong>TOTAL MENSUEL :</strong> ' + Math.round((totalJour + totalNuit) * 100) / 100 + 'h</div>';
-  html += '<div class="summary-box"><strong>Heures à rattraper</strong><br>Total gagné: 0h<br>Total rattrapage: 0h</div>';
-  html += '<div class="summary-box"><strong>Solde Restant à rattraper</strong><br><span style="font-size:20px;font-weight:800">' + (totalJour + totalNuit) + 'h</span></div>';
+  totalJour = Math.round(totalJour * 100) / 100; totalNuit = Math.round(totalNuit * 100) / 100; totalR = Math.round(totalR * 100) / 100;
+  gTot = Math.round(gTot * 100) / 100; uTot = Math.round(uTot * 100) / 100;
+  html += '<div class="summary-box"><strong>Total Heures Jour :</strong> ' + totalJour + 'h<br><strong>Total Heures Nuit :</strong> ' + totalNuit + 'h<br><strong>Rendement :</strong> ' + totalR + 'h<br><strong>TOTAL MENSUEL :</strong> ' + Math.round((totalJour + totalNuit + totalR) * 100) / 100 + 'h</div>';
+  html += '<div class="summary-box"><strong>Heures à rattraper</strong><br>Total gagné: ' + gTot + 'h<br>Total rattrapage: ' + uTot + 'h</div>';
+  html += '<div class="summary-box"><strong>Solde Restant à rattraper</strong><br><span style="font-size:20px;font-weight:800">' + Math.round((gTot - uTot) * 100) / 100 + 'h</span></div>';
   html += '</div></body></html>';
   return html;
 }
