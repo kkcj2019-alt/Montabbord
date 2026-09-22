@@ -689,12 +689,33 @@ function ptPXToMin(t) {
   return h * 60 + mm;
 }
 function ptPXIsNight(min) { var m = ((min % 1440) + 1440) % 1440; return m >= 1260 || m < 300; }
-/* Calcule {j, n} (heures jour/nuit) d'une fiche : créneaux détaillés prioritaires, sinon manuel */
-function ptPXDay(rec) {
-  if (!rec || rec.present === false) return { j: 0, n: 0 };
+/* Durée des créneaux détaillés (heures) */
+function ptPXDurDetailed(rec) {
+  function one(a, b) {
+    var s = ptPXToMin(a), e = ptPXToMin(b);
+    if (s === null || e === null) return 0;
+    if (e <= s) e += 1440;
+    return (e - s) / 60;
+  }
+  var t = 0, tj = 0, tn = 0;
+  if (rec.j_arrivee && rec.j_pause) tj += one(rec.j_arrivee, rec.j_pause);
+  if (rec.j_reprise && rec.j_fin) tj += one(rec.j_reprise, rec.j_fin);
+  if (tj === 0 && rec.j_arrivee && rec.j_fin) tj += one(rec.j_arrivee, rec.j_fin);
+  if (rec.n_arrivee && rec.n_pause) tn += one(rec.n_arrivee, rec.n_pause);
+  if (rec.n_reprise && rec.n_fin) tn += one(rec.n_reprise, rec.n_fin);
+  if (tn === 0 && rec.n_arrivee && rec.n_fin) tn += one(rec.n_arrivee, rec.n_fin);
+  t = tj + tn;
+  return Math.round(t * 100) / 100;
+}
+/* Calcule {j, n, r} d'une fiche (même logique que la Paye) */
+function ptPXDay(rec, isR) {
+  if (!rec || (rec.present === false && !rec.absent_paye)) return { j: 0, n: 0, r: 0 };
+  var libres = parseFloat(rec.h_libres) || 0;
+  if (isR) return { j: 0, n: 0, r: Math.round((ptPXDurDetailed(rec) + libres) * 100) / 100 };
+  if (rec.absent_paye) return { j: ptPXParseH(rec.h_j_manual), n: ptPXParseH(rec.h_n_manual), r: 0 };
   var hasJ = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin;
   var hasN = rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin;
-  if (!hasJ && !hasN) return { j: ptPXParseH(rec.h_j_manual), n: ptPXParseH(rec.h_n_manual) };
+  if (!hasJ && !hasN) return { j: Math.round((ptPXParseH(rec.h_j_manual) + libres) * 100) / 100, n: ptPXParseH(rec.h_n_manual), r: 0 };
   function span(a, b) {
     var s = ptPXToMin(a), e = ptPXToMin(b);
     if (s === null || e === null) return { j: 0, n: 0 };
@@ -714,8 +735,52 @@ function ptPXDay(rec) {
   var j = dj.j + dn.j, n = dj.n + dn.n;
   if (j === 0) { var lj = ptPXParseH(rec.h_j_manual); if (lj > 0) j = lj; }
   if (n === 0) { var ln = ptPXParseH(rec.h_n_manual); if (ln > 0) n = ln; }
-  return { j: Math.round(j * 100) / 100, n: Math.round(n * 100) / 100 };
+  j += libres;
+  return { j: Math.round(j * 100) / 100, n: Math.round(n * 100) / 100, r: 0 };
 }
+/* Catégorie employé + visibilité mensuelle (mêmes règles que la Paye) */
+function ptPXEmpCat(p) {
+  if (!p) return 'titulaire';
+  if (p.type_contrat === 'Journalier') return 'journalier';
+  if (p.type_contrat === 'Externe' || p.categorie === 'externe') return 'externe';
+  return 'titulaire';
+}
+function ptPXVisible(p, ym) {
+  if (!p) return false;
+  var ds = p.date_sortie || '';
+  if (p.status === 'inactif' && !ds) return false;
+  if (ds && ym && ds.substring(0, 7) < ym) return false;
+  return true;
+}
+/* Stats HS mensuelles (même calcul que la Paye : dim → 75/100, nuit → 75, jour au-delà de 40h/sem → 15 puis 50) */
+function ptPXMonthStats(empId, ym, arr) {
+  var hs15 = 0, hs50 = 0, hs75 = 0, hs100 = 0, weeklyNormal = 0, weeklyHS15 = 0, curWeek = -1;
+  var y = parseInt(ym.slice(0, 4), 10), mi = parseInt(ym.slice(5, 7), 10) - 1;
+  var dim = new Date(y, mi + 1, 0).getDate();
+  var firstDow = (new Date(y, mi, 1).getDay() + 6) % 7;
+  for (var d = 1; d <= dim; d++) {
+    var dk = ym + '-' + (d < 10 ? '0' : '') + d;
+    var week = Math.floor((d + firstDow - 1) / 7);
+    if (week !== curWeek) { weeklyNormal = 0; weeklyHS15 = 0; curWeek = week; }
+    var isSun = new Date(y, mi, d).getDay() === 0;
+    var rec = null;
+    for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].employee_id === empId && arr[i].date === dk) { rec = arr[i]; break; } }
+    if (!rec) continue;
+    var hJ = (rec.h_j_manual !== undefined && rec.h_j_manual !== '') ? ptPXParseH(rec.h_j_manual) : 0;
+    var hN = (rec.h_n_manual !== undefined && rec.h_n_manual !== '') ? ptPXParseH(rec.h_n_manual) : 0;
+    if (isSun) { hs75 += hJ; hs100 += hN; }
+    else {
+      hs75 += hN;
+      var toN = Math.min(hJ, Math.max(0, 40 - weeklyNormal));
+      weeklyNormal += toN;
+      var rem = hJ - toN;
+      if (rem > 0) { var to15 = Math.min(rem, Math.max(0, 6 - weeklyHS15)); hs15 += to15; weeklyHS15 += to15; hs50 += rem - to15; }
+    }
+  }
+  function r2(x) { return Math.round(x * 100) / 100; }
+  return { hs15: r2(hs15), hs50: r2(hs50), hs75: r2(hs75), hs100: r2(hs100) };
+}
+function ptPXDash(v) { return v > 0 ? (Math.round(v * 10) / 10) + 'h' : '<span style="color:#cbd5e1">—</span>'; }
 /* Texte + couleur d'une case jour (style module Paye) */
 function ptPXCell(rec, isConge, isWeekend) {
   if (!rec && isConge) return { txt: 'C', bg: '#eff6ff', title: 'Congé' };
@@ -736,8 +801,9 @@ function ptPXAddDay(ds) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 function ptPXOuvres(y, m) {
+  /* Jours ouvrés Lun–Ven comme la Paye */
   var n = 0, dim = new Date(y, m, 0).getDate();
-  for (var d = 1; d <= dim; d++) { if (new Date(y, m - 1, d).getDay() !== 0) n++; }
+  for (var d = 1; d <= dim; d++) { var w = new Date(y, m - 1, d).getDay(); if (w !== 0 && w !== 6) n++; }
   return n;
 }
 function ptPXCongeMap(ym) {
@@ -5904,9 +5970,19 @@ function renderPointageGrouped() {
   var searchQ = (document.getElementById('ptSearch') || {}).value || '';
   var _ym = selYear + '-' + String(selMonth).padStart(2,'0');
   var congeMap = ptPXCongeMap(_ym);
-  var filtered = personnel;
-  if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
-  if (searchQ) { var q = searchQ.toLowerCase(); filtered = filtered.filter(function(e) { return ((e.nom || '') + ' ' + (e.prenoms || '') + ' ' + (e.matricule || '')).toLowerCase().indexOf(q) !== -1; }); }
+  var montSet = {};
+  try {
+    var _pm = JSON.parse(localStorage.getItem('mdb_paye') || '{}').pointageMontage || [];
+    for (var mi = 0; mi < _pm.length; mi++) { var _mm = _pm[mi]; if (_mm && _mm.employee_id && _mm.date && (_mm.date || '').indexOf(_ym) === 0 && (_mm.quantite || 0) > 0) montSet[_mm.employee_id + '|' + _mm.date] = true; }
+  } catch(e) {}
+  /* Même filtre que la Paye : actifs du mois, en paie, tri matricule */
+  var filtered = personnel.filter(function(p) {
+    if (!ptPXVisible(p, _ym)) return false;
+    if (p.en_paie === false) return false;
+    if (foncFilter && (p.fonction || '') !== foncFilter) return false;
+    if (searchQ) { var q = searchQ.toLowerCase(); if (((p.matricule || '') + ' ' + (p.nom || '') + ' ' + (p.prenoms || '') + ' ' + (p.fonction || '') + ' ' + (p.service || '')).toLowerCase().indexOf(q) === -1) return false; }
+    return true;
+  }).sort(function(a, b) { return String(a.matricule || '').localeCompare(String(b.matricule || ''), undefined, { numeric: true, sensitivity: 'base' }); });
 
   var h = '<div style="display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem;align-items:center">';
   h += '<select id="ptMonth" onchange="renderPage()" style="min-width:110px">';
@@ -5931,48 +6007,129 @@ function renderPointageGrouped() {
   h += '<button class="btn btn-accent" onclick="showPointageGroupeModal()" style="font-size:.75rem">👥 Pointage groupé</button>';
   h += '<button class="btn" onclick="renderPage()" style="font-size:.75rem">🔄 Actualiser</button>';
   h += '</div>';
-  h += '<div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin-bottom:.6rem;font-size:.75rem;color:var(--dim)">';
-  h += '<span><strong>' + filtered.length + '</strong> employé(s) affiché(s)</span>';
-  h += '<span><strong>' + ptPXOuvres(selYear, selMonth) + '</strong> jours ouvrés</span>';
-  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:3px"></span> Présent</span>';
-  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#fef2f2;border:1px solid #fecaca;border-radius:3px"></span> Absent</span>';
-  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px"></span> Congé</span>';
-  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:3px"></span> Week-end</span>';
-  h += '<span style="margin-left:auto">💡 Clic sur une case = modifier</span>';
-  h += '</div>';
+  h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem;flex-wrap:wrap;gap:10px">';
+  h += '<div><h3 style="font-size:1rem;font-weight:800;margin:0">📋 Pointage Horaire — ' + monthNames[selMonth - 1] + ' ' + selYear + '</h3>';
+  h += '<div style="font-size:0.72rem;color:var(--dim);margin-top:2px;font-weight:500">' + filtered.length + ' employé(s) affiché(s) &nbsp;·&nbsp; ' + ptPXOuvres(selYear, selMonth) + ' jours ouvrés</div></div>';
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:.68rem;font-weight:600">';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px;color:#16a34a"><span style="display:inline-block;width:12px;height:12px;background:#dcfce7;border:1.5px solid #86efac;border-radius:3px"></span>Présent</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px;color:#dc2626"><span style="display:inline-block;width:12px;height:12px;background:#fee2e2;border:1.5px solid #fca5a5;border-radius:3px"></span>Absent</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px;color:#ea580c"><span style="display:inline-block;width:12px;height:12px;background:#fff7ed;border:1.5px solid #fdba74;border-radius:3px"></span>Rendement</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px;color:#78716c"><span style="display:inline-block;width:12px;height:12px;background:#fef3c7;border:1.5px solid #fde047;border-radius:3px"></span>Week-end</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px;color:#1d4ed8"><span style="display:inline-block;width:12px;height:12px;background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:3px"></span>Congé</span>';
+  h += '</div></div>';
 
   if (!filtered.length) return h + '<div class="empty">Aucun personnel pour ces filtres</div>';
 
-  var _dn = ['DIM', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'];
-  h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.72rem;min-width:' + (260 + daysInMonth * 54 + 170) + 'px">';
-  h += '<tr style="background:var(--accent);color:#fff;position:sticky;top:0;z-index:2"><th style="position:sticky;left:0;z-index:3;background:var(--accent);min-width:190px;padding:6px 8px;text-align:left">EMPLOYÉ</th>';
+  var _jc = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
+  h += '<div style="overflow-x:auto;border-radius:12px;border:1.5px solid #e2e8f0">';
+  h += '<table style="border-collapse:collapse;font-size:.7rem;width:100%;min-width:600px">';
+  h += '<tr style="background:#f1f5f9;color:#1e293b">';
+  h += '<th style="position:sticky;left:0;z-index:3;background:#334155;padding:10px 14px;text-align:left;font-size:.72rem;font-weight:800;letter-spacing:.5px;border-right:2px solid #475569;min-width:190px;white-space:nowrap">EMPLOYÉ</th>';
   for (var d = 1; d <= daysInMonth; d++) {
     var dt = new Date(selYear, selMonth - 1, d);
     var dow = dt.getDay();
-    var isWeekend = dow === 0;
-    var bg = isWeekend ? '#f59e0b' : 'transparent';
-    h += '<th style="min-width:54px;padding:4px 2px;text-align:center;background:' + bg + (isWeekend ? ';color:#000' : '') + '"><span style="font-size:.6rem;display:block;opacity:.85">' + _dn[dow] + '</span>' + d + '</th>';
+    var we = dow === 0 || dow === 6;
+    h += '<th style="padding:4px 2px;text-align:center;min-width:44px;' + (we ? 'background:#fef3c7;color:#b45309;border-right:1px solid #fde047;' : 'background:#f1f5f9;color:#64748b;border-right:1px solid #e2e8f0;') + 'font-size:.62rem;font-weight:700">' + _jc[dow] + '<br><span style="font-size:.75rem;' + (we ? 'color:#92400e;' : 'color:#0f172a;') + 'font-weight:800">' + d + '</span></th>';
   }
-  h += '<th style="min-width:58px;background:var(--accent)">JOUR</th><th style="min-width:58px;background:var(--accent)">NUIT</th><th style="min-width:62px;background:var(--accent)">TOTAL</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#38bdf8;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap;border-left:2px solid #cbd5e1">JOUR</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#a78bfa;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap">NUIT</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#fbbf24;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap">HS+15%</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#fb923c;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap">HS+50%</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#f87171;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap">HS+75%</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#f43f5e;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap">HS+100%</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#e2e8f0;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap">HS TOT</th>';
+  h += '<th style="padding:8px 6px;background:#1e293b;color:#4ade80;text-align:center;font-size:.65rem;font-weight:800;white-space:nowrap;border-left:2px solid #16a34a">TOTAL H</th>';
   h += '</tr>';
-
-  filtered.forEach(function(e) {
-    var totJ = 0, totN = 0, cells = '';
+  var rowIdx = 0;
+  filtered.forEach(function(p) {
+    var cat = ptPXEmpCat(p);
+    var tJ = 0, tN = 0, tR = 0;
+    var clickable = cat !== 'externe';
+    var rowBg = (rowIdx % 2 === 0) ? '#ffffff' : '#f8fafc';
+    var initials = String(p.nom || '?').slice(0, 2).toUpperCase();
+    var avC = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3', '#ede9fe', '#ccfbf1'][rowIdx % 6];
+    var avT = ['#1d4ed8', '#16a34a', '#b45309', '#9d174d', '#6d28d9', '#0d9488'][rowIdx % 6];
+    var row = '<tr style="border-bottom:1px solid #e2e8f0" onmouseover="this.style.background=\'#f0f9ff\'" onmouseout="this.style.background=\'' + rowBg + '\'">' +
+      '<td style="position:sticky;left:0;background:' + rowBg + ';z-index:1;padding:6px 10px;border-right:2px solid #e2e8f0;font-weight:700;white-space:nowrap">' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+      '<div style="width:28px;height:28px;min-width:28px;border-radius:50%;background:' + avC + ';color:' + avT + ';display:flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:800">' + escH(initials) + '</div>' +
+      '<div><div style="font-size:.78rem;font-weight:800;color:#0f172a">' + escH((p.matricule || '') + ' ' + p.nom + ' ' + (p.prenoms || '')) + '</div><div style="font-size:.62rem;color:#64748b;font-weight:500">' + escH(p.fonction || '') + '</div></div></div></td>';
     for (var d = 1; d <= daysInMonth; d++) {
-      var dateStr = selYear + '-' + String(selMonth).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-      var rec = ptIdx[e.id + '|' + dateStr];
-      var dt2 = new Date(selYear, selMonth - 1, d);
-      var isWe = dt2.getDay() === 0;
-      var cell = ptPXCell(rec, !!congeMap[e.id + '|' + dateStr], isWe);
-      if (rec) { var _cc = ptPXDay(rec); totJ += _cc.j; totN += _cc.n; }
-      cells += '<td style="text-align:center;padding:4px 1px;cursor:pointer;background:' + cell.bg + ';border:1px solid var(--border);font-size:.68rem;font-weight:' + ((cell.txt === '-' || cell.txt === 'C') ? '400' : '700') + (cell.txt.indexOf('J:') === 0 ? ';color:#15803d' : '') + '" title="' + escH(cell.title) + '" onclick="openPointageCell(\'' + e.id + '\',\'' + dateStr + '\')">' + escH(cell.txt) + '</td>';
+      var dk = _ym + '-' + (d < 10 ? '0' : '') + d;
+      var dw2 = new Date(selYear, selMonth - 1, d).getDay();
+      var we2 = dw2 === 0 || dw2 === 6;
+      var rec = ptIdx[p.id + '|' + dk];
+      var montFait = montSet[p.id + '|' + dk] === true;
+      var conge = !!congeMap[p.id + '|' + dk];
+      var cell = '<span style="color:#94a3b8">-</span>', bg = '';
+      var hJ = 0, hN = 0, hR = 0;
+      if (rec) {
+        var isR = (p.rendement === true) || (rec.rendement === true);
+        var cc = ptPXDay(rec, isR);
+        hJ = cc.j; hN = cc.n; hR = cc.r;
+        if (hJ === 0 && hN === 0 && hR === 0 && rec.present === true && !isR) hJ = 8;
+        if (rec.faute_societe === true && hJ === 0 && hN === 0 && hR === 0) {
+          cell = '<span style="color:#d97706;font-weight:700">FS</span>';
+        } else if (rec.absent_paye && (hJ + hN + hR > 0)) {
+          cell = '<span style="color:#b45309;font-weight:700">AP: ' + ptPXFmtH(hJ + hN + hR) + '</span>';
+          bg = 'background:#fffbeb;border-color:#fcd34d;';
+        } else if (isR && (hR > 0 || rec.present === true || montFait)) {
+          cell = hR > 0 ? '<span style="color:#ea580c;font-weight:700">R+' + hR + 'h</span>' : (montFait ? '<span style="color:#ea580c;font-weight:700">R</span>' : '<span style="color:#ea580c;font-weight:700">RENDEMENT</span>');
+          bg = 'background:#fff7ed;border-color:#fed7aa;';
+        } else if (hJ > 0 || hN > 0) {
+          cell = '';
+          if (hJ > 0) cell += '<span style="color:#16a34a;font-weight:600">J: ' + ptPXFmtH(hJ) + '</span>';
+          if (hN > 0) cell += (cell ? '<br>' : '') + '<span style="color:#7c3aed;font-weight:600">N: ' + ptPXFmtH(hN) + '</span>';
+          bg = 'background:#f0fdf4;border-color:#bbf7d0;';
+        } else if (rec.present === false) {
+          cell = '<span style="color:#dc2626;font-weight:700">X</span>';
+          bg = 'background:#fef2f2;border-color:#fecaca;';
+        } else {
+          cell = '<span style="color:#16a34a;font-weight:700">✓</span>';
+          bg = 'background:#f0fdf4;border-color:#bbf7d0;';
+        }
+        tJ += hJ; tN += hN; tR += hR;
+      }
+      if (!rec && conge) { cell = '<span style="color:#1d4ed8;font-weight:700">C</span>'; bg = 'background:#eff6ff;border-color:#bfdbfe;'; }
+      if (!rec && p.rendement === true && montFait) { cell = '<span style="color:#ea580c;font-weight:700">R</span>'; bg = 'background:#fff7ed;border-color:#fed7aa;'; }
+      if (we2 && !bg) bg = 'background:#fef3c7;border-color:#fde68a;';
+      var cpT = '';
+      if (rec) {
+        var cps = [];
+        if (rec.j_arrivee) cps.push('Arr J ' + rec.j_arrivee);
+        if (rec.j_pause) cps.push('Pause J ' + rec.j_pause);
+        if (rec.j_reprise) cps.push('Reprise J ' + rec.j_reprise);
+        if (rec.j_fin) cps.push('Fin J ' + rec.j_fin);
+        if (rec.n_arrivee) cps.push('Arr N ' + rec.n_arrivee);
+        if (rec.n_pause) cps.push('Pause N ' + rec.n_pause);
+        if (rec.n_reprise) cps.push('Reprise N ' + rec.n_reprise);
+        if (rec.n_fin) cps.push('Fin N ' + rec.n_fin);
+        if (cps.length) cpT = ' | ' + cps.join(', ');
+        if (rec.h_libres && parseFloat(rec.h_libres) > 0) cpT += ' | +' + rec.h_libres + 'h libres';
+        if (rec.obs) cpT += ' | Obs: ' + rec.obs;
+        if (montFait) cpT += ' | Montage (rendement)';
+      }
+      if (conge) cpT += ' | Congé';
+      row += '<td style="padding:4px 2px;border-right:1px solid #e2e8f0;text-align:center;cursor:' + (clickable ? 'pointer;' : 'default;') + bg + ';min-width:44px" title="' + escH((clickable ? 'Modifier le pointage horaire' : 'Externe : jours saisis ailleurs') + cpT) + '"' + (clickable ? ' onclick="openPointageCell(\'' + p.id + '\',\'' + dk + '\')"' : '') + '>' + cell + '</td>';
     }
-    totJ = Math.round(totJ * 100) / 100; totN = Math.round(totN * 100) / 100;
-    h += '<tr style="border-bottom:1px solid var(--border)">';
-    h += '<td style="position:sticky;left:0;z-index:1;background:var(--card);padding:6px 8px;white-space:nowrap">' + (e.matricule ? '<span style="display:inline-block;min-width:26px;text-align:center;font-size:.62rem;font-weight:800;background:var(--accent);color:#fff;border-radius:8px;padding:1px 5px;margin-right:5px">' + escH(e.matricule) + '</span>' : '') + '<strong style="font-size:.78rem">' + escH(e.nom + ' ' + (e.prenoms || '')) + '</strong><br><span style="font-size:.65rem;color:var(--dim)">' + escH((e.fonction || '').toUpperCase()) + '</span></td>';
-    h += cells;
-    h += '<td style="text-align:center;font-weight:700;background:#f0fdf4;white-space:nowrap">' + ptPXFmtH(totJ) + '</td><td style="text-align:center;font-weight:700;background:#faf5ff;white-space:nowrap">' + ptPXFmtH(totN) + '</td><td style="text-align:center;font-weight:800;background:var(--card);white-space:nowrap">' + ptPXFmtH(totJ + totN) + '</td>';
-    h += '</tr>';
+    var sumH = tJ + tN + tR;
+    var stHS = cat !== 'externe' ? ptPXMonthStats(p.id, _ym, ptPaye) : null;
+    var hs15 = stHS ? stHS.hs15 : 0, hs50 = stHS ? stHS.hs50 : 0, hs75 = stHS ? stHS.hs75 : 0, hs100 = stHS ? stHS.hs100 : 0;
+    var hsTot = Math.round((hs15 + hs50 + hs75 + hs100) * 100) / 100;
+    row += '<td style="padding:6px 8px;text-align:center;font-weight:800;color:#16a34a;font-size:.72rem;border-left:2px solid #e2e8f0;background:#f0fdf4">' + ptPXDash(tJ) + '</td>' +
+      '<td style="padding:6px 8px;text-align:center;font-weight:800;color:#7c3aed;font-size:.72rem;background:#f5f3ff">' + ptPXDash(tN) + '</td>';
+    if (cat === 'externe') {
+      row += '<td style="padding:3px 6px;text-align:right;color:#94a3b8">—</td><td style="padding:3px 6px;text-align:right;color:#94a3b8">—</td><td style="padding:3px 6px;text-align:right;color:#94a3b8">—</td><td style="padding:3px 6px;text-align:right;color:#94a3b8">—</td><td style="padding:3px 6px;text-align:right;color:#94a3b8">—</td>';
+    } else {
+      row += '<td style="padding:6px 8px;text-align:center;font-size:.7rem;font-weight:700;color:#ca8a04;background:#fefce8">' + ptPXDash(hs15) + '</td>' +
+        '<td style="padding:6px 8px;text-align:center;font-size:.7rem;font-weight:700;color:#ea580c;background:#fff7ed">' + ptPXDash(hs50) + '</td>' +
+        '<td style="padding:6px 8px;text-align:center;font-size:.7rem;font-weight:700;color:#9333ea;background:#faf5ff">' + ptPXDash(hs75) + '</td>' +
+        '<td style="padding:6px 8px;text-align:center;font-size:.7rem;font-weight:700;color:#dc2626;background:#fef2f2">' + ptPXDash(hs100) + '</td>' +
+        '<td style="padding:6px 8px;text-align:center;font-size:.7rem;font-weight:900;color:#1e293b;background:#f1f5f9">' + ptPXDash(hsTot) + '</td>';
+    }
+    row += '<td style="padding:6px 10px;text-align:center;font-weight:900;font-size:.78rem;color:#0f172a;background:#f1f5f9;border-left:2px solid #16a34a;white-space:nowrap">' + sumH.toFixed(1) + 'h</td></tr>';
+    h += row;
+    rowIdx++;
   });
   h += '</table></div>';
   return h;
@@ -6181,7 +6338,7 @@ function applyGenererMois() {
     var empId = cb.value;
     for (var d = 1; d <= daysInMonth; d++) {
       var dt = new Date(year, month - 1, d);
-      if (dt.getDay() === 0) continue;
+      if (dt.getDay() === 0 || dt.getDay() === 6) continue;
       var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
       var found = false;
       for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].employee_id === empId && arr[i].date === dateStr) { found = true; break; } }
