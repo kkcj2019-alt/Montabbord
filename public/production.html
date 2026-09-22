@@ -656,6 +656,122 @@ function getLosses() { return getSection('losses', []); }
 function setLosses(v) { setSection('losses', v); }
 function getPersonnel() { try { return JSON.parse(localStorage.getItem('mdb_employes')) || []; } catch(e) { return []; } }
 
+/* ===== Données RH partagées avec l'app principale + module Paye (même localStorage) ===== */
+function getPointagePaye() { try { var p = JSON.parse(localStorage.getItem('mdb_paye') || '{}'); return (p && p.pointage) || []; } catch(e) { return []; } }
+function setPointagePaye(arr) { try { var p = JSON.parse(localStorage.getItem('mdb_paye') || '{}') || {}; if (!p || typeof p !== 'object' || Array.isArray(p)) p = {}; p.pointage = arr; localStorage.setItem('mdb_paye', JSON.stringify(p)); } catch(e) {} }
+function getRhCongesShared() { try { return JSON.parse(localStorage.getItem('mdb_rh_conges') || '[]') || []; } catch(e) { return []; } }
+function getRhSanctionsShared() { try { return JSON.parse(localStorage.getItem('mdb_rh_sanctions') || '[]') || []; } catch(e) { return []; } }
+function getServicesShared() { try { var p = JSON.parse(localStorage.getItem('mdb_paye') || '{}'); var s = (p && p.services) || []; return s.map(function(x) { return (typeof x === 'object' && x) ? (x.nom || x.name || '') : (x || ''); }).filter(function(n) { return !!n; }); } catch(e) { return []; } }
+function getFonctionsShared() { try { var p = JSON.parse(localStorage.getItem('mdb_paye') || '{}'); var f = (p && p.fonctions) || []; return f.map(function(x) { return (typeof x === 'object' && x) ? (x.nom || x.name || '') : (x || ''); }).filter(function(n) { return !!n; }); } catch(e) { return []; } }
+
+/* Parse heures "8", "8:00", "8h00", "7h30", décimal → heures (float) */
+function ptPXParseH(v) {
+  if (v === null || v === undefined) return 0;
+  var s = String(v).trim().replace(',', '.');
+  if (!s) return 0;
+  var m = s.match(/^(\d{1,2})\s*[:hH]\s*(\d{1,2})$/);
+  if (m) return (parseInt(m[1], 10) || 0) + (parseInt(m[2], 10) || 0) / 60;
+  var f = parseFloat(s);
+  return isNaN(f) ? 0 : f;
+}
+function ptPXFmtH(h) {
+  h = Math.round((parseFloat(h) || 0) * 100) / 100;
+  var H = Math.floor(h), M = Math.round((h - H) * 60);
+  if (M === 60) { H++; M = 0; }
+  return H + 'h' + (M < 10 ? '0' : '') + M;
+}
+function ptPXToMin(t) {
+  if (t === null || t === undefined || t === '') return null;
+  var m = String(t).trim().match(/^(\d{1,2})\s*[:hH]\s*(\d{2})$/);
+  if (!m) return null;
+  var h = parseInt(m[1], 10), mm = parseInt(m[2], 10);
+  if (h > 23 || mm > 59) return null;
+  return h * 60 + mm;
+}
+function ptPXIsNight(min) { var m = ((min % 1440) + 1440) % 1440; return m >= 1260 || m < 300; }
+/* Calcule {j, n} (heures jour/nuit) d'une fiche : créneaux détaillés prioritaires, sinon manuel */
+function ptPXDay(rec) {
+  if (!rec || rec.present === false) return { j: 0, n: 0 };
+  var hasJ = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin;
+  var hasN = rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin;
+  if (!hasJ && !hasN) return { j: ptPXParseH(rec.h_j_manual), n: ptPXParseH(rec.h_n_manual) };
+  function span(a, b) {
+    var s = ptPXToMin(a), e = ptPXToMin(b);
+    if (s === null || e === null) return { j: 0, n: 0 };
+    if (e <= s) e += 1440;
+    var j = 0, n = 0;
+    for (var t = s; t < e; t++) { if (ptPXIsNight(t)) n++; else j++; }
+    return { j: j / 60, n: n / 60 };
+  }
+  function pair(a, p1, p2, f) {
+    var r1 = (a && p1) ? span(a, p1) : { j: 0, n: 0 };
+    var r2 = (p2 && f) ? span(p2, f) : { j: 0, n: 0 };
+    if (r1.j + r1.n + r2.j + r2.n === 0 && a && f) return span(a, f);
+    return { j: r1.j + r2.j, n: r1.n + r2.n };
+  }
+  var dj = pair(rec.j_arrivee, rec.j_pause, rec.j_reprise, rec.j_fin);
+  var dn = pair(rec.n_arrivee, rec.n_pause, rec.n_reprise, rec.n_fin);
+  var j = dj.j + dn.j, n = dj.n + dn.n;
+  if (j === 0) { var lj = ptPXParseH(rec.h_j_manual); if (lj > 0) j = lj; }
+  if (n === 0) { var ln = ptPXParseH(rec.h_n_manual); if (ln > 0) n = ln; }
+  return { j: Math.round(j * 100) / 100, n: Math.round(n * 100) / 100 };
+}
+/* Texte + couleur d'une case jour (style module Paye) */
+function ptPXCell(rec, isConge, isWeekend) {
+  if (!rec && isConge) return { txt: 'C', bg: '#eff6ff', title: 'Congé' };
+  if (!rec) return { txt: '-', bg: isWeekend ? '#fffbeb' : 'transparent', title: '' };
+  if (rec.present === false && !rec.absent_paye) return { txt: 'A', bg: '#fef2f2', title: 'Absent' };
+  if (rec.rendement) return { txt: 'R', bg: '#fef2f2', title: 'Rendement' };
+  var c = ptPXDay(rec);
+  if (c.j > 0 || c.n > 0) {
+    var t = 'J: ' + ptPXFmtH(c.j) + (c.n > 0 ? ' N: ' + ptPXFmtH(c.n) : '');
+    return { txt: t, bg: '#f0fdf4', title: t + (rec.obs ? ' — ' + rec.obs : '') };
+  }
+  return { txt: 'P', bg: '#f0fdf4', title: 'Présent' };
+}
+/* Congés couvrant un mois : map "empId|YYYY-MM-DD" */
+function ptPXAddDay(ds) {
+  var d = new Date(ds + 'T00:00:00');
+  d.setDate(d.getDate() + 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function ptPXOuvres(y, m) {
+  var n = 0, dim = new Date(y, m, 0).getDate();
+  for (var d = 1; d <= dim; d++) { if (new Date(y, m - 1, d).getDay() !== 0) n++; }
+  return n;
+}
+function ptPXCongeMap(ym) {
+  var map = {};
+  try {
+    var cs = getRhCongesShared();
+    for (var i = 0; i < cs.length; i++) {
+      var c = cs[i];
+      if (!c || !c.employee_id || !c.date_depart) continue;
+      var d0 = c.date_depart, d1 = c.date_retour || c.date_depart;
+      if (d1 < ym + '-01' || d0 > ym + '-31') continue;
+      var cur = d0 < ym + '-01' ? ym + '-01' : d0;
+      var end = d1 > ym + '-31' ? ym + '-31' : d1;
+      var guard = 0;
+      while (cur <= end && guard < 32) { map[c.employee_id + '|' + cur] = true; cur = ptPXAddDay(cur); guard++; }
+    }
+  } catch(e) {}
+  return map;
+}
+/* Libellés RH (mêmes référentiels que l'app principale) */
+var PROD_CONGE_TYPES = { annual: 'Annuel', annuel: 'Annuel', maladie: 'Maladie', maternite: 'Maternité', sans_solde: 'Sans solde', exceptionnel: 'Exceptionnel' };
+var PROD_SANC_TYPES = { avertissement_verbal: 'Avertissement verbal', avertissement_ecrit: 'Avertissement écrit', blame: 'Blâme', mise_a_pied: 'Mise à pied', retrogradation: 'Rétrogradation', licenciement: 'Licenciement' };
+var PROD_SANC_STATUTS = { notifie: 'Notifié', active: 'Active', executee: 'Exécutée', annulee: 'Annulée' };
+function prodCongeStatut(c) {
+  try {
+    var t = today();
+    if (c.date_reprise) return 'Terminé';
+    if (!c.date_depart) return '—';
+    if (t < c.date_depart) return 'Prévu';
+    if (c.date_retour && t <= c.date_retour) return 'En cours';
+    return 'En retard';
+  } catch(e) { return '—'; }
+}
+
 /* Personnel présent par fonction pour une date donnée (basé sur pointage/présence) */
 function getPresentByFonction(dateStr) {
   var presences = getPresence();
@@ -5496,15 +5612,15 @@ function deleteMaint(key, id) {
 
 /* ==================== RH - DEPARTEMENTS ==================== */
 function render_departments() {
-  var depts = getDepartments();
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<div></div>';
-  h += '<button class="btn btn-accent" onclick="showNewDept()">+ Nouveau Département</button>';
-  h += '</div>';
-  if (depts.length === 0) return h + '<div class="empty">Aucun département</div>';
-  h += '<div class="card"><table><tr><th>Code</th><th>Nom</th><th>Responsable</th><th>Description</th><th>Actions</th></tr>';
-  depts.forEach(function(d) {
-    h += '<tr><td>' + escH(d.code) + '</td><td>' + escH(d.nom) + '</td><td>' + escH(d.responsable || '-') + '</td><td>' + escH(d.description || '-') + '</td><td><button class="btn btn-red" onclick="deleteDept(\'' + d.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+  /* Mêmes départements que l'app principale + Paye (mdb_paye.services) */
+  var depts = getServicesShared().slice().sort();
+  var personnel = getPersonnel();
+  var h = '<div style="margin-bottom:1rem"><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — ' + depts.length + ' département(s) gérés dans l\'app principale (RH) et le module Paye</span></div>';
+  if (!depts.length) return h + '<div class="empty">Aucun département</div>';
+  h += '<div class="card"><table><tr><th>Département</th><th style="text-align:right">Employés</th></tr>';
+  depts.forEach(function(nom) {
+    var nb = personnel.filter(function(e) { return (e.service || '') === nom; }).length;
+    h += '<tr><td>' + escH(nom) + '</td><td style="text-align:right;font-weight:700">' + nb + '</td></tr>';
   });
   h += '</table></div>';
   return h;
@@ -5545,15 +5661,19 @@ function deleteDept(id) {
 
 /* ==================== RH - FONCTIONS ==================== */
 function render_positions() {
-  var positions = getPositions();
-  var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
-  h += '<div></div>';
-  h += '<button class="btn btn-accent" onclick="showNewPosition()">+ Nouvelle Fonction</button>';
-  h += '</div>';
-  if (positions.length === 0) return h + '<div class="empty">Aucune fonction</div>';
-  h += '<div class="card"><table><tr><th>Code</th><th>Intitulé</th><th>Département</th><th style="text-align:right">Salaire min</th><th style="text-align:right">Salaire max</th><th>Actions</th></tr>';
-  positions.forEach(function(p) {
-    h += '<tr><td>' + escH(p.code) + '</td><td>' + escH(p.intitule) + '</td><td>' + escH(p.departement || '-') + '</td><td style="text-align:right">' + fmtF(p.salaire_min || 0) + '</td><td style="text-align:right">' + fmtF(p.salaire_max || 0) + '</td><td><button class="btn btn-red" onclick="deletePosition(\'' + p.id + '\')" style="font-size:.7rem">🗑️</button></td></tr>';
+  /* Mêmes fonctions que l'app principale + Paye (mdb_paye.fonctions) */
+  var fns = [];
+  try { var _pp = JSON.parse(localStorage.getItem('mdb_paye') || '{}'); fns = (_pp && _pp.fonctions) || []; } catch(e) { fns = []; }
+  var personnel = getPersonnel();
+  var h = '<div style="margin-bottom:1rem"><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — ' + fns.length + ' fonction(s) gérées dans l\'app principale (RH) et le module Paye</span></div>';
+  if (!fns.length) return h + '<div class="empty">Aucune fonction</div>';
+  h += '<div class="card"><table><tr><th>Intitulé</th><th>Département</th><th style="text-align:right">Employés</th></tr>';
+  fns.forEach(function(f) {
+    var nom = (typeof f === 'object' && f) ? (f.nom || '') : (f || '');
+    var svc = (typeof f === 'object' && f) ? (f.service || '—') : '—';
+    if (!nom) return;
+    var nb = personnel.filter(function(e) { return (e.fonction || '') === nom; }).length;
+    h += '<tr><td>' + escH(nom) + '</td><td>' + escH(svc || '—') + '</td><td style="text-align:right;font-weight:700">' + nb + '</td></tr>';
   });
   h += '</table></div>';
   return h;
@@ -5772,13 +5892,18 @@ function render_presence() {
 /* ==================== POINTAGE CALENDRIER MENSUEL ==================== */
 function renderPointageGrouped() {
   var personnel = getPersonnel();
-  var presences = getPresence();
+  /* Mêmes données que le module Paye : mdb_paye.pointage (sinon grille vide) */
+  var ptPaye = getPointagePaye();
+  var ptIdx = {};
+  for (var pi = 0; pi < ptPaye.length; pi++) { var _pr = ptPaye[pi]; if (_pr && _pr.employee_id && _pr.date) ptIdx[_pr.employee_id + '|' + _pr.date] = _pr; }
   var funcs = getFonctionsFromPaye();
   var selMonth = parseInt(document.getElementById('ptMonth') || {}.value || (new Date().getMonth() + 1));
   var selYear = parseInt(document.getElementById('ptYear') || {}.value || new Date().getFullYear());
   var daysInMonth = new Date(selYear, selMonth, 0).getDate();
   var foncFilter = getSection('ptFilterFonction', '');
   var searchQ = (document.getElementById('ptSearch') || {}).value || '';
+  var _ym = selYear + '-' + String(selMonth).padStart(2,'0');
+  var congeMap = ptPXCongeMap(_ym);
   var filtered = personnel;
   if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
   if (searchQ) { var q = searchQ.toLowerCase(); filtered = filtered.filter(function(e) { return ((e.nom || '') + ' ' + (e.prenoms || '') + ' ' + (e.matricule || '')).toLowerCase().indexOf(q) !== -1; }); }
@@ -5806,41 +5931,47 @@ function renderPointageGrouped() {
   h += '<button class="btn btn-accent" onclick="showPointageGroupeModal()" style="font-size:.75rem">👥 Pointage groupé</button>';
   h += '<button class="btn" onclick="renderPage()" style="font-size:.75rem">🔄 Actualiser</button>';
   h += '</div>';
+  h += '<div style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin-bottom:.6rem;font-size:.75rem;color:var(--dim)">';
+  h += '<span><strong>' + filtered.length + '</strong> employé(s) affiché(s)</span>';
+  h += '<span><strong>' + ptPXOuvres(selYear, selMonth) + '</strong> jours ouvrés</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:3px"></span> Présent</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#fef2f2;border:1px solid #fecaca;border-radius:3px"></span> Absent</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:3px"></span> Congé</span>';
+  h += '<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:12px;background:#fffbeb;border:1px solid #fde68a;border-radius:3px"></span> Week-end</span>';
+  h += '<span style="margin-left:auto">💡 Clic sur une case = modifier</span>';
+  h += '</div>';
 
   if (!filtered.length) return h + '<div class="empty">Aucun personnel pour ces filtres</div>';
 
-  h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.72rem;min-width:' + (180 + daysInMonth * 38) + 'px">';
-  h += '<tr style="background:var(--accent);color:#fff;position:sticky;top:0;z-index:2"><th style="position:sticky;left:0;z-index:3;background:var(--accent);min-width:170px;padding:6px 8px;text-align:left">EMPLOYÉ</th>';
+  var _dn = ['DIM', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'];
+  h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.72rem;min-width:' + (260 + daysInMonth * 54 + 170) + 'px">';
+  h += '<tr style="background:var(--accent);color:#fff;position:sticky;top:0;z-index:2"><th style="position:sticky;left:0;z-index:3;background:var(--accent);min-width:190px;padding:6px 8px;text-align:left">EMPLOYÉ</th>';
   for (var d = 1; d <= daysInMonth; d++) {
     var dt = new Date(selYear, selMonth - 1, d);
     var dow = dt.getDay();
-    var isWeekend = dow === 0 || dow === 6;
+    var isWeekend = dow === 0;
     var bg = isWeekend ? '#f59e0b' : 'transparent';
-    h += '<th style="width:38px;padding:4px 2px;text-align:center;background:' + bg + (isWeekend ? ';color:#000' : '') + '">' + d + '</th>';
+    h += '<th style="min-width:54px;padding:4px 2px;text-align:center;background:' + bg + (isWeekend ? ';color:#000' : '') + '"><span style="font-size:.6rem;display:block;opacity:.85">' + _dn[dow] + '</span>' + d + '</th>';
   }
+  h += '<th style="min-width:58px;background:var(--accent)">JOUR</th><th style="min-width:58px;background:var(--accent)">NUIT</th><th style="min-width:62px;background:var(--accent)">TOTAL</th>';
   h += '</tr>';
 
   filtered.forEach(function(e) {
-    h += '<tr style="border-bottom:1px solid var(--border)">';
-    h += '<td style="position:sticky;left:0;z-index:1;background:var(--card);padding:6px 8px;white-space:nowrap"><strong style="font-size:.78rem">' + escH(e.nom + ' ' + (e.prenoms || '')) + '</strong><br><span style="font-size:.65rem;color:var(--dim)">' + escH((e.fonction || '').toUpperCase()) + '</span></td>';
+    var totJ = 0, totN = 0, cells = '';
     for (var d = 1; d <= daysInMonth; d++) {
       var dateStr = selYear + '-' + String(selMonth).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-      var p = presences.find(function(p) { return p.employee_id === e.id && p.date === dateStr; });
-      var dt = new Date(selYear, selMonth - 1, d);
-      var dow = dt.getDay();
-      var isWeekend = dow === 0 || dow === 6;
-      var cellBg = isWeekend ? '#fffbeb' : (p && p.statut === 'present' ? '#f0fdf4' : p && p.statut === 'absent' ? '#fef2f2' : p && p.statut === 'conge' ? '#eff6ff' : 'transparent');
-      var txt = '-', title = '';
-      if (p) {
-        if (p.statut === 'present') {
-          txt = (p.heure_arrivee || '').substring(0,5) + '-' + (p.heure_depart || '').substring(0,5);
-          title = 'Présent ' + (p.heures_jour || 0) + 'h jour' + ((p.heures_nuit || 0) > 0 ? ' + ' + p.heures_nuit + 'h nuit' : '');
-        } else if (p.statut === 'absent') { txt = 'A'; title = 'Absent'; cellBg = '#fef2f2'; }
-        else if (p.statut === 'conge') { txt = 'C'; title = 'Congé'; cellBg = '#eff6ff'; }
-        else if (p.statut === 'permission') { txt = 'P'; title = 'Permission'; }
-      }
-      h += '<td style="text-align:center;padding:3px 1px;cursor:pointer;background:' + cellBg + ';border:1px solid var(--border);font-size:.68rem;font-weight:' + (p && p.statut === 'present' ? '700' : '400') + '" title="' + escH(title) + '" onclick="openPointageCell(\'' + e.id + '\',\'' + dateStr + '\')">' + txt + '</td>';
+      var rec = ptIdx[e.id + '|' + dateStr];
+      var dt2 = new Date(selYear, selMonth - 1, d);
+      var isWe = dt2.getDay() === 0;
+      var cell = ptPXCell(rec, !!congeMap[e.id + '|' + dateStr], isWe);
+      if (rec) { var _cc = ptPXDay(rec); totJ += _cc.j; totN += _cc.n; }
+      cells += '<td style="text-align:center;padding:4px 1px;cursor:pointer;background:' + cell.bg + ';border:1px solid var(--border);font-size:.68rem;font-weight:' + ((cell.txt === '-' || cell.txt === 'C') ? '400' : '700') + (cell.txt.indexOf('J:') === 0 ? ';color:#15803d' : '') + '" title="' + escH(cell.title) + '" onclick="openPointageCell(\'' + e.id + '\',\'' + dateStr + '\')">' + escH(cell.txt) + '</td>';
     }
+    totJ = Math.round(totJ * 100) / 100; totN = Math.round(totN * 100) / 100;
+    h += '<tr style="border-bottom:1px solid var(--border)">';
+    h += '<td style="position:sticky;left:0;z-index:1;background:var(--card);padding:6px 8px;white-space:nowrap">' + (e.matricule ? '<span style="display:inline-block;min-width:26px;text-align:center;font-size:.62rem;font-weight:800;background:var(--accent);color:#fff;border-radius:8px;padding:1px 5px;margin-right:5px">' + escH(e.matricule) + '</span>' : '') + '<strong style="font-size:.78rem">' + escH(e.nom + ' ' + (e.prenoms || '')) + '</strong><br><span style="font-size:.65rem;color:var(--dim)">' + escH((e.fonction || '').toUpperCase()) + '</span></td>';
+    h += cells;
+    h += '<td style="text-align:center;font-weight:700;background:#f0fdf4;white-space:nowrap">' + ptPXFmtH(totJ) + '</td><td style="text-align:center;font-weight:700;background:#faf5ff;white-space:nowrap">' + ptPXFmtH(totN) + '</td><td style="text-align:center;font-weight:800;background:var(--card);white-space:nowrap">' + ptPXFmtH(totJ + totN) + '</td>';
     h += '</tr>';
   });
   h += '</table></div>';
@@ -5850,43 +5981,47 @@ function renderPointageGrouped() {
 function openPointageCell(empId, dateStr) {
   var emp = getPersonnel().find(function(e) { return e.id === empId; });
   if (!emp) return;
-  var pres = getPresence().find(function(p) { return p.employee_id === empId && p.date === dateStr; });
+  /* Même fiche que le module Paye (mdb_paye.pointage) */
+  var rec = null, _pp = getPointagePaye();
+  for (var i = 0; i < _pp.length; i++) { if (_pp[i] && _pp[i].employee_id === empId && _pp[i].date === dateStr) { rec = _pp[i]; break; } }
+  var isP = !rec || rec.present !== false;
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
   m += '<h2>📝 Pointage — ' + escH(emp.nom + ' ' + (emp.prenoms || '')) + '</h2>';
   m += '<p style="color:var(--dim);font-size:.8rem;margin-bottom:1rem">📅 ' + dateStr + ' · ' + escH(emp.fonction || '') + '</p>';
   m += '<div style="display:flex;gap:.5rem;margin-bottom:.8rem">';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="present"' + (pres && pres.statut === 'present' ? ' checked' : '') + '> ✅ Présent</label>';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="absent"' + (pres && pres.statut === 'absent' ? ' checked' : '') + '> ❌ Absent</label>';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="conge"' + (pres && pres.statut === 'conge' ? ' checked' : '') + '> 🏖️ Congé</label>';
-  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="permission"' + (pres && pres.statut === 'permission' ? ' checked' : '') + '> 📋 Permission</label>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="present"' + (isP ? ' checked' : '') + '> ✅ Présent</label>';
+  m += '<label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="radio" name="pcStatut" value="absent"' + (!isP ? ' checked' : '') + '> ❌ Absent</label>';
   m += '</div>';
   m += '<div class="form-row">';
-  m += formField('pcArrivee', 'Arrivée', pres ? pres.heure_arrivee || '08:00' : '08:00', 'time', false);
-  m += formField('pcDepart', 'Départ', pres ? pres.heure_depart || '17:00' : '17:00', 'time', false);
+  m += formField('pcHJ', 'Heures jour (ex 8:00)', rec ? (rec.h_j_manual || '') : '8:00', 'text', false);
+  m += formField('pcHN', 'Heures nuit (ex 2:00)', rec ? (rec.h_n_manual || '') : '', 'text', false);
   m += '</div>';
-  m += '<div class="form-row">';
-  m += formField('pcHeuresJour', 'Heures jour', pres ? pres.heures_jour || 8 : 8, 'number', false);
-  m += formField('pcHeuresNuit', 'Heures nuit', pres ? pres.heures_nuit || 0 : 0, 'number', false);
-  m += '</div>';
-  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="savePointageCell(\'' + empId + '\',\'' + dateStr + '\')">✅ Enregistrer</button><button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
+  m += formField('pcObs', 'Observation', rec ? (rec.obs || '') : '', 'text', false);
+  m += '<div style="display:flex;gap:.5rem;margin-top:1rem"><button class="btn btn-accent" onclick="savePointageCell(\'' + empId + '\',\'' + dateStr + '\')">✅ Enregistrer</button>';
+  if (rec) m += '<button class="btn btn-red" onclick="savePointageCell(\'' + empId + '\',\'' + dateStr + '\',true)">🗑️ Effacer</button>';
+  m += '<button class="btn" onclick="document.getElementById(\'modalOverlay\').remove()">Annuler</button></div></div></div>';
   document.body.insertAdjacentHTML('beforeend', m);
 }
 
-function savePointageCell(empId, dateStr) {
-  var statut = (document.querySelector('input[name="pcStatut"]:checked') || {}).value || 'present';
-  var arr = (document.getElementById('pcArrivee') || {}).value || '08:00';
-  var dep = (document.getElementById('pcDepart') || {}).value || '17:00';
-  var hj = parseFloat((document.getElementById('pcHeuresJour') || {}).value) || 0;
-  var hn = parseFloat((document.getElementById('pcHeuresNuit') || {}).value) || 0;
-  var presences = getPresence();
-  var existing = presences.find(function(p) { return p.employee_id === empId && p.date === dateStr; });
-  if (statut === '') {
-    if (existing) presences = presences.filter(function(p) { return !(p.employee_id === empId && p.date === dateStr); });
-  } else {
-    if (existing) { existing.statut = statut; existing.heure_arrivee = arr; existing.heure_depart = dep; existing.heures_jour = hj; existing.heures_nuit = hn; }
-    else presences.push({ id: genId(), employee_id: empId, date: dateStr, statut: statut, heure_arrivee: arr, heure_depart: dep, heures_jour: hj, heures_nuit: hn });
+function savePointageCell(empId, dateStr, del) {
+  var arr = getPointagePaye();
+  var idx = -1;
+  for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].employee_id === empId && arr[i].date === dateStr) { idx = i; break; } }
+  if (del) {
+    if (idx !== -1) { arr.splice(idx, 1); setPointagePaye(arr); }
+    document.getElementById('modalOverlay').remove();
+    toast('Pointage effacé');
+    renderPage();
+    return;
   }
-  setPresence(presences);
+  var present = ((document.querySelector('input[name="pcStatut"]:checked') || {}).value || 'present') === 'present';
+  var hj = ((document.getElementById('pcHJ') || {}).value || '').trim();
+  var hn = ((document.getElementById('pcHN') || {}).value || '').trim();
+  var obs = ((document.getElementById('pcObs') || {}).value || '').trim();
+  var rec = { employee_id: empId, date: dateStr, present: present, h_j_manual: present ? (hj || '8') : '', h_n_manual: present ? hn : '', obs: obs };
+  if (idx !== -1) { rec.id = arr[idx].id || genId(); arr[idx] = rec; }
+  else { rec.id = genId(); arr.push(rec); }
+  setPointagePaye(arr);
   document.getElementById('modalOverlay').remove();
   toast('Pointage enregistré');
   renderPage();
@@ -5938,15 +6073,20 @@ function showPointageGroupeModal() {
 
 function renderPointageGroupeList() {
   var personnel = getPersonnel();
-  var presences = getPresence();
+  var ptPaye = getPointagePaye();
   var date = (document.getElementById('pgDate') || {}).value || today();
   var foncFilter = (document.getElementById('pgFonctionFilter') || {}).value;
   var search = ((document.getElementById('pgSearch') || {}).value || '').toLowerCase();
   var filtered = personnel;
   if (foncFilter) filtered = filtered.filter(function(e) { return (e.fonction || '') === foncFilter; });
   if (search) filtered = filtered.filter(function(e) { return ((e.nom || '') + ' ' + (e.prenoms || '') + ' ' + (e.matricule || '')).toLowerCase().indexOf(search) !== -1; });
-  var dayPres = presences.filter(function(p) { return p.date === date; });
-  var presentIds = dayPres.filter(function(p) { return p.statut === 'present'; }).map(function(p) { return p.employee_id; });
+  var presentIds = [];
+  for (var k = 0; k < ptPaye.length; k++) {
+    var _r = ptPaye[k];
+    if (!_r || _r.date !== date) continue;
+    if (_r.present === true) presentIds.push(_r.employee_id);
+    else if (_r.present !== false) { var _cc = ptPXDay(_r); if (_cc.j + _cc.n > 0) presentIds.push(_r.employee_id); }
+  }
   var el = document.getElementById('pgEmployeeList');
   if (!el) return;
   var h = '';
@@ -5970,21 +6110,28 @@ function applyPointageGroupe() {
   var date = (document.getElementById('pgDate') || {}).value || today();
   var absent = (document.getElementById('pgMarquerAbsent') || {}).checked;
   var arr = (document.getElementById('pgArrivee') || {}).value || '08:00';
+  var p1 = (document.getElementById('pgPauseDeb') || {}).value || '12:00';
+  var p2 = (document.getElementById('pgPauseFin') || {}).value || '13:00';
   var dep = (document.getElementById('pgDepart') || {}).value || '17:00';
   var nuit = (document.getElementById('pgNuit') || {}).checked;
+  var hG = parseFloat((document.getElementById('pgHeuresGagnees') || {}).value) || 0;
+  var hR = parseFloat((document.getElementById('pgHeuresRattrapage') || {}).value) || 0;
+  var isRatt = (document.getElementById('pgMarquerRattrapage') || {}).checked;
   var checked = document.querySelectorAll('.pg-emp:checked');
   if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
-  var presences = getPresence();
+  /* Même format que le module Paye (mdb_paye.pointage) */
+  var arr2 = getPointagePaye();
   var count = 0;
   checked.forEach(function(cb) {
     var empId = cb.value;
-    var statut = absent ? 'absent' : 'present';
-    var existing = presences.find(function(p) { return p.employee_id === empId && p.date === date; });
-    if (existing) { existing.statut = statut; existing.heure_arrivee = absent ? '' : arr; existing.heure_depart = absent ? '' : dep; }
-    else presences.push({ id: genId(), employee_id: empId, date: date, statut: statut, heure_arrivee: absent ? '' : arr, heure_depart: absent ? '' : dep, heures_jour: absent ? 0 : 8, heures_nuit: nuit ? 8 : 0 });
+    var idx = -1;
+    for (var i = 0; i < arr2.length; i++) { if (arr2[i] && arr2[i].employee_id === empId && arr2[i].date === date) { idx = i; break; } }
+    var rec = { employee_id: empId, date: date, present: !absent, j_arrivee: absent ? '' : arr, j_pause: absent ? '' : p1, j_reprise: absent ? '' : p2, j_fin: absent ? '' : dep, h_j_manual: absent ? '' : '8', h_n_manual: (!absent && nuit) ? '8' : '', rattrap_gagnees: hG, rattrap_utilisees: hR, jour_rattrapage: !!isRatt };
+    if (idx !== -1) { rec.id = arr2[idx].id || genId(); arr2[idx] = rec; }
+    else { rec.id = genId(); arr2.push(rec); }
     count++;
   });
-  setPresence(presences);
+  setPointagePaye(arr2);
   document.getElementById('modalOverlay').remove();
   toast('Pointage groupé appliqué à ' + count + ' employé(s)');
   renderPage();
@@ -6022,28 +6169,26 @@ function gmToggleAll(checked) {
 
 function applyGenererMois() {
   var now = new Date();
-  var year = now.getFullYear();
-  var month = now.getMonth() + 1;
+  var mSel = document.getElementById('ptMonth'), ySel = document.getElementById('ptYear');
+  var year = ySel ? parseInt(ySel.value) || now.getFullYear() : now.getFullYear();
+  var month = mSel ? parseInt(mSel.value) || (now.getMonth() + 1) : (now.getMonth() + 1);
   var daysInMonth = new Date(year, month, 0).getDate();
   var checked = document.querySelectorAll('.gm-emp:checked');
   if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
-  var presences = getPresence();
+  var arr = getPointagePaye();
   var count = 0;
   checked.forEach(function(cb) {
     var empId = cb.value;
     for (var d = 1; d <= daysInMonth; d++) {
       var dt = new Date(year, month - 1, d);
-      var dow = dt.getDay();
-      if (dow === 0 || dow === 6) continue;
+      if (dt.getDay() === 0) continue;
       var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
-      var existing = presences.find(function(p) { return p.employee_id === empId && p.date === dateStr; });
-      if (!existing) {
-        presences.push({ id: genId(), employee_id: empId, date: dateStr, statut: 'present', heure_arrivee: '08:00', heure_depart: '17:00', heures_jour: 8, heures_nuit: 0 });
-        count++;
-      }
+      var found = false;
+      for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].employee_id === empId && arr[i].date === dateStr) { found = true; break; } }
+      if (!found) { arr.push({ id: genId(), employee_id: empId, date: dateStr, present: true, h_j_manual: '8', h_n_manual: '' }); count++; }
     }
   });
-  setPresence(presences);
+  setPointagePaye(arr);
   document.getElementById('modalOverlay').remove();
   toast(count + ' pointages générés automatiquement');
   renderPage();
@@ -6092,11 +6237,11 @@ function applyEffacerPointages() {
   if (!checked.length) return toast('Sélectionnez au moins un employé', 'error');
   var empIds = Array.from(checked).map(function(cb) { return cb.value; });
   if (!confirm2('Supprimer les pointages du ' + d1 + ' au ' + d2 + ' pour ' + empIds.length + ' employé(s) ?')) return;
-  var presences = getPresence().filter(function(p) {
-    if (p.date < d1 || p.date > d2) return true;
+  var arr = getPointagePaye().filter(function(p) {
+    if (!p || p.date < d1 || p.date > d2) return true;
     return empIds.indexOf(p.employee_id) === -1;
   });
-  setPresence(presences);
+  setPointagePaye(arr);
   document.getElementById('modalOverlay').remove();
   toast('Pointages supprimés');
   renderPage();
@@ -6148,7 +6293,7 @@ function getSelectedFicheEmpIds() {
 }
 
 function buildFichePointageHTML(emp) {
-  var pres = getPresence();
+  var pres = getPointagePaye();
   var now = new Date();
   var year = now.getFullYear();
   var month = now.getMonth() + 1;
@@ -6164,17 +6309,25 @@ function buildFichePointageHTML(emp) {
     var dt = new Date(year, month - 1, d);
     var dayNames = ['dim.','lun.','mar.','mer.','jeu.','ven.','sam.'];
     var label = dayNames[dt.getDay()] + ' ' + String(d).padStart(2,'0') + '/' + String(month).padStart(2,'0');
-    var p = pres.find(function(p) { return p.employee_id === emp.id && p.date === dateStr; });
-    var ptg = p ? (p.heure_arrivee || '') + '-' + (p.heure_depart || '') : '-';
-    var hj = p ? (parseFloat(p.heures_jour) || 0) : 0;
-    var hn = p ? (parseFloat(p.heures_nuit) || 0) : 0;
+    var p = null;
+    for (var fi = 0; fi < pres.length; fi++) { if (pres[fi] && pres[fi].employee_id === emp.id && pres[fi].date === dateStr) { p = pres[fi]; break; } }
+    var cc = p ? ptPXDay(p) : { j: 0, n: 0 };
+    var ptg = '-';
+    if (p) {
+      if (p.j_arrivee || p.j_fin) ptg = (p.j_arrivee || '?') + '-' + (p.j_fin || '?');
+      else if (p.h_j_manual) ptg = p.h_j_manual + (p.h_n_manual ? ' / N:' + p.h_n_manual : '');
+      else if (p.present === false) ptg = 'Absent';
+      else ptg = 'Présent';
+    }
+    var hj = Math.round(cc.j * 100) / 100, hn = Math.round(cc.n * 100) / 100;
     totalJour += hj;
     totalNuit += hn;
-    html += '<tr><td>' + label + '</td><td>' + ptg + '</td><td>' + hj + '</td><td>' + hn + '</td><td>' + (hj + hn) + '</td><td>-</td><td>' + (p ? (p.statut || '') : '') + '</td></tr>';
+    html += '<tr><td>' + label + '</td><td>' + escH(ptg) + '</td><td>' + hj + '</td><td>' + hn + '</td><td>' + Math.round((hj + hn) * 100) / 100 + '</td><td>' + (p && p.rendement ? 'R' : '-') + '</td><td>' + escH(p ? ((p.present === false ? 'Absent' : 'Présent') + (p.obs ? ' — ' + p.obs : '')) : '') + '</td></tr>';
   }
   html += '</table>';
   html += '<div class="summary">';
-  html += '<div class="summary-box"><strong>Total Heures Jour :</strong> ' + totalJour + 'h<br><strong>Total Heures Nuit :</strong> ' + totalNuit + 'h<br><strong>TOTAL MENSUEL :</strong> ' + (totalJour + totalNuit) + 'h</div>';
+  totalJour = Math.round(totalJour * 100) / 100; totalNuit = Math.round(totalNuit * 100) / 100;
+  html += '<div class="summary-box"><strong>Total Heures Jour :</strong> ' + totalJour + 'h<br><strong>Total Heures Nuit :</strong> ' + totalNuit + 'h<br><strong>TOTAL MENSUEL :</strong> ' + Math.round((totalJour + totalNuit) * 100) / 100 + 'h</div>';
   html += '<div class="summary-box"><strong>Heures à rattraper</strong><br>Total gagné: 0h<br>Total rattrapage: 0h</div>';
   html += '<div class="summary-box"><strong>Solde Restant à rattraper</strong><br><span style="font-size:20px;font-weight:800">' + (totalJour + totalNuit) + 'h</span></div>';
   html += '</div></body></html>';
@@ -6243,18 +6396,16 @@ function markCollectivePresence(statut) {
   else if (typeFilter === 'nuit') filtered = filtered.filter(function(e) { return (e.horaires || '').indexOf('nuit') !== -1; });
 
   var date = (document.getElementById('ptDate') || {}).value || today();
-  var presences = getPresence();
+  var isP = statut === 'present';
+  var arr = getPointagePaye();
   filtered.forEach(function(e) {
-    var existing = presences.find(function(p) { return p.employee_id === e.id && p.date === date; });
-    if (existing) {
-      existing.statut = statut;
-      existing.heure_arrivee = statut === 'present' ? '08:00' : '';
-      existing.heure_depart = statut === 'present' ? '17:00' : '';
-    } else {
-      presences.push({ id: genId(), employee_id: e.id, date: date, statut: statut, heure_arrivee: statut === 'present' ? '08:00' : '', heure_depart: statut === 'present' ? '17:00' : '', heures_jour: 8, heures_nuit: 0, faute_societe: false });
-    }
+    var idx = -1;
+    for (var i = 0; i < arr.length; i++) { if (arr[i] && arr[i].employee_id === e.id && arr[i].date === date) { idx = i; break; } }
+    var rec = { employee_id: e.id, date: date, present: isP, h_j_manual: isP ? '8' : '', h_n_manual: '' };
+    if (idx !== -1) { rec.id = arr[idx].id || genId(); arr[idx] = rec; }
+    else { rec.id = genId(); arr.push(rec); }
   });
-  setPresence(presences);
+  setPointagePaye(arr);
   toast('Marquage collectif ' + statut + ' appliqué à ' + filtered.length + ' personnes');
   renderPage();
 }
@@ -6262,45 +6413,41 @@ function markCollectivePresence(statut) {
 function markFonctionCollective(fonction, statut) {
   var personnel = getPersonnel().filter(function(e) { return (e.fonction || '').trim() === fonction; });
   var date = (document.getElementById('ptDate') || {}).value || today();
-  var presences = getPresence();
+  var isP2 = statut === 'present';
+  var arr2 = getPointagePaye();
   personnel.forEach(function(e) {
-    var existing = presences.find(function(p) { return p.employee_id === e.id && p.date === date; });
-    if (existing) {
-      existing.statut = statut;
-      existing.heure_arrivee = statut === 'present' ? '08:00' : '';
-      existing.heure_depart = statut === 'present' ? '17:00' : '';
-    } else {
-      presences.push({ id: genId(), employee_id: e.id, date: date, statut: statut, heure_arrivee: statut === 'present' ? '08:00' : '', heure_depart: statut === 'present' ? '17:00' : '', heures_jour: 8, heures_nuit: 0, faute_societe: false });
-    }
+    var idx = -1;
+    for (var i = 0; i < arr2.length; i++) { if (arr2[i] && arr2[i].employee_id === e.id && arr2[i].date === date) { idx = i; break; } }
+    var rec = { employee_id: e.id, date: date, present: isP2, h_j_manual: isP2 ? '8' : '', h_n_manual: '' };
+    if (idx !== -1) { rec.id = arr2[idx].id || genId(); arr2[idx] = rec; }
+    else { rec.id = genId(); arr2.push(rec); }
   });
-  setPresence(presences);
+  setPointagePaye(arr2);
   toast('Fonction ' + fonction + ' : ' + statut + ' appliqué à ' + personnel.length + ' personnes');
   renderPage();
 }
 
 function clearDayPresence() {
   var date = (document.getElementById('ptDate') || {}).value || today();
-  setPresence(getPresence().filter(function(p) { return p.date !== date; }));
+  setPointagePaye(getPointagePaye().filter(function(p) { return !p || p.date !== date; }));
   toast('Pointage du jour effacé');
   renderPage();
 }
 
 function updateSinglePresence(empId, statut) {
   var date = (document.getElementById('ptDate') || {}).value || today();
-  var presences = getPresence();
-  var existing = presences.find(function(p) { return p.employee_id === empId && p.date === date; });
+  var arr3 = getPointagePaye();
+  var idx3 = -1;
+  for (var i = 0; i < arr3.length; i++) { if (arr3[i] && arr3[i].employee_id === empId && arr3[i].date === date) { idx3 = i; break; } }
   if (statut === '') {
-    if (existing) presences = presences.filter(function(p) { return !(p.employee_id === empId && p.date === date); });
+    if (idx3 !== -1) { arr3.splice(idx3, 1); setPointagePaye(arr3); }
   } else {
-    if (existing) {
-      existing.statut = statut;
-      existing.heure_arrivee = statut === 'present' ? '08:00' : '';
-      existing.heure_depart = statut === 'present' ? '17:00' : '';
-    } else {
-      presences.push({ id: genId(), employee_id: empId, date: date, statut: statut, heure_arrivee: statut === 'present' ? '08:00' : '', heure_depart: statut === 'present' ? '17:00' : '', heures_jour: 8, heures_nuit: 0 });
-    }
+    var isP3 = statut === 'present';
+    var rec3 = { employee_id: empId, date: date, present: isP3, h_j_manual: isP3 ? '8' : '', h_n_manual: '' };
+    if (idx3 !== -1) { rec3.id = arr3[idx3].id || genId(); arr3[idx3] = rec3; }
+    else { rec3.id = genId(); arr3.push(rec3); }
+    setPointagePaye(arr3);
   }
-  setPresence(presences);
   renderPage();
 }
 
@@ -6850,40 +6997,74 @@ function addEpiCategory() {
   toast('Catégorie "' + val + '" ajoutée. Utilisez-la lors de la création d\'un EPI.');
   document.getElementById('cfgEpiNewCat').value = '';
 }
+function prodCongesRows(conges, personnel) {
+  var h = '';
+  conges.forEach(function(c) {
+    var emp = null;
+    for (var i = 0; i < personnel.length; i++) { if (personnel[i].id === c.employee_id) { emp = personnel[i]; break; } }
+    var st = prodCongeStatut(c);
+    var badge = st === 'En cours' ? 'background:#dcfce7;color:#15803d' : st === 'En retard' ? 'background:#fee2e2;color:#dc2626' : st === 'Terminé' ? 'background:#f1f5f9;color:#475569' : 'background:#fef3c7;color:#b45309';
+    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(PROD_CONGE_TYPES[c.type] || c.type || '-') + '</td><td>' + fmtD(c.date_depart) + '</td><td>' + fmtD(c.date_retour) + '</td><td style="text-align:right">' + (c.duree || 0) + '</td><td><span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:.68rem;font-weight:700;' + badge + '">' + st + '</span></td><td>' + (c.date_reprise ? fmtD(c.date_reprise) : '—') + '</td></tr>';
+  });
+  return h;
+}
 function renderLeavesReadOnly() {
-  var leaves = getLeaves().slice().reverse();
+  /* Mêmes congés que l'app principale (mdb_rh_conges) */
+  var conges = getRhCongesShared().slice().reverse();
   var personnel = getPersonnel();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
   h += '<div><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — Gestion des congés dans l\'app principale</span></div>';
   h += '</div>';
-  if (leaves.length === 0) return h + '<div class="empty">Aucun congé enregistré</div>';
+  if (conges.length === 0) return h + '<div class="empty">Aucun congé enregistré</div>';
   h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Du</th><th>Au</th><th style="text-align:right">Jours</th><th>Statut</th><th>Date reprise</th></tr>';
-  leaves.forEach(function(l) {
-    var emp = personnel.find(function(e) { return e.id === l.employee_id; });
-    var reprise = l.date_fin ? new Date(new Date(l.date_fin).getTime() + 86400000).toLocaleDateString('fr-FR') : '—';
-    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(l.type_conge || '-') + '</td><td>' + fmtD(l.date_debut) + '</td><td>' + fmtD(l.date_fin) + '</td><td style="text-align:right">' + (l.jours || 0) + '</td><td>' + badgeStatut(l.statut) + '</td><td>' + reprise + '</td></tr>';
-  });
+  h += prodCongesRows(conges, personnel);
   h += '</table></div>';
   h += '<div style="margin-top:.5rem;font-size:.75rem;color:var(--dim)">⚠️ Lecture seule — Créer/modifier les congés dans l\'application principale (module RH)</div>';
   return h;
 }
+function render_leaves() {
+  var conges = getRhCongesShared().slice().reverse();
+  var personnel = getPersonnel();
+  var h = '<div style="margin-bottom:1rem"><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — ' + conges.length + ' congé(s) gérés dans l\'app principale (module RH)</span></div>';
+  if (!conges.length) return h + '<div class="empty">Aucun congé enregistré</div>';
+  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Du</th><th>Au</th><th style="text-align:right">Jours</th><th>Statut</th><th>Date reprise</th></tr>';
+  h += prodCongesRows(conges, personnel);
+  h += '</table></div>';
+  return h;
+}
 
 /* ==================== RH - SANCTIONS (LECTURE SEULE) ==================== */
+function prodSanctionsRows(sanctions, personnel) {
+  var h = '';
+  sanctions.forEach(function(s) {
+    var emp = null;
+    for (var i = 0; i < personnel.length; i++) { if (personnel[i].id === s.employee_id) { emp = personnel[i]; break; } }
+    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(PROD_SANC_TYPES[s.type] || s.type || '-') + '</td><td>' + fmtD(s.date) + '</td><td>' + escH(s.description || s.motif || '-') + '</td><td>' + escH(PROD_SANC_STATUTS[s.statut] || s.statut || '-') + '</td></tr>';
+  });
+  return h;
+}
 function renderSanctionsReadOnly() {
-  var sanctions = getSanctions().slice().reverse();
+  /* Mêmes sanctions que l'app principale (mdb_rh_sanctions) */
+  var sanctions = getRhSanctionsShared().slice().reverse();
   var personnel = getPersonnel();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
   h += '<div><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — Gestion des sanctions dans l\'app principale (module RH)</span></div>';
   h += '</div>';
   if (sanctions.length === 0) return h + '<div class="empty">Aucune sanction enregistrée</div>';
-  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Date</th><th>Motif</th><th>Décision</th><th>Absent pointage</th></tr>';
-  sanctions.forEach(function(s) {
-    var emp = personnel.find(function(e) { return e.id === s.employee_id; });
-    var absent = (s.type === 'Suspension' || s.decision === 'absent') ? '⚠️ Oui' : 'Non';
-    h += '<tr><td>' + escH(emp ? emp.nom + ' ' + (emp.prenoms || '') : '-') + '</td><td>' + escH(s.type || '-') + '</td><td>' + fmtD(s.date) + '</td><td>' + escH(s.motif || '-') + '</td><td>' + escH(s.decision || '-') + '</td><td>' + absent + '</td></tr>';
-  });
+  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Date</th><th>Motif</th><th>Statut</th></tr>';
+  h += prodSanctionsRows(sanctions, personnel);
   h += '</table></div>';
   h += '<div style="margin-top:.5rem;font-size:.75rem;color:var(--dim)">⚠️ Lecture seule — Créer/modifier les sanctions dans l\'application principale (module RH)</div>';
+  return h;
+}
+function render_sanctions() {
+  var sanctions = getRhSanctionsShared().slice().reverse();
+  var personnel = getPersonnel();
+  var h = '<div style="margin-bottom:1rem"><span style="color:var(--dim);font-size:.8rem">📖 Lecture seule — ' + sanctions.length + ' sanction(s) gérées dans l\'app principale (module RH)</span></div>';
+  if (!sanctions.length) return h + '<div class="empty">Aucune sanction enregistrée</div>';
+  h += '<div class="card"><table><tr><th>Employé</th><th>Type</th><th>Date</th><th>Motif</th><th>Statut</th></tr>';
+  h += prodSanctionsRows(sanctions, personnel);
+  h += '</table></div>';
   return h;
 }
 function createSanction() {
