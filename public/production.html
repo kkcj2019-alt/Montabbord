@@ -926,14 +926,18 @@ function prodPushNow() {
   if (!sb) { prodSyncStatus('○ hors ligne', 'var(--dim)'); return; }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { prodSyncStatus('○ hors ligne', 'var(--dim)'); return; }
   _prodPushing = true;
-  var nowTs = Date.now();
-  var local = getDB();
-  local.__prodUpdatedAt = nowTs;
-  try { setDB(local); } catch(e) {}
   sb.from('enterprises').select('*').eq('id', uid).limit(1).then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
     var cloudData = row.data || {};
+    var local = getDB();
+    if (!local.__prodUpdatedAt && cloudData.mdb_production && typeof cloudData.mdb_production === 'object') {
+      local = prodMergeObjs(local, cloudData.mdb_production);
+      try { setDB(local); } catch(e) {}
+    } else {
+      local.__prodUpdatedAt = Date.now();
+      try { setDB(local); } catch(e) {}
+    }
     cloudData.mdb_production = getDB();
     return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: cloudData, p_identifiant: row.identifiant || '', p_email: row.email || '', p_nom: row.nom || '' });
   }).then(function(r2) {
@@ -949,9 +953,39 @@ function prodPushNow() {
     try { _prodPushT = setTimeout(prodPushNow, Math.min(60000, 5000 * _prodFail)); } catch(e) {}
   });
 }
+/* Fusion initiale : union par id quand le local n'a jamais été synchronisé (évite d'écraser un appareil) */
+function prodMergeObjs(local, cloud) {
+  var out = {};
+  try {
+    var keys = {};
+    for (var k in local) { if (local.hasOwnProperty(k)) keys[k] = true; }
+    for (var k2 in cloud) { if (cloud.hasOwnProperty(k2)) keys[k2] = true; }
+    for (var key in keys) {
+      var lv = local[key], cv = cloud[key];
+      if (Array.isArray(lv) && Array.isArray(cv)) {
+        var seen = {}, arr = [];
+        for (var i = 0; i < lv.length; i++) { arr.push(lv[i]); var id1 = lv[i] && lv[i].id; if (id1) seen[id1] = true; }
+        for (var j = 0; j < cv.length; j++) { var it = cv[j]; var id2 = it && it.id; if (!id2 || !seen[id2]) { arr.push(it); if (id2) seen[id2] = true; } }
+        out[key] = arr;
+      } else if (lv !== undefined) out[key] = lv;
+      else out[key] = cv;
+    }
+    out.__prodUpdatedAt = Date.now();
+  } catch(e) { out = local; }
+  return out;
+}
 function prodApplyCloud(cloudProd) {
   if (!cloudProd || typeof cloudProd !== 'object') return false;
   var local = getDB();
+  if (!local.__prodUpdatedAt) {
+    var merged = prodMergeObjs(local, cloudProd);
+    try { localStorage.setItem('mdb_production', JSON.stringify(merged)); } catch(e) { return false; }
+    _prodDirty = true;
+    try { scheduleProdPush(); } catch(e) {}
+    prodSyncStatus('● synchro OK', '#16a34a');
+    try { if (prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
+    return true;
+  }
   var ct = cloudProd.__prodUpdatedAt || 0, lt = local.__prodUpdatedAt || 0;
   if (_prodDirty || ct <= lt) return false;
   try { localStorage.setItem('mdb_production', JSON.stringify(cloudProd)); } catch(e) { return false; }
