@@ -1766,11 +1766,9 @@ function updateStockBadge(articleCode) {
   composants.forEach(function(c) {
     var stock = 0;
     if (c.type === 'LATTE' || c.type === 'PLOT' || c.type === 'CP') {
-      var item = getStockSemi().find(function(s) { return s.code === c.code; });
-      stock = item ? (parseFloat(item.quantite) || 0) : 0;
+      stock = semiStockQty(c.code);
     } else if (c.type === 'POINTE') {
-      var item = getStockConsum().find(function(s) { return s.code === c.code; });
-      stock = item ? (parseFloat(item.quantite) || 0) : 0;
+      stock = consumStockQty(c.code);
     } else {
       var item = getStockRaw().find(function(s) { return (s.code || s.colis_number) === c.code; });
       stock = item ? (parseFloat(item.quantite) || 0) : 0;
@@ -2111,44 +2109,139 @@ function deductBoisSorti(p) {
   setStockRaw(stockRaw);
 }
 
+/* Stock semi par code composant : direct s.code, sinon via article (code -> article_id) */
+function semiStockQty(compCode) {
+  if (!compCode) return 0;
+  var key = (compCode || '').toUpperCase();
+  var qty = 0;
+  getStockSemi().forEach(function(s) {
+    if ((s.code || '').toUpperCase() === key) qty += parseFloat(s.quantite) || 0;
+  });
+  if (qty > 0) return qty;
+  var art = getArticles().find(function(a) { return (a.code || '').toUpperCase() === key; });
+  if (art) {
+    getStockSemi().forEach(function(s) { if (s.article_id === art.id) qty += parseFloat(s.quantite) || 0; });
+  }
+  return qty;
+}
+function deductSemiQty(compCode, need) {
+  if (!compCode || !(need > 0)) return;
+  var key = (compCode || '').toUpperCase();
+  var semi = getStockSemi();
+  var rest = need;
+  semi.forEach(function(s) {
+    if (rest <= 0) return;
+    if ((s.code || '').toUpperCase() === key) {
+      var q = parseFloat(s.quantite) || 0;
+      var d = Math.min(q, rest);
+      s.quantite = Math.max(0, q - d);
+      s.updated_at = new Date().toISOString();
+      rest -= d;
+    }
+  });
+  if (rest > 0) {
+    var art = getArticles().find(function(a) { return (a.code || '').toUpperCase() === key; });
+    if (art) {
+      semi.forEach(function(s) {
+        if (rest <= 0) return;
+        if (s.article_id === art.id) {
+          var q2 = parseFloat(s.quantite) || 0;
+          var d2 = Math.min(q2, rest);
+          s.quantite = Math.max(0, q2 - d2);
+          s.updated_at = new Date().toISOString();
+          rest -= d2;
+        }
+      });
+    }
+  }
+  setStockSemi(semi);
+}
+/* Stock conso par code : direct s.code, sinon via article P5/P6/P7... (article_id) */
+function consumStockQty(compCode) {
+  if (!compCode) return 0;
+  var key = (compCode || '').toUpperCase();
+  var qty = 0;
+  getStockConsum().forEach(function(s) {
+    if ((s.code || '').toUpperCase() === key) qty += parseFloat(s.quantite) || 0;
+  });
+  if (qty > 0) return qty;
+  var art = getArticles().find(function(a) { return (a.code || '').toUpperCase() === key; });
+  if (art) {
+    getStockConsum().forEach(function(s) { if (s.article_id === art.id) qty += parseFloat(s.quantite) || 0; });
+  }
+  return qty;
+}
+function deductConsumQty(compCode, need) {
+  if (!compCode || !(need > 0)) return;
+  var key = (compCode || '').toUpperCase();
+  var stock = getStockConsum();
+  var rest = need;
+  stock.forEach(function(s) {
+    if (rest <= 0) return;
+    if ((s.code || '').toUpperCase() === key) {
+      var q = parseFloat(s.quantite) || 0;
+      var d = Math.min(q, rest);
+      s.quantite = Math.max(0, q - d);
+      if (s.quantite_stock != null) s.quantite_stock = s.quantite;
+      s.updated_at = new Date().toISOString();
+      rest -= d;
+    }
+  });
+  if (rest > 0) {
+    var art = getArticles().find(function(a) { return (a.code || '').toUpperCase() === key; });
+    if (art) {
+      stock.forEach(function(s) {
+        if (rest <= 0) return;
+        if (s.article_id === art.id) {
+          var q2 = parseFloat(s.quantite) || 0;
+          var d2 = Math.min(q2, rest);
+          s.quantite = Math.max(0, q2 - d2);
+          if (s.quantite_stock != null) s.quantite_stock = s.quantite;
+          s.updated_at = new Date().toISOString();
+          rest -= d2;
+        }
+      });
+    }
+  }
+  setStockConsum(stock);
+}
+
 /* Deduction assemblage : decrementer stock selon composants utilises */
 function deductAssemblageStock(p) {
   if (!p.assemblage || !p.assemblage.length) return;
-  var qtyAssembled = p.assemblage[0].qty_assembled || 1;
-  
-  p.assemblage.forEach(function(comp) {
-    var code = comp.composant_code;
-    var type = comp.composant_type;
-    var qtePerUnit = comp.qte_per_unit || 0;
-    var totalNeeded = qtePerUnit * qtyAssembled;
-    if (totalNeeded <= 0) return;
-    
-    if (type === "LATTE" || type === "PLOT" || type === "CP") {
-      var semiStock = getStockSemi();
-      var item = semiStock.find(function(s) { return s.code === code; });
-      if (item) {
-        item.quantite = Math.max(0, (parseFloat(item.quantite) || 0) - totalNeeded);
-        item.updated_at = new Date().toISOString();
+  var articles = getArticles();
+  var composants = getSection('composants', []);
+  /* p.assemblage = lignes produit fini {code, qte} : chaque ligne consomme
+     (qte_per_unit de la nomenclature x qte assemblee) pour chaque composant */
+  p.assemblage.forEach(function(row) {
+    if (!row.code || !row.qte) return;
+    var article = articles.find(function(a) { return (a.code || '').toUpperCase() === (row.code || '').toUpperCase(); });
+    if (!article) return;
+    var comps = composants.filter(function(c) { return c.article_id === article.id; });
+    comps.forEach(function(comp) {
+      var totalNeeded = (parseFloat(comp.quantity) || 0) * (parseFloat(row.qte) || 0);
+      if (totalNeeded <= 0) return;
+      var type = comp.type;
+      if (type === "LATTE" || type === "PLOT" || type === "CP") {
+        deductSemiQty(comp.code, totalNeeded);
+      } else if (type === "POINTE") {
+        deductConsumQty(comp.code, totalNeeded);
+      } else {
+        var rawStock = getStockRaw();
+        var rest = totalNeeded;
+        rawStock.forEach(function(s) {
+          if (rest <= 0) return;
+          if ((s.code || s.colis_number) === comp.code) {
+            var oldQ = parseFloat(s.quantite) || 0;
+            var d = Math.min(oldQ, rest);
+            s.quantite = Math.max(0, oldQ - d);
+            s.updated_at = new Date().toISOString();
+            rest -= d;
+          }
+        });
+        setStockRaw(rawStock);
       }
-      setStockSemi(semiStock);
-    } else if (type === "POINTE") {
-      var consumStock = getStockConsum();
-      var item = consumStock.find(function(s) { return s.code === code; });
-      if (item) {
-        item.quantite = Math.max(0, (parseFloat(item.quantite) || 0) - totalNeeded);
-        item.updated_at = new Date().toISOString();
-      }
-      setStockConsum(consumStock);
-    } else {
-      var rawStock = getStockRaw();
-      var item = rawStock.find(function(s) { return (s.code || s.colis_number) === code; });
-      if (item) {
-        var oldQ = parseFloat(item.quantite) || 0;
-        item.quantite = Math.max(0, oldQ - totalNeeded);
-        item.updated_at = new Date().toISOString();
-      }
-      setStockRaw(rawStock);
-    }
+    });
   });
 }
 
@@ -2168,11 +2261,9 @@ function checkAssemblageStock(assemblage) {
       if (totalNeeded <= 0) return;
       var stock = 0;
       if (c.type === 'LATTE' || c.type === 'PLOT' || c.type === 'CP') {
-        var item = getStockSemi().find(function(s) { return s.code === c.code; });
-        stock = item ? (parseFloat(item.quantite) || 0) : 0;
+        stock = semiStockQty(c.code);
       } else if (c.type === 'POINTE') {
-        var item = getStockConsum().find(function(s) { return s.code === c.code; });
-        stock = item ? (parseFloat(item.quantite) || 0) : 0;
+        stock = consumStockQty(c.code);
       } else {
         var item = getStockRaw().find(function(s) { return (s.code || s.colis_number) === c.code; });
         stock = item ? (parseFloat(item.quantite) || 0) : 0;
@@ -2337,7 +2428,7 @@ function saveProduction(validate) {
 
   if (mode === 'validate') {
     /* Sortie nette : sortie (-) + entrée encours (reste en stock) + reprise (re-sort) */
-deductBoisSorti(prod);
+    deductBoisSorti(prod);
     /* Deduction assemblage : decrementer stock selon composants utilises */
     deductAssemblageStock(prod);
     clearAutoDraft();
