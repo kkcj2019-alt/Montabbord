@@ -1073,6 +1073,11 @@ function render_dashboard() {
   } catch (e) {}
 
   var h = '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.8rem">Vue d\u2019ensemble de la performance et des stocks</div>';
+  h += '<div style="display:flex;justify-content:flex-end;gap:.5rem;margin-bottom:.8rem;flex-wrap:wrap">';
+  h += '<button class="btn" onclick="exportProdBackup()" title="Télécharger toute la base (aligner téléphone ↔ PC)" style="font-size:.75rem">💾 Sauvegarde (fichier)</button>';
+  h += '<button class="btn" onclick="document.getElementById(\'prodBackupFile\').click()" title="Restaurer une sauvegarde (remplace les données de cet appareil)" style="font-size:.75rem">📥 Restaurer</button>';
+  h += '<input type="file" id="prodBackupFile" accept=".json,application/json" style="display:none" onchange="importProdBackupFile(this)">';
+  h += '</div>';
   h += '<div class="stats-grid">';
   h += kpiCard(volAchatsMois, 'Vol. Achet\u00e9 (mois)', '\ud83d\uded2', 'achats-history');
   h += kpiCard(volStock.raw, 'Stock Actuel (Global)', '\ud83d\udce6', 'stock-raw');
@@ -9436,9 +9441,95 @@ function deleteAchat(id) {
     '• Fournisseur : ' + (a.fournisseur || '-') + '\n\n' +
     'Le stock sera impacté si cet achat a déjà été réceptionné.\nConfirmer ?';
   if (!confirm2(msg)) return;
+  reverseAchatStock(a);
   setAchats(achats.filter(function(x) { return String(x.id) !== String(id); }));
-  toast('Achat supprimé');
+  toast('Achat supprimé — stock déduit', 'success');
   renderPage();
+}
+/* Suppression bordereau : retire du stock les quantités qu'il avait apportées */
+function reverseAchatStock(a) {
+  try {
+    if (!a || !a.items || !a.items.length) return;
+    var cat = a.category || '';
+    function pull(get, set, match, qtyOf, volOf) {
+      var arr = get();
+      var changed = false;
+      for (var i = 0; i < a.items.length; i++) {
+        var it = a.items[i];
+        var q = qtyOf(it);
+        var v = volOf ? volOf(it) : 0;
+        if (q <= 0 && v <= 0) continue;
+        for (var j = 0; j < arr.length; j++) {
+          if (match(arr[j], it)) {
+            arr[j].quantite = Math.max(0, (parseFloat(arr[j].quantite) || 0) - q);
+            if (volOf && arr[j].volume !== undefined) arr[j].volume = Math.max(0, (parseFloat(arr[j].volume) || 0) - v);
+            if ((parseFloat(arr[j].quantite) || 0) <= 0 && (!volOf || (parseFloat(arr[j].volume) || 0) <= 0)) { arr.splice(j, 1); j--; }
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (changed) set(arr);
+    }
+    function codeMatch(s, it) { return String(s.code || s.colis_number || '') === String(it.code || it.colis_number || ''); }
+    function qtyIt(it) { return parseFloat(it.quantity) || 0; }
+    if (cat === 'raw-materials') {
+      pull(getStockRaw, setStockRaw,
+        function(s, it) { return String(s.colis_number || s.code || '') === String(it.colis_number || ''); },
+        qtyIt,
+        function(it) { return parseFloat(it.volume) || 0; });
+    } else if (cat === 'semi') {
+      pull(getStockSemi, setStockSemi, codeMatch, qtyIt, null);
+    } else if (cat === 'finished') {
+      pull(getStockFinished, setStockFinished, codeMatch, qtyIt, null);
+      try {
+        var movs = getMovements();
+        movs = movs.filter(function(m) { return !(m && m.type === 'entree' && m.reference === a.reference); });
+        setMovements(movs);
+      } catch(e) {}
+    } else if (cat === 'merchandises') {
+      pull(getStockMerch, setStockMerch, codeMatch, qtyIt, null);
+    } else if (cat === 'consumables') {
+      pull(getStockConsum, setStockConsum, codeMatch, qtyIt, null);
+    }
+  } catch(e) {}
+}
+/* Sauvegarde / Restauration complète par fichier (aligner téléphone ↔ PC) */
+function exportProdBackup() {
+  try {
+    var data = {};
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      try { data[k] = localStorage.getItem(k); } catch(e) {}
+    }
+    var blob = new Blob([JSON.stringify({ app: 'montabbord-production', date: new Date().toISOString(), data: data })], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'sauvegarde-production-' + today().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(function() { try { URL.revokeObjectURL(a.href); a.remove(); } catch(e) {} }, 1000);
+    toast('Sauvegarde téléchargée — transférez le fichier sur l\'autre appareil', 'success');
+  } catch(e) { toast('Échec sauvegarde', 'error'); }
+}
+function importProdBackupFile(input) {
+  try {
+    var f = input.files && input.files[0];
+    if (!f) return;
+    var r = new FileReader();
+    r.onload = function() {
+      try {
+        var obj = JSON.parse(r.result);
+        if (!obj || !obj.data) { toast('Fichier invalide', 'error'); return; }
+        var n = Object.keys(obj.data).length;
+        if (!confirm2('Restaurer la sauvegarde du ' + (obj.date || '?') + ' (' + n + ' clés) ?\n\n⚠️ Les données actuelles de CET appareil seront remplacées.')) return;
+        Object.keys(obj.data).forEach(function(k) { try { localStorage.setItem(k, obj.data[k]); } catch(e) {} });
+        toast('Restauration terminée — appareils alignés', 'success');
+        renderPage();
+      } catch(e) { toast('Fichier illisible', 'error'); }
+      try { input.value = ''; } catch(e) {}
+    };
+    r.readAsText(f);
+  } catch(e) { toast('Échec lecture fichier', 'error'); }
 }
 /* ==================== LIVRAISONS PRODUITS FINIS (BL auto → gestion commerciale à facturer) ==================== */
 function prodClientNames() {
