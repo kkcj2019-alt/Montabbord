@@ -9189,10 +9189,72 @@ function calcItemVolLive() {
 }
 
 
+/* PU par défaut = celui de la 1ère ligne renseignée (modifiable ensuite) */
+function achatDefaultPU() {
+  try {
+    for (var i = 0; i < _tempAchatItems.length; i++) {
+      var u = parseFloat(_tempAchatItems[i].unit_price) || 0;
+      if (u > 0) return u;
+    }
+  } catch(e) {}
+  return 0;
+}
+/* N° colis auto : fournisseur + date + dimensions + séquence unique */
+function genColisNumber(sup, dateStr, L, l, e) {
+  var s = String(sup || 'SF').replace(/[^A-Za-z0-9]/g, '').substring(0, 4).toUpperCase() || 'SF';
+  var d = '';
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || '');
+  if (m) d = m[3] + m[2] + m[1].substring(2, 4);
+  else { var t = new Date(); d = (t.getDate() < 10 ? '0' : '') + t.getDate() + ((t.getMonth() + 1 < 10) ? '0' : '') + (t.getMonth() + 1) + String(t.getFullYear()).substring(2, 4); }
+  var dim = (L > 0 && l > 0 && e > 0) ? ('-' + L + 'x' + l + 'x' + e) : '';
+  var base = 'COL-' + s + '-' + d + dim;
+  var used = {};
+  try {
+    _tempAchatItems.forEach(function(it) { if (it.colis_number) used[it.colis_number] = true; });
+    var extra = [];
+    if (typeof getStockRaw === 'function') { try { extra = getStockRaw() || []; } catch(e) {} }
+    else { try { var pp = JSON.parse(localStorage.getItem('mdb_production')) || {}; extra = pp.stockRaw || []; } catch(e) {} }
+    extra.forEach(function(sx) { var c = sx.colis_number || sx.code; if (c) used[c] = true; });
+  } catch(e) {}
+  var n = 1, code = '';
+  do { code = base + '-' + (n < 10 ? '0' : '') + n; n++; } while (used[code] && n < 1000);
+  return code;
+}
+/* Recharge une ligne créée dans les champs pour modification avant validation */
+function editAchatItemLine(i, category) {
+  var it = _tempAchatItems[i];
+  if (!it) return;
+  function setV(id, v) { var el = document.getElementById(id); if (el) el.value = (v === null || v === undefined) ? '' : v; }
+  if (category === 'raw-materials') {
+    setV('ai_colis', it.colis_number); setV('ai_qte', it.quantity);
+    setV('ai_long', it.length); setV('ai_larg', it.width); setV('ai_epais', it.thickness);
+    setV('ai_vol', it.volume); setV('ai_essence', it.essence); setV('ai_type', it.type);
+    setV('ai_zone', it.zone); setV('ai_pu', it.unit_price); setV('ai_obs', it.obs);
+    if (typeof calcItemVolLive === 'function') calcItemVolLive();
+  } else if (category === 'consumables' || category === 'consumable') {
+    setV('ai_code', it.code); setV('ai_designation', it.designation);
+    setV('ai_qte', it.paquets != null ? it.paquets : it.quantity);
+    setV('ai_qte_paquet', it.cond); setV('ai_constype', it.ctype); setV('ai_emplacement', it.emplacement);
+    setV('ai_pu', it.unit_price); setV('ai_obs', it.obs);
+  } else {
+    setV('ai_code', it.code); setV('ai_designation', it.designation);
+    setV('ai_qte', it.quantity); setV('ai_pu', it.unit_price); setV('ai_obs', it.obs);
+  }
+  _tempAchatItems.splice(i, 1);
+  renderAchatItemsTable(category);
+  try { var f = document.getElementById('ai_colis') || document.getElementById('ai_code'); if (f) f.focus(); } catch(e) {}
+}
 function addAchatItemLine(category) {
   var item = {};
+  try {
+    var _puEl = document.getElementById('ai_pu');
+    if (_puEl && (_puEl.value === '' || parseFloat(_puEl.value) <= 0)) {
+      var _puDef = achatDefaultPU();
+      if (_puDef > 0) _puEl.value = _puDef;
+    }
+  } catch(e) {}
   if (category === 'raw-materials') {
-    var colis = (document.getElementById('ai_colis') || {}).value || 'COL-' + Date.now().toString().slice(-4);
+    var colis = ((document.getElementById('ai_colis') || {}).value || '').trim();
     var qte = parseFloat((document.getElementById('ai_qte') || {}).value || 1);
     var L = parseFloat((document.getElementById('ai_long') || {}).value || 0);
     var l = parseFloat((document.getElementById('ai_larg') || {}).value || 0);
@@ -9214,6 +9276,13 @@ function addAchatItemLine(category) {
     }
 
     var puMP = parseFloat((document.getElementById('ai_pu') || {}).value || 0);
+    if (!colis) {
+      var _sup = (document.getElementById('ach_fournisseur') || {}).value || '';
+      var _dat = (document.getElementById('ach_date') || {}).value || '';
+      colis = genColisNumber(_sup, _dat, L, l, e);
+      var _ci = document.getElementById('ai_colis');
+      if (_ci) _ci.value = colis;
+    }
     item = { colis_number: colis, quantity: qte, length: L, width: l, lglob: lglob, thickness: e, volume: vol, essence: essence, type: type, zone: zone, unit_price: puMP, total_price: qte * puMP, obs: obs };
   } else if (category === 'consumables' || category === 'consumable') {
     var code = (document.getElementById('ai_code') || {}).value || 'ART-' + Date.now().toString().slice(-4);
@@ -9287,7 +9356,7 @@ function renderAchatItemsTable(category) {
       h += '<td style="padding:0.5rem;text-align:right;font-weight:700">' + fmt(it.total_price) + ' F</td>';
       h += '<td style="padding:0.5rem">' + escH(it.obs || '-') + '</td>';
     }
-    h += '<td style="padding:0.5rem;text-align:center"><button type="button" onclick="removeAchatItemLine(' + i + ',\'' + category + '\')" style="background:none;border:none;color:#ef4444;cursor:pointer">🗑️</button></td>';
+    h += '<td style="padding:0.5rem;text-align:center;white-space:nowrap"><button type="button" onclick="editAchatItemLine(' + i + ',\'' + category + '\')" title="Modifier" style="background:none;border:none;color:#2563eb;cursor:pointer">✏️</button> <button type="button" onclick="removeAchatItemLine(' + i + ',\'' + category + '\')" style="background:none;border:none;color:#ef4444;cursor:pointer">🗑️</button></td>';
     h += '</tr>';
   });
   tbody.innerHTML = h;
