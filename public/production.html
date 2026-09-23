@@ -939,6 +939,16 @@ function prodPushNow() {
       try { setDB(local); } catch(e) {}
     }
     cloudData.mdb_production = getDB();
+    try {
+      var localDettes = [];
+      try { localDettes = JSON.parse(localStorage.getItem('mdb_dettesFournisseurs')) || []; } catch(e) { localDettes = []; }
+      var cloudDettes = Array.isArray(cloudData.mdb_dettesFournisseurs) ? cloudData.mdb_dettesFournisseurs : [];
+      var seenD = {}, mergedD = [], newD = false;
+      for (var di = 0; di < localDettes.length; di++) { mergedD.push(localDettes[di]); var id1 = localDettes[di] && localDettes[di].id; if (id1) seenD[id1] = true; }
+      for (var dj = 0; dj < cloudDettes.length; dj++) { var itD = cloudDettes[dj]; var id2 = itD && itD.id; if (!id2 || !seenD[id2]) { mergedD.push(itD); if (id2) seenD[id2] = true; newD = true; } }
+      cloudData.mdb_dettesFournisseurs = mergedD;
+      if (newD) { try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(mergedD)); } catch(e) {} }
+    } catch(e) {}
     return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: cloudData, p_identifiant: row.identifiant || '', p_email: row.email || '', p_nom: row.nom || '' });
   }).then(function(r2) {
     if (r2 && r2.error) throw r2.error;
@@ -974,7 +984,22 @@ function prodMergeObjs(local, cloud) {
   } catch(e) { out = local; }
   return out;
 }
-function prodApplyCloud(cloudProd) {
+/* Dettes fournisseurs : union locale+cloud (jamais d'écrasement, des deux côtés) */
+function prodApplyDettes(cloudDettes) {
+  if (!Array.isArray(cloudDettes)) return false;
+  var local = [];
+  try { local = JSON.parse(localStorage.getItem('mdb_dettesFournisseurs')) || []; } catch(e) { local = []; }
+  var seen = {}, added = false;
+  for (var i = 0; i < local.length; i++) { var id1 = local[i] && local[i].id; if (id1) seen[id1] = true; }
+  for (var j = 0; j < cloudDettes.length; j++) {
+    var it = cloudDettes[j], id2 = it && it.id;
+    if (!id2 || !seen[id2]) { local.push(it); if (id2) seen[id2] = true; added = true; }
+  }
+  if (!added) return false;
+  try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(local)); } catch(e) { return false; }
+  return true;
+}
+function prodApplyCloud(cloudProd, silent) {
   if (!cloudProd || typeof cloudProd !== 'object') return false;
   var local = getDB();
   if (!local.__prodUpdatedAt) {
@@ -983,14 +1008,14 @@ function prodApplyCloud(cloudProd) {
     _prodDirty = true;
     try { scheduleProdPush(); } catch(e) {}
     prodSyncStatus('● synchro OK', '#16a34a');
-    try { if (prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
+    try { if (!silent && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
     return true;
   }
   var ct = cloudProd.__prodUpdatedAt || 0, lt = local.__prodUpdatedAt || 0;
   if (_prodDirty || ct <= lt) return false;
   try { localStorage.setItem('mdb_production', JSON.stringify(cloudProd)); } catch(e) { return false; }
   prodSyncStatus('● synchro OK', '#16a34a');
-  try { if (prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
+  try { if (!silent && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
   return true;
 }
 function prodPullNow(silent) {
@@ -1003,7 +1028,10 @@ function prodPullNow(silent) {
   sb.from('enterprises').select('*').eq('id', uid).limit(1).then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
-    if (row.data && row.data.mdb_production) prodApplyCloud(row.data.mdb_production);
+    if (!row.data) return;
+    var r1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
+    var r2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
+    if ((r1 || r2) && prodShouldRender()) { try { if (typeof renderPage === 'function') renderPage(); } catch(e) {} }
   }).catch(function(err) {});
 }
 function prodStartRealtime() {
@@ -1017,7 +1045,10 @@ function prodStartRealtime() {
     _prodSub = sb.channel('prod-' + uid).on('postgres_changes', { event: '*', schema: 'public', table: 'enterprises', filter: 'id=eq.' + uid }, function(payload) {
       try {
         var row = (payload && payload.new) || {};
-        if (row.data && row.data.mdb_production) prodApplyCloud(row.data.mdb_production);
+        if (!row.data) return;
+        var a1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
+        var a2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
+        if ((a1 || a2) && prodShouldRender()) { try { if (typeof renderPage === 'function') renderPage(); } catch(e) {} }
       } catch(e) {}
     });
     _prodSub.subscribe(function(status) {});
@@ -9280,6 +9311,27 @@ function calcAchatTotal() {
   }
 }
 
+/* Achat → dette fournisseur auto (compte tiers partagé avec l'app principale) */
+function syncProdAchatDette(a) {
+  try {
+    if (!a || !a.id) return false;
+    var dettes = [];
+    try { dettes = JSON.parse(localStorage.getItem('mdb_dettesFournisseurs')) || []; } catch(e) { dettes = []; }
+    var idx = -1;
+    for (var i = 0; i < dettes.length; i++) { if (dettes[i].prodAchatId === a.id) { idx = i; break; } }
+    var montant = Math.round((parseFloat(a.montant_total) || 0) * 100) / 100;
+    if (idx !== -1) {
+      dettes[idx].montant = montant;
+      dettes[idx].fournisseur = a.fournisseur || dettes[idx].fournisseur;
+      dettes[idx].description = 'Achat production ' + (a.reference || '');
+      if (a.date) dettes[idx].date = a.date;
+    } else {
+      dettes.push({ id: genId(), prodAchatId: a.id, fournisseurId: '', fournisseur: a.fournisseur || '', description: 'Achat production ' + (a.reference || ''), date: a.date || '', montant: montant });
+    }
+    try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(dettes)); } catch(e) { return false; }
+    return true;
+  } catch(e) { return false; }
+}
 function saveAchatByCategory(e, category) {
   e.preventDefault();
   var achats = getAchats();
@@ -9332,6 +9384,7 @@ function saveAchatByCategory(e, category) {
 
   setAchats(achats);
   window._editingAchatId = null;
+  try { syncProdAchatDette(existing || achats[0]); } catch(e) {}
 
   if (category === 'raw-materials' && !existing) {
     var rawStock = getStockRaw();
@@ -9632,6 +9685,10 @@ function deleteAchat(id) {
     'Le stock sera impacté si cet achat a déjà été réceptionné.\nConfirmer ?';
   if (!confirm2(msg)) return;
   reverseAchatStock(a);
+  try {
+    var _dfs = JSON.parse(localStorage.getItem('mdb_dettesFournisseurs')) || [];
+    localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(_dfs.filter(function(d) { return d.prodAchatId !== a.id; })));
+  } catch(e) {}
   setAchats(achats.filter(function(x) { return String(x.id) !== String(id); }));
   toast('Achat supprimé — stock déduit', 'success');
   renderPage();
