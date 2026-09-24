@@ -16,7 +16,8 @@ if (-not $NoCommit) {
 }
 
 Write-Host "[deploy] git push..."
-git push origin ma-version-deployee
+$curBranch = (git rev-parse --abbrev-ref HEAD).Trim()
+if ($curBranch -and $curBranch -ne 'HEAD') { git push origin $curBranch } else { git push origin ma-version-deployee }
 
 Write-Host "[deploy] Firebase hosting..."
 cmd /c "npx.cmd --yes firebase-tools@latest deploy --only hosting --project montabbord"
