@@ -254,7 +254,7 @@ body.prod-readonly .btn-accent, body.prod-readonly .btn-red { display: none !imp
   <nav id="nav"></nav>
   <div class="nav-section-sep"></div>
   <div style="padding:.5rem 0">
-    <div class="nav-parent" onclick="localStorage.setItem('mdb_aliveTs',String(Date.now()));window.location.href='index.html#entreprise'">
+    <div class="nav-parent" onclick="openMainParametres()">
       <span class="icon">⚙️</span>
       <span class="label">Paramètres</span>
     </div>
@@ -617,6 +617,34 @@ function goBack() {
   navigate(prev);
 }
 
+function openMainParametres() {
+  /* Ouvre la page Paramètres (Entreprise) de l'app de gestion dans un nouvel onglet :
+     ne recharge PAS l'app pendant la fiche de production → ne donne plus l'impression
+     d'une déconnexion. En cas de popup bloquée, bascule vers la navigation directe. */
+  try { localStorage.setItem('mdb_aliveTs', String(Date.now())); } catch (e) {}
+  var url = 'index.html#entreprise';
+  try {
+    var w = window.open(url, '_blank');
+    if (w && !w.closed) return;
+  } catch (ePp) {}
+  try {
+    if (window.self !== window.top) {
+      var ov = document.createElement('div');
+      ov.id = 'mainParamOverlay';
+      ov.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:400;display:flex;flex-direction:column';
+      ov.innerHTML = '<div style="display:flex;justify-content:flex-end;padding:.4rem;background:#fff"><button class="btn" onclick="closeMainParamOverlay()" style="font-size:.75rem">✕ Fermer</button></div>'
+        + '<iframe src="' + url + '" style="flex:1;width:100%;border:0;background:#fff"></iframe>';
+      document.body.appendChild(ov);
+      return;
+    }
+  } catch (eTp) {}
+  window.location.href = url;
+}
+function closeMainParamOverlay() {
+  var ov = document.getElementById('mainParamOverlay');
+  if (ov) ov.remove();
+}
+
 function toggleSidebar() {
   /* ☰ : sur mobile ouvre/ferme le tiroir, sur desktop replie/déplie (comme index) */
   var sb = document.getElementById('sidebar');
@@ -699,12 +727,17 @@ function renderPage() {
     var _pw = true;
     try { _pw = (typeof prodCanWrite !== 'function') || prodCanWrite(prodPageKey('production')); } catch(e) {}
     actions.innerHTML = (_pw ? '<button class="btn" onclick="saveProduction(\'brouillon\')" style="font-size:.75rem">📝 Brouillon</button><button class="btn btn-accent" onclick="saveProduction(\'save\')" style="font-size:.75rem">💾 Enregistrer</button><button class="btn btn-green" onclick="saveProduction(true)" style="font-size:.75rem">✅ Valider</button>' : '') + '<button class="btn" onclick="printProductionFiche()" style="font-size:.75rem">🖨️ Imprimer</button><button class="btn" onclick="exportProductionFichePDF()" style="font-size:.75rem">📄 PDF</button>';
+  } else if (CURRENT_PAGE === 'dashboard') {
+    actions.innerHTML += '<button class="btn" id="prodDashEditBtn" onclick="toggleProdDashEdit()" style="font-size:.75rem" title="Déplacer les blocs du tableau de bord en glissant">⇅ Réorganiser</button>';
   } else {
     actions.innerHTML = '';
   }
   var fn = window['render_' + CURRENT_PAGE.replace(/-/g, '_')];
   if (fn) { document.getElementById('content').innerHTML = fn(); bindEvents(); }
   else { document.getElementById('content').innerHTML = '<div class="empty">Module en cours de développement...</div>'; }
+  if (CURRENT_PAGE === 'dashboard') {
+    try { bindProdDashDnd(); applyProdDashOrder(); } catch (eDbd) {}
+  }
 }
 
 function bindEvents() {
@@ -1373,7 +1406,8 @@ function render_dashboard() {
   } catch (e) {}
 
   var h = '';
-  h += '<div class="kpi-grid">';
+  h += '<div id="prodDashboardView">';
+  h += '<div class="kpi-grid" data-dashkey="kpi">';
   h += kpiCard(volAchatsMois, 'Vol. Acheté (mois)', '🛒', 'achats-history', null, 'linear-gradient(135deg,#f97316,#c2410c)');
   h += kpiCard(volStock.raw, 'Stock Actuel (Global)', '📦', 'stock-raw', null, 'linear-gradient(135deg,#0d9488,#0f766e)');
   h += kpiCard(volInitialTab, 'Stock Initial (Global)', '📊', 'inventory', null, 'linear-gradient(135deg,#4f46e5,#3730a3)');
@@ -1387,14 +1421,14 @@ function render_dashboard() {
   var mpRupt = getStockRaw().filter(function(s) { return (parseFloat(s.quantite) || 0) <= 0; }).length;
   var epiLow = getEpiItems().filter(function(e) { return (e.quantite_stock || 0) <= (e.seuil_minimum || 0); }).length;
   var nbAlertes = mpRupt + epiLow;
-  h += '<div class="mini-grid">';
+  h += '<div class="mini-grid" data-dashkey="mini">';
   h += miniCard('🎯', rendMoy.toFixed(1) + '%', 'Rendement Moyen (mois)', '#22c55e', 'history');
   h += miniCard('📑', prodMois.length, 'Fiches Validées (mois)', null, 'history');
   h += miniCard('🛠️', opsEncours, 'Ordres Production en cours', null, 'orders');
   h += miniCard('🚨', nbAlertes, 'Alertes Stock (MP + EPI)', nbAlertes ? 'var(--red)' : 'var(--green)', 'epi');
   h += '</div>';
 
-  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem" data-dashkey="flux">';
   h += '<div class="card dash-card"><h3>🏭 Flux de Production</h3>';
   h += '<div style="display:flex;gap:1rem;margin-bottom:.5rem;font-size:.75rem;font-weight:600">';
   h += '<span style="color:#f97316">● PRODUCTION</span>';
@@ -1445,24 +1479,37 @@ function render_dashboard() {
   }
   h += '</div></div>';
 
-  h += '<div class="card dash-card"><h3>📊 Stock par Catégorie (m³)</h3>';
+  h += '<div class="card dash-card" data-dashkey="stockcat"><h3>📊 Stock par Catégorie</h3>';
   h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem">';
+  var packsPerCarton = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
+  var pointePaquets = 0;
+  getStockConsum().forEach(function(st) {
+    var n = consoNorm(st);
+    if (n.type === 'POINTE') pointePaquets += (n.paquets || 0);
+  });
+  var pointeCartons = Math.max(1, Math.ceil(pointePaquets / packsPerCarton));
   var cats = [
-    { name: 'Palettes', vol: volStock.finished, icon: '🟫', page: 'stock-palettes', tint: '#fff7ed' },
+    { name: 'Stock de Pointe', line1: fmt(pointePaquets) + ' paquets', line2: fmt(pointeCartons) + ' carton(s)', icon: '📌', page: 'stock-consum', tint: '#fff7ed', custom: true },
     { name: 'Semi-Finis', vol: volStock.semi, icon: '🔧', page: 'stock-semi', tint: '#eff6ff' },
     { name: 'Matière Première', vol: volStock.raw, icon: '🪵', page: 'stock-raw', tint: '#f0fdf4' },
   ];
   cats.forEach(function(c) {
     h += '<div class="cat-tile" onclick="navigate(\'' + c.page + '\')" title="Voir la source">';
     h += '<div class="cat-ico" style="background:' + c.tint + '">' + c.icon + '</div>';
-    h += '<div style="font-size:1.1rem;font-weight:800;color:var(--accent)">' + c.vol.toFixed(2) + ' m³</div>';
-    h += '<div style="font-size:.68rem;color:var(--dim);font-weight:600">' + c.name + '</div>';
+    if (c.custom) {
+      h += '<div style="font-size:1.1rem;font-weight:800;color:var(--accent)">' + c.line1 + '</div>';
+      h += '<div style="font-size:.68rem;color:var(--dim);font-weight:600">' + c.line2 + '</div>';
+      h += '<div style="font-size:.6rem;color:var(--dim);margin-top:.3rem;cursor:pointer" onclick="event.stopPropagation();setPacksPerCarton()" title="Changer le nombre de paquets par carton">⚙ ' + packsPerCarton + ' paquets/carton</div>';
+    } else {
+      h += '<div style="font-size:1.1rem;font-weight:800;color:var(--accent)">' + c.vol.toFixed(2) + ' m³</div>';
+      h += '<div style="font-size:.68rem;color:var(--dim);font-weight:600">' + c.name + '</div>';
+    }
     h += '</div>';
   });
   h += '</div></div>';
 
   /* ---------- MÉTRIQUES OPÉRATIONNELLES ---------- */
-  h += dashSection('MÉTRIQUES OPÉRATIONNELLES');
+  h += '<div data-dashkey="metriques">' + dashSection('MÉTRIQUES OPÉRATIONNELLES');
   var rawStock = getStockRaw();
   var nbBL = rawStock.length;
   var nbColis = rawStock.reduce(function(s, r) { return s + (parseFloat(r.quantite) || 0); }, 0);
@@ -1477,7 +1524,7 @@ function render_dashboard() {
   h += metricCard('STOCK BL', nbBL + ' BL | ' + fmt(nbColis) + ' colis', 'VOL: ' + volBL.toFixed(2) + ' m³', '📦', 'var(--accent)', 'stock-raw');
   h += metricCard('SEMI-FINIS', semiStock.length + ' Articles', 'VOL: ' + volStock.semi.toFixed(2) + ' m³', '🔧', 'var(--accent)', 'stock-semi');
   h += metricCard('ALERTES RUPTURE', String(ruptCount + epiRupt), ruptCount + ' stock épuisé · ' + epiRupt + ' EPI sous seuil', '⚠️', '#dc2626', 'epi');
-  h += '</div>';
+  h += '</div></div>';
 
   /* ---------- ACHATS / RÉPARATIONS / PROD MOIS ---------- */
   var achFinis = getAchats().filter(function(a) { return a.category === 'finished'; });
@@ -1493,7 +1540,7 @@ function render_dashboard() {
   try { repairs = getSection('palette_repairs', []).concat(getSection('repair_services', [])); } catch (eRep) { repairs = []; }
   var repDone = repairs.filter(function(r) { return r.statut === 'termine' || r.statut === 'terminee' || r.statut === 'done'; }).length;
   var pctMois = volProdTotal > 0 ? Math.round(volProduction / volProdTotal * 100) : (volProduction > 0 ? 100 : 0);
-  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-top:1rem">';
+  h += '<div data-dashkey="achats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-top:1rem">';
   h += '<div class="card" style="margin-bottom:0"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="cursor:pointer;margin:0" onclick="navigate(\'achats-history\')" title="Voir l\'historique">🛒 ACHATS PRODUITS FINIS</h3><button class="btn" onclick="navigate(\'achats-history\')" style="font-size:.65rem;padding:2px 8px">✏️ Modifier</button></div>';
   if (!fourList.length) h += '<div class="empty">Aucun achat de produits finis</div>';
   else {
@@ -1536,7 +1583,7 @@ function render_dashboard() {
   var marges = articles.map(function(a) { return { code: a.code || a.designation || '—', m: (a.prix_vente || 0) - (a.prix_revient || 0) }; })
     .filter(function(x) { return x.m > 0; }).sort(function(a, b) { return b.m - a.m; }).slice(0, 6);
   var maxMarge = marges.length ? marges[0].m : 0;
-  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-top:1rem">';
+  h += '<div data-dashkey="thermique" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-top:1rem">';
   h += '<div class="card" style="margin-bottom:0"><h3 style="cursor:pointer" onclick="navigate(\'thermal\')" title="Voir la source">🌡️ TRAITEMENT THERMIQUE CLIENT</h3>';
   if (!treats.length) h += '<div class="empty">Aucun traitement thermique</div>';
   else {
@@ -1593,7 +1640,7 @@ function render_dashboard() {
   getProductions().filter(function(p) { return p.statut === 'draft'; }).slice(0, 3).forEach(function(p) {
     alerts.push({ tag: 'PRODUCTION', name: p.numero || 'Fiche', sub: 'En attente de validation', n: '' });
   });
-  h += dashSection('ALERTES CRITIQUES');
+  h += '<div data-dashkey="alertes">' + dashSection('ALERTES CRITIQUES');
   h += '<div class="card" style="margin-bottom:0"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem"><h3 style="margin:0;cursor:pointer" onclick="navigate(\'history\')" title="Voir la source">🚨 Alertes (' + alerts.length + ')</h3><span style="font-size:.68rem;color:var(--dim)">VOIR TOUT</span></div>';
   if (!alerts.length) h += '<div class="empty">Aucune alerte 🎉</div>';
   else {
@@ -1607,8 +1654,109 @@ function render_dashboard() {
     });
   }
   h += '</div>';
+  h += '</div>';
 
+  h += '</div>'; /* /#prodDashboardView */
   return h;
+}
+
+function setPacksPerCarton() {
+  var current = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
+  var v = prompt('Nombre de paquets par carton (défaut 50) :', String(current));
+  if (v === null) return;
+  var n = parseInt(v, 10);
+  if (isNaN(n) || n <= 0) { toast('Valeur invalide', 'error'); return; }
+  localStorage.setItem('mdb_packs_per_carton', String(n));
+  renderPage();
+  toast('Paquets/carton mis à jour : ' + n);
+}
+
+/* ==================== DRAG & DROP DASHBOARD (réordonner les blocs) ==================== */
+var _prodDashEdit = false, _prodDashDragEl = null;
+function prodDashKeys(skipOpenBtn) {
+  var dv = document.getElementById('prodDashboardView');
+  if (!dv) return [];
+  var out = [];
+  for (var i = 0; i < dv.children.length; i++) {
+    out.push(dv.children[i].getAttribute('data-dashkey') || ('blk' + i));
+  }
+  return out;
+}
+function applyProdDashOrder() {
+  var dv = document.getElementById('prodDashboardView');
+  if (!dv) return;
+  var saved = [];
+  try { saved = JSON.parse(localStorage.getItem('mdb_prod_dash_order') || '[]'); } catch (eOp) {}
+  if (saved && saved.length) {
+    var map = {}, i;
+    for (i = 0; i < dv.children.length; i++) map[dv.children[i].getAttribute('data-dashkey')] = dv.children[i];
+    var frag = document.createDocumentFragment();
+    for (i = 0; i < saved.length; i++) { if (map[saved[i]]) { frag.appendChild(map[saved[i]]); delete map[saved[i]]; } }
+    for (var kk in map) frag.appendChild(map[kk]);
+    dv.appendChild(frag);
+  }
+  prodDashSetEdit(false);
+}
+function prodDashSaveOrder() {
+  try { localStorage.setItem('mdb_prod_dash_order', JSON.stringify(prodDashKeys(true))); } catch (eOp2) {}
+}
+function toggleProdDashEdit() { prodDashSetEdit(!_prodDashEdit); }
+function prodDashSetEdit(on) {
+  _prodDashEdit = !!on;
+  var dv = document.getElementById('prodDashboardView');
+  if (!dv) return;
+  var btn = document.getElementById('prodDashEditBtn');
+  if (btn) btn.innerHTML = _prodDashEdit ? '✓ Terminer' : '⇅ Réorganiser';
+  for (var i = 0; i < dv.children.length; i++) {
+    var c = dv.children[i];
+    c.setAttribute('draggable', _prodDashEdit ? 'true' : 'false');
+    c.style.outline = _prodDashEdit ? '2px dashed rgba(37,99,235,.55)' : '';
+    c.style.outlineOffset = _prodDashEdit ? '4px' : '';
+    c.style.cursor = _prodDashEdit ? 'grab' : '';
+  }
+}
+function prodDndStart(ev) {
+  if (!_prodDashEdit) { ev.preventDefault(); return; }
+  _prodDashDragEl = ev.currentTarget;
+  try { ev.dataTransfer.effectAllowed = 'move'; ev.dataTransfer.setData('text/plain', 'd'); } catch (eD1) {}
+}
+function prodDndOver(ev) {
+  if (!_prodDashEdit) return;
+  ev.preventDefault();
+  var t = ev.currentTarget;
+  if (t === _prodDashDragEl) return;
+  var r = t.getBoundingClientRect();
+  t.style.borderTop = (ev.clientY < r.top + r.height / 2) ? '3px solid #2563eb' : t.style.borderTop;
+  t.style.borderBottom = (ev.clientY >= r.top + r.height / 2) ? '3px solid #2563eb' : t.style.borderBottom;
+}
+function prodDndLeave(ev) {
+  var t = ev.currentTarget;
+  if (t) { t.style.borderTop = ''; t.style.borderBottom = ''; }
+}
+function prodDndDrop(ev) {
+  if (!_prodDashEdit) return;
+  ev.preventDefault();
+  var t = ev.currentTarget;
+  prodDndLeave(ev);
+  if (!_prodDashDragEl || t === _prodDashDragEl) { _prodDashDragEl = null; return; }
+  var r = t.getBoundingClientRect();
+  var parent = t.parentNode;
+  if (ev.clientY < r.top + r.height / 2) parent.insertBefore(_prodDashDragEl, t);
+  else parent.insertBefore(_prodDashDragEl, t.nextSibling);
+  _prodDashDragEl.style.opacity = '';
+  _prodDashDragEl = null;
+  prodDashSaveOrder();
+}
+function bindProdDashDnd() {
+  var dv = document.getElementById('prodDashboardView');
+  if (!dv) return;
+  for (var i = 0; i < dv.children.length; i++) {
+    var c = dv.children[i];
+    c.addEventListener('dragstart', prodDndStart);
+    c.addEventListener('dragover', prodDndOver);
+    c.addEventListener('dragleave', prodDndLeave);
+    c.addEventListener('drop', prodDndDrop);
+  }
 }
 
 function statCard(val, label) {
@@ -1617,6 +1765,9 @@ function statCard(val, label) {
 
 function statCardVolume(vol, label) {
   return '<div class="stat-card"><div class="value">' + vol.toFixed(2) + ' m³</div><div class="label">' + escH(label) + '</div></div>';
+}
+function statCardVolumeSum(elId, label, color) {
+  return '<div class="stat-card" style="border-top:3px solid ' + (color || 'var(--accent)') + '"><div class="value" id="' + elId + '" style="color:' + (color || 'var(--accent)') + '">—</div><div class="label">' + escH(label) + '</div></div>';
 }
 
 /* ---------- Helpers dashboard (style acser-sas.com) ---------- */
@@ -1819,6 +1970,22 @@ function render_production() {
     });
     h += '</div></div>';
   }
+
+  /* === RÉSUMÉ DE LA FICHE === */
+  h += '<div class="card" style="margin-top:1rem;border-left:4px solid var(--green)">';
+  h += '<h3 style="margin:0 0 .8rem">📈 RÉSUMÉ DE LA FICHE DE PRODUCTION</h3>';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.6rem">';
+  h += statCardVolumeSum('summary_sb_vol', 'Vol. Bois Sorti', 'var(--accent)');
+  h += statCardVolumeSum('summary_latte_vol', 'Vol. Lattes', '#22c55e');
+  h += statCardVolumeSum('summary_plot_vol', 'Vol. Plots', 'var(--blue)');
+  h += statCardVolumeSum('summary_cp_vol', 'Vol. CP', 'var(--green)');
+  h += statCardVolumeSum('summary_enc_vol', 'En-Cours (entrée)', '#8b5cf6');
+  h += statCardVolumeSum('summary_perte_vol', 'Perte (m³)', 'var(--red)');
+  h += statCardVolumeSum('summary_perte_taux', 'Taux de Perte', '#f59e0b');
+  h += statCardVolumeSum('summary_rendement', 'Rendement', '#0d9488');
+  h += '</div>';
+  h += '<div id="summary_perte_warn" style="display:none;margin-top:.6rem;padding:.5rem .7rem;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#b91c1c;font-size:.78rem"></div>';
+  h += '</div>';
 
   try { setTimeout(function() { applyAutoDraft(); }, 60); } catch (e) {}
   return h;
