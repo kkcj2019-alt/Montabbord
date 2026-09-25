@@ -5844,6 +5844,78 @@
         }, 1200);
       }
 
+      /* Application d'une donnee distante : partagee par l'abonnement temps reel
+         et par le sondage de securite (voir _payeStartPoll). */
+      function _payeApplyRemote(data) {
+        if (!data) return;
+        var prevPaye = JSON.stringify(getPayeData() || {});
+        var prevEmps = JSON.stringify(DB.getMain("mdb_employes") || []);
+        _payeRecvSharedKeys(data || {});
+        var _cur = DB.getMain(PAYE_KEY) || {};
+        var _inc =
+          data &&
+          data[PAYE_KEY] &&
+          typeof data[PAYE_KEY] === "object" &&
+          !Array.isArray(data[PAYE_KEY])
+            ? data[PAYE_KEY]
+            : {};
+        DB.setMain(PAYE_KEY, _payeMergeObj(_cur, _inc, false));
+        syncFromMain();
+        try {
+          _purgeOrphanAcomptesP();
+        } catch (e) {}
+        var payeChanged = JSON.stringify(getPayeData() || {}) !== prevPaye;
+        var empsChanged =
+          JSON.stringify(DB.getMain("mdb_employes") || []) !== prevEmps;
+        /* Écho de notre propre écriture (rien de neuf) : ne pas re-rendre, sinon le curseur saute */
+        if (!payeChanged && !empsChanged) return;
+        try {
+          var cuPx = JSON.parse(localStorage.getItem("mdb_currentUser") || "null");
+          var ubPx = document.getElementById("payeUserBox");
+          if (ubPx && cuPx)
+            ubPx.textContent = cuPx.nom || cuPx.username || cuPx.email || "Utilisateur";
+        } catch (eUP) {}
+        setTimeout(_payeNavInitDnd, 3000);
+        setTimeout(_payeNavInitDnd, 9000);
+        var sec = localStorage.getItem("paye_currentSection");
+        if (!sec) return;
+        /* Pendant la saisie d'une case du pointage, ne pas détruire le focus :
+           on reporte le rafraîchissement au lieu de l'abandonner. */
+        var ptc = document.getElementById("pt-container");
+        var ae = document.activeElement;
+        if (sec === "pointage" && ptc && ae && ptc.contains(ae)) {
+          _payeDeferredRealtime(sec);
+          return;
+        }
+        showSection(sec);
+      }
+
+      /* Filet de securite : si la table n'est pas publiee dans supabase_realtime,
+         aucun evenement temps reel n'arrive et l'ecran seemed fige. Ce sondage
+         garantit la reception en quelques secondes, abonnement actif ou non. */
+      var payePollTimer = null;
+      function _payeStopPoll() {
+        try { if (payePollTimer) clearInterval(payePollTimer); } catch (e) {}
+        payePollTimer = null;
+      }
+      function _payeStartPoll(uid) {
+        _payeStopPoll();
+        payePollTimer = setInterval(function () {
+          if (document.hidden) return;
+          if (!firebaseDbP) return;
+          try {
+            firebaseDbP
+              .collection("enterprises")
+              .doc(uid)
+              .get()
+              .then(function (doc) {
+                if (doc && doc.exists) _payeApplyRemote(doc.data() || {});
+              })
+              .catch(function () {});
+          } catch (e) {}
+        }, 5000);
+      }
+
       function startRealtimeSync() {
         if (payeSnapshotUnsub) {
           try {
@@ -5853,58 +5925,14 @@
         }
         var uid = getEnterpriseUid();
         if (!uid || !firebaseDbP) return;
+        _payeStartPoll(uid);
         payeSnapshotUnsub = firebaseDbP
           .collection("enterprises")
           .doc(uid)
           .onSnapshot(
             function (doc) {
               if (!doc.exists) return;
-              var data = doc.data();
-              var prevPaye = JSON.stringify(getPayeData() || {});
-              var prevEmps = JSON.stringify(DB.getMain("mdb_employes") || []);
-              _payeRecvSharedKeys(data || {});
-              var _cur = DB.getMain(PAYE_KEY) || {};
-              var _inc =
-                data &&
-                data[PAYE_KEY] &&
-                typeof data[PAYE_KEY] === "object" &&
-                !Array.isArray(data[PAYE_KEY])
-                  ? data[PAYE_KEY]
-                  : {};
-              DB.setMain(PAYE_KEY, _payeMergeObj(_cur, _inc, false));
-              syncFromMain();
-              try {
-                _purgeOrphanAcomptesP();
-              } catch (e) {}
-              var payeChanged =
-                JSON.stringify(getPayeData() || {}) !== prevPaye;
-              var empsChanged =
-                JSON.stringify(DB.getMain("mdb_employes") || []) !== prevEmps;
-              /* Écho de notre propre écriture (rien de neuf) : ne pas re-rendre, sinon le curseur saute */
-              if (!payeChanged && !empsChanged) return;
-              try {
-                var cuPx = JSON.parse(
-                  localStorage.getItem("mdb_currentUser") || "null",
-                );
-                var ubPx = document.getElementById("payeUserBox");
-                if (ubPx && cuPx)
-                  ubPx.textContent =
-                    cuPx.nom || cuPx.username || cuPx.email || "Utilisateur";
-              } catch (eUP) {}
-              setTimeout(_payeNavInitDnd, 3000);
-              setTimeout(_payeNavInitDnd, 9000);
-              var sec = localStorage.getItem("paye_currentSection");
-              if (!sec) return;
-              /* Pendant la saisie d'une case du pointage, ne pas détruire le focus :
-                 on reporte le rafraîchissement au lieu de l'abandonner, sinon la
-                 modification distante n'apparaît qu'au rechargement manuel. */
-              var ptc = document.getElementById("pt-container");
-              var ae = document.activeElement;
-              if (sec === "pointage" && ptc && ae && ptc.contains(ae)) {
-                _payeDeferredRealtime(sec);
-                return;
-              }
-              showSection(sec);
+              _payeApplyRemote(doc.data());
             },
             function (e) {
               console.warn("[Paye] Realtime sync error:", e);
