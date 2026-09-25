@@ -310,11 +310,38 @@ var DB_KEY = 'mdb_production';
 var CURRENT_PAGE = 'dashboard';
 
 function getDB() { try { return JSON.parse(localStorage.getItem(DB_KEY)) || {}; } catch(e) { return {}; } }
-function setDB(v) { localStorage.setItem(DB_KEY, JSON.stringify(v)); }
+function setDB(v) {
+  localStorage.setItem(DB_KEY, JSON.stringify(v));
+  try { if (_prodChannel) _prodChannel.postMessage({ type: 'shared_key_updated', key: DB_KEY, value: JSON.stringify(v) }); } catch (e) {}
+}
 function getSection(key, def) { var db = getDB(); return db[key] !== undefined ? db[key] : def; }
-function setSection(key, val) { var db = getDB(); db[key] = val; setDB(db); try { if (typeof scheduleProdPush === 'function') scheduleProdPush(); } catch(e) {} }
+function setSection(key, val) {
+  var db = getDB();
+  db[key] = val;
+  markProdSectionDirty(key);
+  setDB(db);
+  try { if (typeof scheduleProdPush === 'function') scheduleProdPush(); } catch(e) {}
+}
 function genId() { return Date.now().toString(36) + Math.random().toString(36).substr(2, 6); }
 function today() { return new Date().toISOString().slice(0, 10); }
+/* Synchronisation inter-onglets : index.html et paye.html écrivent dans le même localStorage */
+var _prodWatchKeys = ['mdb_employes', 'mdb_production', 'mdb_paye', 'mdb_acomptesPrets', 'mdb_operationsCaisse'];
+var _prodChannel = null;
+try { _prodChannel = new BroadcastChannel('mdb_shared_sync'); } catch (e) {}
+if (_prodChannel) {
+  _prodChannel.onmessage = function (ev) {
+    var m = ev && ev.data;
+    if (!m || m.type !== 'shared_key_updated') return;
+    if (_prodWatchKeys.indexOf(m.key) === -1) return;
+    try { if (typeof prodShouldRender === 'function' && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch (e) {}
+  };
+}
+window.addEventListener('storage', function (ev) {
+  if (!ev || !ev.key) return;
+  if (_prodWatchKeys.indexOf(ev.key) === -1) return;
+  if (ev.newValue === ev.oldValue) return;
+  try { if (typeof prodShouldRender === 'function' && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch (e) {}
+});
 function thisMonth() { return new Date().toISOString().slice(0, 7); }
 function monthLabel(ym) {
   var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
@@ -853,12 +880,12 @@ function renderPage() {
     document.body.classList.toggle('prod-readonly', !_rw);
   } catch(e) {}
   var actions = document.getElementById('pageActions');
-  var _pwD2 = true;
-  try { _pwD2 = (typeof prodCanWrite !== 'function') || prodCanWrite(prodPageKey('dashboard')); } catch(e) {}
+  var _canRestore = false;
+  try { _canRestore = typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin(); } catch(e) {}
   /* Barre figée : toujours visible, quel que soit le menu (← Retour, Sauvegarde, Restaurer, synchro) */
   actions.innerHTML = '<button class="btn" onclick="goBack()" style="font-size:.75rem" title="Retour \u00e0 la page pr\u00e9c\u00e9dente">\u2190 Retour</button>'
     + '<button class="btn" onclick="exportProdBackup()" style="font-size:.75rem" title="T\u00e9l\u00e9charger toute la base (aligner t\u00e9l\u00e9phone \u2194 PC)">\uD83D\uDCBE Sauvegarde</button>'
-    + (_pwD2 ? '<button class="btn" onclick="document.getElementById(\'prodBackupFile\').click()" style="font-size:.75rem" title="Restaurer une sauvegarde (remplace les donn\u00e9es de cet appareil)">\uD83D\uDCE5 Restaurer</button><input type="file" id="prodBackupFile" accept=".json,application/json" style="display:none" onchange="importProdBackupFile(this)">' : '')
+    + (_canRestore ? '<button class="btn" onclick="document.getElementById(\'prodBackupFile\').click()" style="font-size:.75rem" title="Restaurer une sauvegarde (remplace les donn\u00e9es de cet appareil)">\uD83D\uDCE5 Restaurer</button><input type="file" id="prodBackupFile" accept=".json,application/json" style="display:none" onchange="importProdBackupFile(this)">' : '')
     + '<span id="prodSyncStatus" title="\u00c9tat de la synchronisation cloud temps r\u00e9el" style="font-size:.72rem;font-weight:700;color:var(--dim)">\u25CB synchro\u2026</span>';
   if (CURRENT_PAGE === 'production') {
     var _pw = true;
@@ -1159,6 +1186,32 @@ function prodCongeStatut(c) {
 var PROD_SB_URL = 'https://pywacfwhwsvidkhqsjqv.supabase.co';
 var PROD_SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5d2FjZndod3N2aWRraHFzanF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczMDMyMTksImV4cCI6MjEwMjg3OTIxOX0.wmt5vKo189wxQ9loIYprj8PE-Xd3y0Xs_-n61UJjbls';
 var _prodSB = null, _prodUid = null, _prodDirty = false, _prodPushT = null, _prodPushing = false, _prodSub = null, _prodFail = 0;
+/* Sections de mdb_production modifiees depuis le dernier envoi reussi.
+   Permet d'envoyer uniquement les sections concernees : le serveur fusionne le reste,
+   donc une saisie concurrente sur une autre section n'est plus ecrasee. */
+var _prodDirtySections = {};
+var _prodMergedRpc = null; /* null = inconnu, true/false = disponibilite de la RPC section */
+function markProdSectionDirty(key) {
+  if (!key || key === '__prodUpdatedAt') return;
+  _prodDirtySections[key] = true;
+}
+function markProdAllSectionsDirty() {
+  var db = getDB();
+  for (var k in db) { if (db.hasOwnProperty(k) && k !== '__prodUpdatedAt') _prodDirtySections[k] = true; }
+}
+function prodBuildSectionPayload() {
+  var db = getDB();
+  var names = Object.keys(_prodDirtySections);
+  if (names.length === 0) return null;
+  var payload = {};
+  for (var i = 0; i < names.length; i++) {
+    var k = names[i];
+    if (k === '__prodUpdatedAt') continue;
+    payload[k] = db[k];
+  }
+  payload.__prodUpdatedAt = db.__prodUpdatedAt || Date.now();
+  return payload;
+}
 function prodSyncStatus(txt, color) {
   try {
     var el = document.getElementById('prodSyncStatus');
@@ -1204,19 +1257,26 @@ function prodPushNow() {
   if (!sb) { prodSyncStatus('○ hors ligne', 'var(--dim)'); return; }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { prodSyncStatus('○ hors ligne', 'var(--dim)'); return; }
   _prodPushing = true;
+  var identity = null;
   sb.from('enterprises').select('*').eq('id', uid).limit(1).then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
     var cloudData = row.data || {};
+    identity = { identifiant: row.identifiant || '', email: row.email || '', nom: row.nom || '' };
     var local = getDB();
     if (!local.__prodUpdatedAt && cloudData.mdb_production && typeof cloudData.mdb_production === 'object') {
       local = prodMergeObjs(local, cloudData.mdb_production);
       try { setDB(local); } catch(e) {}
-    } else {
+      markProdAllSectionsDirty();
+    } else if (!_prodDirtySections || Object.keys(_prodDirtySections).length === 0) {
       local.__prodUpdatedAt = Date.now();
       try { setDB(local); } catch(e) {}
     }
-    cloudData.mdb_production = getDB();
+    /* Ecriture par cle : mdb_upsert_enterprise fusionne au niveau des cles (jsonb ||),
+       donc on n'envoie QUE les cles possedees par le module production. Toutes les autres
+       (mdb_employes, mdb_paye, mdb_operationsCaisse...) restent intactes. */
+    var payload = {};
+    payload.mdb_production = getDB();
     try {
       var localDettes = [];
       try { localDettes = JSON.parse(localStorage.getItem('mdb_dettesFournisseurs')) || []; } catch(e) { localDettes = []; }
@@ -1224,13 +1284,31 @@ function prodPushNow() {
       var seenD = {}, mergedD = [], newD = false;
       for (var di = 0; di < localDettes.length; di++) { mergedD.push(localDettes[di]); var id1 = localDettes[di] && localDettes[di].id; if (id1) seenD[id1] = true; }
       for (var dj = 0; dj < cloudDettes.length; dj++) { var itD = cloudDettes[dj]; var id2 = itD && itD.id; if (!id2 || !seenD[id2]) { mergedD.push(itD); if (id2) seenD[id2] = true; newD = true; } }
-      cloudData.mdb_dettesFournisseurs = mergedD;
+      if (localDettes.length > 0 || cloudDettes.length > 0) payload.mdb_dettesFournisseurs = mergedD;
       if (newD) { try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(mergedD)); } catch(e) {} }
     } catch(e) {}
-    return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: cloudData, p_identifiant: row.identifiant || '', p_email: row.email || '', p_nom: row.nom || '' });
+    /* Si la RPC section existe, on n'envoie que les sections reellement modifiees :
+       le serveur fusionne le reste, donc une saisie concurrente sur une autre section survit. */
+    var sectionPayload = prodBuildSectionPayload();
+    if (_prodMergedRpc === false || !sectionPayload) {
+      return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+    }
+    var prodArgs = { p_id: uid, p_prod: sectionPayload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom };
+    return sb.rpc('mdb_upsert_enterprise_prod', prodArgs).then(function(r) {
+      if (r && r.error) {
+        _prodMergedRpc = false;
+        return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+      }
+      _prodMergedRpc = true;
+      return r;
+    }).catch(function() {
+      _prodMergedRpc = false;
+      return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+    });
   }).then(function(r2) {
     if (r2 && r2.error) throw r2.error;
     _prodDirty = false;
+    _prodDirtySections = {};
     _prodFail = 0;
     _prodPushing = false;
     prodSyncStatus('● synchro OK', '#16a34a');
@@ -1283,6 +1361,7 @@ function prodApplyCloud(cloudProd, silent) {
   if (!local.__prodUpdatedAt) {
     var merged = prodMergeObjs(local, cloudProd);
     try { localStorage.setItem('mdb_production', JSON.stringify(merged)); } catch(e) { return false; }
+    markProdAllSectionsDirty();
     _prodDirty = true;
     try { scheduleProdPush(); } catch(e) {}
     prodSyncStatus('● synchro OK', '#16a34a');
@@ -10797,6 +10876,11 @@ function exportProdBackup() {
 }
 function importProdBackupFile(input) {
   try {
+    if (typeof isCurrentUserAdmin !== 'function' || !isCurrentUserAdmin()) {
+      toast('Restauration réservée aux administrateurs', 'error');
+      try { input.value = ''; } catch(e) {}
+      return;
+    }
     var f = input.files && input.files[0];
     if (!f) return;
     var r = new FileReader();

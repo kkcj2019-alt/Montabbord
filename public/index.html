@@ -1281,6 +1281,35 @@ var _autoBackupTimer = null;
 var _sessionUnsubscribe = null;
 var _sessionToken = '';
 
+/* BroadcastChannel for instant cross-tab sync of shared keys */
+var _syncChannel = null;
+try { _syncChannel = new BroadcastChannel('mdb_shared_sync'); } catch(e) {}
+if (_syncChannel) {
+  _syncChannel.onmessage = function(ev) {
+    var msg = ev.data;
+    if (!msg || msg.type !== 'shared_key_updated') return;
+    var key = msg.key;
+    if (SHARED_SYNC_KEYS.indexOf(key) === -1) return;
+    try {
+      var newData = JSON.parse(msg.value);
+      var oldData = DB.get(key);
+      if (JSON.stringify(oldData) !== JSON.stringify(newData)) {
+        DB.set(key, newData);
+        if (typeof markDirty === 'function') markDirty(key);
+        if (currentPage === 'employes' && key === 'mdb_employes') renderEmployesPage();
+        if (currentPage === 'tresorerie' && key === 'mdb_operationsCaisse') renderTresorerie();
+        if (currentPage === 'production' && (key === 'mdb_production' || key === 'mdb_employes')) {
+          if (typeof renderProduction === 'function') renderProduction();
+        }
+      }
+    } catch(err) {}
+  };
+}
+function _broadcastSharedKey(key, value) {
+  if (!_syncChannel) return;
+  try { _syncChannel.postMessage({ type: 'shared_key_updated', key: key, value: JSON.stringify(value) }); } catch(e) {}
+}
+
 function stopUniqueSession() {
   if (_sessionUnsubscribe) { try { _sessionUnsubscribe(); } catch(e) {} _sessionUnsubscribe = null; }
   _sessionToken = '';
@@ -1298,6 +1327,15 @@ function _mdbDevType() {
 function _mdbDevicesRef(uid) {
   return firebaseDb.collection('enterprises').doc(uid).collection('sessions').doc('_devices');
 }
+/* Emplacement par UTILISATEUR : un ordinateur ET un telephone par compte.
+   L'identifiant du compte est currentUser.subUserId (currentUser.id vaut
+   l'identifiant d'ENTREPRISE : l'utiliser ici fusionnait tous les comptes). */
+function _mdbDevUserId(u) {
+  return (u && (u.subUserId || u.id)) || '';
+}
+function _mdbDevSlotKey(ty, userId) {
+  return ty + '_' + (userId ? String(userId) : 'anon');
+}
 function _mdbKickedLocal() {
   stopUniqueSession();
   stopRealtimeSync();
@@ -1312,38 +1350,48 @@ function _mdbKickedLocal() {
     err.style.display = 'block';
   }
 }
-function _mdbDevClaim(uid) {
+function _mdbDevClaim(uid, userId) {
   if (!firebaseDb || !uid) return;
   var ty = _mdbDevType();
   var sid = localStorage.getItem('mdb_devSid');
   if (!sid) { sid = DB.genId(); try { localStorage.setItem('mdb_devSid', sid); } catch (eS) {} }
   var r = _mdbDevicesRef(uid);
+  var uId = userId || _mdbDevUserId(currentUser);
+  var slotKey = _mdbDevSlotKey(ty, uId);
   var patch = {};
-  patch[ty] = { sid: sid, userId: (currentUser && currentUser.id) || '', at: new Date().toISOString() };
+  patch[slotKey] = { sid: sid, userId: uId, at: new Date().toISOString() };
   r.set(patch, { merge: true }).catch(function() {});
   if (_devUnsub) { try { _devUnsub(); } catch (eU) {} _devUnsub = null; }
   var settledD = false;
-  setTimeout(function() { settledD = true; }, 8000);
-  _devUnsub = r.onSnapshot(function(doc) {
-    if (!settledD) return;
+  function checkSlot(doc) {
     if (!doc || !doc.exists) return;
-    var d = doc.data() || {};
-    var slot = d[ty];
+    var slot = (doc.data() || {})[slotKey];
     if (!slot || !slot.sid) return;
     if (slot.sid !== sid) { _mdbKickedLocal(); }
+  }
+  /* Verification explicite a la fin de la fenetre : sans elle, deux connexions
+     quasi simultanees pouvaient toutes deux echapper au deplacement. */
+  setTimeout(function() {
+    settledD = true;
+    try { r.get().then(checkSlot).catch(function() {}); } catch (eVG) {}
+  }, 8000);
+  _devUnsub = r.onSnapshot(function(doc) {
+    if (!settledD) return;
+    checkSlot(doc);
   });
 }
-function _mdbDevValidate(uid) {
+function _mdbDevValidate(uid, userId) {
   if (!firebaseDb || !uid) return;
   var ty = _mdbDevType();
   var sid = localStorage.getItem('mdb_devSid');
-  if (!sid) { _mdbDevClaim(uid); return; }
+  if (!sid) { _mdbDevClaim(uid, userId); return; }
   var r = _mdbDevicesRef(uid);
+  var slotKey = _mdbDevSlotKey(ty, userId || _mdbDevUserId(currentUser));
   r.get().then(function(doc) {
     var d = (doc && doc.exists) ? doc.data() : {};
-    var slot = d[ty];
-    if (!slot || !slot.sid) { _mdbDevClaim(uid); return; }
-    if (slot.sid === sid) { _mdbDevClaim(uid); return; }
+    var slot = d[slotKey];
+    if (!slot || !slot.sid) { _mdbDevClaim(uid, userId); return; }
+    if (slot.sid === sid) { _mdbDevClaim(uid, userId); return; }
     _mdbKickedLocal();
   }).catch(function() {});
 }
@@ -1351,8 +1399,8 @@ function startUniqueSession(enterpriseUid, userId, forceNew) {
   stopUniqueSession();
   if (!firebaseDb || !enterpriseUid || !userId) return;
   if (enterpriseUid !== 'SUPER-ADMIN') {
-    if (forceNew) { try { _mdbDevClaim(enterpriseUid); } catch (eD1) {} }
-    else { try { _mdbDevValidate(enterpriseUid); } catch (eD2) {} }
+    if (forceNew) { try { _mdbDevClaim(enterpriseUid, userId); } catch (eD1) {} }
+    else { try { _mdbDevValidate(enterpriseUid, userId); } catch (eD2) {} }
   }
   var storeKey = 'mdb_session_' + userId;
   var stored = null; try { stored = sessionStorage.getItem(storeKey); } catch (eS0) {}
@@ -2091,6 +2139,13 @@ var DB = {
     if (!_receivingSnapshot && currentUser && currentUser.id) {
       markDirty(key);
     }
+    if (!_receivingSnapshot && !_loadingCloud) _broadcastSharedKey(key, data);
+  },
+  getMain: function(key) {
+    return DB.get(key);
+  },
+  setMain: function(key, data) {
+    DB.set(key, data);
   },
   genId: function() {
     return 'id_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
@@ -2100,6 +2155,27 @@ var DB = {
   }
 };
 pruneTombstones();
+
+/* Cross-tab sync: reload shared keys when changed in another tab (e.g., paye.html) */
+var SHARED_SYNC_KEYS = ['mdb_employes', 'mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_acomptesPrets', 'mdb_caisses', 'mdb_entreprise'];
+window.addEventListener('storage', function(e) {
+  if (!e.key) return;
+  if (SHARED_SYNC_KEYS.indexOf(e.key) === -1) return;
+  if (e.newValue === e.oldValue) return;
+  try {
+    var newData = JSON.parse(e.newValue);
+    var oldData = DB.get(e.key);
+    if (JSON.stringify(oldData) !== JSON.stringify(newData)) {
+      DB.set(e.key, newData);
+      if (typeof markDirty === 'function') markDirty(e.key);
+      if (currentPage === 'employes' && e.key === 'mdb_employes') renderEmployesPage();
+      if (currentPage === 'tresorerie' && e.key === 'mdb_operationsCaisse') renderTresorerie();
+      if (currentPage === 'production' && (e.key === 'mdb_production' || e.key === 'mdb_employes')) {
+        if (typeof renderProduction === 'function') renderProduction();
+      }
+    }
+  } catch(err) {}
+});
 
 var pageNames = {
   dashboard: 'Tableau de Bord', qualite: 'Service Qualité & Réclamations', reunions: 'Réunions & Tâches', tiers: 'Tiers', facturation: 'Facturation', dashCommercial: 'Tableau de bord commercial',
@@ -4206,6 +4282,12 @@ function doFirebaseLoginInner() {
               if (_lvArr.length > 0) { delete _npP[_sk3]; continue; }
             }
             for (var _pk5 in _npP) _lpP[_pk5] = _npP[_pk5];
+            /* Pointage : ne pas ressusciter une journée effacée sur un autre poste */
+            if (Array.isArray(_lpP.pointage) && Array.isArray(_lpP.pointage_tombstones) && _lpP.pointage_tombstones.length) {
+              var _ptSet = {};
+              for (var _pti = 0; _pti < _lpP.pointage_tombstones.length; _pti++) _ptSet[String(_lpP.pointage_tombstones[_pti])] = true;
+              _lpP.pointage = _lpP.pointage.filter(function (p) { return !(p && p.id && _ptSet[String(p.id)]); });
+            }
             if (_lpP.grilleWood !== true) { try { _lpP.categories = woodSectorGridDataI(); _lpP.grilleWood = true; } catch (_eg2) {} }
             else if (!_lpP.categories || !_lpP.categories.length) { try { _lpP.categories = woodSectorGridDataI(); } catch (_eg3) {} }
             var _prevP = JSON.stringify(DB.get(key));
@@ -4544,6 +4626,12 @@ function doFirebaseRegister() {
               if (_lvArr.length > 0) { delete _npP[_sk3]; continue; }
             }
             for (var _pk5 in _npP) _lpP[_pk5] = _npP[_pk5];
+            /* Pointage : ne pas ressusciter une journée effacée sur un autre poste */
+            if (Array.isArray(_lpP.pointage) && Array.isArray(_lpP.pointage_tombstones) && _lpP.pointage_tombstones.length) {
+              var _ptSet = {};
+              for (var _pti = 0; _pti < _lpP.pointage_tombstones.length; _pti++) _ptSet[String(_lpP.pointage_tombstones[_pti])] = true;
+              _lpP.pointage = _lpP.pointage.filter(function (p) { return !(p && p.id && _ptSet[String(p.id)]); });
+            }
             if (_lpP.grilleWood !== true) { try { _lpP.categories = woodSectorGridDataI(); _lpP.grilleWood = true; } catch (_eg2) {} }
             else if (!_lpP.categories || !_lpP.categories.length) { try { _lpP.categories = woodSectorGridDataI(); } catch (_eg3) {} }
             var _prevP = JSON.stringify(DB.get(key));
@@ -4649,7 +4737,7 @@ function doLogout() {
         var tyL = _mdbDevType();
         var sidL = localStorage.getItem('mdb_devSid');
         var pL = {};
-        pL[tyL] = { sid: '', userId: '', at: new Date().toISOString() };
+        pL[_mdbDevSlotKey(tyL, _mdbDevUserId(currentUser))] = { sid: '', userId: '', at: new Date().toISOString() };
         if (sidL) { _mdbDevicesRef(lUid).set(pL, { merge: true }).catch(function() {}); }
       }
     }
@@ -4918,6 +5006,12 @@ entRef.get().then(function(doc) {
               if (_lvArr.length > 0) { delete _npP[_sk3]; continue; }
             }
             for (var _pk5 in _npP) _lpP[_pk5] = _npP[_pk5];
+            /* Pointage : ne pas ressusciter une journée effacée sur un autre poste */
+            if (Array.isArray(_lpP.pointage) && Array.isArray(_lpP.pointage_tombstones) && _lpP.pointage_tombstones.length) {
+              var _ptSet = {};
+              for (var _pti = 0; _pti < _lpP.pointage_tombstones.length; _pti++) _ptSet[String(_lpP.pointage_tombstones[_pti])] = true;
+              _lpP.pointage = _lpP.pointage.filter(function (p) { return !(p && p.id && _ptSet[String(p.id)]); });
+            }
             if (_lpP.grilleWood !== true) { try { _lpP.categories = woodSectorGridDataI(); _lpP.grilleWood = true; } catch (_eg2) {} }
             else if (!_lpP.categories || !_lpP.categories.length) { try { _lpP.categories = woodSectorGridDataI(); } catch (_eg3) {} }
             var _prevP = JSON.stringify(DB.get(key));
@@ -4928,6 +5022,15 @@ entRef.get().then(function(doc) {
           /* Prévention perte de données : ne pas remplacer des données locales non vides par du cloud vide */
           var localData = DB.get(key);
           if ((val === undefined || val === null || (Array.isArray(val) && val.length === 0)) && localData && (!Array.isArray(localData) || localData.length > 0)) { continue; }
+          /* mdb_production est un objet versionné par production.html (__prodUpdatedAt) :
+             ne jamais remplacer un local plus récent par un cloud plus ancien. */
+          if (key === 'mdb_production' && val && typeof val === 'object' && !Array.isArray(val)) {
+            var _lpProd = DB.get('mdb_production') || {};
+            var _ctP = val.__prodUpdatedAt || 0;
+            var _ltP = _lpProd.__prodUpdatedAt || 0;
+            if (_ltP && _ctP && _ctP <= _ltP) { continue; }
+            if (_ltP && !_ctP) { continue; }
+          }
           /* Merge array data: cloud wins for an existing ID, local-only rows survive. */
           if (Array.isArray(val) && Array.isArray(localData) && localData.length > 0 && val.length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
              var merged = mergeArraysPreferCloud(localData, val);
@@ -4984,10 +5087,9 @@ function startRealtimeSync(uid) {
   if (_snapshotUnsubscribe) { try { _snapshotUnsubscribe(); } catch(e) {} _snapshotUnsubscribe = null; }
   if (!firebaseDb || !uid) return;
   var dataRef = firebaseDb.collection('enterprises').doc(uid);
-  _snapshotUnsubscribe = dataRef.onSnapshot(function(doc) {
+  function applySnapshot(doc) {
+    if (!doc) return;
     if (window._syncApplying) return;
-    if (window._lastRealtimeSync && Date.now() - window._lastRealtimeSync < 30000) return;
-    window._lastRealtimeSync = Date.now();
     if (!doc.exists) return;
     window._syncApplying = true;
     var data = doc.data();
@@ -5006,10 +5108,17 @@ function startRealtimeSync(uid) {
         if (_rrMerged && JSON.stringify(_rrMerged) !== JSON.stringify(_rrLocal)) { DB.set(key, _rrMerged); changed = true; }
         continue;
       }
-       var local = DB.get(key);
-       /* Prévention perte de données : ne pas remplacer des données locales non vides par du cloud vide */
-       if ((Array.isArray(data[key]) && data[key].length === 0) && local && (!Array.isArray(local) || local.length > 0)) continue;
-       if (key === 'mdb_bc_colors') {
+var local = DB.get(key);
+        /* Prévention perte de données : ne pas remplacer des données locales non vides par du cloud vide */
+        if ((Array.isArray(data[key]) && data[key].length === 0) && local && (!Array.isArray(local) || local.length > 0)) continue;
+        /* mdb_production : respecter le marqueur de version __prodUpdatedAt */
+        if (key === 'mdb_production' && data[key] && typeof data[key] === 'object' && !Array.isArray(data[key])) {
+          var _rtProd = local || {};
+          var _rtCt = data[key].__prodUpdatedAt || 0;
+          var _rtLt = _rtProd.__prodUpdatedAt || 0;
+          if (_rtLt && (!_rtCt || _rtCt <= _rtLt)) { continue; }
+        }
+        if (key === 'mdb_bc_colors') {
          var _lcR = DB.get(key) || {};
          var _ccR = (data[key] && typeof data[key] === 'object' && !Array.isArray(data[key])) ? data[key] : {};
          var _mcR = {};
@@ -5079,6 +5188,29 @@ function startRealtimeSync(uid) {
         }
       }, 400);
     }
+  }
+  /* Limiteur de debit : au lieu de REJETER les snapshots recus pendant la fenetre
+     (ce qui faisait perdre definitivement une saisie distante), on les met en attente
+     et on les applique des que la fenetre est passee. */
+  var _rtPendingDoc = null, _rtTimer = null;
+  var _rtWindow = 5000;
+  function scheduleApply(doc) {
+    _rtPendingDoc = doc;
+    if (_rtTimer) return;
+    var since = window._lastRealtimeSync ? (Date.now() - window._lastRealtimeSync) : _rtWindow;
+    var wait = Math.max(0, _rtWindow - since);
+    _rtTimer = setTimeout(function() {
+      _rtTimer = null;
+      window._lastRealtimeSync = Date.now();
+      var d = _rtPendingDoc;
+      _rtPendingDoc = null;
+      if (!d) return;
+      try { applySnapshot(d); } catch (eAS) { console.warn('applySnapshot', eAS); }
+    }, wait + 20);
+  }
+  _snapshotUnsubscribe = dataRef.onSnapshot(function(doc) {
+    if (window._syncApplying) { scheduleApply(doc); return; }
+    scheduleApply(doc);
   }, function(e) {
     console.warn('Snapshot error:', e);
     var ind = document.getElementById('syncIndicator');
@@ -7324,6 +7456,89 @@ function getAccessibleCaisses() {
   return out;
 }
 function getOperationsCaisse() { return DB.get('mdb_operationsCaisse') || []; }
+/* ===== TRANSFERTS DE CAISSE : STATUTS ET VALIDATION =====
+   Un transfert est memorise en paire (sortie source / entree destination) via transferId.
+   Cycle : en_attente -> approuve | refuse.
+   Seules les paires approuvees comptent dans les soldes, totaux, exports et impressions. */
+function isTransfertOp(o) { return !!(o && o.typeOp === 'transfert'); }
+function csTransfertStatus(o) { return (o && o.status) ? String(o.status) : ''; }
+function isTransfertApprouve(o) { return !isTransfertOp(o) || csTransfertStatus(o) === 'approuve'; }
+function csTransfertStatutLabel(o) {
+  var st = csTransfertStatus(o);
+  if (st === 'approuve') return { txt: 'Approuve', cls: 'badge-success' };
+  if (st === 'refuse') return { txt: 'Refuse', cls: 'badge-danger' };
+  return { txt: 'En attente', cls: 'badge-warning' };
+}
+/* Les transferts saisis avant l'existence des statuts restent valides. */
+function migrateTransfertStatuts() {
+  var ops = getOperationsCaisse() || [];
+  var changed = false;
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i];
+    if (!isTransfertOp(o)) continue;
+    if (!o.status) { o.status = 'approuve'; o.statutLegacy = true; changed = true; }
+  }
+  if (changed) {
+    try { DB.set('mdb_operationsCaisse', ops); } catch (e) {}
+  }
+  return changed;
+}
+/* Seuls l'agent de la caisse destination et un administrateur peuvent valider. */
+function canValidateTransfert(o) {
+  if (!isTransfertOp(o)) return false;
+  if (!currentUser) return false;
+  if (currentUser.isAdmin || currentUser.isSuperAdmin) return true;
+  if (!o.caisseDestId) return false;
+  if (currentUser.caisseId && currentUser.caisseId === o.caisseDestId) return true;
+  return !!(currentUser.caissesAutorisees && currentUser.caissesAutorisees.indexOf(o.caisseDestId) !== -1);
+}
+/* Applique le meme statut aux deux moities du transfert. */
+function setTransfertStatut(transferId, statut, motif) {
+  var ops = getOperationsCaisse() || [];
+  var now = new Date().toISOString();
+  var n = 0;
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i];
+    if (!isTransfertOp(o)) continue;
+    if (o.transferId !== transferId) continue;
+    o.status = statut;
+    o.statutModifieLe = now;
+    o.statutModifiePar = (currentUser && (currentUser.nom || currentUser.username)) || '';
+    if (motif) o.statutMotif = motif;
+    n++;
+  }
+  if (n === 0) { toast('Transfert introuvable', 'error'); return false; }
+  try { DB.set('mdb_operationsCaisse', ops); } catch (e) {}
+  return true;
+}
+function getTransfertIdByOpId(opId) {
+  var ops = getOperationsCaisse() || [];
+  for (var i = 0; i < ops.length; i++) { if (ops[i].id === opId && isTransfertOp(ops[i])) return ops[i].transferId || ''; }
+  return '';
+}
+function validerTransfert(opId) {
+  var ops = getOperationsCaisse() || [];
+  var op = null;
+  for (var i = 0; i < ops.length; i++) { if (ops[i].id === opId) { op = ops[i]; break; } }
+  if (!op) { toast('Transfert introuvable', 'error'); return; }
+  if (!canValidateTransfert(op)) { toast('Seul l\'agent de la caisse destination ou un administrateur peut valider ce transfert.', 'error'); return; }
+  if (csTransfertStatus(op) === 'approuve') return;
+  if (!setTransfertStatut(op.transferId, 'approuve')) return;
+  toast('Transfert approuve : la caisse destination est creditee');
+  renderTresorerie();
+}
+function refuserTransfert(opId) {
+  var ops = getOperationsCaisse() || [];
+  var op = null;
+  for (var i = 0; i < ops.length; i++) { if (ops[i].id === opId) { op = ops[i]; break; } }
+  if (!op) { toast('Transfert introuvable', 'error'); return; }
+  if (!canValidateTransfert(op)) { toast('Seul l\'agent de la caisse destination ou un administrateur peut refuser ce transfert.', 'error'); return; }
+  if (csTransfertStatus(op) === 'refuse') return;
+  var motif = window.prompt('Motif du refus (facultatif) :', '') || '';
+  if (!setTransfertStatut(op.transferId, 'refuse', motif)) return;
+  toast('Transfert refuse', 'error');
+  renderTresorerie();
+}
 function getModelesCaisse() { return DB.get('mdb_modelesCaisse') || []; }
 function getCaisses() { return DB.get('mdb_caisses') || []; }
 
@@ -8725,6 +8940,379 @@ function saveBulkBLs() {
   toast(created.length + ' BL créé(s) : ' + created.map(function(x) { return x.numero + ' ← BC ' + x.bcNumero; }).join(', '), 'success');
   renderBL();
   buildSidebar();
+}
+
+var _blExcelImport = { fileName: '', groups: [], columns: [], sheets: [] };
+
+function blExcelNormalize(value) {
+  return String(value == null ? '' : value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+}
+function blExcelNumber(value) {
+  if (typeof value === 'number') return isFinite(value) ? value : 0;
+  var text = String(value == null ? '' : value).trim().replace(/\s/g, '').replace(/[^\d,.-]/g, '');
+  if (!text) return 0;
+  if (text.indexOf(',') !== -1 && text.indexOf('.') !== -1) {
+    if (text.lastIndexOf(',') > text.lastIndexOf('.')) text = text.replace(/\./g, '').replace(',', '.');
+    else text = text.replace(/,/g, '');
+  } else if (text.indexOf(',') !== -1) {
+    text = text.replace(',', '.');
+  }
+  var number = parseFloat(text);
+  return isNaN(number) || !isFinite(number) ? 0 : number;
+}
+function blExcelRef(value) {
+  var text = String(value == null ? '' : value).trim();
+  if (text.match(/^\d+\.0+$/)) text = text.replace(/\.0+$/, '');
+  return text;
+}
+function blExcelRefKey(value) {
+  return blExcelNormalize(blExcelRef(value)).replace(/^(nobc|nbc|numero|num|bdc|bc|ref)/, '');
+}
+function blExcelDate(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return value.getFullYear() + '-' + String(value.getMonth() + 1).padStart(2, '0') + '-' + String(value.getDate()).padStart(2, '0');
+  }
+  return normalizeDate(value) || getToday();
+}
+function blExcelDetectColumns(headers) {
+  var map = { date: -1, client: -1, bc: -1, bl: -1, chauffeur: -1, convoyeur: -1, code: -1, designation: -1, quantite: -1, prix: -1, montant: -1 };
+  for (var i = 0; i < (headers || []).length; i++) {
+    var header = blExcelNormalize(headers[i]);
+    if (!header) continue;
+    if (map.date === -1 && /date|jour|livraison|emission/.test(header) && !/paiement|echeance/.test(header)) map.date = i;
+    if (map.client === -1 && /client|tiers|raisonsociale|societe|destinataire|beneficiaire/.test(header)) map.client = i;
+    if (map.bc === -1 && /^(bc|bdc|nbc|nobc|bon.*commande|num.*commande|cmd|commandeno|ref.*commande)$/.test(header)) map.bc = i;
+    if (map.bl === -1 && /^(bl|bdl|nbl|nobl|bon.*livraison|num.*livraison|blno|ref.*livraison)$/.test(header)) map.bl = i;
+    if (map.chauffeur === -1 && /chauffeur|conducteur|livreur/.test(header)) map.chauffeur = i;
+    if (map.convoyeur === -1 && /convoyeur|accompagnateur/.test(header)) map.convoyeur = i;
+    if (map.code === -1 && /^(code|codearticle|articlecode|codeproduit|referencearticle|refarticle)$/.test(header)) map.code = i;
+    if (map.designation === -1 && /designation|libelle|produit|article|description|detail/.test(header)) map.designation = i;
+    if (map.quantite === -1 && /quantite|qty|qte|nbre|nombre|volume/.test(header)) map.quantite = i;
+    if (map.prix === -1 && /prix|prixtarif|tarif|unitaire|pu/.test(header)) map.prix = i;
+    if (map.montant === -1 && /montant|total|valeur|ttc|th/.test(header)) map.montant = i;
+  }
+  return map;
+}
+function blExcelHeaderScore(map) {
+  var score = 0;
+  if (map.bc >= 0) score += 4;
+  if (map.client >= 0) score += 2;
+  if (map.date >= 0) score += 1;
+  if (map.designation >= 0) score += 2;
+  if (map.code >= 0) score += 1;
+  if (map.quantite >= 0) score += 2;
+  if (map.prix >= 0) score += 1;
+  if (map.montant >= 0) score += 1;
+  return score;
+}
+function blExcelFindHeader(rows) {
+  var bestIndex = -1;
+  var bestScore = 0;
+  for (var i = 0; i < Math.min((rows || []).length, 12); i++) {
+    var map = blExcelDetectColumns(rows[i]);
+    if (map.bc < 0 || (map.designation < 0 && map.code < 0) || map.quantite < 0) continue;
+    var score = blExcelHeaderScore(map);
+    if (score > bestScore) { bestScore = score; bestIndex = i; }
+  }
+  return bestIndex;
+}
+function blExcelFindClient(value) {
+  var text = String(value == null ? '' : value).trim();
+  if (!text) return null;
+  var clients = getClients() || [];
+  var normalized = blExcelNormalize(text);
+  for (var i = 0; i < clients.length; i++) {
+    if (String(clients[i].id || '') === text || blExcelNormalize(clients[i].id) === normalized) return clients[i];
+    if (blExcelNormalize(clients[i].code || clients[i].codeClient || '') === normalized) return clients[i];
+  }
+  var id = findClientIdByName(text);
+  for (var j = 0; j < clients.length; j++) { if (clients[j].id === id) return clients[j]; }
+  return null;
+}
+function blExcelFindBC(value, clientId) {
+  var text = blExcelRef(value);
+  if (!text) return null;
+  var key = blExcelRefKey(text);
+  var bcs = getBCs() || [];
+  var found = null;
+  for (var i = 0; i < bcs.length; i++) {
+    if (bcs[i].statut === 'annule') continue;
+    if (blExcelRefKey(bcs[i].numero || '') !== key) continue;
+    if (clientId && String(bcs[i].clientId || '') !== String(clientId)) continue;
+    if (found) return null;
+    found = bcs[i];
+  }
+  if (found) return found;
+  if (!clientId) {
+    for (var j = 0; j < bcs.length; j++) {
+      if (bcs[j].statut === 'annule') continue;
+      if (blExcelRefKey(bcs[j].numero || '') === key) return bcs[j];
+    }
+  }
+  return null;
+}
+function blExcelInferBC(clientId) {
+  if (!clientId) return null;
+  var candidates = [];
+  var bcs = getBCs() || [];
+  for (var i = 0; i < bcs.length; i++) {
+    if (String(bcs[i].clientId || '') !== String(clientId)) continue;
+    if (bcs[i].statut === 'annule' || bcs[i].statut === 'livre') continue;
+    candidates.push(bcs[i]);
+  }
+  return candidates.length === 1 ? candidates[0] : null;
+}
+function blExcelMatchArticle(code, designation, date) {
+  var articles = getArticles() || [];
+  var normalizedCode = blExcelNormalize(code);
+  if (normalizedCode) {
+    for (var i = 0; i < articles.length; i++) {
+      if (blExcelNormalize(articles[i].code || '') === normalizedCode) return articles[i];
+    }
+  }
+  return matchArticle(designation, articles) || null;
+}
+function blExcelBCPrice(bc, article, designation) {
+  if (!bc || !bc.lignes) return 0;
+  var articleId = article ? String(article.id || '') : '';
+  var code = blExcelNormalize(article ? article.code || '' : '');
+  var label = blExcelNormalize(designation || (article ? article.designation || '' : ''));
+  for (var i = 0; i < bc.lignes.length; i++) {
+    var line = bc.lignes[i];
+    if (articleId && line.articleId && String(line.articleId) === articleId) return parseFloat(line.prixUnitaire) || 0;
+    if (code && blExcelNormalize(line.articleCode || getArticleCodeById(line.articleId) || '') === code) return parseFloat(line.prixUnitaire) || 0;
+    if (label && blExcelNormalize(line.designation || '') === label) return parseFloat(line.prixUnitaire) || 0;
+  }
+  return 0;
+}
+function blExcelGroupKey(group) {
+  var lines = [];
+  for (var i = 0; i < group.lignes.length; i++) {
+    var line = group.lignes[i];
+    lines.push([line.articleId || '', line.articleCode || '', blExcelNormalize(line.designation || ''), line.quantite || 0, line.prixUnitaire || 0].join('~'));
+  }
+  return [group.bcId || '', group.clientId || '', group.numero || '', group.date || '', group.chauffeur || ''].join('|') + '||' + lines.join('|');
+}
+function blExcelParseWorkbook(workbook, fileName) {
+  var groupsByKey = {};
+  var order = [];
+  var detectedColumns = [];
+  var parsedSheets = [];
+  for (var sheetIndex = 0; sheetIndex < workbook.SheetNames.length; sheetIndex++) {
+    var sheetName = workbook.SheetNames[sheetIndex];
+    var rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: '', raw: false });
+    if (!rows || rows.length < 2) continue;
+    var headerIndex = blExcelFindHeader(rows);
+    if (headerIndex < 0) continue;
+    var map = blExcelDetectColumns(rows[headerIndex]);
+    detectedColumns.push({ sheet: sheetName, map: map });
+    parsedSheets.push(sheetName);
+    for (var rowIndex = headerIndex + 1; rowIndex < rows.length; rowIndex++) {
+      var row = rows[rowIndex] || [];
+      var hasValue = false;
+      for (var emptyIndex = 0; emptyIndex < row.length; emptyIndex++) {
+        if (String(row[emptyIndex] == null ? '' : row[emptyIndex]).trim()) { hasValue = true; break; }
+      }
+      if (!hasValue) continue;
+      var bcRaw = map.bc >= 0 ? blExcelRef(row[map.bc]) : '';
+      var blRaw = map.bl >= 0 ? blExcelRef(row[map.bl]) : '';
+      var clientRaw = map.client >= 0 ? String(row[map.client] == null ? '' : row[map.client]).trim() : '';
+      var codeRaw = map.code >= 0 ? String(row[map.code] == null ? '' : row[map.code]).trim() : '';
+      var designationRaw = map.designation >= 0 ? String(row[map.designation] == null ? '' : row[map.designation]).trim() : '';
+      var quantity = map.quantite >= 0 ? blExcelNumber(row[map.quantite]) : 0;
+      var price = map.prix >= 0 ? blExcelNumber(row[map.prix]) : 0;
+      var amount = map.montant >= 0 ? blExcelNumber(row[map.montant]) : 0;
+      if (!codeRaw && !designationRaw && quantity === 0 && amount === 0) continue;
+      var client = blExcelFindClient(clientRaw);
+      var clientId = client ? client.id : '';
+      var bc = blExcelFindBC(bcRaw, clientId);
+      if (!bc && !bcRaw && clientId) bc = blExcelInferBC(clientId);
+      if (bc && !clientId) {
+        clientId = bc.clientId || '';
+        client = getClientById(clientId);
+      }
+      if (quantity <= 0 && amount > 0) quantity = 1;
+      if (quantity <= 0) continue;
+      var date = map.date >= 0 ? blExcelDate(row[map.date]) : getToday();
+      var article = blExcelMatchArticle(codeRaw, designationRaw, date);
+      if (article && !designationRaw) designationRaw = article.designation || article.nom || codeRaw;
+      if (!designationRaw && !codeRaw) continue;
+      if (!price && amount > 0 && quantity > 0) price = Math.round((amount / quantity) * 100) / 100;
+      if (!price && article) price = getPrixForDate(article, date);
+      if (!price) price = blExcelBCPrice(bc, article, designationRaw);
+      var chauffeur = map.chauffeur >= 0 ? String(row[map.chauffeur] == null ? '' : row[map.chauffeur]).trim() : '';
+      var convoyeur = map.convoyeur >= 0 ? String(row[map.convoyeur] == null ? '' : row[map.convoyeur]).trim() : '';
+      var groupIdentity = bc ? String(bc.id) : 'raw|' + blExcelRefKey(bcRaw) + '|' + (clientId || blExcelNormalize(clientRaw));
+      var deliveryIdentity = blRaw ? 'bl|' + blExcelNormalize(blRaw) : 'date|' + date + '|driver|' + blExcelNormalize(chauffeur);
+      var groupKey = groupIdentity + '||' + deliveryIdentity;
+      if (!groupsByKey[groupKey]) {
+        groupsByKey[groupKey] = {
+          key: groupKey, sheet: sheetName, sourceRow: rowIndex + 1, bcRaw: bcRaw, numero: blRaw,
+          clientRaw: clientRaw, clientId: clientId, clientNom: client ? client.nom : '',
+          bcId: bc ? bc.id : '', bcNumero: bc ? bc.numero || '' : '', date: date,
+          chauffeur: chauffeur, convoyeur: convoyeur, lignes: [], warnings: []
+        };
+        order.push(groupKey);
+      }
+      var group = groupsByKey[groupKey];
+      if (!group.clientId && clientId) {
+        group.clientId = clientId;
+        group.clientNom = client ? client.nom : (getClientById(clientId) || {}).nom || '';
+      }
+      if (group.clientId && clientId && group.clientId !== clientId) group.warnings.push('Client différent sur plusieurs lignes');
+      if (group.bcId && bc && group.bcId !== bc.id) group.warnings.push('BC différent sur plusieurs lignes');
+      if (group.date && group.date !== date) group.warnings.push('Dates différentes : ' + group.date + ' / ' + date);
+      if (group.chauffeur && chauffeur && blExcelNormalize(group.chauffeur) !== blExcelNormalize(chauffeur)) group.warnings.push('Chauffeurs différents : ' + group.chauffeur + ' / ' + chauffeur);
+      if (!group.chauffeur && chauffeur) group.chauffeur = chauffeur;
+      if (!group.convoyeur && convoyeur) group.convoyeur = convoyeur;
+      group.lignes.push({
+        articleId: article ? article.id || '' : '', articleCode: article ? article.code || codeRaw : codeRaw,
+        designation: designationRaw, quantite: quantity, prixUnitaire: price || 0
+      });
+    }
+  }
+  for (var groupIndex = 0; groupIndex < order.length; groupIndex++) {
+    var current = groupsByKey[order[groupIndex]];
+    var linkedBC = current.bcId ? getBCById(current.bcId) : null;
+    if (linkedBC && current.clientId && String(linkedBC.clientId) !== String(current.clientId)) current.warnings.push('Le client ne correspond pas au BC');
+    current.valid = !!linkedBC && !!current.clientId && (!linkedBC || !current.clientId || String(linkedBC.clientId) === String(current.clientId)) && current.lignes.length > 0;
+    current.reason = current.valid ? '' : (!linkedBC ? 'BC introuvable' : (!current.clientId ? 'Client introuvable' : 'Aucune ligne valide'));
+    current.importKey = blExcelGroupKey(current);
+  }
+  _blExcelImport = { fileName: fileName, groups: order.map(function(key) { return groupsByKey[key]; }), columns: detectedColumns, sheets: parsedSheets };
+  renderBLExcelImportPreview();
+}
+function blExcelExistingDuplicate(group, bls) {
+  var items = bls || getBLs();
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].importKey && items[i].importKey === group.importKey) return true;
+    if (group.numero && items[i].numero === group.numero && String(items[i].bcId || '') === String(group.bcId || '')) return true;
+  }
+  return false;
+}
+function renderBLExcelImportPreview() {
+  var body = document.getElementById('formModalBody');
+  if (!body) return;
+  var data = _blExcelImport;
+  var groups = data.groups || [];
+  var valid = 0;
+  var duplicates = 0;
+  var bls = getBLs();
+  for (var i = 0; i < groups.length; i++) {
+    groups[i].duplicate = blExcelExistingDuplicate(groups[i], bls);
+    if (groups[i].valid && !groups[i].duplicate) valid++;
+    else if (groups[i].duplicate) duplicates++;
+  }
+  var html = '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px">';
+  html += '<div><strong>Importer des BL depuis Excel</strong><div style="font-size:12px;color:var(--gray-500);margin-top:3px">Les BC et clients sont recherchés automatiquement; les lignes sont regroupées par BL, ou par date et chauffeur si aucun numéro n’existe.</div></div>';
+  html += '<input type="file" accept=".xlsx,.xls" onchange="blExcelReadFile(this)" style="max-width:320px">';
+  html += '</div>';
+  if (data.fileName) {
+    html += '<div style="padding:9px 11px;background:#f8fafc;border:1px solid var(--gray-200);border-radius:8px;margin-bottom:10px;font-size:12px"><strong>' + escH(data.fileName) + '</strong> — ' + groups.length + ' groupe(s), ' + valid + ' prêt(s) à créer' + (duplicates ? ', ' + duplicates + ' doublon(s)' : '') + '<br><span style="color:var(--gray-500)">Feuilles utilisées : ' + escH((data.sheets || []).join(', ')) + '</span></div>';
+  }
+  if ((data.columns || []).length) {
+    var labels = { date: 'Date', client: 'Client', bc: 'BC', bl: 'BL', chauffeur: 'Chauffeur', convoyeur: 'Convoyeur', code: 'Code', designation: 'Article', quantite: 'Quantité', prix: 'Prix', montant: 'Montant' };
+    html += '<div style="font-size:12px;margin-bottom:10px">';
+    for (var c = 0; c < data.columns.length; c++) {
+      var found = [];
+      for (var key in data.columns[c].map) {
+        if (data.columns[c].map.hasOwnProperty(key) && data.columns[c].map[key] >= 0) found.push(labels[key] + ' col. ' + (data.columns[c].map[key] + 1));
+      }
+      html += '<div style="margin-bottom:3px"><strong>' + escH(data.columns[c].sheet) + ':</strong> ' + escH(found.join(' • ')) + '</div>';
+    }
+    html += '</div>';
+  }
+  if (groups.length) {
+    html += '<div style="max-height:390px;overflow:auto;border:1px solid var(--gray-200);border-radius:8px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead style="position:sticky;top:0;background:#f8fafc;z-index:1"><tr><th style="padding:7px;text-align:left">BC</th><th style="padding:7px;text-align:left">Client</th><th style="padding:7px;text-align:left">BL / Date</th><th style="padding:7px;text-align:right">Lignes</th><th style="padding:7px;text-align:left">Contrôle</th></tr></thead><tbody>';
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g];
+      var status = '';
+      if (group.duplicate) status = '<span class="badge badge-warning">Déjà importé</span>';
+      else if (group.valid) status = '<span class="badge badge-success">Prêt</span>';
+      else status = '<span class="badge badge-danger">' + escH(group.reason || 'À corriger') + '</span>';
+      if (group.warnings && group.warnings.length) status += '<div style="color:#b45309;font-size:10px;margin-top:2px">' + escH(group.warnings.join(' • ')) + '</div>';
+      if (!group.chauffeur) status += '<div style="color:#64748b;font-size:10px">Chauffeur : Non précisé</div>';
+      html += '<tr><td style="padding:6px;border-bottom:1px solid var(--gray-100)">' + escH(group.bcNumero || group.bcRaw || '-') + '</td><td style="padding:6px;border-bottom:1px solid var(--gray-100)">' + escH(group.clientNom || group.clientRaw || '-') + '</td><td style="padding:6px;border-bottom:1px solid var(--gray-100)">' + escH(group.numero || 'Auto') + '<div style="color:var(--gray-500)">' + escH(group.date || '') + '</div></td><td style="padding:6px;text-align:right;border-bottom:1px solid var(--gray-100)">' + group.lignes.length + '</td><td style="padding:6px;border-bottom:1px solid var(--gray-100)">' + status + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+  } else if (data.fileName) {
+    html += '<div style="padding:14px;border:1px dashed var(--gray-300);border-radius:8px;text-align:center;color:var(--gray-500)">Aucune feuille compatible détectée. Le fichier doit contenir les colonnes BC, article/désignation et quantité.</div>';
+  }
+  body.innerHTML = html;
+  var footer = document.getElementById('formModalFooter');
+  if (footer) footer.innerHTML = '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button> <button type="button" class="btn btn-primary" onclick="blExcelRun()"' + (valid ? '' : ' disabled') + '>Créer ' + valid + ' BL</button>';
+}
+function openBLExcelImport() {
+  _blExcelImport = { fileName: '', groups: [], columns: [], sheets: [] };
+  var body = '<div id="blExcelDrop" style="border:2px dashed var(--gray-300);border-radius:12px;padding:34px;text-align:center;background:#f8fafc"><div style="font-size:18px;font-weight:700;margin-bottom:5px">Déposer le fichier Excel de suivi</div><div style="font-size:12px;color:var(--gray-500);margin-bottom:14px">Formats acceptés: .xlsx et .xls. Toutes les feuilles compatibles sont analysées.</div><input type="file" accept=".xlsx,.xls" onchange="blExcelReadFile(this)"></div>';
+  openFormModal('Importer des BL depuis Excel', body, '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>', 'xwide');
+  var drop = document.getElementById('blExcelDrop');
+  if (drop) {
+    drop.addEventListener('dragover', function(event) { event.preventDefault(); drop.style.borderColor = 'var(--primary)'; });
+    drop.addEventListener('dragleave', function() { drop.style.borderColor = 'var(--gray-300)'; });
+    drop.addEventListener('drop', function(event) {
+      event.preventDefault();
+      drop.style.borderColor = 'var(--gray-300)';
+      if (event.dataTransfer.files && event.dataTransfer.files.length) blExcelReadFile(event.dataTransfer.files[0]);
+    });
+  }
+}
+function blExcelReadFile(input) {
+  var file = input && input.files ? input.files[0] : input;
+  if (!file) return;
+  if (!file.name.match(/\.xlsx?$/i)) { toast('Format non supporté. Utilisez un fichier .xlsx ou .xls.', 'error'); return; }
+  if (typeof XLSX === 'undefined') { toast('La bibliothèque Excel n’est pas chargée.', 'error'); return; }
+  var reader = new FileReader();
+  reader.onload = function(event) {
+    try {
+      var workbook = XLSX.read(new Uint8Array(event.target.result), { type: 'array', cellDates: true });
+      blExcelParseWorkbook(workbook, file.name);
+      toast((_blExcelImport.groups || []).length + ' groupe(s) détecté(s)', 'info');
+    } catch (error) {
+      toast('Erreur de lecture Excel : ' + error.message, 'error');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+function blExcelRun() {
+  var groups = _blExcelImport.groups || [];
+  var bls = getBLs();
+  var created = [];
+  var skippedInvalid = 0;
+  var skippedDuplicate = 0;
+  var touchedBCs = {};
+  for (var i = 0; i < groups.length; i++) {
+    var group = groups[i];
+    if (!group.valid) { skippedInvalid++; continue; }
+    if (blExcelExistingDuplicate(group, bls)) { skippedDuplicate++; continue; }
+    var numero = group.numero || getNumero('BL', bls);
+    var data = {
+      id: DB.genId(), numero: numero, clientId: group.clientId, dateLivraison: group.date,
+      chauffeur: group.chauffeur || 'Non précisé', convoyeur: group.convoyeur || '', statut: 'livree',
+      lignes: group.lignes.map(function(line) {
+        return { articleId: line.articleId || '', articleCode: line.articleCode || '', designation: line.designation || '', quantite: parseFloat(line.quantite) || 0, prixUnitaire: parseFloat(line.prixUnitaire) || 0 };
+      }),
+      bcId: group.bcId, factureId: null, raisonNonFacture: '', numeroAuto: !group.numero,
+      importSource: 'excel-bl', importKey: group.importKey, importFile: _blExcelImport.fileName || '',
+      createdAt: new Date().toISOString()
+    };
+    bls.push(data);
+    _adjustStockForBLLines(data.lignes, -1);
+    touchedBCs[data.bcId] = true;
+    created.push(data);
+  }
+  if (!created.length) { toast('Aucun nouveau BL à créer', 'warning'); return; }
+  DB.set('mdb_bl', bls);
+  for (var bcId in touchedBCs) {
+    if (touchedBCs.hasOwnProperty(bcId)) updateBCStatusFromBLs(bcId);
+  }
+  closeModal();
+  renderBL();
+  buildSidebar();
+  var message = created.length + ' BL créé(s)';
+  if (skippedDuplicate) message += ', ' + skippedDuplicate + ' doublon(s) ignoré(s)';
+  if (skippedInvalid) message += ', ' + skippedInvalid + ' groupe(s) non lié(s) ignoré(s)';
+  toast(message, 'success');
 }
 
 function saveBC(id) {
@@ -11584,28 +12172,6 @@ function renderBL() {
     return (a.dateLivraison || '').localeCompare(b.dateLivraison || '');
   });
   
-  // Precompute totals per client and per article
-  var clientArtTotals = {};
-  for (var cti = 0; cti < bls.length; cti++) {
-    var ctbl = bls[cti];
-    var cid = ctbl.clientId || '_none_';
-    if (!clientArtTotals[cid]) clientArtTotals[cid] = {};
-    if (ctbl.lignes) {
-      for (var ctli = 0; ctli < ctbl.lignes.length; ctli++) {
-        var ctl = ctbl.lignes[ctli];
-        if (!ctl.articleId && !ctl.designation && !ctl.prixUnitaire) continue;
-        var artKey = ctl.articleId || (ctl.designation || '').toLowerCase().trim();
-        var artLabel = ctl.designation || getArticleLabel(ctl.articleId) || 'Article';
-        if (!clientArtTotals[cid][artKey]) {
-          clientArtTotals[cid][artKey] = { label: artLabel, qte: 0, montant: 0, count: 0 };
-        }
-        clientArtTotals[cid][artKey].qte += (ctl.quantite || 0);
-        clientArtTotals[cid][artKey].montant += (ctl.quantite || 0) * (ctl.prixUnitaire || 0);
-        clientArtTotals[cid][artKey].count++;
-      }
-    }
-  }
-
   var html = '<div class="tabs-scroll" style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:16px">';
   var subTabs = [{key:'non_facture',label:'Non factur\u00e9s (' + notInvoiced.length + ')'},{key:'facture',label:'Factur\u00e9s (' + invoiced.length + ')'}];
   for (var sti = 0; sti < subTabs.length; sti++) {
@@ -11614,33 +12180,6 @@ function renderBL() {
     html += '<button onclick="switchBLSubTab(\'' + st.key + '\')" style="padding:10px 18px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:' + (stActive ? '700' : '500') + ';color:' + (stActive ? 'var(--primary)' : 'var(--gray-500)') + ';border-bottom:3px solid ' + (stActive ? 'var(--primary)' : 'transparent') + ';margin-bottom:-2px;transition:all .2s;white-space:nowrap">' + st.label + '</button>';
   }
   html += '</div>';
-  
-  // Summary banner of quantities per client and per article
-  var clientKeys = Object.keys(clientArtTotals);
-  if (clientKeys.length > 0) {
-    html += '<div style="background:#ffffff;border:1px solid #cbd5e1;border-radius:8px;padding:10px 14px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">';
-    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
-    html += '<span style="font-size:12px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:5px">📦 <span>Cumul des quantités par client (' + (_blSubTab === 'facture' ? 'BLs facturés' : 'BLs non facturés') + ')</span></span>';
-    html += '<span style="font-size:11px;color:var(--gray-400)">' + bls.length + ' BL(s)</span>';
-    html += '</div>';
-    html += '<div style="display:flex;flex-wrap:wrap;gap:8px" id="blSummaryContainer">';
-    for (var cki = 0; cki < clientKeys.length; cki++) {
-      var cIdK = clientKeys[cki];
-      var clObj = getClientById(cIdK);
-      var clName = clObj ? clObj.nom : 'Client inconnu';
-      var artsForCl = clientArtTotals[cIdK];
-      var artBadges = [];
-      for (var ak in artsForCl) {
-        if (artsForCl.hasOwnProperty(ak)) {
-          artBadges.push('<span style="display:inline-flex;align-items:center;gap:4px;background:#eff6ff;color:#1e40af;padding:2px 7px;border-radius:4px;font-size:11px;border:1px solid #bfdbfe">' + escH(artsForCl[ak].label) + ': <strong>' + artsForCl[ak].qte + '</strong></span>');
-        }
-      }
-      html += '<div class="bl-client-summary-card" data-client="' + escH(cIdK) + '" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:11.5px">';
-      html += '<strong style="color:#0f172a">' + escH(clName) + ' :</strong> ' + artBadges.join(' ');
-      html += '</div>';
-    }
-    html += '</div></div>';
-  }
 
   html += '<div class="toolbar">';
   html += '<input type="text" id="blSearch" placeholder="Rechercher..." oninput="filterBL()" style="width:220px">';
@@ -11658,6 +12197,7 @@ function renderBL() {
   html += '<div id="blFactureBtnWrap" style="display:none;margin-left:auto"><span id="blFactureWarning" style="color:var(--danger);font-size:13px;font-weight:600;display:none">Clients diff\u00e9rents</span> <button class="btn btn-primary btn-sm" onclick="factureFromBLList()" id="btnFactureFromBL">Cr\u00e9er facture</button> <button class="btn btn-danger btn-sm" onclick="deleteSelectedBLs()" id="btnDeleteSelectedBL" style="background:var(--danger);color:#fff;border:none;padding:5px 12px;border-radius:6px;font-size:13px;cursor:pointer;font-weight:600">Supprimer</button></div>';
   if (!readonly) html += '<button class="btn btn-primary" onclick="openBLModal()">+ Nouveau BL</button>';
   if (!readonly) html += '<button class="btn btn-outline" onclick="openBulkBLModal()" style="color:var(--primary);border-color:var(--primary)">+ Plusieurs BL (par client)</button>';
+  if (!readonly && _blSubTab === 'non_facture') html += '<button class="btn btn-outline" onclick="openBLExcelImport()">Importer Excel BL</button>';
   html += '<button class="btn btn-outline" onclick="exportPDF()">Exporter PDF</button>';
   html += '</div>';
   html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr>';
@@ -25655,6 +26195,7 @@ function renderCaisseOps() {
   for (var bi = 0; bi < opsBefore.length; bi++) {
     if (opsBefore[bi].linkedOpId && opsBefore[bi].libelle && opsBefore[bi].libelle.indexOf('Frais') === 0) continue;
     if (caisseSoldeInitialDate && (opsBefore[bi].date || '') <= caisseSoldeInitialDate) continue;
+    if (!isTransfertApprouve(opsBefore[bi])) continue;
     if (opsBefore[bi].sens === 'entree') soldeBefore += opsBefore[bi].montant || 0;
     else { soldeBefore -= opsBefore[bi].montant || 0; soldeBefore -= opsBefore[bi].frais || 0; }
   }
@@ -25669,7 +26210,8 @@ function renderCaisseOps() {
     if (o.linkedOpId && o.libelle && o.libelle.indexOf('Frais') === 0) continue;
     if (search && !(o.libelle && o.libelle.toLowerCase().indexOf(search) !== -1) && !(o.code && o.code.toLowerCase().indexOf(search) !== -1) && !(o.remettant && o.remettant.toLowerCase().indexOf(search) !== -1)) continue;
     var isEntree = o.sens === 'entree';
-    running = isEntree ? running + (o.montant || 0) : running - (o.montant || 0) - (o.frais || 0);
+    var _trApprouve = isTransfertApprouve(o);
+    if (_trApprouve) running = isEntree ? running + (o.montant || 0) : running - (o.montant || 0) - (o.frais || 0);
     var typeLabel = o.type || 'libre';
     var typeColors = { libre:'var(--gray-500)', employe:'var(--blue)', acompte:'var(--pink)', pret:'var(--indigo)', fournisseur:'var(--orange)', client:'var(--green)', transfert:'var(--purple)' };
     var tc = typeColors[typeLabel] || 'var(--gray-500)';
@@ -25688,7 +26230,7 @@ function renderCaisseOps() {
     var sortieVal = !isEntree && !o.brouillon ? ((o.montant || 0) + (o.frais || 0)) : 0;
     var fraisVal = (o.frais || 0) > 0 && !isEntree ? (o.frais || 0) : 0;
     var chargeVal = (o.montantCharge || 0) > 0 ? (o.montantCharge || 0) : 0;
-    html += '<tr style="' + (o.brouillon ? 'opacity:.55;background:#fffbeb;' : '') + (i % 2 === 1 ? 'background:#fafcfa;' : '') + '" data-charge-type="' + (chargeVal > 0 && entreeVal === 0 && sortieVal === 0 ? 'charge_seule' : (chargeVal > 0 ? 'avec_paiement' : 'charge_simple')) + '" data-entree="' + entreeVal + '" data-sortie="' + sortieVal + '" data-frais="' + fraisVal + '" data-charge="' + chargeVal + '" data-solde="' + fmtMoney(running) + '" data-brouillon="' + (o.brouillon ? 'brouillon' : 'valide') + '" data-imprime="' + (o.imprime ? 'imprime' : 'non_imprime') + '" data-imported="' + (o.imported ? 'importe' : '') + '">';
+    html += '<tr style="' + (o.brouillon ? 'opacity:.55;background:#fffbeb;' : '') + (i % 2 === 1 ? 'background:#fafcfa;' : '') + '" data-charge-type="' + (chargeVal > 0 && entreeVal === 0 && sortieVal === 0 ? 'charge_seule' : (chargeVal > 0 ? 'avec_paiement' : 'charge_simple')) + '" data-entree="' + entreeVal + '" data-sortie="' + sortieVal + '" data-frais="' + fraisVal + '" data-charge="' + chargeVal + '" data-solde="' + fmtMoney(running) + '" data-brouillon="' + (o.brouillon ? 'brouillon' : 'valide') + '" data-status="' + (isTransfertOp(o) ? (o.status || 'en_attente') : 'approuve') + '" data-imprime="' + (o.imprime ? 'imprime' : 'non_imprime') + '" data-imported="' + (o.imported ? 'importe' : '') + '">';
     html += '<td style="' + tdB + ';font-size:12px;color:var(--gray-600);white-space:nowrap">' + (o.date ? o.date.slice(8,10) + '/' + o.date.slice(5,7) : '-') + '</td>';
     html += '<td style="' + tdB + ';white-space:nowrap">' + escH(o.heure || '-') + '</td>';
     html += '<td style="' + tdB + ';font-weight:600">' + escH(o.code || o.codeId || '-') + '</td>';
@@ -25722,6 +26264,7 @@ function calcSoldeCaisse(c, ops) {
   for (var j = 0; j < ops.length; j++) {
     var o = ops[j];
     if (o.brouillon) continue;
+    if (!isTransfertApprouve(o)) continue;
     if (o.caisseId !== c.id) continue;
     if (d0 && (o.date || '') <= d0) continue;
     if (o.sens === 'entree') s += o.montant || 0; else s -= o.montant || 0;
@@ -26076,6 +26619,11 @@ function renderCaisseIn(el) {
     }
     if(needFix){ DB.set('mdb_operationsCaisse', allOps); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){} toast('Opérations orphelines réaffectées', 'success'); }
   })();
+  /* Migration statuts : les transferts antérieurs restent approuvés pour ne pas fausser les soldes */
+  if (!window._csTransfertStatutDone) {
+    window._csTransfertStatutDone = true;
+    if (migrateTransfertStatuts()) { allOps = getOperationsCaisse(); }
+  }
   // Gestion vue caisse : centralisé peut choisir Ma caisse / Toutes / Générale
   if (window._csViewCaisseId === undefined) window._csViewCaisseId = '';
   var caisseTargetId = myCaisseId;
@@ -26169,6 +26717,11 @@ function renderCaisseIn(el) {
   html += '<div style="display:flex;gap:6px;align-items:center;margin-left:8px;flex-wrap:wrap">';
   html += '<select id="csFilterCharge" onchange="filterCaisseOps()" style="font-size:12px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);outline:none"><option value="">Toutes les pi\u00e8ces</option><option value="avec_paiement">Avec paiement</option><option value="charge_seule">Charge seule</option><option value="charge_simple">Charge simple</option></select>';
   html += '<select id="csFilterType" onchange="exitCaisseBrouillonMode();filterCaisseOps()" style="font-size:12px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);outline:none"><option value="valide"' + (brouMode ? '' : ' selected') + '>Valid\u00e9es (r\u00e9alit\u00e9)</option><option value="">Toutes</option><option value="brouillon"' + (brouMode ? ' selected' : '') + '>Brouillons</option><option value="importe">Import\u00e9es</option><option value="imprime">Imprim\u00e9es</option><option value="non_imprime">Non imprim\u00e9es</option></select>';
+  var _nbAttenteTransf = 0;
+  for (var _bt = 0; _bt < allOps.length; _bt++) { if (isTransfertOp(allOps[_bt]) && csTransfertStatus(allOps[_bt]) === 'en_attente') _nbAttenteTransf++; }
+  if (_nbAttenteTransf > 0) {
+    html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 10px;color:#b45309;border-color:#fde68a;background:#fffbeb" onclick="setCaisseFilterTransfert()" title="Afficher les transferts en attente de validation">\u21C4 Transferts en attente (' + _nbAttenteTransf + ')</button>';
+  }
   var _nbBrouillons = 0;
   for (var _bi = 0; _bi < allOps.length; _bi++) { if (allOps[_bi].brouillon) _nbBrouillons++; }
   html += '<button class="btn btn-outline" style="font-size:11px;padding:5px 10px;color:var(--warning);border-color:' + (brouMode ? 'var(--warning)' : 'var(--warning)') + ';' + (brouMode ? 'background:var(--warning);color:#fff' : '') + '" onclick="setCaisseFilterBrouillon()" title="Afficher tous les brouillons (toutes p\u00e9riodes)">&#x270E; Brouillons (' + _nbBrouillons + ')</button>';
@@ -26212,6 +26765,7 @@ function renderCaisseIn(el) {
   for (var i = 0; i < ops.length; i++) {
     if (ops[i].linkedOpId && ops[i].libelle && ops[i].libelle.indexOf('Frais') === 0) continue;
     if (ops[i].brouillon) continue;
+    if (!isTransfertApprouve(ops[i])) continue;
     if (ops[i].sens === 'entree') totalEntrees += ops[i].montant || 0;
     else { totalSorties += ops[i].montant || 0; totalFraisMois += ops[i].frais || 0; }
   }
@@ -26219,6 +26773,7 @@ function renderCaisseIn(el) {
   for (var bi = 0; bi < opsBefore.length; bi++) {
     if (opsBefore[bi].linkedOpId && opsBefore[bi].libelle && opsBefore[bi].libelle.indexOf('Frais') === 0) continue;
     if (caisseSoldeInitialDate && (opsBefore[bi].date || '') <= caisseSoldeInitialDate) continue;
+    if (!isTransfertApprouve(opsBefore[bi])) continue;
     if (opsBefore[bi].sens === 'entree') soldeBefore += opsBefore[bi].montant || 0;
     else { soldeBefore -= opsBefore[bi].montant || 0; soldeBefore -= opsBefore[bi].frais || 0; }
   }
@@ -26432,6 +26987,7 @@ function renderCaisseIn(el) {
     var so = ops[si];
     if (so.linkedOpId && so.libelle && so.libelle.indexOf('Frais') === 0) continue;
     if (so.brouillon) continue;
+    if (!isTransfertApprouve(so)) { soldeMap[so.id] = null; continue; }
     runningSolde += (so.sens === 'entree' ? (so.montant || 0) : -(so.montant || 0) - (so.frais || 0));
     soldeMap[so.id] = runningSolde;
   }
@@ -26448,6 +27004,8 @@ function renderCaisseIn(el) {
     var sortieVal = o.sens === 'sortie' ? (o.montant || 0) : 0;
     var transfertLabel = '';
     if (o.typeOp === 'transfert' && o.caisseDestNom) transfertLabel = o.sens === 'sortie' ? ' \u2192 ' + escH(o.caisseDestNom) : ' \u2190 ' + escH(o.caisseSourceNom || '');
+    var _trStatut = csTransfertStatutLabel(o);
+    var transfertBadge = isTransfertOp(o) ? '<br><span class="badge ' + _trStatut.cls + '" style="font-size:9px;margin-top:2px">' + _trStatut.txt + '</span>' : '';
     var searchStr = ((o.numeroPiece||'') + ' ' + (o.date||'') + ' ' + codeLabel + ' ' + (o.libelle||'') + ' ' + (o.beneficiaireNom||'') + ' ' + (o.executant||'') + ' ' + (o.remettant||'') + ' ' + (o.observations||'') + ' ' + (o.moyenPaiement||'') + ' ' + (o.numeroTransaction||'') + ' ' + (o.montant || 0) + ' ' + (o.montantCharge || 0)).toLowerCase();
     var chargeType = '';
     if (o.montantCharge && o.montantCharge > 0 && o.montant && o.montant > 0) chargeType = 'avec_paiement';
@@ -26455,12 +27013,12 @@ function renderCaisseIn(el) {
     else if (o.montant && o.montant > 0) chargeType = 'charge_simple';
     var rowStyle = o.typeOp === 'transfert' ? 'background:#fefce8' : '';
     if (o.brouillon) rowStyle += (rowStyle ? ';' : '') + 'opacity:0.6;font-style:italic';
-    html += '<tr data-imprime="' + (o.imprime ? 'imprime' : 'non_imprime') + '" data-brouillon="' + (o.brouillon ? 'brouillon' : 'valide') + '" data-imported="' + (o.imported ? 'importe' : 'non_importe') + '" data-search="' + escH(searchStr) + '" data-charge-type="' + chargeType + '" data-entree="' + (entreeVal || 0) + '" data-sortie="' + (sortieVal || 0) + '" data-charge="' + (o.montantCharge || 0) + '" data-frais="' + (o.frais || 0) + '" data-date="' + escH((o.date || '') + ' ' + (o.heure || '')) + '" data-piece="' + escH(o.numeroPiece || '') + '"' + (rowStyle ? ' style="' + rowStyle + '"' : '') + '>';
+    html += '<tr data-imprime="' + (o.imprime ? 'imprime' : 'non_imprime') + '" data-brouillon="' + (o.brouillon ? 'brouillon' : 'valide') + '" data-status="' + (isTransfertOp(o) ? (o.status || 'en_attente') : 'approuve') + '" data-imported="' + (o.imported ? 'importe' : 'non_importe') + '" data-search="' + escH(searchStr) + '" data-charge-type="' + chargeType + '" data-entree="' + (entreeVal || 0) + '" data-sortie="' + (sortieVal || 0) + '" data-charge="' + (o.montantCharge || 0) + '" data-frais="' + (o.frais || 0) + '" data-date="' + escH((o.date || '') + ' ' + (o.heure || '')) + '" data-piece="' + escH(o.numeroPiece || '') + '"' + (rowStyle ? ' style="' + rowStyle + '"' : '') + '>';
     html += '<td style="text-align:center"><input type="checkbox" class="cs-cb" data-id="' + o.id + '" onchange="updateBulkCaisseBar()" style="width:14px;height:14px"></td>';
     html += '<td>' + fmtDateShort(o.date) + '</td>';
     html += '<td style="color:var(--gray-500);white-space:nowrap;font-size:10px">' + escH(o.numeroPiece || '-') + '</td>';
     html += '<td class="fw-600" style="font-size:10px">' + escH(codeLabel) + '</td>';
-    html += '<td style="min-width:160px">' + escH(o.libelle || '-') + (o.typeOp === 'transfert' ? '<br><span style="color:var(--primary);font-size:10px;font-weight:600">' + transfertLabel + '</span>' : '') + '</td>';
+    html += '<td style="min-width:160px">' + escH(o.libelle || '-') + (o.typeOp === 'transfert' ? '<br><span style="color:var(--primary);font-size:10px;font-weight:600">' + transfertLabel + '</span>' + transfertBadge : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--success);white-space:nowrap">' + (entreeVal > 0 ? '+ ' + fmtMoneyNoDevise(entreeVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--danger);white-space:nowrap">' + (sortieVal > 0 ? '- ' + fmtMoneyNoDevise(sortieVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoneyNoDevise(o.montantCharge) : '') + '</td>';
@@ -26490,6 +27048,12 @@ function renderCaisseIn(el) {
     var sv = soldeMap[o.id];
     html += '<td class="text-right fw-600" style="color:' + ((sv || 0) >= 0 ? 'var(--success)' : 'var(--danger)') + ';white-space:nowrap">' + ((sv !== undefined && sv !== null) ? fmtMoneyNoDevise(sv) : '') + '</td>';
     html += '<td style="white-space:nowrap">';
+    if (isTransfertOp(o) && canValidateTransfert(o) && csTransfertStatus(o) !== 'approuve') {
+      html += '<button class="btn-icon" onclick="validerTransfert(\'' + o.id + '\')" title="Approuver le transfert reçu" style="color:var(--success)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></button> ';
+    }
+    if (isTransfertOp(o) && canValidateTransfert(o) && csTransfertStatus(o) !== 'refuse') {
+      html += '<button class="btn-icon" onclick="refuserTransfert(\'' + o.id + '\')" title="Refuser le transfert" style="color:var(--danger)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></button> ';
+    }
     if (o.brouillon) {
       html += '<button class="btn-icon" onclick="validerBrouillon(\'' + o.id + '\')" title="Valider" style="color:var(--success)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></button> ';
     } else {
@@ -27269,6 +27833,7 @@ function filterCaisseOps() {
   var q = (document.getElementById('csSearchTop').value || '').toLowerCase().trim();
   var chargeFilter = document.getElementById('csFilterCharge') ? document.getElementById('csFilterCharge').value : '';
   var typeFilter = document.getElementById('csFilterType') ? document.getElementById('csFilterType').value : '';
+  var onlyPendingTransf = !!window._csOnlyPendingTransf;
   var rows = document.getElementById('csOpsBody').getElementsByTagName('tr');
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
@@ -27277,6 +27842,7 @@ function filterCaisseOps() {
     var rowBrouillon = row.getAttribute('data-brouillon') || '';
     var rowImprime = row.getAttribute('data-imprime') || '';
     var rowImport = row.getAttribute('data-imported') || '';
+    var rowStatus = row.getAttribute('data-status') || '';
     var show = true;
     if (q && searchStr.indexOf(q) === -1) show = false;
     if (chargeFilter && rowChargeType !== chargeFilter) show = false;
@@ -27285,8 +27851,16 @@ function filterCaisseOps() {
     if (typeFilter === 'imprime' && rowImprime !== 'imprime') show = false;
     if (typeFilter === 'non_imprime' && rowImprime !== 'non_imprime') show = false;
     if (typeFilter === 'importe' && rowImport !== 'importe') show = false;
+    if (onlyPendingTransf && rowStatus !== 'en_attente') show = false;
     rows[i].style.display = show ? '' : 'none';
   }
+}
+function setCaisseFilterTransfert() {
+  window._csOnlyPendingTransf = !window._csOnlyPendingTransf;
+  if (!window._csOnlyPendingTransf && document.getElementById('csFilterType')) {
+    window._csBrouillonMode = false;
+  }
+  renderCaisseIn(document.getElementById('tresorerieContent'));
 }
 function setCaisseFilterBrouillon() {
   window._csBrouillonMode = !window._csBrouillonMode;
@@ -31096,7 +31670,7 @@ function saveCaisse(id, asDraft) {
     var txHeure = heure || ((new Date().getHours() < 10 ? '0' : '') + new Date().getHours() + ':' + (new Date().getMinutes() < 10 ? '0' : '') + new Date().getMinutes());
     var npSource = generatePieceNumber(caisseId, txDate);
     var txId = DB.genId();
-    ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais, transferId:txId});
+    ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais, status:'en_attente', transferId:txId});
     var npDest = generatePieceNumber(destCaisseId, txDate);
     ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0, transferId:txId});
     DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
@@ -32933,6 +33507,7 @@ function printFilteredCaisse() {
       var chargeType = rows[i].getAttribute('data-charge-type') || '';
       if (chargeType === 'charge_seule') continue;
       if (rows[i].getAttribute('data-brouillon') === 'brouillon') continue;
+      if (rows[i].getAttribute('data-status') !== 'approuve') continue;
       visibleOps.push({
         date: rows[i].cells[0] ? rows[i].cells[0].textContent : '',
         piece: rows[i].cells[1] ? rows[i].cells[1].textContent : '',
@@ -33015,6 +33590,7 @@ function exportCaisseExcel() {
     for (var i = 0; i < trs.length; i++) {
       if (trs[i].style.display === 'none') continue;
       if (trs[i].getAttribute('data-brouillon') === 'brouillon') continue;
+      if (trs[i].getAttribute('data-status') !== 'approuve') continue;
       if (trs[i].getAttribute('data-charge-type') === 'charge_seule') continue;
       var c = trs[i].cells;
       visibleOps.push({
@@ -33283,6 +33859,7 @@ function printBulkCaisse() {
     var ocId3 = op.caisseId || '';
     var caisseMatch = window._seeAllCaisses ? true : (myCaisseId ? (ocId3 === myCaisseId) : true);
     if (!caisseMatch) continue;
+    if (!isTransfertApprouve(op)) continue;
     if (op.date >= dateFrom && op.date <= dateTo) ops.push(op);
   }
   if (ops.length === 0) { toast('Aucune op\u00e9ration dans cette p\u00e9riode ('+allOps.length+' au total)', 'error'); return; }
@@ -33381,6 +33958,7 @@ function printPeriodeCaissePDF() {
       if (selCaisseId && selCaisseId !== 'all' && op.caisseId !== selCaisseId) continue;
       if (op.montantCharge && op.montantCharge > 0 && !op.montant) continue;
       if (op.brouillon) continue;
+      if (!isTransfertApprouve(op)) continue;
       ops.push(op);
     }
   }
@@ -35353,7 +35931,7 @@ var _tempAchatItems = [];
 function apProdGet() { try { return JSON.parse(localStorage.getItem('mdb_production')) || {}; } catch(e) { return {}; } }
 function apProdSet(p) { try { localStorage.setItem('mdb_production', JSON.stringify(p)); } catch(e) {} }
 function apProdArr(p, k) { if (!p[k] || !Array.isArray(p[k])) p[k] = []; return p[k]; }
-function apCatLabel(c) { return c === 'raw-materials' ? 'Matière Première' : c === 'finished' ? 'Produits Finis' : c === 'semi' ? 'Semi-Finis' : c === 'merchandises' ? 'Marchandises' : 'Consommables'; }
+function apCatLabel(c) { return c === 'raw-materials' ? 'Matière Première' : c === 'finished' ? 'Produits Finis' : c === 'semi' ? 'Semi-Finis' : c === 'merchandises' ? 'Marchandises' : c === 'epi' ? 'EPI' : 'Consommables'; }
 function apNorm(x) { return String(x || '').trim().toLowerCase(); }
 /* Catalogue par catégorie d'achat :
    - finished → articles catalogue produits (nomenclature produit_fini + articles production)
@@ -35369,20 +35947,20 @@ function apAchatCatalogue(cat) {
     out.push({ code: code, designation: desig || code, pu: pu || 0 });
   }
   try {
+    var p = apProdGet();
+    var pArts = (p && p.articles) || [];
+    var nom = (typeof getArticles === 'function') ? (getArticles() || []) : [];
     if (cat === 'finished') {
-      var nom = (typeof getArticles === 'function') ? (getArticles() || []) : [];
+      pArts.forEach(function(a) { if (String(a.categorie || '').trim().toLowerCase() === 'finished') push(a.code, a.designation, a.prix_vente); });
+      ((p && p.stockFinished) || []).forEach(function(s) { push(s.code, s.designation, s.prix_unitaire); });
       for (var i = 0; i < nom.length; i++) {
         var t = nom[i].typeArticle || '';
-        if (t === 'produit_fini') push(nom[i].code, nom[i].designation || nom[i].nom, nom[i].prixUnitaire || nom[i].prix_vente);
-      }
-      var p = apProdGet(); var arts = (p && p.articles) || [];
-      for (var j = 0; j < arts.length; j++) {
-        if (String(arts[j].categorie || '').trim().toLowerCase() === 'finished') push(arts[j].code, arts[j].designation, arts[j].prix_vente);
+        if (t === 'produit_fini' || t === 'produit fini') push(nom[i].code, nom[i].designation || nom[i].nom, nom[i].prixUnitaire || nom[i].prix_vente);
       }
     } else if (cat === 'semi') {
       /* Même source que le menu Articles > Définitions Composants (Semi-Finis Bois) :
          lattes, plots et CP uniquement ; les définitions manuelles priment sur les nomenclatures. */
-      var p2 = apProdGet();
+      var p2 = p;
       var cmap = {};
       var comps = (p2 && p2.composants) || [];
       for (var k = 0; k < comps.length; k++) {
@@ -35399,17 +35977,26 @@ function apAchatCatalogue(cat) {
         }
       }
       Object.keys(cmap).forEach(function(kc) { push(cmap[kc].code, cmap[kc].designation, cmap[kc].pu); });
+      ((p && p.stockSemi) || []).forEach(function(s) { push(s.code, s.designation, s.prix_unitaire); });
+      for (var ns = 0; ns < nom.length; ns++) {
+        if (nom[ns].typeArticle === 'semi_fini' || nom[ns].typeArticle === 'semi-fini') push(nom[ns].code, nom[ns].designation || nom[ns].nom, nom[ns].prixUnitaire || nom[ns].prix_vente);
+      }
     } else if (cat === 'merchandises') {
-      var nom2 = (typeof getArticles === 'function') ? (getArticles() || []) : [];
-      for (var n = 0; n < nom2.length; n++) {
-        if (nom2[n].typeArticle === 'marchandise') push(nom2[n].code, nom2[n].designation || nom2[n].nom, nom2[n].prixUnitaire || nom2[n].prix_vente);
+      ((p && p.stockMerch) || []).forEach(function(s) { push(s.code, s.designation, s.prix_unitaire); });
+      pArts.forEach(function(a) { if (String(a.categorie || '').trim().toLowerCase() === 'marchandise') push(a.code, a.designation, a.prix_vente); });
+      for (var n = 0; n < nom.length; n++) {
+        if (nom[n].typeArticle === 'marchandise') push(nom[n].code, nom[n].designation || nom[n].nom, nom[n].prixUnitaire || nom[n].prix_vente);
       }
     } else if (cat === 'epi') {
-      var epiList = (typeof getEpiCatalogue === 'function') ? (getEpiCatalogue() || []) : [];
+      var epiList = (typeof getEpiCatalogue === 'function') ? (getEpiCatalogue() || []) : ((p && p.epiCatalogue) || []);
       for (var ei = 0; ei < epiList.length; ei++) {
-        var e = epiList[ei];
-        if (e.code || e.designation) push(e.code || '', e.designation || '', e.prix_unitaire || 0);
+        var ep = epiList[ei];
+        if (ep.code || ep.designation) push(ep.code || '', ep.designation || '', ep.prix_unitaire || 0);
       }
+      ((p && p.epiItems) || []).forEach(function(s) { push(s.code, s.designation || s.nom, s.prix_unitaire); });
+    } else if (cat === 'consumable' || cat === 'consumables') {
+      ((p && p.stockConsum) || []).forEach(function(s) { push(s.code, s.designation, s.prix_unitaire); });
+      pArts.forEach(function(a) { if (String(a.categorie || '').trim().toLowerCase() === 'consum') push(a.code, a.designation, a.prix_vente); });
     } else {
       var els = (typeof getElementsAchats === 'function') ? (getElementsAchats() || []) : [];
       for (var e = 0; e < els.length; e++) push(els[e].code, els[e].designation || els[e].nom);
@@ -35462,7 +36049,7 @@ function renderAchatsProduction() {
   var readonly = isReadonly('achatsProduction');
   var p = apProdGet();
   var achats = (p.achats || []).filter(function(a) { return (f === 'all' || (a.category || a.type) === f); });
-  var cats = [['all', 'Tous types'], ['raw-materials', '🌲 Matières Premières'], ['finished', '📦 Produits Finis'], ['semi', '⚙️ Semi-Finis'], ['merchandises', '🛍️ Marchandises'], ['consumables', '🔨 Consommables']];
+  var cats = [['all', 'Tous types'], ['raw-materials', '🌲 Matières Premières'], ['finished', '📦 Produits Finis'], ['semi', '⚙️ Semi-Finis'], ['merchandises', '🛍️ Marchandises'], ['consumables', '🔨 Consommables'], ['epi', '🛡️ EPI']];
   var html = '<div class="toolbar"><h3 style="font-size:16px;font-weight:600">🛒 Achats</h3>';
   html += '<select id="apTypeFilter" onchange="window._apTypeFilter=this.value;renderAchatsProduction()" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:8px;font-size:12px">';
   for (var ci = 0; ci < cats.length; ci++) html += '<option value="' + cats[ci][0] + '"' + (f === cats[ci][0] ? ' selected' : '') + '>' + cats[ci][1] + '</option>';
@@ -35517,8 +36104,9 @@ function openApAchatModal(cat) {
   else if (cat === 'semi') title = '📄 Entrée Semi-Finis';
   else if (cat === 'merchandises') title = '📄 Achat Marchandises';
   else if (cat === 'consumables') title = '📄 Entrée Consommables/Divers';
-  var m = '<div id="apModalOverlay" onclick="if(event.target===this)apCloseModal()" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding:14px;overflow-y:auto">';
-  m += '<div class="acser-modal-card" style="background:#fff;border-radius:18px;padding:1.8rem;width:100%;max-width:1150px;margin:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif">';
+  else if (cat === 'epi') title = '🛡️ Achat EPI';
+  var m = '<div id="apModalOverlay" onclick="if(event.target===this)apCloseModal()" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding:10px;overflow-y:auto">';
+  m += '<div class="acser-modal-card" style="background:#fff;border-radius:18px;padding:1.8rem;width:100%;max-width:1680px;margin:auto;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);font-family:system-ui,-apple-system,sans-serif">';
   m += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem">';
   m += '<div><h2 style="font-size:1.25rem;font-weight:700;color:#1e293b;margin:0 0 0.25rem 0">' + title + '</h2>';
   m += '<p style="font-size:0.85rem;color:#64748b;margin:0">' + subtitle + '</p></div>';
@@ -35527,7 +36115,7 @@ function openApAchatModal(cat) {
   m += '<form onsubmit="saveApAchat(event,\'' + cat + '\')">';
   m += '<div style="margin-bottom:1rem"><div style="font-size:.8rem;font-weight:700;color:#334155;margin-bottom:.5rem">Quoi acheter ?</div>';
   m += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-  var _acats = [['raw-materials', '🌲 Matière Première'], ['finished', '📦 Produits Finis'], ['semi', '⚙️ Semi-Finis'], ['merchandises', '🛍️ Marchandises'], ['consumables', '🔨 Consommables']];
+  var _acats = [['raw-materials', '🌲 Matière Première'], ['finished', '📦 Produits Finis'], ['semi', '⚙️ Semi-Finis'], ['merchandises', '🛍️ Marchandises'], ['consumables', '🔨 Consommables'], ['epi', '🛡️ EPI']];
   for (var _aci = 0; _aci < _acats.length; _aci++) {
     var _aon = (cat === _acats[_aci][0]);
     m += '<button type="button" onclick="apAchatSwitchType(\'' + _acats[_aci][0] + '\')" style="flex:1;min-width:130px;padding:8px;border-radius:10px;cursor:pointer;font-weight:700;font-size:.76rem;border:2px solid ' + (_aon ? '#f97316' : '#e2e8f0') + ';background:' + (_aon ? '#fff7ed' : '#fff') + ';color:' + (_aon ? '#ea580c' : '#475569') + '">' + _acats[_aci][1] + '</button>';
@@ -35580,21 +36168,15 @@ if (cat === 'raw-materials') {
     m += '<datalist id="apRawMaterialsList"><option value="Bois rouge"><option value="Bois blanc"><option value="Okoumé"><option value="Douglasie"><option value="Frêne"><option value="Chêne"><option value="Hêtre"><option value="Nogal"><option value="Meranti"><option value="Pin"></datalist>';
   } else if (cat === 'consumable' || cat === 'consumables') {
     m += '<div style="background:#f8fafc;padding:0.85rem;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:1rem">';
-    m += '<div style="display:grid;grid-template-columns: 0.8fr 1.5fr 0.8fr 0.7fr 0.8fr 0.8fr 0.8fr 1fr auto;gap:0.5rem;align-items:center">';
-    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Code</label><input type="text" id="ai_code" placeholder="Code..." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
-    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Désignation / Libellé</label><input type="text" id="ai_designation" placeholder="Description..." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
-    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Type</label><select id="ai_constype" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"><option value="POINTE">Pointe</option><option value="DIVERS">Divers</option></select></div>';
-    function calcConsommableCartons() {
-  var qte = parseFloat((document.getElementById('ai_qte') || {}).value || 1);
-  var qpaq = parseFloat((document.getElementById('ai_qte_paquet') || {}).value || 1);
-  var cartons = document.getElementById('ai_cartons');
-  if (qpaq > 0) {
-    cartons.value = Math.ceil(qte / (qpaq * 50));
-  } else {
-    cartons.value = 0;
-  }
-}
-    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Nombre de cartons</label><input type="number" id="ai_cartons" value="0" min="0" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right" oninput="calcConsommableCartons()"></div>';
+    m += '<div style="display:grid;grid-template-columns: 0.8fr 1.5fr 0.8fr 0.7fr 0.7fr 0.8fr 1fr 0.8fr 1fr auto;gap:0.5rem;align-items:center">';
+    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Code</label><input type="text" id="ai_code" list="apCodeList" placeholder="Code..." oninput="apFillAchatDesig();apFillConsumableCond()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
+    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Désignation / Libellé</label><input type="text" id="ai_designation" list="apDesigList" placeholder="Description..." oninput="apFillAchatCode();apFillConsumableCond()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
+    m += '<datalist id="apCodeList">' + apAchatCodeOptions(cat) + '</datalist>';
+    m += '<datalist id="apDesigList">' + apAchatDesigOptions(cat) + '</datalist>';
+    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Type</label><select id="ai_constype" onchange="apFillConsumableCond()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"><option value="POINTE">Pointe</option><option value="DIVERS">Divers</option></select></div>';
+    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Nb paquets</label><input type="number" id="ai_qte" value="1" min="0" oninput="calcConsommableCartons(\'qte\')" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Qté par paquet</label><input type="number" id="ai_qte_paquet" value="1" min="1" title="Nombre de pièces dans un paquet (repris depuis la fiche du code)" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Nombre de cartons</label><input type="number" id="ai_cartons" value="0" min="0" oninput="calcConsommableCartons(\'cartons\')" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"><div style="font-size:.6rem;color:#94a3b8;text-align:right;margin-top:2px" title="Réglable dans Production > tableau de bord (icône ⚙)">' + apPacksPerCarton() + ' paquets/carton</div></div>';
     m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Emplacement</label><input type="text" id="ai_emplacement" placeholder="Zone..." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Prix Unitaire (FCFA)</label><input type="number" id="ai_pu" placeholder="0" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
     m += '<div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Observation</label><input type="text" id="ai_obs" placeholder="Obs." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
@@ -35715,6 +36297,8 @@ function editAchatItemLine(i, category) {
     setV('ai_code', it.code); setV('ai_designation', it.designation);
     setV('ai_qte', it.paquets != null ? it.paquets : it.quantity);
     setV('ai_qte_paquet', it.cond); setV('ai_constype', it.ctype); setV('ai_emplacement', it.emplacement);
+    if (it.cartons != null) setV('ai_cartons', it.cartons);
+    else calcConsommableCartons('qte');
     setV('ai_pu', it.unit_price); setV('ai_obs', it.obs);
   } else {
     setV('ai_code', it.code); setV('ai_designation', it.designation);
@@ -35723,6 +36307,57 @@ function editAchatItemLine(i, category) {
   _tempAchatItems.splice(i, 1);
   renderAchatItemsTable(category);
   try { var f = document.getElementById('ai_colis') || document.getElementById('ai_code'); if (f) f.focus(); } catch(e) {}
+}
+function apPacksPerCarton() {
+  try {
+    var n = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10);
+    return (!isNaN(n) && n > 0) ? n : 50;
+  } catch(e) { return 50; }
+}
+function apFillConsumableCond() {
+  try {
+    var code = apNorm((document.getElementById('ai_code') || {}).value);
+    var dest = document.getElementById('ai_qte_paquet');
+    if (!dest) return;
+    if (!code) return;
+    var p = apProdGet() || {};
+    var found = 0;
+    var stocks = p.stockConsum || [];
+    for (var i = 0; i < stocks.length; i++) {
+      if (apNorm(stocks[i].code) === code) {
+        var c = parseFloat(stocks[i].cond != null ? stocks[i].cond : stocks[i].qty_per_packet);
+        if (!isNaN(c) && c > 0) { dest.value = c; found = 1; }
+        break;
+      }
+    }
+    if (!found) {
+      var srcs = [].concat(p.definitions || [], p.composants || []);
+      for (var j = 0; j < srcs.length; j++) {
+        if (apNorm(srcs[j].code) === code) {
+          var q = parseFloat(srcs[j].qty_per_packet);
+          if (!isNaN(q) && q > 0) { dest.value = q; found = 1; }
+        }
+      }
+    }
+    calcConsommableCartons('qte');
+  } catch(e) {}
+}
+function calcConsommableCartons(src) {
+  try {
+    var qteEl = document.getElementById('ai_qte');
+    var cartEl = document.getElementById('ai_cartons');
+    if (!qteEl || !cartEl) return;
+    var PACKS_PER_CARTON = apPacksPerCarton();
+    if (src === 'cartons') {
+      var c = parseFloat(cartEl.value || 0);
+      if (isNaN(c) || c < 0) c = 0;
+      qteEl.value = c * PACKS_PER_CARTON;
+    } else {
+      var q = parseFloat(qteEl.value || 0);
+      if (isNaN(q) || q < 0) q = 0;
+      cartEl.value = q / PACKS_PER_CARTON;
+    }
+  } catch(e) {}
 }
 function addAchatItemLine(category) {
   var item = {};
@@ -35770,7 +36405,9 @@ function addAchatItemLine(category) {
     var empl = (document.getElementById('ai_emplacement') || {}).value || '';
     var qtePaq = parseFloat((document.getElementById('ai_qte_paquet') || {}).value || 1);
     var units = ctype === 'POINTE' ? qte * Math.max(1, qtePaq) : qte;
-    item = { code: code, designation: des, quantity: units, paquets: qte, cond: qtePaq, ctype: ctype, emplacement: empl, unit_price: pu, total_price: qte * pu, obs: obs };
+    var cartons = parseFloat((document.getElementById('ai_cartons') || {}).value || 0);
+    if (isNaN(cartons) || cartons < 0) cartons = 0;
+    item = { code: code, designation: des, quantity: units, paquets: qte, cond: qtePaq, ctype: ctype, emplacement: empl, cartons: cartons, unit_price: pu, total_price: qte * pu, obs: obs };
   } else {
     var code = (document.getElementById('ai_code') || {}).value || 'ART-' + Date.now().toString().slice(-4);
     var des = (document.getElementById('ai_designation') || {}).value || 'Article';
@@ -36030,8 +36667,11 @@ function saveApAchat(e, category) {
   } else if (category === 'consumables') {
     var cs = apProdArr(p, 'stockConsum');
     _tempAchatItems.forEach(function(it) {
-      cs.unshift({ id: DB.genId(), code: it.code, designation: it.designation, fournisseur: fourn, quantite: it.quantity, paquets: it.paquets != null ? it.paquets : it.quantity, cond: it.cond || 1, ctype: it.ctype || 'DIVERS', emplacement: it.emplacement || '', prix_unitaire: it.unit_price, cartons: it.cartons != null ? it.cartons : Math.ceil((it.quantity || 1) / (it.paquets || 1) / 50), created_at: date });
+      cs.unshift({ id: DB.genId(), code: it.code, designation: it.designation, fournisseur: fourn, quantite: it.quantity, paquets: it.paquets != null ? it.paquets : it.quantity, cond: it.cond || 1, ctype: it.ctype || 'DIVERS', emplacement: it.emplacement || '', prix_unitaire: it.unit_price, cartons: it.cartons != null ? it.cartons : (it.paquets != null ? it.paquets : it.quantity || 0) / 50, created_at: date });
     });
+  } else if (category === 'epi') {
+    var es = apProdArr(p, 'stockEpi');
+    _tempAchatItems.forEach(function(it) { es.unshift({ id: DB.genId(), code: it.code, designation: it.designation, fournisseur: fourn, quantite: it.quantity, quantite_recue: it.quantity, prix_unitaire: it.unit_price, created_at: date }); });
   }
   apProdSet(p);
   try {

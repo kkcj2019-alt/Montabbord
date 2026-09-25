@@ -962,6 +962,42 @@
         }
       }
       /* ============ PRODUCTION MONTAGE MODERN STYLES ============ */
+      /* Grille de saisie montage : la colonne des noms reste figee au defilement
+         horizontal sur TOUTES les tailles d'ecran, telephone compris. Le tableau
+         doit pouvoir glisser sur les articles tout en gardant le travailleur
+         visible, sinon on ne sait plus a qui on saisit une quantite. */
+      .pt-mont-grid th:first-child,
+      .pt-mont-grid td:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+      }
+      .pt-mont-grid thead th:first-child {
+        z-index: 3;
+      }
+      .pt-mont-grid td:first-child {
+        box-shadow: 6px 0 8px -6px rgba(15, 23, 42, 0.35);
+      }
+      /* Telephone : defilement tactile fluide + colonne des noms compacte pour
+         laisser la place aux articles. */
+      .pt-mont-scroll {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+      }
+      @media (max-width: 768px) {
+        .pt-mont-grid th:first-child {
+          min-width: 92px;
+          padding: 10px 6px;
+        }
+        .pt-mont-grid td:first-child {
+          min-width: 92px;
+          padding: 8px 6px;
+        }
+        .pt-mont-grid input {
+          width: 54px !important;
+          height: 36px !important;
+        }
+      }
       .pt-montage-card {
         background: #ffffff;
         border: 1px solid var(--border);
@@ -1376,6 +1412,15 @@
           flex-wrap: wrap;
           gap: 8px;
           left: 0;
+        }
+        /* Téléphone : l'en-tête n'est PAS figé. Sur petit écran il se replie sur
+           plusieurs lignes (recherche globale + alerte) et, en sticky, il occupait
+           la moitié de la vue et bloquait la lecture et la navigation. */
+        #payeHeader {
+          position: static;
+          top: auto;
+          z-index: auto;
+          box-shadow: none;
         }
         main {
           padding-top: 0;
@@ -5186,11 +5231,21 @@
         },
         setMain: function (k, v) {
           localStorage.setItem(k, JSON.stringify(v));
+          if (!_payeApplyingCloud) {
+            try {
+              var _pd = JSON.parse(localStorage.getItem("mdb_pendingSync")) || {};
+              _pd[k] = true;
+              localStorage.setItem("mdb_pendingSync", JSON.stringify(_pd));
+            } catch (e) {}
+            try { if (window._mdbSyncChannel) window._mdbSyncChannel.postMessage({ type: 'shared_key_updated', key: k, value: JSON.stringify(v) }); } catch(e) {}
+          }
         },
         id: function () {
           return Date.now() + "_" + Math.random().toString(36).substr(2, 6);
         },
       };
+      /* BroadcastChannel for cross-tab sync */
+      try { window._mdbSyncChannel = new BroadcastChannel('mdb_shared_sync'); } catch(e) {}
       /* ============ IDLE TIMEOUT PARTAGÉ (index / paye / production) ============ */
       var _idleTimeoutMs = 30 * 60 * 1000;
       var _lastActivityP = Date.now();
@@ -5278,6 +5333,17 @@
       }
 
       /* ===== Fusion anti-perte : union par id, le tableau prioritaire gagne ===== */
+      function _payeItemKey(r) {
+        if (r && typeof r === "object") {
+          if (r.code) return "code:" + String(r.code).trim().toLowerCase();
+          if (r.id) return "id:" + String(r.id);
+          if (r.numero) return "numero:" + String(r.numero).trim().toLowerCase();
+          try {
+            return "json:" + JSON.stringify(r);
+          } catch (e) {}
+        }
+        return typeof r === "string" ? "value:" + r : String(r || "");
+      }
       function _payeUnion(prim, sec) {
         var a = Array.isArray(prim) ? prim : [];
         var b = Array.isArray(sec) ? sec : [];
@@ -5289,22 +5355,12 @@
         for (i = 0; i < a.length; i++) {
           r = a[i];
           out.push(r);
-          key =
-            r && typeof r === "object" && r.id
-              ? r.id
-              : typeof r === "string"
-                ? r
-                : String(r || "");
+          key = _payeItemKey(r);
           if (key) seen[key] = true;
         }
         for (i = 0; i < b.length; i++) {
           r = b[i];
-          key =
-            r && typeof r === "object" && r.id
-              ? r.id
-              : typeof r === "string"
-                ? r
-                : String(r || "");
+          key = _payeItemKey(r);
           if (key && !seen[key]) {
             out.push(r);
             seen[key] = true;
@@ -5313,6 +5369,97 @@
           }
         }
         return out;
+      }
+      function _payeArticleCode(value) {
+        return String(
+          (value && typeof value === "object" ? value.code : value) || "",
+        )
+          .trim()
+          .toLowerCase();
+      }
+      function _payeEventTime(value) {
+        if (!value) return 0;
+        var raw = value.updatedAt || value.deletedAt || 0;
+        var time = typeof raw === "number" ? raw : Date.parse(raw);
+        return isFinite(time) ? time : 0;
+      }
+      function _payeIndexArticleEvents(articles, tombstones) {
+        var indexed = { articles: {}, tombstones: {} };
+        (Array.isArray(articles) ? articles : []).forEach(function (article) {
+          var code = _payeArticleCode(article);
+          if (!code) return;
+          var current = indexed.articles[code];
+          if (
+            !current ||
+            _payeEventTime(article) >= _payeEventTime(current)
+          )
+            indexed.articles[code] = article;
+        });
+        (Array.isArray(tombstones) ? tombstones : []).forEach(function (tomb) {
+          var code = _payeArticleCode(tomb);
+          if (!code) return;
+          var current = indexed.tombstones[code];
+          if (
+            !current ||
+            _payeEventTime(tomb) >= _payeEventTime(current)
+          )
+            indexed.tombstones[code] = tomb;
+        });
+        return indexed;
+      }
+      function _payeMergeArticles(cur, inc, localFirst) {
+        var local = _payeIndexArticleEvents(
+          cur.articlesMontage,
+          cur.articlesMontage_tombstones,
+        );
+        var cloud = _payeIndexArticleEvents(
+          inc.articlesMontage,
+          inc.articlesMontage_tombstones,
+        );
+        var codes = {};
+        Object.keys(local.articles).forEach(function (code) {
+          codes[code] = true;
+        });
+        Object.keys(local.tombstones).forEach(function (code) {
+          codes[code] = true;
+        });
+        Object.keys(cloud.articles).forEach(function (code) {
+          codes[code] = true;
+        });
+        Object.keys(cloud.tombstones).forEach(function (code) {
+          codes[code] = true;
+        });
+        var result = { articles: [], tombstones: [] };
+        Object.keys(codes).forEach(function (code) {
+          var localArticle = local.articles[code] || null;
+          var cloudArticle = cloud.articles[code] || null;
+          var localTomb = local.tombstones[code] || null;
+          var cloudTomb = cloud.tombstones[code] || null;
+          var article = localArticle;
+          if (cloudArticle) {
+            if (
+              !article ||
+              _payeEventTime(cloudArticle) > _payeEventTime(article) ||
+              (_payeEventTime(cloudArticle) === _payeEventTime(article) &&
+                !localFirst)
+            )
+              article = cloudArticle;
+          }
+          var tomb = localTomb;
+          if (cloudTomb) {
+            if (
+              !tomb ||
+              _payeEventTime(cloudTomb) > _payeEventTime(tomb) ||
+              (_payeEventTime(cloudTomb) === _payeEventTime(tomb) &&
+                !localFirst)
+            )
+              tomb = cloudTomb;
+          }
+          if (article && (!tomb || _payeEventTime(article) > _payeEventTime(tomb)))
+            result.articles.push(article);
+          else if (tomb) result.tombstones.push(tomb);
+        });
+        return result;
       }
       /* ===== Travaux funéraires (tombstones) partagés =====
          On réutilise la même clé localStorage que l'app principale (mdb_tombstones) pour que
@@ -5419,6 +5566,38 @@
           else if (prim) merged[k] = [];
           else if (sec && sec.length > 0) merged[k] = sec;
         }
+        /* Pointage : la fusion en union ressusciterait une journée effacée ailleurs.
+           On retire les identifiants tombstonés et on garde la trace des suppressions
+           (union) pour que tous les postes en tiennent compte définitivement. */
+        var _pTombC = Array.isArray(cur.pointage_tombstones) ? cur.pointage_tombstones : [];
+        var _pTombI = Array.isArray(inc.pointage_tombstones) ? inc.pointage_tombstones : [];
+        if (_pTombC.length || _pTombI.length) {
+          var _pT = {};
+          var _pTAll = [];
+          var _pTArr = _pTombC.concat(_pTombI);
+          for (var _pi = 0; _pi < _pTArr.length; _pi++) {
+            var _pk = String(_pTArr[_pi]);
+            if (!_pT[_pk]) { _pT[_pk] = true; _pTAll.push(_pk); }
+          }
+          if (Array.isArray(merged.pointage)) {
+            merged.pointage = merged.pointage.filter(function (p) {
+              return !(p && p.id && _pT[String(p.id)]);
+            });
+          }
+          merged.pointage_tombstones = _pTAll;
+        }
+        if (
+          cur.hasOwnProperty("articlesMontage") ||
+          cur.hasOwnProperty("articlesMontage_tombstones") ||
+          inc.hasOwnProperty("articlesMontage") ||
+          inc.hasOwnProperty("articlesMontage_tombstones")
+        ) {
+          var _amMerged = _payeMergeArticles(cur, inc, localFirst);
+          merged.articlesMontage = _amMerged.articles;
+          if (_amMerged.tombstones.length)
+            merged.articlesMontage_tombstones = _amMerged.tombstones;
+          else delete merged.articlesMontage_tombstones;
+        }
         if (cur.grilleWood === true || inc.grilleWood === true)
           merged.grilleWood = true;
         // Tombstones primes : union toujours (jamais perdu)
@@ -5445,7 +5624,10 @@
         }
         return merged;
       }
+      var _payeApplyingCloud = false;
       function _payeRecvSharedKeys(data) {
+        _payeApplyingCloud = true;
+        try {
         if (data.mdb_tombstones)
           _payeMergeTombstonesFromCloud(data.mdb_tombstones);
         [
@@ -5480,6 +5662,7 @@
         });
         if (data.mdb_entreprise && data.mdb_entreprise.nom)
           DB.setMain("mdb_entreprise", data.mdb_entreprise);
+        } finally { _payeApplyingCloud = false; }
       }
 
       var payePushBusy = false,
@@ -5632,6 +5815,23 @@
       }
       /* Écoute en temps réel : les modifications depuis l'app principale se propagent ici (vice-versa) */
       var payeSnapshotUnsub = null;
+      /* Reprise differee du rafraichissement temps reel : on attend que l'utilisateur
+         quitte le champ en cours de saisie, puis on applique la mise a jour. */
+      var _payeDeferredTimer = null;
+      function _payeDeferredRealtime(sec) {
+        try { if (_payeDeferredTimer) clearTimeout(_payeDeferredTimer); } catch (e) {}
+        _payeDeferredTimer = setTimeout(function () {
+          _payeDeferredTimer = null;
+          try {
+            var ae2 = document.activeElement;
+            var ptc2 = document.getElementById("pt-container");
+            if (ptc2 && ae2 && ptc2.contains(ae2)) { _payeDeferredRealtime(sec); return; }
+            var cur = localStorage.getItem("paye_currentSection") || sec;
+            showSection(cur);
+          } catch (e2) {}
+        }, 1200);
+      }
+
       function startRealtimeSync() {
         if (payeSnapshotUnsub) {
           try {
@@ -5683,10 +5883,15 @@
               setTimeout(_payeNavInitDnd, 9000);
               var sec = localStorage.getItem("paye_currentSection");
               if (!sec) return;
-              /* Pendant la saisie d'une case du pointage, ne pas détruire le focus */
+              /* Pendant la saisie d'une case du pointage, ne pas détruire le focus :
+                 on reporte le rafraîchissement au lieu de l'abandonner, sinon la
+                 modification distante n'apparaît qu'au rechargement manuel. */
               var ptc = document.getElementById("pt-container");
               var ae = document.activeElement;
-              if (sec === "pointage" && ptc && ae && ptc.contains(ae)) return;
+              if (sec === "pointage" && ptc && ae && ptc.contains(ae)) {
+                _payeDeferredRealtime(sec);
+                return;
+              }
               showSection(sec);
             },
             function (e) {
@@ -5892,12 +6097,44 @@
       function setCategories(v) {
         setPayeSection("categories", v);
       }
+      /* Suppressions de pointage : la fusion en union ressuscitait les lignes effacées
+         sur un autre poste. On conserve la trace des identifiants supprimés. */
+      function _payePointageTomb() {
+        var t = getPayeSection("pointage_tombstones", []);
+        return Array.isArray(t) ? t : [];
+      }
       function getPointageData() {
         var v = getPayeSection("pointage", []);
-        return Array.isArray(v) ? v : [];
+        if (!Array.isArray(v)) return [];
+        var tomb = _payePointageTomb();
+        if (!tomb.length) return v;
+        var ts = {};
+        for (var ti = 0; ti < tomb.length; ti++) ts[String(tomb[ti])] = true;
+        return v.filter(function (p) {
+          return !(p && p.id && ts[String(p.id)]);
+        });
       }
+      /* Point d'entrée unique : toute suppression (cellule, journée, mois,standard…)
+         est tracée ici, automatiquement. */
       function setPointageData(v) {
-        setPayeSection("pointage", v);
+        var arr = Array.isArray(v) ? v : [];
+        var raw = getPayeSection("pointage", []);
+        raw = Array.isArray(raw) ? raw : [];
+        var newIds = {};
+        var i;
+        for (i = 0; i < arr.length; i++) { if (arr[i] && arr[i].id) newIds[String(arr[i].id)] = true; }
+        var tomb = _payePointageTomb();
+        var ts = {};
+        for (i = 0; i < tomb.length; i++) ts[String(tomb[i])] = true;
+        var added = false;
+        for (i = 0; i < raw.length; i++) {
+          var rid = raw[i] && raw[i].id ? String(raw[i].id) : "";
+          if (rid && !newIds[rid] && !ts[rid]) { tomb.push(rid); ts[rid] = true; added = true; }
+        }
+        var obj = getPayeData();
+        obj.pointage = arr;
+        if (added || tomb.length) obj.pointage_tombstones = tomb;
+        setPayeData(obj);
       }
 
       /* ==================== PRIMES SPECIALES CENTRALISÉES ==================== */
@@ -10037,10 +10274,54 @@ function showSection(id) {
       }
       /* ==================== ARTICLES MONTAGE ==================== */
       function getArticlesMontage() {
-        return getPayeSection("articlesMontage", []);
+        var v = getPayeSection("articlesMontage", []);
+        return Array.isArray(v) ? v : [];
       }
-      function setArticlesMontage(v) {
-        setPayeSection("articlesMontage", v);
+      function setArticlesMontage(v, deletedCodes) {
+        var p = getPayeData();
+        var articles = Array.isArray(v) ? v : [];
+        var tombstones = Array.isArray(p.articlesMontage_tombstones)
+          ? p.articlesMontage_tombstones.slice()
+          : [];
+        (Array.isArray(deletedCodes) ? deletedCodes : [deletedCodes]).forEach(
+          function (value) {
+            var code = String(
+              (value && typeof value === "object" ? value.code : value) || "",
+            )
+              .trim()
+              .toLowerCase();
+            if (!code) return;
+            if (
+              !tombstones.some(function (t) {
+                return (
+                  String(
+                    (t && typeof t === "object" ? t.code : t) || "",
+                  )
+                    .trim()
+                    .toLowerCase() === code
+                );
+              })
+            )
+              tombstones.push({ code: code, deletedAt: Date.now() });
+          },
+        );
+        var active = {};
+        articles.forEach(function (article) {
+          var code = String((article && article.code) || "")
+            .trim()
+            .toLowerCase();
+          if (code) active[code] = true;
+        });
+        p.articlesMontage = articles;
+        p.articlesMontage_tombstones = tombstones.filter(function (t) {
+          var code = String(
+            (t && typeof t === "object" ? t.code : t) || "",
+          )
+            .trim()
+            .toLowerCase();
+          return !code || !active[code];
+        });
+        setPayeData(p);
       }
       function getMontageConfig() {
         return getPayeSection("montageConfig", { seuil: 0, prime: 0 });
@@ -10123,6 +10404,7 @@ function showSection(id) {
           designation: des,
           prix: prix,
           compte_prime: comptePrime,
+          updatedAt: Date.now(),
         });
         setArticlesMontage(ams);
         document.getElementById("am-code").value = "";
@@ -10398,6 +10680,7 @@ function addArticleMontageFromPt(e) {
           designation: des,
           prix: prix,
           compte_prime: cp,
+          updatedAt: Date.now(),
         });
         setArticlesMontage(ams);
         loadPointageMontage();
@@ -10405,8 +10688,9 @@ function addArticleMontageFromPt(e) {
       }
       function delArticleMontage(i) {
         var ams = getArticlesMontage();
+        var deleted = ams[i];
         ams.splice(i, 1);
-        setArticlesMontage(ams);
+        setArticlesMontage(ams, deleted ? [deleted] : []);
         loadArticlesMontage();
       }
       function editArticleMontage(i) {
@@ -10445,8 +10729,21 @@ function addArticleMontageFromPt(e) {
           loadArticlesMontage();
           return;
         }
-        ams[i] = { code: code, designation: des, prix: prix, compte_prime: cp };
-        setArticlesMontage(ams);
+        var previous = ams[i];
+        ams[i] = {
+          code: code,
+          designation: des,
+          prix: prix,
+          compte_prime: cp,
+          updatedAt: Date.now(),
+        };
+        setArticlesMontage(
+          ams,
+          String(previous.code || "").trim().toLowerCase() !==
+            String(code).trim().toLowerCase()
+            ? [previous]
+            : [],
+        );
         loadArticlesMontage();
         toast("Article modifié", "success");
       }
@@ -10490,8 +10787,21 @@ function addArticleMontageFromPt(e) {
         var prixN = parseFloat(document.getElementById("edit-am-prix").value) || 0;
         var cpN = document.getElementById("edit-am-cprime").checked;
         if (!codeN || !desN) { loadPointageMontage(); return; }
-        ams[idx] = { code: codeN, designation: desN, prix: prixN, compte_prime: cpN };
-        setArticlesMontage(ams);
+        var previous = ams[idx];
+        ams[idx] = {
+          code: codeN,
+          designation: desN,
+          prix: prixN,
+          compte_prime: cpN,
+          updatedAt: Date.now(),
+        };
+        setArticlesMontage(
+          ams,
+          String(previous.code || "").trim().toLowerCase() !==
+            String(codeN).trim().toLowerCase()
+            ? [previous]
+            : [],
+        );
         loadPointageMontage();
         toast("Article modifié", "success");
       }
@@ -16072,7 +16382,7 @@ function ptMontFilterArts(q) {
         html += '</div>';
 
         html +=
-          '<div style="overflow-x:auto;border:2px solid #cbd5e1;border-radius:10px;margin-bottom:1.2rem"><table style="margin-top:0;font-size:0.78rem;border-collapse:collapse;width:100%"><thead><tr style="background:#0f172a;color:#ffffff"><th style="min-width:160px;padding:12px;text-align:left;font-weight:800;border-right:1px solid #334155">EMPLOYES</th>';
+          '<div class="pt-mont-scroll" style="overflow-x:auto;border:2px solid #cbd5e1;border-radius:10px;margin-bottom:1.2rem"><table class="pt-mont-grid" style="margin-top:0;font-size:0.78rem;border-collapse:collapse;width:100%"><thead><tr style="background:#0f172a;color:#ffffff"><th style="min-width:150px;padding:12px;text-align:left;font-weight:800;border-right:1px solid #334155;background:#0f172a">EMPLOYES</th>';
         selectedArts.forEach(function (art) {
           var am = ams.find(function (a) {
             return a.code === art;
