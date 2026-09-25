@@ -469,10 +469,9 @@ var NAV = [
     ]}
   ]},
   { group: 'APPROVISIONNEMENT', items: [
-    { id: 'achats-group', label: 'Achat', icon: '🛒', children: [
-      { id: 'achats', label: 'Saisie Achat' },
-      { id: 'achats-history', label: 'Historique Achats' }
-    ]}
+    /* Achat n'est plus depliable : un seul menu, ou l'on enregistre l'achat
+       et ou le tableau des achats est deja juste en dessous. */
+    { id: 'achats', label: 'Achat', icon: '🛒' }
   ]},
   { group: 'LOGISTIQUE ET COMMERCIAL', items: [
     { id: 'livraisons-group', label: 'Livraisons', icon: '🚚', children: [
@@ -737,6 +736,8 @@ function prodFirstPage() {
 }
 function navigate(page) {
   autoSaveDraft();
+  /* L'historique des achats a fusionne dans la page Achat unique */
+  if (page === 'achats-history' || page === 'achats-group') page = 'achats';
   if (typeof prodPageKey === 'function') {
     var _pk = prodPageKey(page);
     if (_pk && !prodCanRead(_pk)) { try { toast('Accès non autorisé', 'error'); } catch(e) {} return; }
@@ -9848,31 +9849,108 @@ function updateProductionTotals() {
   if (sumRendementEl) sumRendementEl.textContent = rendement + ' %';
 }
 
-/* ==================== MULTI-CATEGORY ACHAT SYSTEM (5 TABS) ==================== */
+/* ==================== ACHAT : SAISIE + TABLEAU SUR UNE SEULE PAGE ==================== */
+/* Une seule page Achat : on enregistre l'achat et le tableau des achats est
+   juste dessous, avec les filtres par type. L'ancienne page « Historique
+   Achats » est redirigee ici. */
+var ACHAT_CATEGORIES = [
+  { v: 'all', l: 'Tous les types' },
+  { v: 'raw-materials', l: '🌲 Matières Premières' },
+  { v: 'finished', l: '📦 Produits Finis' },
+  { v: 'semi', l: '⚙️ Semi-Finis' },
+  { v: 'merchandises', l: '🛍️ Marchandises' },
+  { v: 'consumables', l: '🔨 Consommables & Divers' },
+  { v: 'epi', l: '🛡️ EPI' }
+];
+function achatCatLabel(cat) {
+  for (var i = 0; i < ACHAT_CATEGORIES.length; i++) if (ACHAT_CATEGORIES[i].v === cat) return ACHAT_CATEGORIES[i].l;
+  return cat;
+}
+function achatItemLabel(it) {
+  if (!it) return '-';
+  return it.colis_number || it.code || it.designation || it.essence || '-';
+}
+function achatItemSub(it) {
+  if (!it) return '';
+  var bits = [];
+  if (it.designation && it.colis_number) bits.push(it.designation);
+  if (it.essence && !it.colis_number) bits.push(it.essence);
+  if (it.essence && it.colis_number) bits.push(it.essence);
+  if (it.zone) bits.push('Zone ' + it.zone);
+  if (it.emplacement) bits.push(it.emplacement);
+  if (it.paquets) bits.push(it.paquets + ' paquets');
+  if (it.obs) bits.push(it.obs);
+  return bits.join(' · ');
+}
+/* Ligne de detail d'un achat : les articles achetes, en dessous du BL */
+function renderAchatDetailRow(a) {
+  var items = a.items || [];
+  var h = '<tr id="achatDetail_' + a.id + '" style="display:none;background:#f8fafc"><td colspan="9" style="padding:0">';
+  if (!items.length) {
+    h += '<div style="padding:10px 12px;font-size:.78rem;color:var(--dim)">Aucun article enregistré pour cet achat.</div>';
+  } else {
+    h += '<div style="padding:8px 12px 4px;font-size:.72rem;font-weight:700;color:var(--accent)">Détail des articles · ' + items.length + ' ligne(s)</div>';
+    h += '<table style="margin:0 12px 12px"><thead><tr><th style="font-size:.66rem">Article</th><th style="font-size:.66rem">Désignation</th><th style="font-size:.66rem;text-align:right">Quantité</th><th style="font-size:.66rem;text-align:right">Volume (m³)</th><th style="font-size:.66rem;text-align:right">Prix unitaire</th><th style="font-size:.66rem;text-align:right">Total</th></tr></thead><tbody>';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i] || {};
+      h += '<tr><td style="font-size:.72rem;font-weight:600">' + escH(achatItemLabel(it)) + '</td>';
+      h += '<td style="font-size:.7rem;color:var(--dim)">' + escH(achatItemSub(it) || '-') + '</td>';
+      h += '<td style="font-size:.72rem;text-align:right">' + (parseFloat(it.quantity || 0) || 0) + '</td>';
+      h += '<td style="font-size:.72rem;text-align:right">' + (it.volume ? (parseFloat(it.volume) || 0).toFixed(3) : '-') + '</td>';
+      h += '<td style="font-size:.72rem;text-align:right">' + (parseFloat(it.unit_price || 0) ? fmt(it.unit_price) : '-') + '</td>';
+      h += '<td style="font-size:.72rem;text-align:right;font-weight:700">' + (parseFloat(it.total_price || 0) ? fmt(it.total_price) : '-') + '</td></tr>';
+    }
+    h += '</tbody></table>';
+  }
+  h += '</td></tr>';
+  return h;
+}
+function toggleAchatDetail(id) {
+  var el = document.getElementById('achatDetail_' + id);
+  if (!el) return;
+  var open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : '';
+}
 function render_achats() {
   var f = window._achatTypeFilter || 'all';
+  var q = (window._achatSearch || '').toString().toLowerCase().trim();
   var _pwA = true;
   try { _pwA = (typeof prodCanWrite !== 'function') || prodCanWrite(prodPageKey('achats')); } catch(e) {}
   var achats = getAchats();
-  var cats = [['all', 'Tous types'], ['raw-materials', '🌲 Matières Premières'], ['finished', '📦 Produits Finis'], ['semi', '⚙️ Semi-Finis'], ['merchandises', '🛍️ Marchandises'], ['consumables', '🔨 Consommables & Divers'], ['epi', '🛡️ EPI']];
 
-  var h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:1rem">';
+  var h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">';
   h += '<h3 style="margin:0">🛒 Achats</h3>';
-  h += '<select id="achatTypeFilter" onchange="window._achatTypeFilter=this.value;renderPage()" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:.8rem">';
-  for (var ci = 0; ci < cats.length; ci++) h += '<option value="' + cats[ci][0] + '"' + (f === cats[ci][0] ? ' selected' : '') + '>' + cats[ci][1] + '</option>';
-  h += '</select>';
   if (_pwA) h += '<button class="btn btn-accent" onclick="showNewAchat()">+ Nouvel Achat</button>';
   h += '</div>';
 
-  var list = achats.filter(function(a) { return (f === 'all' || (a.category || a.type) === f) && monthMatch(a.date); });
+  h += '<div class="card" style="padding:.7rem;margin-bottom:1rem"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+  h += '<label style="font-size:.72rem;font-weight:700;color:var(--text)">Type d\'achat</label>';
+  h += '<select id="achatTypeFilter" onchange="window._achatTypeFilter=this.value;renderPage()" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:.8rem">';
+  for (var ci = 0; ci < ACHAT_CATEGORIES.length; ci++) {
+    h += '<option value="' + ACHAT_CATEGORIES[ci].v + '"' + (f === ACHAT_CATEGORIES[ci].v ? ' selected' : '') + '>' + ACHAT_CATEGORIES[ci].l + '</option>';
+  }
+  h += '</select>';
+  h += '<input type="text" id="achatSearch" placeholder="Rechercher un BL, un fournisseur..." value="' + escH(window._achatSearch || '') + '" oninput="window._achatSearch=this.value;renderPage()" style="flex:1;min-width:170px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:.8rem">';
+  h += '</div></div>';
+
+  var list = achats.filter(function(a) {
+    if (f !== 'all' && (a.category || a.type) !== f) return false;
+    if (!monthMatch(a.date)) return false;
+    if (q) {
+      var hay = ((a.reference || '') + ' ' + (a.fournisseur || '') + ' ' + (a.receiver_name || '') + ' ' + (a.achatant || '') + ' ' + (a.category || a.type || '')).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  });
 
   if (list.length === 0) {
-    h += '<div class="card"><div class="empty">Aucun achat enregistré. Cliquez sur le bouton ci-dessus pour ajouter un achat.</div></div>';
+    h += '<div class="card"><div class="empty">' + (achats.length === 0 ? 'Aucun achat enregistré. Utilisez le bouton « + Nouvel Achat » pour commencer.' : 'Aucun achat ne correspond à ces filtres.') + '</div></div>';
   } else {
-    h += '<div class="card"><table><thead><tr><th>N° BL / Ref</th><th>Date</th><th>Fournisseur</th><th>Réceptionnaire</th><th>Type</th><th style="text-align:right">Colis</th><th style="text-align:right">Volume (m³)</th><th style="text-align:right">Montant Total</th><th>Actions</th></tr></thead><tbody>';
+    h += '<div class="card"><table><thead><tr><th style="width:34px"></th><th>N° BL / Ref</th><th>Date</th><th>Fournisseur</th><th>Réceptionnaire</th><th>Type</th><th style="text-align:right">Colis</th><th style="text-align:right">Volume (m³)</th><th style="text-align:right">Montant Total</th><th>Actions</th></tr></thead><tbody>';
     list.forEach(function(a) {
       var nbItems = (a.items || []).length;
       h += '<tr>';
+      h += '<td><button class="btn btn-sm" onclick="toggleAchatDetail(' + a.id + ')" title="Voir le détail des articles" style="font-size:.7rem;padding:2px 6px">▾</button></td>';
       h += '<td><strong>' + escH(a.reference || 'BL-' + a.id) + '</strong></td>';
       h += '<td>' + fmtD(a.date || today()) + '</td>';
       h += '<td>' + escH(a.fournisseur || '-') + '</td>';
@@ -9881,8 +9959,9 @@ function render_achats() {
       h += '<td style="text-align:right;font-weight:600">' + nbItems + ' colis</td>';
       h += '<td style="text-align:right;font-weight:600">' + parseFloat(a.total_volume || 0).toFixed(3) + ' m³</td>';
       h += '<td style="text-align:right;font-weight:700;color:var(--accent)">' + fmt(a.montant_total || 0) + ' FCFA</td>';
-      h += '<td>' + (_pwA ? '<button class="btn btn-sm" onclick="deleteAchat(' + a.id + ')" style="font-size:.7rem">🗑️</button>' : '') + '</td>';
+      h += '<td style="white-space:nowrap">' + (_pwA ? '<button class="btn btn-sm" onclick="editAchat(' + a.id + ')" title="Modifier cet achat" style="font-size:.7rem">✏️</button> ' : '') + (_pwA ? '<button class="btn btn-sm" onclick="deleteAchat(' + a.id + ')" title="Supprimer cet achat" style="font-size:.7rem">🗑️</button>' : '') + '</td>';
       h += '</tr>';
+      h += renderAchatDetailRow(a);
     });
     h += '</tbody></table></div>';
   }
