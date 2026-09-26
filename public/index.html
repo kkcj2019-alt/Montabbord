@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-09-26-40';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-41';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16681,13 +16681,39 @@ function onPfFilterChange() {
 // Purge générique des acomptes dont la pièce de caisse d'origine a disparu (index.html / RH)
 function _purgeOrphanAcomptes(){
   var _opsAll = getOperationsCaisse() || [];
-  var _opsById = {}; for(var _oi=0; _oi<_opsAll.length; _oi++) if(_opsAll[_oi].id) _opsById[_opsAll[_oi].id]=true;
-  var _opsByPiece = {}; for(var _opi=0; _opi<_opsAll.length; _opi++) if(_opsAll[_opi].numeroPiece) _opsByPiece[_opsAll[_opi].numeroPiece]=true;
+  var _opsById = {}; for(var _oi=0; _oi<_opsAll.length; _oi++) if(_opsAll[_oi].id) _opsById[_opsAll[_oi].id]=_opsAll[_oi];
+  var _opsByPiece = {}; for(var _opi=0; _opi<_opsAll.length; _opi++) if(_opsAll[_opi].numeroPiece) _opsByPiece[_opsAll[_opi].numeroPiece]=_opsAll[_opi];
   var _acs = DB.get('mdb_acomptesPrets') || [];
   var _toRemove = [];
+  var _repaired = 0;
   for(var _ai=0; _ai<_acs.length; _ai++){
     var _a=_acs[_ai];
     if(!_a) continue;
+    // Réparation : le lien interne a été perdu (bug historique sur le rattachement
+    // de la pièce) mais la pièce existe en caisse par son numéro => on ré-accroche.
+    var _linkedOp = _a.caisseOpId ? _opsById[_a.caisseOpId] : null;
+    if (!_linkedOp && _a.numeroPiece && _opsByPiece[_a.numeroPiece]) {
+      _linkedOp = _opsByPiece[_a.numeroPiece];
+      _a.caisseOpId = _linkedOp.id;
+      if (!_a.provenance) _a.provenance = 'caisse';
+      _repaired++;
+      continue;
+    }
+    //-id cassé mais la pièce existe sous un autre id : on retrouve par numéro de pièce
+    if (!_linkedOp && !_a.numeroPiece && _a.employeId) {
+      for (var _ok=0; _ok<_opsAll.length; _ok++) {
+        var _cand = _opsAll[_ok];
+        if (_cand && (_cand.apType === _a.type) && _cand.beneficiaireId === _a.employeId
+            && Math.abs((parseInt(_cand.montant)||0) - (parseInt(_a.montant)||0)) < 1
+            && String(_cand.date || '').substring(0,10) === String(_a.date || '').substring(0,10)
+            && (!_cand.acomptePretId || _cand.acomptePretId === _a.id)) {
+          _a.caisseOpId = _cand.id; _a.numeroPiece = _cand.numeroPiece || '';
+          if (!_a.provenance) _a.provenance = 'caisse';
+          _repaired++; break;
+        }
+      }
+      if (_a.caisseOpId) continue;
+    }
     // règle 1 : la pièce référencée par id n'existe plus
     if(_a.caisseOpId && !_opsById[_a.caisseOpId]){ _toRemove.push(_a); continue; }
     // règle 2 : la pièce référencée par numeroPiece n'existe plus
@@ -16697,6 +16723,12 @@ function _purgeOrphanAcomptes(){
     var _newAcs = _acs.filter(function(x){ return _toRemove.indexOf(x)===-1; });
     DB.set('mdb_acomptesPrets', _newAcs);
     try{ _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(e){}
+  }
+  if (_repaired > 0) {
+    DB.set('mdb_acomptesPrets', _acs);
+    try{ _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(eR){}
+    console.log('Rattachement de ' + _repaired + ' acompte(s)/prêt(s) à leur pièce de caisse');
+    if (typeof toast === 'function') { try { toast(_repaired + ' acompte(s)/prêt(s) rattaché(s) à leur pièce de caisse', 'success'); } catch(eT) {} }
   }
 }
 
@@ -16744,11 +16776,153 @@ function _cleanGhostAcomptes(){
     console.log('Nettoyage acomptes fantômes : ' + _removed + ' ligne(s) supprimée(s)');
   }
 }
+/* ===== Échéancier des prêts : calcul basé sur le mois courant =====
+   Un plan d'amortissement NE vaut pas remboursement. Ce qui compte :
+   - les échéances dont le mois est arrivé (mois <= mois courant) sont DUES ;
+   - chaque mois se coche individuellement quand la paie l'a réellement prélevé ;
+   - le prêt n'est « remboursé » que si TOUTES les échéances sont cochées. */
+function _apMoisCourant() {
+  var n = new Date();
+  return n.getFullYear() + '-' + ((n.getMonth() + 1) < 10 ? '0' : '') + (n.getMonth() + 1);
+}
+function _apMoisAdd(mois, offset) {
+  if (!mois || !/^\d{4}-\d{2}$/.test(mois)) return '';
+  var y = parseInt(mois.substring(0, 4), 10), m = parseInt(mois.substring(5, 7), 10) + (offset || 0);
+  while (m > 12) { m -= 12; y++; }
+  while (m < 1) { m += 12; y--; }
+  return y + '-' + (m < 10 ? '0' : '') + m;
+}
+/* Nombre de mois d'écart entre deux mois "AAAA-MM" (nouveau - ancien). */
+function _apMoisShift(ancien, nouveau) {
+  if (!/^\d{4}-\d{2}$/.test(ancien || '') || !/^\d{4}-\d{2}$/.test(nouveau || '')) return 0;
+  var ya = parseInt(ancien.substring(0, 4), 10), ma = parseInt(ancien.substring(5, 7), 10);
+  var yn = parseInt(nouveau.substring(0, 4), 10), mn = parseInt(nouveau.substring(5, 7), 10);
+  return (yn - ya) * 12 + (mn - ma);
+}
+/* Normalise les échéances d'un prêt et renvoie :
+   { echs, totalPlan, totalPreleve, totalDu, nbPreleves, nbEcheances, resteDu,
+     debutEcheance, prochaineEcheance, echancesDues, echancesEnRetard, termine } */
+function _apCalcEcheances(a, moisRef) {
+  var ref = moisRef || _apMoisCourant();
+  var montant = parseInt(a && a.montant) || 0;
+  var mensuel = parseInt(a && a.montantMensuel) || (a && a.dureeMois ? Math.round(montant / a.dureeMois) : montant);
+  var start = (a && a.moisDeduction) || (a && a.date ? String(a.date).substring(0, 7) : '');
+  var echs = (a && a.echeances && a.echeances.length) ? a.echeances.slice() : null;
+  if (!echs) {
+    echs = [];
+    var cap = montant, n = (a && a.dureeMois) || Math.ceil(montant / (mensuel || 1));
+    for (var k = 0; k < n; k++) {
+      var mm = _apMoisAdd(start, k) || ('M' + (k + 1));
+      var pay = Math.min(mensuel || 0, cap);
+      cap = Math.max(0, cap - pay);
+      echs.push({ mois: mm, montant: pay, preleve: false });
+    }
+  }
+  var totalPlan = 0, totalPreleve = 0, totalDu = 0, nbPreleves = 0, nbEch = 0;
+  var echancesDues = 0, echancesEnRetard = 0, prochaineEcheance = '';
+  for (var i = 0; i < echs.length; i++) {
+    var e = echs[i] || {};
+    var m = parseInt(e.montant) || 0;
+    var prev = e.preleve === true;
+    totalPlan += m;
+    if (prev) { totalPreleve += m; nbPreleves++; }
+    nbEch++;
+    /* Une échéance est due si son mois est arrivé ET elle n'est pas prélevée. */
+    if (m > 0 && !prev && /^\d{4}-\d{2}$/.test(e.mois || '') && e.mois <= ref) {
+      totalDu += m; echancesDues++;
+      if (!prochaineEcheance || e.mois < prochaineEcheance) prochaineEcheance = e.mois;
+      if (e.mois < ref) echancesEnRetard++;
+    }
+  }
+  return {
+    echs: echs, totalPlan: totalPlan, totalPreleve: totalPreleve, totalDu: totalDu,
+    nbPreleves: nbPreleves, nbEcheances: nbEch,
+    resteDu: Math.max(0, montant - totalPreleve),
+    debutEcheance: echs.length ? (echs[0].mois || '') : start,
+    prochaineEcheance: prochaineEcheance,
+    echeancesDues: echancesDues, echeancesEnRetard: echancesEnRetard,
+    termine: nbEch > 0 && nbPreleves === nbEch
+  };
+}
+
+/* Recrée les lignes acompte/prêt manquantes à partir des pièces de caisse.
+   Cas visé : un prêt payé en caisse (ex. KKCJ2609126 / ADE / 60 000) qui
+   n'apparaît plus dans « Acompte et Prêt » parce que sa ligne a été purgée
+   (le lien interne pointait vers la mauvaise pièce). On la reconstruit à
+   partir de la pièce, sans toucher aux pièces collectives déjà réparties. */
+function _reconcileAcomptesPretsFromCaisse() {
+  var ops = getOperationsCaisse() || [];
+  if (!ops.length) return;
+  var list = DB.get('mdb_acomptesPrets') || [];
+  var linkedIds = {};
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].caisseOpId) linkedIds[list[i].caisseOpId] = true;
+    if (list[i] && list[i].numeroPiece) linkedIds['P:' + list[i].numeroPiece] = true;
+    if (list[i] && list[i].id) linkedIds['A:' + list[i].id] = true;
+  }
+  var created = 0;
+  for (var o = 0; o < ops.length; o++) {
+    var op = ops[o];
+    if (!op || op.reversed) continue;
+    var t = op.apType || '';
+    if (t !== 'pret' && t !== 'acompte') continue;
+    if (op.collective && op.pendingDetail) continue;   /* collective : gérée par la répartition */
+    if (!op.beneficiaireId) continue;
+    /* Garde-fou : le bénéficiaire doit être un employé connu de l'entreprise. */
+    var _empOk = false;
+    try {
+      var _emps = getEmployes() || [];
+      for (var _ei = 0; _ei < _emps.length; _ei++) { if (_emps[_ei] && _emps[_ei].id === op.beneficiaireId) { _empOk = true; break; } }
+    } catch (eEmp) { _empOk = false; }
+    if (!_empOk) continue;
+    if (linkedIds[op.id] || (op.numeroPiece && linkedIds['P:' + op.numeroPiece]) || (op.acomptePretId && linkedIds['A:' + op.acomptePretId])) continue;
+    var rec = {
+      id: op.acomptePretId || DB.genId(),
+      type: t,
+      employeId: op.beneficiaireId,
+      employeNom: op.beneficiaireNom || '',
+      montant: parseInt(op.montant) || 0,
+      dureeMois: parseInt(op.apDureeMois) || 0,
+      montantMensuel: parseInt(op.apMontantMensuel) || 0,
+      moisDeduction: op.apMoisDeduction || (op.date ? String(op.date).substring(0, 7) : ''),
+      motif: op.tiers || op.observations || op.libelle || '',
+      notes: op.observations || '',
+      date: op.date || '',
+      statut: 'en_cours',
+      montantRembourse: 0,
+      caisseOpId: op.id,
+      numeroPiece: op.numeroPiece || '',
+      provenance: 'caisse',
+      moyen: op.moyenPaiement || '',
+      executant: op.executant || '',
+      caisseId: op.caisseId || ''
+    };
+    if (rec.type === 'pret' && !rec.dureeMois) rec.dureeMois = 0;
+    if (rec.type === 'pret' && !rec.montantMensuel && rec.dureeMois > 0) rec.montantMensuel = Math.round(rec.montant / rec.dureeMois);
+    list.push(rec);
+    linkedIds[op.id] = true;
+    if (rec.numeroPiece) linkedIds['P:' + rec.numeroPiece] = true;
+    if (op.acomptePretId) op.acomptePretId = rec.id;
+    created++;
+  }
+  if (created > 0) {
+    DB.set('mdb_acomptesPrets', list);
+    try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e1) {}
+    try { DB.set('mdb_operationsCaisse', ops); try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e2) {} } catch (e3) {}
+    console.log('Reconstitution de ' + created + ' acompte(s)/prêt(s) depuis les pièces de caisse');
+    if (typeof toast === 'function') { try { toast(created + ' prêt(s)/acompte(s) restauré(s) depuis la caisse', 'success'); } catch (e4) {} }
+  }
+}
+
 function renderAcomptesPrets() {
   // Nettoyage orphelins générique avant chaque rendu du module acomptes.
   try{ _purgeOrphanAcomptes(); }catch(e){}
   // Nettoyage des acomptes fantômes (frais/encaissements) issus de l'ancienne saisie rapide.
   try{ _cleanGhostAcomptes(); }catch(e){}
+  // Recréation des lignes manquantes : une pièce de caisse typed pretrial/acompte
+  // qui n'a plus de ligne dans mdb_acomptesPrets (purge accidentelle, ancienne saisie)
+  // est rétablie automatiquement pour qu'elle réapparaisse ici ET dans le module Salaire.
+  try{ _reconcileAcomptesPretsFromCaisse(); }catch(eRec){}
   var acomptes = DB.get('mdb_acomptesPrets') || [];
   var employes = getEmployes();
   var empMap = {};
@@ -16946,11 +17120,26 @@ function renderAcomptesPrets() {
     if (a4.type === 'acompte' && (window._apValFilter || '') === 'valides' && a4.valide !== true) continue;
     displayedCount++;
     var emp4 = empMap[a4.employeId] || null;
-    var reste4 = Math.max(0, (a4.montant || 0) - (a4.montantRembourse || 0));
-    var stBadge4 = a4.statut === 'rembourse' ? 'badge-success' : (reste4 > 0 && a4.moisDeduction && a4.moisDeduction <= currentMonth ? 'badge-danger' : 'badge-warning');
-    var stLabel4 = a4.statut === 'rembourse' ? 'Rembours\u00e9' : 'En cours';
-    var valBadge4 = a4.type === 'acompte' ? (a4.valide === true ? '<span class="badge badge-success" title="D\u00e9ductible sur le bulletin">Valid\u00e9</span>' : '<span class="badge badge-gray" title="Non d\u00e9ductible tant que non valid\u00e9">Non valid\u00e9</span>') : '<span class="badge badge-gray">-</span>';
-    var valBtn4 = a4.type === 'acompte' && a4.valide !== true ? '<button class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px" onclick="apValiderUn(\'' + a4.id + '\')" title="Valider cet acompte">\u2713</button> ' : '';
+    /* Prêts : le restant dû se calcule sur les échéances RÉELLEMENT prélevées,
+       pas sur le total du plan (un plan existe => reste dû, même si tout est planifié). */
+    var calcRow4 = (a4.type === 'pret' && a4.montant > 0) ? _apCalcEcheances(a4, currentMonth) : null;
+    var reste4 = calcRow4 ? calcRow4.resteDu : Math.max(0, (a4.montant || 0) - (a4.montantRembourse || 0));
+    var stBadge4, stLabel4, stTitle4;
+    if (calcRow4) {
+      if (calcRow4.termine) { stBadge4 = 'badge-success'; stLabel4 = 'Remboursé'; stTitle4 = 'Toutes les échéances sont prélevées'; }
+      else if (calcRow4.echeancesEnRetard > 0) { stBadge4 = 'badge-danger'; stLabel4 = 'En retard'; stTitle4 = calcRow4.echeancesEnRetard + ' mensualité(s) dépassée(s) non prélevée(s)'; }
+      else if (calcRow4.echeancesDues > 0) { stBadge4 = 'badge-warning'; stLabel4 = 'Dû ce mois'; stTitle4 = fmtMoney(calcRow4.totalDu) + ' à prélever sur ' + calcRow4.echeancesDues + ' échéance(s)'; }
+      else { stBadge4 = 'badge-info'; stLabel4 = 'En cours'; stTitle4 = 'Rien à verser ce mois'; }
+    } else {
+      stBadge4 = a4.statut === 'rembourse' ? 'badge-success' : (reste4 > 0 && a4.moisDeduction && a4.moisDeduction <= currentMonth ? 'badge-danger' : 'badge-warning');
+      stLabel4 = a4.statut === 'rembourse' ? 'Remboursé' : 'En cours';
+      stTitle4 = a4.statut === 'rembourse' ? 'Soldé' : 'Reste ' + fmtMoney(reste4);
+    }
+    var _valide4 = a4.valide === true;
+    var valBadge4 = (a4.type === 'acompte' || a4.type === 'pret')
+      ? (_valide4 ? '<span class="badge badge-success" title="Validé : déductible sur le bulletin de paie">Validé</span>' : '<span class="badge badge-gray" title="Non déductible tant que non validé">Non validé</span>')
+      : '<span class="badge badge-gray">-</span>';
+    var valBtn4 = (a4.type === 'acompte' || a4.type === 'pret') && !_valide4 ? '<button class="btn btn-sm btn-primary" style="padding:3px 8px;font-size:11px" onclick="apValiderUn(\'' + a4.id + '\')" title="Valider ' + (a4.type === 'pret' ? 'ce prêt' : 'cet acompte') + ' : il devient déductible sur le bulletin">\u2713</button> ' : '';
     var pieceCell = a4.numeroPiece ? '<td class="fw-600" style="color:var(--primary);white-space:nowrap">' + escH(a4.numeroPiece) + '</td>' : '<td style="color:var(--gray-400)">-</td>';
     html += '<tr>' + (a4.type === 'acompte' ? '<td style="text-align:center"><input type="checkbox" class="apValCheck" data-ap-id="' + escH(a4.id) + '" onchange="apValCountFn()"></td>' : '<td></td>') + pieceCell;
     html += '<td class="fw-600">' + escH(emp4 ? emp4.nom : a4.employeNom || '-') + '</td>';
@@ -16962,39 +17151,67 @@ function renderAcomptesPrets() {
       html += '<td class="text-right">' + (a4.montantMensuel ? fmtMoney(a4.montantMensuel) : '-') + '</td>';
     }
     html += '<td>' + fmtMois(a4.moisDeduction) + '</td>';
-    html += '<td class="text-right" style="color:var(--success)">' + fmtMoney(a4.montantRembourse || 0) + '</td>';
-    html += '<td class="text-right fw-600" style="color:' + (reste4 > 0 ? 'var(--danger)' : 'var(--success)') + '">' + fmtMoney(reste4) + '</td>';
-    html += '<td><span class="badge ' + stBadge4 + '">' + stLabel4 + '</span></td>';
+    var _remb4 = calcRow4 ? calcRow4.totalPreleve : (a4.montantRembourse || 0);
+    html += '<td class="text-right" style="color:var(--success)">' + fmtMoney(_remb4) + '</td>';
+    var _resteTitle = calcRow4
+      ? (calcRow4.resteDu > 0 ? 'Reste dû sur ' + fmtMoney(calcRow4.resteDu) + (calcRow4.echeancesDues > 0 ? ' — dont ' + fmtMoney(calcRow4.totalDu) + ' échu ce mois' : '') : 'Soldé')
+      : '';
+    html += '<td class="text-right fw-600" style="color:' + (reste4 > 0 ? 'var(--danger)' : 'var(--success)') + '" title="' + escH(_resteTitle) + '">' + fmtMoney(reste4) + '</td>';
+    html += '<td><span class="badge ' + stBadge4 + '" title="' + escH(stTitle4) + '">' + stLabel4 + '</span></td>';
     var preleve4 = a4.preleve;
     var moisPreleve4 = a4.moisPreleve || '';
-    var preleveBadge = preleve4 ? '<span class="badge badge-success" title="Pr\u00e9lev\u00e9 en ' + moisPreleve4 + '">Oui</span>' : '<span class="badge badge-gray" title="Non pr\u00e9lev\u00e9">Non</span>';
+    var preleveBadge = calcRow4
+      ? (calcRow4.termine
+          ? '<span class="badge badge-success" title="' + calcRow4.nbPreleves + '/' + calcRow4.nbEcheances + ' échéances prélevées">Oui (' + calcRow4.nbPreleves + '/' + calcRow4.nbEcheances + ')</span>'
+          : (calcRow4.nbPreleves > 0
+              ? '<span class="badge badge-warning" title="' + calcRow4.nbPreleves + '/' + calcRow4.nbEcheances + ' échéances prélevées">' + calcRow4.nbPreleves + '/' + calcRow4.nbEcheances + '</span>'
+              : '<span class="badge badge-gray" title="Aucune mensualité prélevée">0/' + calcRow4.nbEcheances + '</span>'))
+      : (preleve4 ? '<span class="badge badge-success" title="Pr\u00e9lev\u00e9 en ' + moisPreleve4 + '">Oui</span>' : '<span class="badge badge-gray" title="Non pr\u00e9lev\u00e9">Non</span>');
     html += '<td>' + preleveBadge + '</td>';
     html += '<td>' + valBadge4 + '</td>';
     html += '<td>' + valBtn4 + '<button class="btn-icon" onclick="openAcomptePretModal(\'' + a4.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button><button class="btn-icon" style="color:var(--danger)" onclick="deleteAcomptePret(\'' + a4.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button> ';
-    html += '<span style="display:inline-block;width:28px;height:16px" title="Statut auto: remboursé quand somme échéances prélevées = montant"></span></td></tr>';
+    html += '<span style="display:inline-block;width:28px;height:16px" title="' + (calcRow4 ? 'Statut calculé sur le mois courant : dû si le mois est dépassé et non coché' : 'Statut : soldé quand le restant dû atteint 0') + '"></span></td></tr>';
     /* Amortization row for prêts - ÉDITABLE : ajout ligne, mois modifiable, mensualité 0 = report, solde auto */
     if (a4.type === 'pret' && a4.montant > 0) {
-      var mensuel4 = a4.montantMensuel || (a4.dureeMois ? Math.round(a4.montant / a4.dureeMois) : a4.montant);
-      var startM4 = a4.moisDeduction || (a4.date ? a4.date.substring(0, 7) : '');
-      var echs = a4.echeances && a4.echeances.length ? a4.echeances : (function(){ var arr=[]; var cap=a4.montant; var s=startM4; var n=a4.dureeMois||Math.ceil(a4.montant/(mensuel4||1)); for(var k=0;k<n;k++){ var m=s ? (function(sm,o){ var y=parseInt(sm.substring(0,4)); var mm=parseInt(sm.substring(5,7))+o; while(mm>12){mm-=12;y++;} return y+'-'+(mm<10?'0':'')+mm; })(s,k) : ('M'+(k+1)); var pay=Math.min(mensuel4||0, cap); cap=Math.max(0, cap-pay); arr.push({mois:m, montant:pay}); } return arr; })();
+      var calc4 = _apCalcEcheances(a4, currentMonth);
+      var echs = calc4.echs;
       if(!a4.echeances || !a4.echeances.length){ a4.echeances=echs; DB.set('mdb_acomptesPrets', acomptes); try{ _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(e){} }
-      var totEch=0; for(var _te=0;_te<echs.length;_te++) totEch+= (parseInt(echs[_te].montant)||0);
-      var resteEch=Math.max(0, a4.montant - totEch);
-      // auto statut remboursé si total échéances >= montant
-      if(totEch >= a4.montant && a4.statut!=='rembourse'){ a4.statut='rembourse'; a4.montantRembourse=a4.montant; }
-      html += '<tr><td colspan="14" style="padding:6px 8px;background:#f8fafc"><details open><summary style="cursor:pointer;font-weight:700;color:var(--primary);font-size:11px">📅 Amortissement éditable — ' + echs.length + ' échéances — reste ' + fmtMoney(resteEch) + ' — clique pour replier</summary>';
+      /* Statut = remboursement réel (échéances cochées), jamais le total du plan. */
+      if (calc4.termine && a4.statut !== 'rembourse') {
+        a4.statut = 'rembourse'; a4.montantRembourse = a4.montant;
+        try{ DB.set('mdb_acomptesPrets', acomptes); _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(eSt){}
+      } else if (!calc4.termine && a4.statut === 'rembourse') {
+        a4.statut = 'en_cours'; a4.montantRembourse = calc4.totalPreleve;
+        try{ DB.set('mdb_acomptesPrets', acomptes); _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(eSt2){}
+      }
+      var resteEch = Math.max(0, a4.montant - calc4.totalPlan);
+      var _dueTxt = calc4.echeancesDues > 0
+        ? ' — dû ce mois : ' + fmtMoney(calc4.totalDu) + ' (' + calc4.echeancesDues + ' échéance(s)'
+          + (calc4.echeancesEnRetard > 0 ? ', dont ' + calc4.echeancesEnRetard + ' en retard' : '') + ')'
+        : (calc4.termine ? ' — soldé' : ' — rien à verser ce mois');
+      html += '<tr><td colspan="14" style="padding:6px 8px;background:#f8fafc"><details><summary style="cursor:pointer;font-weight:700;color:var(--primary);font-size:11px">📅 Amortissement éditable — ' + echs.length + ' échéances — reste ' + fmtMoney(resteEch) + _dueTxt + ' — clique pour déplier</summary>';
       var lotN4 = 0;
       if (a4.groupeId) { for (var li4 = 0; li4 < acomptes.length; li4++) { if (acomptes[li4].groupeId === a4.groupeId && acomptes[li4].type === 'pret') lotN4++; } }
       var lotBtn4 = lotN4 > 1 ? '<button class="btn btn-xs btn-outline" onclick="askPrintPretLot(\''+a4.groupeId+'\')" style="font-size:10px;padding:3px 8px;border-color:var(--success);color:var(--success)" title="Imprimer tous les prêts du lot ensemble">👥 Imprimer le lot ('+lotN4+')</button>' : '';
-      html += '<div style="margin:6px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap"><button class="btn btn-xs btn-outline" onclick="addPretEcheance(\''+a4.id+'\')" style="font-size:10px;padding:3px 8px;border-color:var(--primary);color:var(--primary)">+ Ajouter échéance</button><button class="btn btn-xs btn-outline" onclick="printPretEcheances(\''+a4.id+'\')" style="font-size:10px;padding:3px 8px">🖨️ Imprimer</button>' + lotBtn4 + '<span style="font-size:10px;color:var(--gray-500)">Mets 0 pour sauter un mois (report) — le solde se met à jour, la paie ne prélève pas ce mois</span></div>';
-      html += '<table style="width:100%;font-size:11px;margin-top:4px;border:1px solid #e5e7eb"><thead><tr style="background:var(--gray-100)"><th style="padding:4px 6px">Mois</th><th style="padding:4px 6px;text-align:right">Mensualité (éditable)</th><th style="padding:4px 6px;text-align:right">Capital avant</th><th style="padding:4px 6px;text-align:right">Cumul</th><th style="padding:4px 6px;text-align:right">Reste</th><th style="width:30px"></th></tr></thead><tbody>';
+      html += '<div style="margin:6px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap"><button class="btn btn-xs btn-outline" onclick="addPretEcheance(\''+a4.id+'\')" style="font-size:10px;padding:3px 8px;border-color:var(--primary);color:var(--primary)">+ Ajouter échéance</button><button class="btn btn-xs btn-outline" onclick="printPretEcheances(\''+a4.id+'\')" style="font-size:10px;padding:3px 8px">🖨️ Imprimer</button>' + lotBtn4 + '<span style="font-size:10px;color:var(--gray-500)">Coche « Prélévé » une fois la mensualité réellement déduite (bulletin). Més 0 = mois sauté. Seul un prêt dont TOUTES les échéances sont cochées passe « Remboursé ».</span></div>';
+      html += '<table style="width:100%;font-size:11px;margin-top:4px;border:1px solid #e5e7eb"><thead><tr style="background:var(--gray-100)"><th style="padding:4px 6px;width:34px;text-align:center">✓</th><th style="padding:4px 6px">Mois</th><th style="padding:4px 6px;text-align:right">Mensualité (éditable)</th><th style="padding:4px 6px;text-align:right">Capital avant</th><th style="padding:4px 6px;text-align:right">Cumul</th><th style="padding:4px 6px;text-align:right">Reste</th><th style="width:30px"></th></tr></thead><tbody>';
       var capCalc=a4.montant, cumulCalc=0;
       for(var ei=0; ei<echs.length; ei++){
         var e=echs[ei];
         var capAvant=capCalc;
         var payE=Math.max(0, parseInt(e.montant)||0);
         cumulCalc+=payE; capCalc=Math.max(0, capCalc-payE);
-        html += '<tr style="background:'+(payE===0?'#fef3c7':'#fff')+'"><td style="padding:3px 4px"><input type="month" value="'+escH(e.mois||'')+'" onchange="updatePretEcheance(\''+a4.id+'\','+ei+',\'mois\',this.value)" style="padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:10px;width:130px"></td><td style="padding:3px 4px;text-align:right"><input type="number" min="0" value="'+payE+'" oninput="updatePretEcheance(\''+a4.id+'\','+ei+',\'montant\',this.value)" style="width:100px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;text-align:right;font-size:10px"></td><td style="padding:3px 4px;text-align:right">'+fmtMoney(capAvant)+'</td><td style="padding:3px 4px;text-align:right">'+fmtMoney(cumulCalc)+'</td><td style="padding:3px 4px;text-align:right;font-weight:700;color:'+(capCalc>0?'var(--danger)':'var(--success)')+'">'+fmtMoney(capCalc)+'</td><td style="padding:3px 4px;text-align:center"><button class="btn btn-xs" onclick="deletePretEcheance(\''+a4.id+'\','+ei+')" title="Supprimer cette échéance" style="color:var(--danger);border:1px solid var(--danger);padding:1px 6px;font-size:10px">×</button></td></tr>';
+        var _eMois = e.mois || '';
+        var _isPreleve = e.preleve === true;
+        var _estDue = payE > 0 && !_isPreleve && /^\d{4}-\d{2}$/.test(_eMois) && _eMois <= currentMonth;
+        var _estRetard = _estDue && _eMois < currentMonth;
+        var _rowBg = payE === 0 ? '#fef3c7' : (_isPreleve ? '#f0fdf4' : (_estRetard ? '#fef2f2' : (_estDue ? '#fff7ed' : '#fff')));
+        html += '<tr style="background:' + _rowBg + '">'
+          + '<td style="padding:3px 4px;text-align:center"><input type="checkbox" ' + (_isPreleve ? 'checked ' : '') + 'onchange="togglePretEcheancePreleve(\'' + a4.id + '\',' + ei + ',this.checked)" title="' + (_isPreleve ? 'Mensualité déjà prélevée — décocher pour annuler' : 'Cocher quand la paie a déduit cette mensualité') + '" style="width:15px;height:15px;cursor:pointer;' + (_estDue && !_isPreleve ? 'outline:2px solid var(--warning);outline-offset:1px' : '') + '"></td>'
+          + '<td style="padding:3px 4px"><input type="month" value="'+escH(_eMois)+'" onchange="updatePretEcheance(\''+a4.id+'\','+ei+',\'mois\',this.value)" style="padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;font-size:10px;width:130px">'
+          + (_estRetard ? ' <span class="badge badge-danger" style="font-size:9px;padding:1px 5px" title="Mensualité non prélevée alors que le mois est dépassé">En retard</span>' : (_estDue ? ' <span class="badge badge-warning" style="font-size:9px;padding:1px 5px">Dû</span>' : ''))
+          + '</td>'
+          + '<td style="padding:3px 4px;text-align:right"><input type="number" min="0" value="'+payE+'" oninput="updatePretEcheance(\''+a4.id+'\','+ei+',\'montant\',this.value)" style="width:100px;padding:3px 6px;border:1px solid #d1d5db;border-radius:4px;text-align:right;font-size:10px"></td><td style="padding:3px 4px;text-align:right">'+fmtMoney(capAvant)+'</td><td style="padding:3px 4px;text-align:right">'+fmtMoney(capCalc)+'</td><td style="padding:3px 4px;text-align:right;font-weight:700;color:'+(capCalc>0?'var(--danger)':'var(--success)')+'">'+fmtMoney(capCalc)+'</td><td style="padding:3px 4px;text-align:center"><button class="btn btn-xs" onclick="deletePretEcheance(\''+a4.id+'\','+ei+')" title="Supprimer cette échéance" style="color:var(--danger);border:1px solid var(--danger);padding:1px 6px;font-size:10px">×</button></td></tr>';
       }
       html += '</tbody></table>';
       html += '<div style="font-size:10px;color:var(--gray-500);margin-top:4px">Total échéances: '+fmtMoney(cumulCalc)+' / '+fmtMoney(a4.montant)+' — Si total &lt; montant, ajoute une échéance. Le statut passe à Remboursé automatiquement quand total = montant.</div>';
@@ -17032,6 +17249,31 @@ function apValCountFn() {
   var total = document.querySelectorAll('.apValCheck').length;
   if (all) { all.checked = total > 0 && n === total; all.indeterminate = n > 0 && n < total; }
 }
+/* Cocher / décocher une mensualité : c'est la source de vérité du remboursement.
+   Le statut « Remboursé » et le restant dû se recalculent sur le mois courant. */
+function togglePretEcheancePreleve(id, idx, checked) {
+  try {
+    var list = DB.get('mdb_acomptesPrets') || [];
+    var target = null;
+    for (var i = 0; i < list.length; i++) { if (list[i].id === id) { target = list[i]; break; } }
+    if (!target) { toast('Prêt introuvable', 'error'); return; }
+    var calc = _apCalcEcheances(target, _apMoisCourant());
+    if (!calc.echs[idx]) { toast('Échéance introuvable', 'error'); return; }
+    calc.echs[idx].preleve = !!checked;
+    if (checked) calc.echs[idx].datePreleve = getToday();
+    else delete calc.echs[idx].datePreleve;
+    target.echeances = calc.echs;
+    var c2 = _apCalcEcheances(target, _apMoisCourant());
+    target.montantRembourse = c2.totalPreleve;
+    target.statut = c2.termine ? 'rembourse' : 'en_cours';
+    target.preleve = c2.termine;
+    if (c2.termine) target.moisPreleve = _apMoisCourant();
+    DB.set('mdb_acomptesPrets', list);
+    try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e) {}
+    renderAcomptesPrets();
+    if (c2.termine) toast('Prêt intégralement remboursé', 'success');
+  } catch (e) { console.error('togglePretEcheancePreleve', e); }
+}
 function apValToggleAll(el) {
   var checks = document.querySelectorAll('.apValCheck');
   for (var i = 0; i < checks.length; i++) checks[i].checked = !!el.checked;
@@ -17041,7 +17283,7 @@ function _apSetValide(ids) {
   var list = DB.get('mdb_acomptesPrets') || [];
   var changed = false;
   for (var i = 0; i < list.length; i++) {
-    if (list[i].type === 'acompte' && ids.indexOf(list[i].id) !== -1 && list[i].valide !== true) {
+    if ((list[i].type === 'acompte' || list[i].type === 'pret') && ids.indexOf(list[i].id) !== -1 && list[i].valide !== true) {
       list[i].valide = true; changed = true;
     }
   }
@@ -17049,8 +17291,12 @@ function _apSetValide(ids) {
   return changed;
 }
 function apValiderUn(id) {
+  var list = DB.get('mdb_acomptesPrets') || [];
+  var isPret = false;
+  for (var i = 0; i < list.length; i++) { if (list[i].id === id) { isPret = (list[i].type === 'pret'); break; } }
   _apSetValide([id]);
-  toast('Acompte valid\u00e9 \u2014 il pourra \u00eatre d\u00e9duit sur le bulletin', 'success');
+  toast(isPret ? 'Pr\u00eat valid\u00e9 \u2014 ses mensualit\u00e9s pourront \u00eatre d\u00e9duites sur le bulletin'
+               : 'Acompte valid\u00e9 \u2014 il pourra \u00eatre d\u00e9duit sur le bulletin', 'success');
   renderAcomptesPrets();
 }
 function apValiderPreselect() {
@@ -17509,23 +17755,82 @@ function saveAcomptePret(id) {
   var data = {id: id || DB.genId(), type: type, employeId: employeId, employeNom: employeNom, montant: montant, dureeMois: type === 'pret' ? duree : 0, montantMensuel: montantMensuel, moisDeduction: moisDeduction, motif: motif, notes: notes, executant: executant, date: getToday(), statut: 'en_cours', montantRembourse: 0};
   if (id) {
     for (var i = 0; i < list.length; i++) {
-      if (list[i].id === id) { data.date = list[i].date; data.montantRembourse = list[i].montantRembourse || 0; data.caisseOpId = list[i].caisseOpId || ''; data.numeroPiece = list[i].numeroPiece || ''; data.preleve = list[i].preleve || false; data.moisPreleve = list[i].moisPreleve || ''; data.statut = list[i].statut || 'en_cours'; data.echeances = list[i].echeances || data.echeances; list[i] = data; break; }
+      if (list[i].id === id) {
+        var _prevL = list[i];
+        data.date = _prevL.date;
+        data.montantRembourse = _prevL.montantRembourse || 0;
+        data.caisseOpId = _prevL.caisseOpId || '';
+        data.numeroPiece = _prevL.numeroPiece || '';
+        data.preleve = _prevL.preleve || false;
+        data.moisPreleve = _prevL.moisPreleve || '';
+        data.statut = _prevL.statut || 'en_cours';
+        data.valide = _prevL.valide === true;
+        data.valideLe = _prevL.valideLe || '';
+        data.groupeId = _prevL.groupeId || '';
+        data.caisseId = _prevL.caisseId || '';
+        data.echeances = _prevL.echeances || [];
+        /* Changement de mois de deduction : on décale les échéances non prélevées
+           pour que le plan reste cohérent avec le nouveau mois de départ. */
+        if (data.echeances.length && _prevL.moisDeduction && moisDeduction
+            && _prevL.moisDeduction !== moisDeduction && type === 'pret') {
+          var _sh = _apMoisShift(_prevL.moisDeduction, moisDeduction);
+          if (_sh !== 0) {
+            for (var _si = 0; _si < data.echeances.length; _si++) {
+              var _se2 = data.echeances[_si];
+              if (_se2 && _se2.preleve === true) continue;
+              if (_se2 && /^\d{4}-\d{2}$/.test(_se2.mois || '')) _se2.mois = _apMoisAdd(_se2.mois, _sh);
+            }
+          }
+        }
+        list[i] = data; break;
+      }
     }
-    /* Sync apType, montant, employe, executant on linked caisse operation */
+    /* Sync apType, montant, employe, executant ET mois de deduction on linked caisse operation.
+       Sans le mois de deduction, la piece de caisse continuait d'afficher l'ancien mois
+       alors que la page Acompte et Pret affichait le nouveau. */
     if (data.caisseOpId) {
       var opsSync = getOperationsCaisse();
+      var _opsTouched = false;
       for (var osi = 0; osi < opsSync.length; osi++) {
         if (opsSync[osi].id === data.caisseOpId) {
           opsSync[osi].apType = type;
           opsSync[osi].montant = montant;
           opsSync[osi].beneficiaireId = employeId;
           opsSync[osi].beneficiaireNom = employeNom;
+          opsSync[osi].beneficiaireType = 'employe';
           opsSync[osi].executant = executant;
-          opsSync[osi].libelle = (type === 'acompte' ? 'Acompte employ\u00e9 : ' : 'Pr\u00eat employ\u00e9 : ') + employeNom;
+          opsSync[osi].apMoisDeduction = moisDeduction;
+          opsSync[osi].apDureeMois = (type === 'pret' ? duree : 0);
+          opsSync[osi].apMontantMensuel = montantMensuel;
+          opsSync[osi].libelle = (type === 'acompte' ? 'Acompte employé : ' : 'Prêt employé : ') + employeNom;
+          _opsTouched = true;
           break;
         }
       }
-      DB.set('mdb_operationsCaisse', opsSync);
+      if (_opsTouched) {
+        try { DB.set('mdb_operationsCaisse', opsSync); } catch (eOS) {}
+        try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (eOD) {}
+      }
+      /* Le lien peut être cassé (bug historique) : on le reconstruit par numéro de pièce. */
+      else if (data.numeroPiece) {
+        var opsFix = getOperationsCaisse();
+        var _fixed = false;
+        for (var ofi = 0; ofi < opsFix.length; ofi++) {
+          if (opsFix[ofi].numeroPiece === data.numeroPiece) {
+            opsFix[ofi].acomptePretId = data.id;
+            opsFix[ofi].apType = type;
+            opsFix[ofi].apMoisDeduction = moisDeduction;
+            data.caisseOpId = opsFix[ofi].id;
+            _fixed = true;
+            break;
+          }
+        }
+        if (_fixed) {
+          try { DB.set('mdb_operationsCaisse', opsFix); } catch (eF1) {}
+          try { DB.set('mdb_acomptesPrets', list); } catch (eF2) {}
+          try { _dirtyKeys['mdb_operationsCaisse'] = true; _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (eF3) {}
+        }
+      }
     }
   } else {
     var caisses = getCaisses();
@@ -31550,6 +31855,10 @@ function generatePieceNumber(caisseId, opDate) {
 function saveCaisse(id, asDraft) {
   var isDraft = !!asDraft;
   var editId = id || window._csEditId || '';
+  /* Id de la pièce réellement enregistrée (créée ou modifiée) : sert à rattacher
+     l'acompte/prêt à SA pièce, et non à « la dernière du tableau » qui peut être
+     une autre écriture (bug historique : le prêt devenait orphelin puis purgé). */
+  var savedOpId = editId;
   /* Save date early so it can be restored if form is re-rendered */
   var _dateEl = document.getElementById('csDate');
   if (_dateEl) window._csLastDate = _dateEl.value;
@@ -31795,7 +32104,8 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
     } else {
       numeroPiece = generatePieceNumber(caisseId, fullDate);
       var newId = DB.genId();
-      ops.push({id:newId, numeroPiece:numeroPiece, date:fullDate, heure:heure, codeId:codeId, code:codeStr, libelle:libelle, montant:montant, sens:sens, moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType: (typeOp === 'acompte' || typeOp === 'pret') ? 'employe' : beneficiaireType, beneficiaireId:beneficiaireId, beneficiaireNom:beneficiaireNom, observations:tiers, remettant:remettant, executant:executant, imprime:false, montantCharge: beneficiaireType === 'fournisseur' ? montantCharge : 0, caisseId:caisseId, reversed:false, frais:frais, linkedOpId:'', apType: (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : '', brouillon: isDraft});
+      ops.push({id:newId, numeroPiece:numeroPiece, date:fullDate, heure:heure, codeId:codeId, code:codeStr, libelle:libelle, montant:montant, sens:sens, moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType: (typeOp === 'acompte' || typeOp === 'pret') ? 'employe' : beneficiaireType, beneficiaireId:beneficiaireId, beneficiaireNom:beneficiaireNom, observations:tiers, remettant:remettant, executant:executant, imprime:false, montantCharge: beneficiaireType === 'fournisseur' ? montantCharge : 0, caisseId:caisseId, reversed:false, frais:frais, linkedOpId:'', apType: (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : '', apMoisDeduction: (typeOp === 'acompte' || typeOp === 'pret') ? (document.getElementById('csAPMoisDeduction') ? document.getElementById('csAPMoisDeduction').value : '') : '', brouillon: isDraft});
+      savedOpId = newId;
     }
     DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
     if (beneficiaireType === 'fournisseur' && beneficiaireId && sens === 'sortie') {
@@ -31830,7 +32140,7 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
         date: fullDate || getToday(),
         statut: 'en_cours',
         montantRembourse: 0,
-        caisseOpId: editId || (ops.length > 0 ? ops[ops.length - 1].id : ''),
+        caisseOpId: savedOpId || '',
         numeroPiece: numeroPiece,
         provenance: 'caisse',
         moyen: moyenPaiement,
@@ -31839,19 +32149,38 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
         caisseId: caisseId
       };
       if (existingApIdx >= 0) {
-        apData.montantRembourse = apList[existingApIdx].montantRembourse || 0;
-        apData.statut = apList[existingApIdx].statut || 'en_cours';
-        apData.preleve = apList[existingApIdx].preleve || false;
-        apData.moisPreleve = apList[existingApIdx].moisPreleve || '';
+        var _prevAp = apList[existingApIdx];
+        apData.montantRembourse = _prevAp.montantRembourse || 0;
+        apData.statut = _prevAp.statut || 'en_cours';
+        apData.preleve = _prevAp.preleve || false;
+        apData.moisPreleve = _prevAp.moisPreleve || '';
+        apData.valide = _prevAp.valide === true;
+        apData.valideLe = _prevAp.valideLe || '';
+        apData.groupeId = _prevAp.groupeId || '';
+        /* Le plan d'amortissement est conservé. Si le mois de deduction change,
+           on décale les échéances NON ENCORE prélevées pour qu'elles restent
+           alignées sur le nouveau mois de départ (celles déjà payées ne bougent pas). */
+        apData.echeances = _prevAp.echeances || [];
+        if (apData.echeances.length && _prevAp.moisDeduction && apMoisDeduction
+            && _prevAp.moisDeduction !== apMoisDeduction && typeOp === 'pret') {
+          var _shift = _apMoisShift(_prevAp.moisDeduction, apMoisDeduction);
+          if (_shift !== 0) {
+            for (var _sei = 0; _sei < apData.echeances.length; _sei++) {
+              var _se = apData.echeances[_sei];
+              if (_se && _se.preleve === true) continue;
+              if (_se && /^\d{4}-\d{2}$/.test(_se.mois || '')) _se.mois = _apMoisAdd(_se.mois, _shift);
+            }
+          }
+        }
         apList[existingApIdx] = apData;
       } else {
         apList.push(apData);
       }
       DB.set('mdb_acomptesPrets', apList);
       /* Link caisse op to acompte/pret */
-      var opIdToLink = editId || (ops.length > 0 ? ops[ops.length - 1].id : '');
+      var opIdToLink = savedOpId || editId || '';
       for (var _apOi = 0; _apOi < ops.length; _apOi++) {
-        if (ops[_apOi].id === opIdToLink) { ops[_apOi].acomptePretId = apData.id; break; }
+        if (ops[_apOi].id === opIdToLink) { ops[_apOi].acomptePretId = apData.id; ops[_apOi].apMoisDeduction = apMoisDeduction; break; }
       }
 DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
     toast(isDraft ? 'Brouillon enregistré (Pièce n° ' + numeroPiece + '). Retrouvez-le via le filtre « Brouillons » en haut du tableau caisse (ou « Toutes ») pour le modifier ou le valider.' : 'Op\u00e9ration enregistr\u00e9e (Pi\u00e8ce n\u00b0 ' + numeroPiece + ')');
