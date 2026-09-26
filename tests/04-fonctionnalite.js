@@ -185,6 +185,209 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
+  r.push({
+    nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('STOCK POINTES (PAQUETS)') !== -1) ? 'OK' : 'ABSENT'
+    `,
+    attendu: 'OK'
+  });
+
+  r.push({
+    nom: 'Tableau de bord Exploitation : 100 pointes sont comptees en 2 cartons de 50',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var t = dashCartePointes().replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      (/\\b2 c\\./.test(t) && /\\b100 paq\\./.test(t) && /\\b2 cartons\\b/.test(t))
+        ? 'OK : 2 cartons / 100 paquets'
+        : 'ECHEC : ' + t.substr(0, 220)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Tableau de bord Exploitation : le nombre de cartons suit le reglage paquets/carton',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '25');
+      var t = dashCartePointes().replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      (/\\b4 cartons\\b/.test(t) && /25 paquets\\/carton/.test(t))
+        ? 'OK : 4 cartons a 25 paquets/carton'
+        : 'ECHEC : ' + t.substr(0, 220)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
+  r.push({
+    nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      document.getElementById('ai_qte').value = '2';
+      document.getElementById('ai_qte_paquet').value = '50';
+      document.getElementById('ai_cond').value = '1000';
+      document.getElementById('ai_pu').value = '45000';
+      var c = apConsoCalc();
+      (c.cartons === 2 && c.paquets === 100 && c.unites === 100000 && c.total === 90000)
+        ? 'OK : 2 c / ' + c.paquets + ' paq / ' + c.unites + ' pointes / ' + c.total + ' F'
+        : 'ECHEC : ' + JSON.stringify(c)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat pointes : le prix a la pointe vaut prix du carton / pointes du carton',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      document.getElementById('ai_qte').value = '2';
+      document.getElementById('ai_qte_paquet').value = '50';
+      document.getElementById('ai_cond').value = '1000';
+      document.getElementById('ai_pu').value = '45000';
+      document.getElementById('ai_code').value = 'P6';
+      document.getElementById('ai_designation').value = 'Pointes 6';
+      document.getElementById('ai_constype').value = 'POINTE';
+      _tempAchatItems = [];
+      addAchatItemLine('consumable');
+      var it = _tempAchatItems[0];
+      (it.cartons === 2 && it.paquets === 100 && it.quantity === 100000
+        && it.prix_carton === 45000 && it.total_price === 90000
+        && Math.abs(it.unit_price - 0.9) < 0.0001)
+        ? 'OK : ' + it.cartons + ' carton(s), ' + it.unit_price + ' F/pointe, ' + it.total_price + ' F'
+        : 'ECHEC : ' + JSON.stringify(it)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat pointes : la ligne reprise en modification conserve cartons et prix du carton',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:60000, paquets:60,
+        cartons:2, ppc:30, cond:1000, ctype:'POINTE', prix_carton:12000, unit_price:0.2, total_price:24000 }];
+      editAchatItemLine(0, 'consumable');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_qte') === '2' && g('ai_qte_paquet') === '30'
+        && g('ai_cond') === '1000' && g('ai_pu') === '12000')
+        ? 'OK : 2 cartons x 30 paq x 1000 = 60 000 pointes, 12 000 F/carton'
+        : 'ECHEC : qte=' + g('ai_qte') + ' ppc=' + g('ai_qte_paquet')
+          + ' cond=' + g('ai_cond') + ' pu=' + g('ai_pu')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      varAvec = consoNorm({ code:'P6', designation:'Pointes 6', ctype:'POINTE', cond:1000, quantite:100000, paquets:100, cartons:2 });
+      varAnc = consoNorm({ code:'P5', designation:'Pointes 5', ctype:'POINTE', cond:1000, quantite:50000, paquets:50 });
+      (varAvec.cartons === 2 && varAnc.cartons === 1)
+        ? 'OK : saisie 2 cartons, ancienne ligne 50 paq => 1 carton'
+        : 'ECHEC : ' + varAvec.cartons + ' / ' + varAnc.cartons
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Achats : une entree inutilisable ne doit pas casser la page ---------- */
+  r.push({
+    nom: 'Achats : une entree null/undefined dans la liste n\'empêche plus l\'affichage',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var d = JSON.parse(localStorage.getItem('mdb_production') || '{}');
+      d.achats = [null, undefined, 'texte', 42, [], { id:'B1', reference:'B1', date:'2026-09-24', category:'consumables', montant_total:1000, items:[null, { code:'P6', quantity:10 }] }];
+      localStorage.setItem('mdb_production', JSON.stringify(d));
+      CURRENT_PAGE = 'achats'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('Cette page n') === -1 && h.indexOf('B1') !== -1) ? 'OK' : 'CASSE'
+    `,
+    attendu: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : la reparation retire les entrees invalides du tableau',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var d = JSON.parse(localStorage.getItem('mdb_production') || '{}');
+      d.achats = [null, undefined, 'texte', 42, { id:'B1', reference:'B1', date:'2026-09-24', items:'pas un tableau' }];
+      localStorage.setItem('mdb_production', JSON.stringify(d));
+      var r = prodRepareSections();
+      var apres = JSON.parse(localStorage.getItem('mdb_production') || '{}').achats;
+      (Array.isArray(apres) && apres.length === 1 && apres[0].id === 'B1'
+        && Array.isArray(apres[0].items) && apres[0].items.length === 0
+        && r.join(',').indexOf('achats') !== -1)
+        ? 'OK : 1 achat conserve, ' + (5 - 1) + ' entrees retirees'
+        : 'ECHEC : ' + JSON.stringify(apres) + ' / ' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : un achat dont items est un objet ne casse plus le detail',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var d = JSON.parse(localStorage.getItem('mdb_production') || '{}');
+      d.achats = [{ id:'B2', reference:'B2', date:'2026-09-24', category:'consumables', montant_total:2000, items:{ 0:{ code:'P6', quantity:5 } } }];
+      localStorage.setItem('mdb_production', JSON.stringify(d));
+      CURRENT_PAGE = 'achats'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('Cette page n') === -1 && h.indexOf('B2') !== -1) ? 'OK' : 'CASSE'
+    `,
+    attendu: 'OK'
+  });
+
+  /* ---------- App principale : modifier un achat depuis la liste ---------- */
+  r.push({
+    nom: 'App principale : le bouton Modifier existe sur chaque achat',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      var p = apProdGet();
+      p.achats = [{ id:'B2409', reference:'B2409', date:'2026-09-24', fournisseur:'TIJANI',
+        receiver_name:'GABOU LAURE CLEMENCE', category:'consumables', total_volume:0, montant_total:55000,
+        items:[{ code:'P6', designation:'Pointes 6', quantity:1000, cond:500, unit_price:27500, total_price:55000 }] }];
+      apProdSet(p);
+      renderAchatsProduction();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf("editApAchat('B2409')") !== -1 && h.indexOf('Modifier cet achat') !== -1) ? 'OK' : 'ABSENT'
+    `,
+    attendu: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : modifier un achat met a jour sans en creer un second',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      var p = apProdGet();
+      p.achats = [{ id:'B2409', reference:'B2409', date:'2026-09-24', fournisseur:'TIJANI',
+        receiver_name:'GABOU', category:'consumables', montant_total:55000,
+        items:[{ code:'P6', designation:'Pointes 6', quantity:1000, unit_price:27500, total_price:55000 }] }];
+      p.stockConsum = [];
+      apProdSet(p);
+      window._apEditingId = 'B2409';
+      document.getElementById('ach_ref').value = 'B2409';
+      document.getElementById('ach_date').value = '2026-09-25';
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      document.getElementById('ach_receiver').value = 'GABOU';
+      document.getElementById('ach_acheteur').value = '';
+      _tempAchatItems = [{ code:'P6', designation:'Pointes 6', quantity:2000, unit_price:27500, total_price:55000, volume:0 }];
+      saveApAchat(null, 'consumables');
+      var apres = apProdGet();
+      (apres.achats.length === 1 && apres.achats[0].date === '2026-09-25'
+        && apres.achats[0].montant_total === 55000
+        && apres.achats[0].items.length === 1 && apres.achats[0].items[0].quantity === 2000)
+        ? 'OK : 1 achat, date 2026-09-25, 2000 pointes'
+        : 'ECHEC : ' + JSON.stringify(apres.achats)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
