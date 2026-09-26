@@ -20,7 +20,8 @@ const ETAPES = [
   { cle: '01', nom: 'syntaxe', charger: () => require('./01-syntaxe.js') },
   { cle: '02', nom: 'fonctions', charger: () => require('./02-fonctions.js') },
   { cle: '03', nom: 'pages', charger: () => require('./03-pages.js') },
-  { cle: '04', nom: 'fonctionnalite', charger: () => require('./04-fonctionnalite.js') }
+  { cle: '04', nom: 'fonctionnalite', charger: () => require('./04-fonctionnalite.js') },
+  { cle: '05', nom: 'ergonomie', charger: () => require('./05-ergonomie.js') }
 ];
 
 const rapport = new Rapport('MONTABBORD — CONTROLE QUALITE DES APPLICATIONS');
