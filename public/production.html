@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-42';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-44';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -1778,11 +1778,22 @@ function render_dashboard() {
   h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem">';
   var packsPerCarton = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
   var pointePaquets = 0;
+  var pointeDetail = {};   /* code (P5, P6...) -> { paquets, cartons, unites } */
   getStockConsum().forEach(function(st) {
     var n = consoNorm(st);
-    if (n.type === 'POINTE') pointePaquets += (n.paquets || 0);
+    if (n.type !== 'POINTE') return;
+    pointePaquets += (n.paquets || 0);
+    var key = (n.code || 'P?').toUpperCase();
+    if (!pointeDetail[key]) pointeDetail[key] = { code: key, des: n.des, paquets: 0, unites: 0, cartons: 0 };
+    pointeDetail[key].paquets += (n.paquets || 0);
+    pointeDetail[key].unites  += (n.unites || 0);
   });
-  var pointeCartons = Math.max(1, Math.ceil(pointePaquets / packsPerCarton));
+  Object.keys(pointeDetail).forEach(function(k) {
+    var d = pointeDetail[k];
+    d.cartons = Math.ceil(d.paquets / packsPerCarton);
+  });
+  var pointeCartons = 0;
+  Object.keys(pointeDetail).forEach(function(k) { pointeCartons += pointeDetail[k].cartons; });
   var cats = [
     { name: 'Stock de Pointe', line1: fmt(pointePaquets) + ' paquets', line2: fmt(pointeCartons) + ' carton(s)', icon: '📌', page: 'stock-consum', tint: '#fff7ed', custom: true },
     { name: 'Semi-Finis', vol: volStock.semi, icon: '🔧', page: 'stock-semi', tint: '#eff6ff' },
@@ -1794,6 +1805,19 @@ function render_dashboard() {
     if (c.custom) {
       h += '<div style="font-size:1.1rem;font-weight:800;color:var(--accent)">' + c.line1 + '</div>';
       h += '<div style="font-size:.68rem;color:var(--dim);font-weight:600">' + c.line2 + '</div>';
+      /* Detail par type de pointage : « P6 = 2 carton(s) » */
+      var _pk = Object.keys(pointeDetail).sort();
+      if (_pk.length) {
+        h += '<div style="margin-top:.4rem;display:flex;flex-wrap:wrap;gap:3px;justify-content:center">';
+        for (var _pi = 0; _pi < _pk.length; _pi++) {
+          var _d = pointeDetail[_pk[_pi]];
+          h += '<span title="' + escH(_d.des || '') + ' — ' + fmt(_d.paquets) + ' paquets (' + fmt(_d.unites) + ' pointes)" '
+             + 'style="display:inline-flex;align-items:center;gap:3px;background:#fff;border:1px solid #fed7aa;border-radius:20px;padding:1px 6px;font-size:.62rem;font-weight:700;color:#9a3412;cursor:pointer" '
+             + 'onclick="event.stopPropagation();openConsoDetail(\'' + escH(_d.code) + '\')">'
+             + escH(_d.code) + ' <span style="color:var(--accent)">' + fmt(_d.cartons) + '</span></span>';
+        }
+        h += '</div>';
+      }
       h += '<div style="font-size:.6rem;color:var(--dim);margin-top:.3rem;cursor:pointer" onclick="event.stopPropagation();setPacksPerCarton()" title="Changer le nombre de paquets par carton">⚙ ' + packsPerCarton + ' paquets/carton</div>';
     } else {
       h += '<div style="font-size:1.1rem;font-weight:800;color:var(--accent)">' + c.vol.toFixed(2) + ' m³</div>';
@@ -4694,7 +4718,105 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     var cond = parseFloat(s.cond != null ? s.cond : s.qty_per_packet) || 0;
     var unites = parseFloat(s.quantite) || 0;
     var paq = t === 'POINTE' ? (cond > 0 ? Math.floor(unites / cond) : unites) : unites;
-    return { id: s.id, code: code || '-', des: des || '-', type: t, emplacement: s.emplacement || s.zone || '-', cond: cond, unites: unites, paquets: paq };
+    var _ppc = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
+    var cart = t === 'POINTE' ? Math.ceil(paq / _ppc) : 0;
+    return { id: s.id, code: code || '-', des: des || '-', type: t, emplacement: s.emplacement || s.zone || '-', cond: cond, unites: unites, paquets: paq, cartons: cart };
+  }
+  /* Fiche d'un type de pointage : mouvements d'entrée / sortie (fiche de stock). */
+  function openConsoDetail(code) {
+    try {
+      var cible = String(code || '').toUpperCase();
+      var _ppc = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
+      var lignes = getStockConsum().map(consoNorm).filter(function(x) {
+        return x.type === 'POINTE' && String(x.code || '').toUpperCase() === cible;
+      });
+      var totP = 0, totU = 0, totC = 0;
+      lignes.forEach(function(x) { totP += x.paquets; totU += x.unites; totC += x.cartons; });
+      var mvtHtml = '<div style="margin-top:12px"><h4 style="font-size:.85rem;margin:0 0 6px;color:var(--text)">Mouvements de stock</h4>';
+      var rows = buildConsoMovements(lignes);
+      if (!rows.length) {
+        mvtHtml += '<div style="padding:14px;text-align:center;color:var(--dim);border:1px dashed var(--border);border-radius:8px">Aucun mouvement enregistré pour ce type</div>';
+      } else {
+        mvtHtml += '<table style="width:100%;font-size:.78rem"><thead><tr style="background:var(--gray-50)"><th style="text-align:left;padding:6px 8px">Date</th><th>Libellé</th><th style="text-align:right">Quantité</th><th style="text-align:right">Paquets</th><th style="text-align:right">Cartons</th></tr></thead><tbody>';
+        rows.forEach(function(r) {
+          var signe = r.qte < 0 ? 'var(--danger)' : 'var(--green)';
+          var c2 = r.paquets != null ? Math.ceil(Math.abs(r.paquets) / _ppc) : null;
+          mvtHtml += '<tr><td style="padding:5px 8px;white-space:nowrap">' + fmtD(r.date) + '</td><td>' + escH(r.libelle || '') + '</td>'
+            + '<td style="text-align:right;font-weight:700;color:' + signe + '">' + (r.qte > 0 ? '+' : '') + fmt(r.qte) + '</td>'
+            + '<td style="text-align:right">' + (r.paquets != null ? fmt(r.paquets) : '-') + '</td>'
+            + '<td style="text-align:right;font-weight:700">' + (c2 != null ? fmt(c2) : '-') + '</td></tr>';
+        });
+        mvtHtml += '</tbody></table>';
+      }
+      mvtHtml += '</div>';
+      var m = '<div class="modal-overlay" id="consoDetailOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:720px">';
+      m += '<h2>📦 Fiche de stock — ' + escH(cible) + '</h2>';
+      m += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:6px">'
+        + '<div><div style="font-size:1.02rem;font-weight:700">' + escH(lignes[0] ? lignes[0].des : '') + '</div>'
+        + '<div style="color:var(--dim);font-size:.78rem">' + lignes.length + ' ligne(s) de stock</div></div>'
+        + '<div style="display:flex;gap:14px;flex-wrap:wrap">'
+        + '<div><div style="font-size:.62rem;color:var(--dim);text-transform:uppercase">Pointes</div><div style="font-size:1.05rem;font-weight:800">' + fmt(totU) + '</div></div>'
+        + '<div><div style="font-size:.62rem;color:var(--dim);text-transform:uppercase">Paquets</div><div style="font-size:1.05rem;font-weight:800">' + fmt(totP) + '</div></div>'
+        + '<div><div style="font-size:.62rem;color:var(--dim);text-transform:uppercase">Cartons</div><div style="font-size:1.05rem;font-weight:800;color:var(--accent)">' + fmt(totC) + '</div></div>'
+        + '<div><div style="font-size:.62rem;color:var(--dim);text-transform:uppercase">Cond.</div><div style="font-size:1.05rem;font-weight:800">' + (lignes[0] && lignes[0].cond ? fmt(lignes[0].cond) : '-') + '</div></div>'
+        + '</div></div>';
+      m += mvtHtml;
+      m += '<div style="margin-top:1rem;text-align:right"><button class="btn" onclick="document.getElementById(\'consoDetailOverlay\').remove()">Fermer</button></div>';
+      m += '</div></div>';
+      var prev = document.getElementById('consoDetailOverlay');
+      if (prev) prev.remove();
+      document.body.appendChild(document.createRange().createContextualFragment(m));
+    } catch (e) { console.error('openConsoDetail', e); }
+  }
+  /* Reconstruit les mouvements (entrees/sorties) d'un consummable depuis l'historique. */
+  function buildConsoMovements(lignes) {
+    var out = [];
+    try {
+      var cibles = {};
+      lignes.forEach(function(x) { if (x.id) cibles[x.id] = x; });
+      var stocks = getStockConsum();
+      stocks.forEach(function(s) {
+        var x = consoNorm(s);
+        if (!cibles[x.id]) return;
+        out.push({ date: s.date || '', libelle: s.libelle || s.mouvement || (s.quantite >= 0 ? 'Entrée' : 'Sortie'), qte: x.unites, paquets: x.paquets });
+      });
+      out.sort(function(a, b) { return String(b.date).localeCompare(String(a.date)); });
+    } catch (e) {}
+    return out;
+  }
+  /* Bloc de mouvements inline (ligne deroulee dans la table). */
+  function buildConsoMovementBlock(x) {
+    var _ppc = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
+    var rows = buildConsoMovements([x]);
+    var inner = '<div style="font-size:.72rem;font-weight:700;color:#9a3412;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Mouvements — ' + escH(x.code) + '</div>';
+    if (!rows.length) {
+      inner += '<div style="font-size:.75rem;color:#94a3b8;padding:8px 0">Aucun mouvement enregistré</div>';
+    } else {
+      inner += '<table style="width:100%;font-size:.76rem;background:#fff;border-radius:8px;overflow:hidden">'
+        + '<thead><tr style="background:#ffedd5"><th style="text-align:left;padding:5px 8px">Date</th><th>Libellé</th><th style="text-align:right">Quantité</th><th style="text-align:right">Paquets</th><th style="text-align:right">Cartons</th></tr></thead><tbody>';
+      rows.forEach(function(r) {
+        var c2 = r.paquets != null ? Math.ceil(Math.abs(r.paquets) / _ppc) : null;
+        inner += '<tr><td style="padding:4px 8px;white-space:nowrap">' + fmtD(r.date) + '</td><td>' + escH(r.libelle || '') + '</td>'
+          + '<td style="text-align:right;font-weight:700">' + fmt(r.qte) + '</td>'
+          + '<td style="text-align:right">' + (r.paquets != null ? fmt(r.paquets) : '-') + '</td>'
+          + '<td style="text-align:right;font-weight:700">' + (c2 != null ? fmt(c2) : '-') + '</td></tr>';
+      });
+      inner += '</tbody></table>';
+    }
+    inner += '<div style="font-size:.68rem;color:#94a3b8;margin-top:6px">Stock actuel : ' + fmt(x.unites) + ' pointes = ' + fmt(x.paquets) + ' paquets = ' + fmt(x.cartons) + ' carton(s) (' + _ppc + ' paq/carton)</div>';
+    return inner;
+  }
+  /* Clic sur une ligne POINTE : deroule / replie la fiche de mouvements. */
+  function toggleConsoDetailRow(tr) {
+    try {
+      var nx = tr.nextElementSibling;
+      if (!nx || !nx.id) return;
+      var ouvrir = nx.style.display === 'none' || nx.style.display === '';
+      nx.style.display = ouvrir ? '' : 'none';
+      tr.style.background = ouvrir ? '#fff7ed' : '';
+      var cd = tr.querySelector('td');
+      if (cd && cd.textContent.indexOf('▶') === 0) cd.textContent = (ouvrir ? '▼ ' : '▶ ') + cd.textContent.substring(2);
+    } catch (e) {}
   }
   function render_stock_consum() {
     var tab = getSection('stockConsoTab', 'tous');
@@ -4727,24 +4849,35 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
         h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(x.code) + '</td>';
         h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + fmt(x.unites) + '</td>';
-        h += '<td><td style="white-space:nowrap"></td></tr>';
+        h += '<td style="white-space:nowrap"></td></tr>';
       });
       h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totD) + '</td><td></td></tr>';
     } else {
-      h += '<tr><th>Code</th><th>Nom</th><th>Type</th><th>Emplacement</th><th style="text-align:right">Cond.</th><th style="text-align:right">Stock pointes</th><th style="text-align:right">Stock paquets</th><th>Actions</th></tr>';
-      var totU = 0, totP = 0;
+      h += '<tr><th>Code</th><th>Nom</th><th>Type</th><th>Emplacement</th><th style="text-align:right">Cond.</th><th style="text-align:right">Stock pointes</th><th style="text-align:right">Paquets</th><th style="text-align:right">Cartons</th><th>Actions</th></tr>';
+      var totU = 0, totP = 0, totC = 0;
       list.forEach(function(x) {
         totU += x.unites;
         totP += x.paquets;
+        totC += x.cartons;
         var isDiv = x.type === 'DIVERS';
-        h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(x.code) + '</td>';
+        /* Ligne cliquable : deroule la fiche de stock du type (mouvements). */
+        var detId = 'consoDet_' + String(x.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+        var isPointe = x.type === 'POINTE';
+        h += '<tr' + (isPointe ? ' style="cursor:pointer" onclick="toggleConsoDetailRow(this)" title="Cliquer pour voir les mouvements de ce type"' : '') + '>'
+          + '<td style="font-weight:700;color:var(--accent)">' + (isPointe ? '▶ ' : '') + escH(x.code) + '</td>';
         h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement) + '</td>';
         h += '<td style="text-align:right">' + (isDiv ? '-' : fmt(x.cond)) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? '-' : fmt(x.unites)) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + fmt(x.paquets) + '</td>';
-        h += '<td><td style="white-space:nowrap"></td></tr>';
+        h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + (isDiv ? '-' : fmt(x.cartons)) + '</td>';
+        h += '<td style="white-space:nowrap"></td></tr>';
+        /* Ligne de detail deroulee (mouvements) */
+        if (isPointe) {
+          h += '<tr id="' + detId + '" style="display:none;background:#fff7ed"><td colspan="9" style="padding:0">'
+            + '<div style="padding:10px 12px">' + buildConsoMovementBlock(x) + '</div></td></tr>';
+        }
       });
-      h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totU) + '</td><td style="text-align:right">' + fmt(totP) + '</td><td></td></tr>';
+      h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totU) + '</td><td style="text-align:right">' + fmt(totP) + '</td><td style="text-align:right;color:var(--accent)">' + fmt(totC) + '</td><td></td></tr>';
     }
     h += '</table>';
     if (list.length === 0) h += '<div class="empty">Aucun consommable</div>';
