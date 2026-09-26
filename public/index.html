@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-09-26-42';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-43';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16893,7 +16893,8 @@ function _reconcileAcomptesPretsFromCaisse() {
     if (!op || op.reversed) continue;
     var t = op.apType || '';
     if (t !== 'pret' && t !== 'acompte') continue;
-    if (op.collective && op.pendingDetail) continue;   /* collective : gérée par la répartition */
+    /* La pièce maîtresse « à répartir » (pendingDetail) n'est pas un prêt individuel. */
+    if (op.pendingDetail) continue;
     if (!op.beneficiaireId) continue;
     /* Garde-fou : le bénéficiaire doit être un employé connu de l'entreprise. */
     var _empOk = false;
@@ -16902,7 +16903,12 @@ function _reconcileAcomptesPretsFromCaisse() {
       for (var _ei = 0; _ei < _emps.length; _ei++) { if (_emps[_ei] && _emps[_ei].id === op.beneficiaireId) { _empOk = true; break; } }
     } catch (eEmp) { _empOk = false; }
     if (!_empOk) continue;
-    if (linkedIds[op.id] || (op.numeroPiece && linkedIds['P:' + op.numeroPiece]) || (op.acomptePretId && linkedIds['A:' + op.acomptePretId])) continue;
+    /* Une remise collective partage le même numeroPiece pour tous ses employés :
+       on ne peut donc PAS dédupliquer sur le numeroPiece, sinon une seule ligne
+       serait recréée (bug : les autres employés restaient à « 0 op. »).
+       La déduplication se fait sur l'ID de l'opération, qui est unique. */
+    if (linkedIds[op.id]) continue;
+    if (op.acomptePretId && linkedIds['A:' + op.acomptePretId]) continue;
     var rec = {
       id: op.acomptePretId || DB.genId(),
       type: t,
@@ -16922,14 +16928,13 @@ function _reconcileAcomptesPretsFromCaisse() {
       provenance: 'caisse',
       moyen: op.moyenPaiement || '',
       executant: op.executant || '',
-      caisseId: op.caisseId || ''
+      caisseId: op.caisseId || '',
+      groupeId: op.groupeId || ''
     };
-    if (rec.type === 'pret' && !rec.dureeMois) rec.dureeMois = 0;
-    if (rec.type === 'pret' && !rec.montantMensuel && rec.dureeMois > 0) rec.montantMensuel = Math.round(rec.montant / rec.dureeMois);
+    if (rec.type === 'pret' && rec.dureeMois > 0 && !rec.montantMensuel) rec.montantMensuel = Math.round(rec.montant / rec.dureeMois);
     list.push(rec);
     linkedIds[op.id] = true;
-    if (rec.numeroPiece) linkedIds['P:' + rec.numeroPiece] = true;
-    if (op.acomptePretId) op.acomptePretId = rec.id;
+    if (op.acomptePretId) { op.acomptePretId = rec.id; linkedIds['A:' + rec.id] = true; }
     created++;
   }
   if (created > 0) {
@@ -18799,25 +18804,33 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
       list.push(data);
     }
   }
-  /* Retirer les acomptes du groupe dont la ligne a \u00e9t\u00e9 vid\u00e9e */
-  var newList = [];
-  for (var nl = 0; nl < list.length; nl++) {
-    var apItem = list[nl];
-    if (apItem.groupeId === groupeId && newEmployeIds.indexOf(apItem.employeId) === -1) continue;
-    newList.push(apItem);
+  /* Retirer les acomptes du groupe dont la ligne a ete videe.
+     Sûr uniquement si au moins un employe a reellement ete enregistre : sinon
+     (erreur de lecture du formulaire, cases decochees par accident...) on effacait
+     TOUS les prets du groupe, qui disparaissaient alors de la page. */
+  if (newEmployeIds.length > 0) {
+    var newList = [];
+    for (var nl = 0; nl < list.length; nl++) {
+      var apItem = list[nl];
+      if (apItem.groupeId === groupeId && newEmployeIds.indexOf(apItem.employeId) === -1) continue;
+      newList.push(apItem);
+    }
+    list = newList;
   }
-  list = newList;
   /* Retirer les opérations du groupe sans employé (ligne vidée ou ancienne pièce "à répartir"),
-     en conservant la ligne frais cumulée (fraisLiaison) qui sera réconciliée après */
-  var newOps = [];
-  for (var no2 = 0; no2 < ops.length; no2++) {
-    var curOp = ops[no2];
-    if (curOp.groupeId !== groupeId) { newOps.push(curOp); continue; }
-    if (curOp.fraisLiaison) { newOps.push(curOp); continue; }
-    if (newEmployeIds.indexOf(curOp.beneficiaireId) === -1) continue;
-    newOps.push(curOp);
+     en conservant la ligne frais cumulée (fraisLiaison) qui sera réconciliée après.
+     Même garde : jamais de purge si aucune ligne n'a été lue. */
+  if (newEmployeIds.length > 0) {
+    var newOps = [];
+    for (var no2 = 0; no2 < ops.length; no2++) {
+      var curOp = ops[no2];
+      if (curOp.groupeId !== groupeId) { newOps.push(curOp); continue; }
+      if (curOp.fraisLiaison) { newOps.push(curOp); continue; }
+      if (newEmployeIds.indexOf(curOp.beneficiaireId) === -1) continue;
+      newOps.push(curOp);
+    }
+    ops = newOps;
   }
-  ops = newOps;
   /* Ligne cumulée des frais (sortie = charge) : une seule ligne par pièce, montant =
      somme des frais des lignes ; supprimée si plus aucun frais. */
   var fraisBase2 = csMoyenBase(moyenPaiement) || moyenPaiement || 'Esp\u00e8ce';
