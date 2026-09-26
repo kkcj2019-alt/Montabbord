@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-09-26-39";
+      window.__APP_VERSION = "2026-09-26-42";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -122,11 +122,14 @@
           font-size: 16px;
         }
       }
+      /* THEME « SALAIRE » : emeraude profond (accent #10b981).
+         Chaque application a sa propre teinte de barre laterale :
+         Principale = ambre, Salaire = emeraude, Exploitation = ardoise bleu. */
       aside {
         width: 260px;
-        background: linear-gradient(180deg, #0b1526 0%, #101f38 100%);
-        color: #e8dcae;
-        border-right: 1px solid #24344f;
+        background: linear-gradient(180deg, #052e16 0%, #064e3b 55%, #065f46 100%);
+        color: #d1fae5;
+        border-right: 1px solid #065f46;
         display: flex;
         flex-direction: column;
         padding: 1.2rem 1rem;
@@ -142,7 +145,7 @@
       aside h1 {
         font-size: 1rem;
         font-weight: 800;
-        color: #ecc95f;
+        color: #6ee7b7;
         margin-bottom: 1.5rem;
         display: flex;
         align-items: center;
@@ -170,7 +173,7 @@
       aside.collapsed nav button::first-letter {
         font-size: 1.05rem;
         font-weight: 800;
-        color: #ecc95f;
+        color: #6ee7b7;
         background: rgba(236, 201, 95, 0.12);
         width: 38px;
         height: 38px;
@@ -182,7 +185,7 @@
       }
       aside.collapsed nav button.active::first-letter {
         background: rgba(236, 201, 95, 0.3);
-        border-color: #ecc95f;
+        border-color: #6ee7b7;
         color: #fff;
       }
       aside.collapsed nav button:hover::first-letter {
@@ -225,7 +228,7 @@
         justify-content: center;
         font-size: 0.7rem;
         z-index: 10;
-        color: #ecc95f;
+        color: #6ee7b7;
       }
       #aside-toggle:hover {
         color: #ffffff;
@@ -259,7 +262,7 @@
         );
         color: #ffffff;
         font-weight: 700;
-        border-left: 3px solid #ecc95f;
+        border-left: 3px solid #6ee7b7;
       }
             main {
         flex: 1 1 0px !important;
@@ -7541,6 +7544,76 @@
           DB.getMain("mdb_acomptesPrets") || [],
         );
       }
+      /* Reconstitution : une pièce de caisse de type pret/acompte dont la ligne
+         a disparu de mdb_acomptesPrets (purge accidentelle côté app Principale)
+         est rétablie ici. Sans cela l'employé affiche « 0 op. » alors que son
+         prêt existe bien en caisse. */
+      var _payeApReconciled = false;
+      function _payeReconcileAPFromCaisse() {
+        if (_payeApReconciled) return;
+        try {
+          var ops = DB.getMain("mdb_operationsCaisse") || [];
+          if (!ops.length) return;
+          var list = DB.getMain("mdb_acomptesPrets") || [];
+          var linked = {};
+          for (var i = 0; i < list.length; i++) {
+            var it = list[i];
+            if (!it) continue;
+            if (it.caisseOpId) linked[it.caisseOpId] = true;
+            if (it.numeroPiece) linked["P:" + it.numeroPiece] = true;
+            if (it.id) linked["A:" + it.id] = true;
+          }
+          var emps = [];
+          try { emps = DB.getMain("mdb_employes") || []; } catch (e1) { emps = []; }
+          var empIds = {};
+          for (var e = 0; e < emps.length; e++) if (emps[e] && emps[e].id) empIds[emps[e].id] = true;
+          var created = 0;
+          for (var o = 0; o < ops.length; o++) {
+            var op = ops[o];
+            if (!op || op.reversed) continue;
+            var t = op.apType || "";
+            if (t !== "pret" && t !== "acompte") continue;
+            if (op.collective && op.pendingDetail) continue;
+            if (!op.beneficiaireId || !empIds[op.beneficiaireId]) continue;
+            if (linked[op.id] || (op.numeroPiece && linked["P:" + op.numeroPiece]) || (op.acomptePretId && linked["A:" + op.acomptePretId])) continue;
+            var rec = {
+              id: op.acomptePretId || "ap" + op.id,
+              type: t,
+              employeId: op.beneficiaireId,
+              employeNom: op.beneficiaireNom || "",
+              montant: parseInt(op.montant) || 0,
+              dureeMois: parseInt(op.apDureeMois) || 0,
+              montantMensuel: parseInt(op.apMontantMensuel) || 0,
+              moisDeduction: op.apMoisDeduction || (op.date ? String(op.date).substring(0, 7) : ""),
+              motif: op.tiers || op.observations || op.libelle || "",
+              notes: op.observations || "",
+              date: op.date || "",
+              statut: "en_cours",
+              montantRembourse: 0,
+              caisseOpId: op.id,
+              numeroPiece: op.numeroPiece || "",
+              provenance: "caisse",
+              moyen: op.moyenPaiement || "",
+              executant: op.executant || "",
+              caisseId: op.caisseId || ""
+            };
+            if (rec.type === "pret" && rec.dureeMois > 0 && !rec.montantMensuel)
+              rec.montantMensuel = Math.round(rec.montant / rec.dureeMois);
+            list.push(rec);
+            linked[op.id] = true;
+            if (rec.numeroPiece) linked["P:" + rec.numeroPiece] = true;
+            if (op.acomptePretId) op.acomptePretId = rec.id;
+            created++;
+          }
+          if (created > 0) {
+            DB.setMain("mdb_acomptesPrets", _payeStripTombstoned("mdb_acomptesPrets", list));
+            try { pushPayeCloud(); } catch (e2) {}
+            console.log("Reconstitution de " + created + " pret(s)/acompte(s) depuis la caisse (module Salaire)");
+          }
+        } catch (e) {}
+        _payeApReconciled = true;
+      }
+
       function setAPList(v) {
         /* Toute ligne présente avant et absente après = suppression définitive (tombstone),
            pour que le cloud ne la ressuscite jamais à la ré-ouverture / à l'actualisation. */
@@ -17743,6 +17816,10 @@ function ptMontPrintEtat(mois, tab) {
         try {
           _purgeOrphanAcomptesP();
         } catch (e) {}
+        /* Rétablit les prêts/acomptes disparus de la liste alors que leur pièce
+           de caisse existe (évite « 0 op. » pour un employé qui a bien un prêt).
+           Doit tourner AVANT getAPList(). */
+        try { _payeReconcileAPFromCaisse(); } catch (eRec) {}
         var raw = getAPList() || [];
         var list = raw.map(normalizeAP);
         var personnel = getPersonnel();
