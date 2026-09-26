@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-56';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-57';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -419,14 +419,14 @@ if (_prodChannel) {
     var m = ev && ev.data;
     if (!m || m.type !== 'shared_key_updated') return;
     if (_prodWatchKeys.indexOf(m.key) === -1) return;
-    try { if (typeof prodShouldRender === 'function' && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch (e) {}
+    try { prodAutoRefresh(); } catch (e) {}
   };
 }
 window.addEventListener('storage', function (ev) {
   if (!ev || !ev.key) return;
   if (_prodWatchKeys.indexOf(ev.key) === -1) return;
   if (ev.newValue === ev.oldValue) return;
-  try { if (typeof prodShouldRender === 'function' && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch (e) {}
+  try { prodAutoRefresh(); } catch (e) {}
 });
 function thisMonth() { return new Date().toISOString().slice(0, 7); }
 function monthLabel(ym) {
@@ -833,6 +833,8 @@ function navigate(page) {
     if (window._navHist.length > 20) window._navHist.shift();
   }
   window._navigatingBack = false;
+  try { _prodAutoRPending = false; if (_prodAutoRTimer) { clearTimeout(_prodAutoRTimer); _prodAutoRTimer = null; } } catch (e) {}
+  try { _prodAutoRStamp = _prodDataStamp(); } catch (e) {}
   CURRENT_PAGE = page;
   try { var _mn = document.getElementById('app'); if (_mn) _mn.classList.toggle('dash-dense', page === 'dashboard'); } catch (e) {}
   localStorage.setItem('mdb_prod_currentPage', page);
@@ -1392,6 +1394,69 @@ function prodSb() {
     return _prodSB;
   } catch(e) { return null; }
 }
+/* ============ RAFRAICHISSEMENT AUTOMATIQUE (anti-boucle) ============
+   Les autres onglets (index.html, paye.html) ecrivent dans le meme localStorage.
+   Chaque ecriture declenchait un renderPage() COMPLET : le module se redessinait
+   sans arret (animations rejouees, scroll perdu), ce qui semblait etre une
+   actualisation permanente. On garde la synchro, mais on :
+     - regroupe les evenements (delai minimum entre deux rendus) ;
+     - ne rend jamais pendant une saisie ;
+     - conserve la position de defilement ;
+     - et n'actualise que si le contenu a reellement change. */
+var _prodAutoRTimer = null;
+var _prodAutoRPending = false;
+var _prodAutoRLast = 0;
+var _prodAutoRMinMs = 15000;  // 15 s minimum entre deux rendus automatiques
+var _prodAutoRStamp = '';     // empreinte du contenu : evite les rendus a vide
+function _prodFocusSaisie() {
+  try {
+    var a = document.activeElement;
+    if (!a) return false;
+    var t = (a.tagName || '').toUpperCase();
+    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return true;
+    if (a.isContentEditable) return true;
+  } catch (e) {}
+  return false;
+}
+function _prodEstSaisie() {
+  var p = CURRENT_PAGE;
+  return (p === 'production' || p === 'achats' || p === 'livraisons' || p === 'epi');
+}
+function prodAutoRefresh() {
+  _prodAutoRPending = true;
+  if (_prodAutoRTimer) return;
+  var since = Date.now() - _prodAutoRLast;
+  _prodAutoRTimer = setTimeout(_prodAutoRRun, since >= _prodAutoRMinMs ? 900 : _prodAutoRMinMs);
+}
+function _prodDataStamp() {
+  try {
+    var a = localStorage.getItem('mdb_production') || '';
+    var b = localStorage.getItem('mdb_dettesFournisseurs') || '';
+    var h = 5381, i = 0;
+    var str = a.length + "|" + b.length + "|" + a + b;
+    for (i = 0; i < str.length; i += 7) { h = ((h << 5) + h + str.charCodeAt(i)) >>> 0; }
+    return h + ":" + a.length + ":" + b.length;
+  } catch (e) { return "err"; }
+}
+function _prodAutoRRun() {
+  _prodAutoRTimer = null;
+  if (!_prodAutoRPending) return;
+  /*Jamais de rendu pendant une saisie : on abandonne, le prochain
+     evenement rechargera le flag. */
+  if (_prodFocusSaisie() || _prodEstSaisie()) return;
+  if (typeof prodShouldRender === 'function' && !prodShouldRender()) return;
+  _prodAutoRPending = false;
+  _prodAutoRLast = Date.now();
+  /* Donnees identiques : pas de rendu (evite le clignotement). */
+  var _st = _prodDataStamp();
+  if (_st === _prodAutoRStamp) return;
+  _prodAutoRStamp = _st;
+  try {
+    var sc = window.pageYOffset || document.documentElement.scrollTop || 0;
+    renderPage();
+    if (sc) window.scrollTo(0, sc);
+  } catch (e) {}
+}
 function prodShouldRender() {
   try {
     if (document.getElementById('modalOverlay')) return false;
@@ -1524,14 +1589,14 @@ function prodApplyCloud(cloudProd, silent) {
     _prodDirty = true;
     try { scheduleProdPush(); } catch(e) {}
     prodSyncStatus('● synchro OK', '#16a34a');
-    try { if (!silent && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
+    try { if (!silent) prodAutoRefresh(); } catch(e) {}
     return true;
   }
   var ct = cloudProd.__prodUpdatedAt || 0, lt = local.__prodUpdatedAt || 0;
   if (_prodDirty || ct <= lt) return false;
   try { localStorage.setItem('mdb_production', JSON.stringify(cloudProd)); } catch(e) { return false; }
   prodSyncStatus('● synchro OK', '#16a34a');
-  try { if (!silent && prodShouldRender() && typeof renderPage === 'function') renderPage(); } catch(e) {}
+  try { if (!silent) prodAutoRefresh(); } catch(e) {}
   return true;
 }
 function prodPullNow(silent) {
@@ -1547,7 +1612,7 @@ function prodPullNow(silent) {
     if (!row.data) return;
     var r1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
     var r2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
-    if ((r1 || r2) && prodShouldRender()) { try { if (typeof renderPage === 'function') renderPage(); } catch(e) {} }
+    if (r1 || r2) { try { prodAutoRefresh(); } catch(e) {} }
   }).catch(function(err) {});
 }
 function prodStartRealtime() {
@@ -1564,7 +1629,7 @@ function prodStartRealtime() {
         if (!row.data) return;
         var a1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
         var a2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
-        if ((a1 || a2) && prodShouldRender()) { try { if (typeof renderPage === 'function') renderPage(); } catch(e) {} }
+        if (a1 || a2) { try { prodAutoRefresh(); } catch(e) {} }
       } catch(e) {}
     });
     _prodSub.subscribe(function(status) {});
