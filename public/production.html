@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-58';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-59';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -605,6 +605,7 @@ var NAV = [
   { group: 'GÉNÉRAL', items: [
     { id: 'qualite', label: 'Service Qualité & NC', icon: '🎯' },
     { id: 'reports', label: 'Rapports', icon: '📈' },
+    { id: 'analyse-couts', label: 'Analyse des coôuts', icon: '\ud83d\udcb0' },
     { id: 'rh-group', label: 'RH & Présence', icon: '👤', children: [
       { id: 'rh-dashboard', label: 'Tableau de Bord RH' },
       { id: 'departments', label: 'Départements' },
@@ -834,6 +835,7 @@ var PROD_PAGE_PERM = {
   'livraisons': 'prodLivraisons',
   'preventive': 'prodMaintenance', 'corrective': 'prodMaintenance',
   'reports': 'prodRapports',
+  'analyse-couts': 'prodRapports',
   'rh-dashboard': 'prodRH', 'departments': 'prodRH', 'positions': 'prodRH', 'presence': 'prodRH', 'leaves': 'prodRH', 'sanctions': 'prodRH'
 };
 function prodGrantedMap() { try { var g = JSON.parse(localStorage.getItem('mdb_prod_granted')); if (g && g.pages) return g.pages; } catch(e) {} return null; }
@@ -1052,6 +1054,7 @@ var PAGE_TITLES = {
   'preventive': 'Maintenance Préventive',
   'corrective': 'Maintenance Corrective',
   'reports': 'Rapports',
+  'analyse-couts': 'Analyse des Coúts de Production',
   'rh-dashboard': 'Tableau de Bord RH',
   'departments': 'Départements',
   'positions': 'Fonctions',
@@ -1086,6 +1089,522 @@ function prodReparerEtRecharger() {
   } catch (e) { toast('Réparation impossible', 'error'); }
   setTimeout(function () { try { renderPage(); } catch (e2) {} }, 200);
 }
+/* =====================================================================
+   ANALYSE DES COUTS DE PRODUCTION
+   - Prix moyen pondere (CUMP) du bois, calcule sur les achats reellement
+     saisis (volume x prix unitaire), par essence.
+   - Cout matiere consumee valorise fiche par fiche, ligne de sortie par
+     ligne de sortie, au CUMP de l'essence concernee.
+   - Pertes de bois isolees.
+   - Consommables achetes sur la periode.
+   - Frais de structure saisis par l'utilisateur (le module n'a aucune
+     donnee de charges : on ne les invente pas, on les saisit).
+   - Cout de revient au m3 produit et marge face au prix de vente reel
+     des livraisons.
+   Aucun calcul existant n'est modifie : uniquement des lectures.
+   ===================================================================== */
+
+function acJour(d) { return String(d || '').trim().slice(0, 10); }
+function acMoisDe(d) { return String(d || '').trim().slice(0, 7); }
+function acDebutMois(ym) { return String(ym || '').slice(0, 7) + '-01'; }
+function acFinMois(ym) {
+  var s = String(ym || '').slice(0, 7);
+  var y = parseInt(s.slice(0, 4), 10), m = parseInt(s.slice(5, 7), 10);
+  if (!y || !m) return s + '-31';
+  return s + '-' + String(new Date(y, m, 0).getDate()).padStart(2, '0');
+}
+function acPeriode() {
+  /* "Tout l'historique" : un periode vide est un choix volontaire, pas un
+     defaut. Sans ce drapeau, le raccourci "Tout" serait remplace par le mois
+     en cours a chaque rendu. */
+  if (window._acTout) { window._acDu = ''; window._acAu = ''; return { du: '', au: '' }; }
+  var du = acJour(window._acDu), au = acJour(window._acAu);
+  if (!du && !au) { var m = thisMonth(); du = acDebutMois(m); au = acFinMois(m); }
+  if (du && !au) au = today();
+  if (au && !du) du = acDebutMois(acMoisDe(au));
+  if (du && au && du > au) { var t = du; du = au; au = t; }
+  window._acDu = du; window._acAu = au;
+  return { du: du, au: au };
+}
+function acPeriodePrec(p) {
+  /* pas de periode definie : pas de comparaison (et surtout pas de Date invalide) */
+  if (!p.du || !p.au) return { du: '', au: '' };
+  var d1 = new Date(p.du + 'T00:00:00');
+  var d2 = new Date(p.au + 'T00:00:00');
+  if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return { du: '', au: '' };
+  /* (d2 - d1) est en MILLISECONDES : il faut convertir en jours,
+     sinon la periode precedente partait hors des limites de Date. */
+  var nJours = Math.round((d2.getTime() - d1.getTime()) / 86400000) + 1;
+  if (!(nJours > 0) || nJours > 3660) return { du: '', au: '' };
+  var pd2 = new Date(d1.getTime() - 86400000);
+  var pd1 = new Date(pd2.getTime() - (nJours - 1) * 86400000);
+  if (isNaN(pd1.getTime()) || isNaN(pd2.getTime())) return { du: '', au: '' };
+  function f(x) { return x.toISOString().slice(0, 10); }
+  return { du: f(pd1), au: f(pd2) };
+}
+function acDansPeriode(d, du, au) {
+  var s = acJour(d);
+  if (!s) return false;
+  if (du && s < du) return false;
+  if (au && s > au) return false;
+  return true;
+}
+function acPeriodeLabel(p) {
+  if (!p.du && !p.au) return 'Tout l\'historique';
+  if (!p.au) return 'depuis le ' + fmtD(p.du);
+  if (!p.du) return 'jusqu\'au ' + fmtD(p.au);
+  if (acMoisDe(p.du) === acMoisDe(p.au)) return monthLabel(acMoisDe(p.du));
+  return fmtD(p.du) + ' au ' + fmtD(p.au);
+}
+
+/* ---------------- CUMP du bois (achats matiere premiere) ---------------- */
+function acCump(du, au) {
+  var map = {}, g = { vol: 0, montant: 0, qte: 0, lots: 0 };
+  getAchats().forEach(function (a) {
+    var cat = a.category || a.type || '';
+    if (cat !== 'raw-materials') return;
+    if (!acDansPeriode(a.date, du, au)) return;
+    var items = a.items || [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i] || {};
+      var vol = parseFloat(it.volume) || 0;
+      var mt = parseFloat(it.total_price) || 0;
+      if (!mt && it.unit_price) mt = (parseFloat(it.unit_price) || 0) * (parseFloat(it.quantity) || 0);
+      var ese = (it.essence || it.type || 'Autre').toString().trim() || 'Autre';
+      if (!map[ese]) map[ese] = { essence: ese, vol: 0, montant: 0, qte: 0, lots: 0 };
+      map[ese].vol += vol;
+      map[ese].montant += mt;
+      map[ese].qte += parseFloat(it.quantity) || 0;
+      map[ese].lots++;
+      g.vol += vol; g.montant += mt; g.qte += parseFloat(it.quantity) || 0; g.lots++;
+    }
+  });
+  var liste = [];
+  for (var k in map) if (Object.prototype.hasOwnProperty.call(map, k)) liste.push(map[k]);
+  liste.forEach(function (e) { e.prixM3 = e.vol > 0 ? e.montant / e.vol : 0; });
+  liste.sort(function (a, b) { return b.montant - a.montant; });
+  return { essences: liste, vol: g.vol, montant: g.montant, qte: g.qte, lots: g.lots,
+           prixM3: g.vol > 0 ? g.montant / g.vol : 0 };
+}
+
+/* ---------------- Production valorisee ---------------- */
+function acProduction(du, au, cuma) {
+  var r = { fiches: 0, volBois: 0, volProduit: 0, volReprise: 0, volPerte: 0,
+            coutMatiere: 0, coutPerte: 0, rend: [], sansCump: 0, detail: [] };
+  var fallback = cuma.prixM3;
+  function prixEssence(nom) {
+    var e = (nom || '').toString().trim().toLowerCase();
+    for (var i = 0; i < cuma.essences.length; i++) {
+      if (cuma.essences[i].essence.toLowerCase() === e) return cuma.essences[i].prixM3;
+    }
+    return 0;
+  }
+  getProductions().forEach(function (p) {
+    if ((p.statut || '') !== 'validated') return;
+    if (!acDansPeriode(p.date, du, au)) return;
+    r.fiches++;
+    var vb = parseFloat(p.vol_sortie_bois) || 0;
+    var vp = parseFloat(p.vol_total) || 0;
+    var vr = parseFloat(p.vol_enc_reprise) || 0;
+    var base = vb + vr;
+    r.volBois += vb; r.volProduit += vp; r.volReprise += vr;
+    var perte = base > 0 ? Math.max(0, base - vp) : 0;
+    r.volPerte += perte;
+    var rd = parseFloat(p.rendement);
+    if (!rd && base > 0) rd = (vp / base) * 100;
+    if (rd > 0) r.rend.push(rd);
+    /* valorisation du bois consomme, essence par essence */
+    var cm = 0, valued = false;
+    var sb = p.sortie_bois || [];
+    for (var i = 0; i < sb.length; i++) {
+      var v = parseFloat((sb[i] || {}).volume) || 0;
+      if (v <= 0) continue;
+      var pu = prixEssence((sb[i] || {}).essence);
+      if (pu > 0) { cm += v * pu; valued = true; }
+    }
+    if (!valued) {
+      /* aucune essence valorisee : on applique le CUMP global */
+      if (fallback > 0) cm = base * fallback;
+      if (base > 0) r.sansCump++;
+    }
+    r.coutMatiere += cm;
+    var partPerte = base > 0 ? (perte / base) : 0;
+    r.coutPerte += cm * partPerte;
+    r.detail.push({ id: p.id, numero: p.numero, date: p.date,
+                    volBois: vb, volProduit: vp, perte: perte,
+                    cout: cm, coutM3: vp > 0 ? cm / vp : 0, rendement: rd });
+  });
+  r.rendementMoy = r.rend.length ? (r.rend.reduce(function (a, b) { return a + b; }, 0) / r.rend.length) : 0;
+  r.detail.sort(function (a, b) { return (b.cout || 0) - (a.cout || 0); });
+  return r;
+}
+
+/* ---------------- Consommables achats ---------------- */
+function acConsommables(du, au) {
+  var t = 0, n = 0;
+  getAchats().forEach(function (a) {
+    var cat = a.category || a.type || '';
+    if (cat !== 'consumables' && cat !== 'consumable') return;
+    if (!acDansPeriode(a.date, du, au)) return;
+    var items = a.items || [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i] || {};
+      var mt = parseFloat(it.total_price) || 0;
+      if (!mt && it.unit_price) mt = (parseFloat(it.unit_price) || 0) * (parseFloat(it.quantity) || 0);
+      t += mt; n++;
+    }
+  });
+  return { montant: t, lignes: n };
+}
+
+/* ---------------- Frais de structure (saisie utilisateur) ---------------- */
+function acFraisLignes() { var l = getSection('costFees', []); return Array.isArray(l) ? l : []; }
+function acFraisSur(du, au) {
+  var parMois = {}, total = 0;
+  var lignes = acFraisLignes();
+  for (var i = 0; i < lignes.length; i++) {
+    var f = lignes[i] || {};
+    var m = acMoisDe(f.mois || f.date || '');
+    if (!m) continue;
+    var dd = acDebutMois(m), auu = acFinMois(m);
+    if (au && auu < du) continue;
+    if (du && dd > au) continue;
+    var mt = parseFloat(f.montant) || 0;
+    if (!parMois[m]) parMois[m] = { mois: m, total: 0, postes: [] };
+    parMois[m].total += mt;
+    parMois[m].postes.push({ poste: f.poste || 'Autre', montant: mt });
+    total += mt;
+  }
+  var liste = [];
+  for (var k in parMois) if (Object.prototype.hasOwnProperty.call(parMois, k)) liste.push(parMois[k]);
+  liste.sort(function (a, b) { return a.mois < b.mois ? -1 : 1; });
+  return { total: total, mois: liste };
+}
+function acSaveFrais() {
+  var poste = (document.getElementById('acPoste') || {}).value;
+  var mois = (document.getElementById('acMois') || {}).value;
+  var mt = parseFloat((document.getElementById('acMontant') || {}).value) || 0;
+  poste = (poste || '').trim(); mois = acMoisDe(mois);
+  if (!poste) { toast('Indiquez le poste (loyer, salaires, énergie...)', 'error'); return; }
+  if (!mois) { toast('Indiquez le mois', 'error'); return; }
+  if (mt <= 0) { toast('Indiquez un montant supérieur à 0', 'error'); return; }
+  var l = acFraisLignes();
+  l.push({ id: genId(), mois: mois, poste: poste, montant: mt, created_at: new Date().toISOString() });
+  setSection('costFees', l);
+  toast('Frais enregistrés : ' + poste + ' ' + fmtF(mt));
+  renderPage();
+}
+function acDelFrais(id) {
+  var l = acFraisLignes();
+  var out = [];
+  for (var i = 0; i < l.length; i++) if (String((l[i] || {}).id) !== String(id)) out.push(l[i]);
+  setSection('costFees', out);
+  renderPage();
+}
+
+/* ---------------- Prix de vente reel (livraisons) ---------------- */
+function acVentes(du, au) {
+  var mt = 0, qt = 0, art = {};
+  getLivraisons().forEach(function (l) {
+    if (!acDansPeriode(l.date, du, au)) return;
+    var lignes = l.lignes || [];
+    for (var i = 0; i < lignes.length; i++) {
+      var li = lignes[i] || {};
+      var q = parseFloat(li.qte) || 0, pu = parseFloat(li.pu) || 0;
+      if (q <= 0 || pu <= 0) continue;
+      mt += q * pu; qt += q;
+      var k = li.article_id || li.code || li.designation || 'divers';
+      if (!art[k]) art[k] = { cle: k, designation: li.designation || li.code || String(k), qte: 0, montant: 0 };
+      art[k].qte += q; art[k].montant += q * pu;
+    }
+  });
+  var liste = [];
+  for (var kk in art) if (Object.prototype.hasOwnProperty.call(art, kk)) liste.push(art[kk]);
+  liste.sort(function (a, b) { return b.montant - a.montant; });
+  return { montant: mt, qte: qt, prixMoyen: qt > 0 ? mt / qt : 0, articles: liste };
+}
+
+/* ---------------- Articles : cout unitaire estime ---------------- */
+function acSimuler(coutM3, rendPct) {
+  var idA = (document.getElementById('acArt') || {}).value;
+  var qte = parseFloat((document.getElementById('acQte') || {}).value) || 0;
+  var out = (document.getElementById('acSimRes') || {}).innerHTML || '';
+  var arts = getArticles();
+  var a = null;
+  for (var i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(idA)) { a = arts[i]; break; }
+  if (!a || qte <= 0) { out = '<div style="font-size:.75rem;color:var(--dim);padding:.5rem">Choisissez un article et une quantité.</div>'; }
+  else {
+    var volU = artUnitVol(a) || 0;
+    var r = rendPct > 0 ? rendPct : 100;
+    /* cout matiere pour la quantite demandee, corrige du rendement */
+    var coutMat = (volU * qte) * (100 / r) * coutM3;
+    var pv = parseFloat(a.prix_vente) || 0;
+    var pr = parseFloat(a.prix_revient) || 0;
+    var pxRev = pr > 0 ? pr : coutMat;
+    var marge = pv - pxRev;
+    out = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.4rem">' +
+      '<div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:.45rem"><div style="font-size:.6rem;color:var(--dim)">Coût matière estimé</div><div style="font-size:.95rem;font-weight:800">' + fmtF(coutMat) + '</div></div>' +
+      '<div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:.45rem"><div style="font-size:.6rem;color:var(--dim)">Coût / unité</div><div style="font-size:.95rem;font-weight:800">' + fmtF(pxRev) + '</div></div>' +
+      '<div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:.45rem"><div style="font-size:.6rem;color:var(--dim)">Prix de vente</div><div style="font-size:.95rem;font-weight:800;color:var(--accent)">' + (pv > 0 ? fmtF(pv) : '—') + '</div></div>' +
+      '<div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:.45rem"><div style="font-size:.6rem;color:var(--dim)">Marge / unité</div><div style="font-size:.95rem;font-weight:800;color:' + (marge > 0 ? '#16a34a' : '#dc2626') + '">' + (pv > 0 ? fmtF(marge) : '—') + '</div></div>' +
+      '<div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:.45rem"><div style="font-size:.6rem;color:var(--dim)">Taux de marge</div><div style="font-size:.95rem;font-weight:800;color:' + (pv > 0 && pxRev > 0 ? (marge > 0 ? '#16a34a' : '#dc2626') : '#64748b') + '">' + (pv > 0 && pxRev > 0 ? (marge / pv * 100).toFixed(1) + ' %' : '—') + '</div></div>' +
+      '<div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:.45rem"><div style="font-size:.6rem;color:var(--dim)">Volume unitaire</div><div style="font-size:.95rem;font-weight:800">' + (volU > 0 ? volU.toFixed(4) + ' m³' : '—') + '</div></div>' +
+      '</div>' +
+      (pr > 0 ? '<div style="font-size:.7rem;color:var(--dim);margin-top:.35rem">Coût de revient saisi dans la fiche article : ' + fmtF(pr) + ' (non recalculé)</div>' : '');
+  }
+  var box = document.getElementById('acSimRes');
+  if (box) box.innerHTML = out;
+}
+function acLigneAc(dst, txt, val, sub, coul) {
+  return '<div style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:.5rem .6rem">' +
+    '<div style="font-size:.6rem;color:var(--dim);font-weight:700;letter-spacing:.4px;text-transform:uppercase">' + escH(txt) + '</div>' +
+    '<div style="font-size:1.1rem;font-weight:800;color:' + (coul || 'var(--text)') + '">' + val + '</div>' +
+    (sub ? '<div style="font-size:.66rem;color:var(--dim);margin-top:.1rem">' + sub + '</div>' : '') + '</div>';
+}
+
+/* ============================ PAGE ============================ */
+function render_analyse_couts() {
+  var p = acPeriode();
+  var pp = acPeriodePrec(p);
+  var cuma = acCump(p.du, p.au);
+  var cumaP = acCump(pp.du, pp.au);
+  var prod = acProduction(p.du, p.au, cuma);
+  var prodP = acProduction(pp.du, pp.au, cumaP);
+  var conso = acConsommables(p.du, p.au);
+  var frais = acFraisSur(p.du, p.au);
+  var ventes = acVentes(p.du, p.au);
+
+  var coutDirect = prod.coutMatiere + conso.montant;
+  var coutComplet = coutDirect + frais.total;
+  var volProd = prod.volProduit;
+  var crDirect = volProd > 0 ? coutDirect / volProd : 0;
+  var crComplet = volProd > 0 ? coutComplet / volProd : 0;
+  var margeM3 = ventes.prixMoyen - crComplet;
+  var tauxMarge = (ventes.prixMoyen > 0) ? (margeM3 / ventes.prixMoyen * 100) : 0;
+
+  var h = '';
+
+  /* ---------- Bandeau de periode ---------- */
+  h += '<div class="card" style="padding:.6rem;margin-bottom:.5rem"><div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:flex-end">';
+  h += '<div><label style="font-size:.66rem;font-weight:700;color:var(--dim);display:block">Du</label><input type="date" id="acDu" value="' + escH(p.du) + '" onchange="acSetPeriode(this.value,document.getElementById(\'acAu\').value)" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.78rem"></div>';
+  h += '<div><label style="font-size:.66rem;font-weight:700;color:var(--dim);display:block">Au</label><input type="date" id="acAu" value="' + escH(p.au) + '" onchange="acSetPeriode(document.getElementById(\'acDu\').value,this.value)" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.78rem"></div>';
+  h += '<div style="display:flex;gap:.3rem;flex-wrap:wrap">';
+  h += '<button class="btn btn-sm" onclick="acRaccourci(\'mois\')">Ce mois</button>';
+  h += '<button class="btn btn-sm" onclick="acRaccourci(\'prec\')">Mois dernier</button>';
+  h += '<button class="btn btn-sm" onclick="acRaccourci(\'trimestre\')">3 mois</button>';
+  h += '<button class="btn btn-sm" onclick="acRaccourci(\'annee\')">12 mois</button>';
+  h += '<button class="btn btn-sm" onclick="acRaccourci(\'tout\')">Tout</button>';
+  h += '</div>';
+  h += '<div style="flex:1"></div>';
+  h += '<div style="font-size:.72rem;color:var(--dim)">Période : <strong>' + escH(acPeriodeLabel(p)) + '</strong>' +
+       (prod.fiches > 0 ? ' · comparaison ' + escH(acPeriodeLabel(pp)) : '') + '</div>';
+  h += '</div></div>';
+
+  /* ---------- Alerte si le CUMP est indisponible ---------- */
+  if (cuma.prixM3 <= 0) {
+    h += '<div class="card" style="border-left:3px solid #d97706;margin-bottom:.5rem">' +
+      '<h3 style="color:#b45309">Prix du bois indisponible sur cette période</h3>' +
+      '<div style="font-size:.78rem;color:var(--dim)">Le prix moyen pondéré se calcule à partir de vos <strong>achats de matière première</strong> (volume × prix unitaire). Aucun achat de cette période n\'a été trouvé : le coût matière ne peut pas être valorisé. Saisissez vos achats dans <em>Approvisionnement → Achat</em>, puis revenez ici.</div></div>';
+  }
+
+  /* ---------- Indicateurs cles ---------- */
+  h += '<div class="stats-grid">';
+  h += acLigneAc(1, 'Coût matière consommée', prod.coutMatiere > 0 ? fmtF(prod.coutMatiere) : '—',
+        prod.fiches + ' fiche(s) validée(s) · ' + prod.volBois.toFixed(3) + ' m³ bois sorti',
+        prod.coutMatiere > 0 ? 'var(--text)' : 'var(--dim)');
+  h += acLigneAc(2, 'Coût des pertes', prod.coutPerte > 0 ? fmtF(prod.coutPerte) : '—',
+        prod.volPerte > 0 ? prod.volPerte.toFixed(3) + ' m³ perdus' : 'aucune perte',
+        prod.coutPerte > prod.coutMatiere * 0.15 ? '#dc2626' : 'var(--text)');
+  h += acLigneAc(3, 'Coût de revient / m³', crComplet > 0 ? fmtF(crComplet) : '—',
+        volProd > 0 ? 'sur ' + volProd.toFixed(3) + ' m³ produits' : 'pas de production',
+        'var(--accent)');
+  h += acLigneAc(4, 'Prix de vente moyen', ventes.prixMoyen > 0 ? fmtF(ventes.prixMoyen) : '—',
+        ventes.qte > 0 ? fmt(ventes.qte) + ' unité(s) livrée(s)' : 'aucune livraison',
+        'var(--text)');
+  h += '</div>';
+
+  /* ---------- Marge ---------- */
+  h += '<div class="card" style="padding:.6rem;margin-bottom:.5rem"><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.5rem">';
+  var margeOk = ventes.prixMoyen > 0 && crComplet > 0;
+  h += acLigneAc(1, 'Marge / m³', margeOk ? fmtF(margeM3) : '—', 'vente moins coût de revient', margeOk ? (margeM3 > 0 ? '#16a34a' : '#dc2626') : 'var(--dim)');
+  h += acLigneAc(1, 'Taux de marge', margeOk ? tauxMarge.toFixed(1) + ' %' : '—', 'sur le prix de vente', margeOk ? (tauxMarge > 0 ? '#16a34a' : '#dc2626') : 'var(--dim)');
+  h += acLigneAc(1, 'Chiffre d\'affaires', ventes.montant > 0 ? fmtF(ventes.montant) : '—', 'livraisons de la période', 'var(--text)');
+  h += acLigneAc(1, 'Résultat de la période', (ventes.montant > 0 || coutComplet > 0) ? fmtF(ventes.montant - coutComplet) : '—', 'affaires moins coûts', (ventes.montant - coutComplet) > 0 ? '#16a34a' : ((ventes.montant - coutComplet) < 0 ? '#dc2626' : 'var(--dim)'));
+  h += '</div></div>';
+
+  /* ---------- CUMP du bois ---------- */
+  h += '<div class="sec-title"><span></span>PRIX MOYEN PONDÉRÉ DU BOIS (CUMP)</div>';
+  h += '<div class="card" style="padding:0;overflow:hidden">';
+  if (!cuma.essences.length) {
+    h += '<div style="padding:.8rem;font-size:.78rem;color:var(--dim)">Aucun achat de matière première sur la période.</div>';
+  } else {
+    h += '<table><thead><tr><th>Essence</th><th style="text-align:right">Volume</th><th style="text-align:right">Quantité</th><th style="text-align:right">Montant</th><th style="text-align:right">Prix / m³</th><th style="text-align:right">Évolution</th></tr></thead><tbody>';
+    for (var i = 0; i < cuma.essences.length; i++) {
+      var e = cuma.essences[i];
+      var prev = null;
+      for (var j = 0; j < cumaP.essences.length; j++) {
+        if (cumaP.essences[j].essence.toLowerCase() === e.essence.toLowerCase()) { prev = cumaP.essences[j]; break; }
+      }
+      var evol = '';
+      if (prev && prev.prixM3 > 0 && e.prixM3 > 0) {
+        var d = ((e.prixM3 - prev.prixM3) / prev.prixM3) * 100;
+        evol = '<span style="color:' + (d > 0 ? '#dc2626' : d < 0 ? '#16a34a' : 'var(--dim)') + ';font-weight:700">' + (d > 0 ? '+' : '') + d.toFixed(1) + ' %</span>';
+      } else evol = '<span style="color:var(--dim)">—</span>';
+      h += '<tr><td><strong>' + escH(e.essence) + '</strong></td>' +
+           '<td style="text-align:right">' + e.vol.toFixed(3) + ' m³</td>' +
+           '<td style="text-align:right">' + fmt(e.qte) + '</td>' +
+           '<td style="text-align:right">' + fmtF(e.montant) + '</td>' +
+           '<td style="text-align:right;font-weight:700;color:var(--accent)">' + (e.prixM3 > 0 ? fmtF(e.prixM3) : '—') + '</td>' +
+           '<td style="text-align:right">' + evol + '</td></tr>';
+    }
+    h += '<tr style="background:#f8fafc;font-weight:800"><td>TOTAL / MOYENNE</td>' +
+         '<td style="text-align:right">' + cuma.vol.toFixed(3) + ' m³</td>' +
+         '<td style="text-align:right">' + fmt(cuma.qte) + '</td>' +
+         '<td style="text-align:right">' + fmtF(cuma.montant) + '</td>' +
+         '<td style="text-align:right;color:var(--accent)">' + (cuma.prixM3 > 0 ? fmtF(cuma.prixM3) : '—') + '</td>' +
+         '<td></td></tr>';
+    h += '</tbody></table>';
+  }
+  h += '</div>';
+
+  /* ---------- Production ---------- */
+  h += '<div class="sec-title"><span></span>PRODUCTION ET VALORISATION</div>';
+  h += '<div class="card" style="padding:0;overflow:hidden">';
+  if (!prod.fiches) {
+    h += '<div style="padding:.8rem;font-size:.78rem;color:var(--dim)">Aucune fiche de production <strong>validée</strong> sur la période. Les brouillons ne sont pas valorisés.</div>';
+  } else {
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.4rem;padding:.6rem">';
+    h += acLigneAc(1, 'Volume produit', prod.volProduit.toFixed(3) + ' m³', prod.fiches + ' fiche(s)', 'var(--text)');
+    h += acLigneAc(1, 'Bois sorti', prod.volBois.toFixed(3) + ' m³', 'dont ' + prod.volReprise.toFixed(3) + ' m³ repris', 'var(--text)');
+    h += acLigneAc(1, 'Pertes', prod.volPerte.toFixed(3) + ' m³', 'bois non valorisé', prod.volPerte > 0 ? '#dc2626' : 'var(--dim)');
+    h += acLigneAc(1, 'Rendement moyen', prod.rendementMoy.toFixed(1) + ' %', 'produit / bois entrant', prod.rendementMoy >= 60 ? '#16a34a' : '#d97706');
+    h += acLigneAc(1, 'Coût matière / m³', (volProd > 0 ? fmtF(prod.coutMatiere / volProd) : '—'), 'hors frais de structure', 'var(--accent)');
+    h += '</div>';
+    if (prod.sansCump > 0) {
+      h += '<div style="padding:.4rem .6rem;font-size:.7rem;color:#b45309;background:#fffbeb;border-top:1px solid #fde68a">' +
+           prod.sansCump + ' fiche(s) valorisée(s) au CUMP global : l\'essence du bois sorti n\'est pas renseignée ou n\'a pas été achetée sur la période.</div>';
+    }
+    h += '<table><thead><tr><th>Fiche</th><th>Date</th><th style="text-align:right">Bois</th><th style="text-align:right">Produit</th><th style="text-align:right">Perte</th><th style="text-align:right">Rend.</th><th style="text-align:right">Coût</th><th style="text-align:right">Coût/m³</th></tr></thead><tbody>';
+    for (var k = 0; k < prod.detail.length && k < 60; k++) {
+      var f = prod.detail[k];
+      h += '<tr><td><strong>' + escH(f.numero || f.id) + '</strong></td>' +
+           '<td>' + fmtD(f.date) + '</td>' +
+           '<td style="text-align:right">' + f.volBois.toFixed(3) + '</td>' +
+           '<td style="text-align:right">' + f.volProduit.toFixed(3) + '</td>' +
+           '<td style="text-align:right;color:' + (f.perte > 0 ? '#dc2626' : 'var(--dim)') + '">' + f.perte.toFixed(3) + '</td>' +
+           '<td style="text-align:right">' + (f.rendement > 0 ? f.rendement.toFixed(1) + ' %' : '—') + '</td>' +
+           '<td style="text-align:right">' + (f.cout > 0 ? fmtF(f.cout) : '—') + '</td>' +
+           '<td style="text-align:right;font-weight:700">' + (f.coutM3 > 0 ? fmtF(f.coutM3) : '—') + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    if (prod.detail.length > 60) h += '<div style="padding:.4rem .6rem;font-size:.7rem;color:var(--dim)">60 premières fiches sur ' + prod.detail.length + '.</div>';
+  }
+  h += '</div>';
+
+  /* ---------- Frais de structure ---------- */
+  h += '<div class="sec-title"><span></span>FRAIS DE STRUCTURE (À SAISIR)</div>';
+  h += '<div class="card" style="padding:.6rem;margin-bottom:.5rem">';
+  h += '<div style="font-size:.76rem;color:var(--dim);margin-bottom:.5rem">Le module Exploitation n\'a aucune donnée de charges (loyer, salaires, énergie, transport). Pour obtenir un coût de revient <strong>réel</strong>, saisis-les ici : ils seront comptés dans le coût de revient au m³.</div>';
+  h += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:flex-end">';
+  h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Poste</label><input type="text" id="acPoste" placeholder="Loyer, Salaires, Énergie..." style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem;min-width:150px"></div>';
+  h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Mois</label><input type="month" id="acMois" value="' + escH(acMoisDe(p.au) || thisMonth()) + '" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem"></div>';
+  h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Montant (FCFA)</label><input type="number" id="acMontant" min="0" step="1000" placeholder="0" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem;width:120px"></div>';
+  h += '<button class="btn btn-accent btn-sm" onclick="acSaveFrais()">Ajouter</button>';
+  h += '</div>';
+  if (frais.mois.length) {
+    h += '<table style="margin-top:.6rem"><thead><tr><th>Mois</th><th>Postes</th><th style="text-align:right">Total</th><th style="width:70px"></th></tr></thead><tbody>';
+    for (var mi = 0; mi < frais.mois.length; mi++) {
+      var fm = frais.mois[mi];
+      var listePostes = [];
+      for (var pi = 0; pi < fm.postes.length; pi++) listePostes.push(escH(fm.postes[pi].poste) + ' : ' + fmtF(fm.postes[pi].montant));
+      var lignesDuMois = acFraisLignes().filter(function (x) { return acMoisDe((x || {}).mois) === fm.mois; });
+      h += '<tr><td><strong>' + escH(monthLabel(fm.mois)) + '</strong></td>' +
+           '<td style="font-size:.72rem;color:var(--dim)">' + listePostes.join(' · ') + '</td>' +
+           '<td style="text-align:right;font-weight:700">' + fmtF(fm.total) + '</td>' +
+           '<td>' + lignesDuMois.map(function (x) { return '<button class="btn btn-sm" onclick="acDelFrais(\'' + x.id + '\')" title="Supprimer" style="padding:1px 5px;font-size:.65rem">×</button>'; }).join(' ') + '</td></tr>';
+    }
+    h += '</tbody></table>';
+    h += '<div style="text-align:right;font-weight:800;margin-top:.4rem">Total frais retenus sur la période : ' + fmtF(frais.total) + '</div>';
+  }
+  h += '</div>';
+
+  /* ---------- Récapitulatif du coût ---------- */
+  h += '<div class="sec-title"><span></span>RÉCAPITULATIF DU COÛT DE REVIENT</div>';
+  h += '<div class="card" style="padding:0;overflow:hidden"><table><tbody>';
+  function ligneRec(lib, val, fort) {
+    return '<tr' + (fort ? ' style="background:#f8fafc;font-weight:800"' : '') + '><td' + (fort ? '' : ' style="color:var(--dim)"') + '>' + lib + '</td>' +
+      '<td style="text-align:right;font-weight:' + (fort ? '800' : '600') + '">' + val + '</td></tr>';
+  }
+  h += ligneRec('Coût matière première consommée', prod.coutMatiere > 0 ? fmtF(prod.coutMatiere) : '—');
+  h += ligneRec('dont pertes de bois', prod.coutPerte > 0 ? fmtF(prod.coutPerte) + ' (' + prod.volPerte.toFixed(3) + ' m³)' : '—');
+  h += ligneRec('Consommables achetés sur la période', conso.montant > 0 ? fmtF(conso.montant) : '—');
+  h += ligneRec('Coût direct', coutDirect > 0 ? fmtF(coutDirect) : '—', true);
+  h += ligneRec('Frais de structure saisis', frais.total > 0 ? fmtF(frais.total) : '—');
+  h += ligneRec('COÛT DE REVIENT COMPLET', coutComplet > 0 ? fmtF(coutComplet) : '—', true);
+  h += ligneRec('Volume produit', volProd > 0 ? volProd.toFixed(3) + ' m³' : '—');
+  h += ligneRec('Coût de revient au m³ produit', crComplet > 0 ? fmtF(crComplet) : '—', true);
+  h += ligneRec('Prix de vente moyen constaté', ventes.prixMoyen > 0 ? fmtF(ventes.prixMoyen) : '—');
+  h += ligneRec('Marge par m³', margeOk ? fmtF(margeM3) : '—', true);
+  h += '</tbody></table></div>';
+
+  /* ---------- Simulateur par article ---------- */
+  h += '<div class="sec-title"><span></span>COÛT D\'UN ARTICLE</div>';
+  h += '<div class="card" style="padding:.6rem">';
+  var arts = getArticles();
+  h += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:flex-end">';
+  h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Article</label><select id="acArt" onchange="acSimuler(' + (cuma.prixM3) + ',' + (prod.rendementMoy) + ')" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem;min-width:220px">';
+  h += '<option value="">— choisir —</option>';
+  for (var ai = 0; ai < arts.length; ai++) {
+    var a2 = arts[ai] || {};
+    h += '<option value="' + escH(a2.id) + '">' + escH((a2.code ? a2.code + ' · ' : '') + (a2.designation || 'Article')) + '</option>';
+  }
+  h += '</select></div>';
+  h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Quantité</label><input type="number" id="acQte" min="0" value="1" oninput="acSimuler(' + (cuma.prixM3) + ',' + (prod.rendementMoy) + ')" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem;width:90px"></div>';
+  h += '<div style="font-size:.7rem;color:var(--dim)">Calculé au CUMP du bois de la période, corrigé du rendement moyen constaté.</div>';
+  h += '</div>';
+  h += '<div id="acSimRes" style="margin-top:.5rem"><div style="font-size:.75rem;color:var(--dim);padding:.5rem">Choisissez un article et une quantité.</div></div>';
+  h += '</div>';
+
+  /* ---------- Catalogue ---------- */
+  if (arts.length) {
+    h += '<div class="sec-title"><span></span>CATALOGUE : PRIX VENTE / PRIX DE REVIENT</div>';
+    h += '<div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th style="text-align:right">Prix vente</th><th style="text-align:right">Prix revient</th><th style="text-align:right">Marge</th><th style="text-align:right">Taux</th></tr></thead><tbody>';
+    for (var bi = 0; bi < arts.length; bi++) {
+      var a3 = arts[bi] || {};
+      var pv3 = parseFloat(a3.prix_vente) || 0;
+      var pr3 = parseFloat(a3.prix_revient) || 0;
+      var mg3 = pv3 - pr3;
+      var tx3 = pv3 > 0 ? (mg3 / pv3 * 100) : 0;
+      h += '<tr><td><strong>' + escH(a3.code || '—') + '</strong></td>' +
+           '<td>' + escH(a3.designation || '—') + '</td>' +
+           '<td style="font-size:.7rem;color:var(--dim)">' + escH(a3.categorie || a3.category_type || '—') + '</td>' +
+           '<td style="text-align:right">' + (pv3 > 0 ? fmtF(pv3) : '—') + '</td>' +
+           '<td style="text-align:right">' + (pr3 > 0 ? fmtF(pr3) : '—') + '</td>' +
+           '<td style="text-align:right;color:' + (pv3 > 0 && pr3 > 0 ? (mg3 > 0 ? '#16a34a' : '#dc2626') : 'var(--dim)') + '">' + (pv3 > 0 && pr3 > 0 ? fmtF(mg3) : '—') + '</td>' +
+           '<td style="text-align:right">' + (pv3 > 0 && pr3 > 0 ? tx3.toFixed(1) + ' %' : '—') + '</td></tr>';
+    }
+    h += '</tbody></table></div>';
+  }
+
+  return h;
+}
+function acSetPeriode(du, au) { window._acTout = false; window._acDu = acJour(du); window._acAu = acJour(au); renderPage(); }
+function acRaccourci(cle) {
+  var m = thisMonth();
+  window._acTout = false;
+  if (cle === 'mois') { window._acDu = acDebutMois(m); window._acAu = acFinMois(m); }
+  else if (cle === 'prec') {
+    var y = parseInt(m.slice(0, 4), 10), mm = parseInt(m.slice(5, 7), 10);
+    var pm = (mm === 1) ? (y - 1) + '-12' : y + '-' + String(mm - 1).padStart(2, '0');
+    window._acDu = acDebutMois(pm); window._acAu = acFinMois(pm);
+  }
+  else if (cle === 'trimestre') { window._acDu = acDebutMois(m); window._acAu = today(); }
+  else if (cle === 'annee') { window._acDu = m.slice(0, 4) + '-01-01'; window._acAu = m.slice(0, 4) + '-12-31'; }
+  else if (cle === 'tout') { window._acTout = true; window._acDu = ''; window._acAu = ''; }
+  renderPage();
+}
+
+
 function renderPage() {
   document.getElementById('pageTitle').textContent = PAGE_TITLES[CURRENT_PAGE] || CURRENT_PAGE;
   try {
@@ -1894,14 +2413,14 @@ function render_dashboard() {
   var prodMois = prods.filter(function(p) { return (p.date || '').indexOf(thisM) === 0; });
   
   var volStock = getStockVolume();
-  var volProduction = prodMois.reduce(function(s, p) { return s + (p.volume_total || 0); }, 0);
+  var volProduction = prodMois.reduce(function(s, p) { return s + (p.vol_total || p.volume_total || 0); }, 0);
   var pertesMois = getLosses().filter(function(l) { return (l.date || '').indexOf(thisM) === 0; })
     .reduce(function(s, l) { return s + (l.quantite || 0); }, 0);
 
   var articles = getArticles();
-  var volProdTotal = prods.reduce(function(s, p) { return s + (p.volume_total || 0); }, 0);
+  var volProdTotal = prods.reduce(function(s, p) { return s + (p.vol_total || p.volume_total || 0); }, 0);
   var volEncours = getProductions().filter(function(p) { return p.statut !== 'validated'; })
-    .reduce(function(s, p) { return s + (p.volume_total || 0); }, 0);
+    .reduce(function(s, p) { return s + (p.vol_total || p.volume_total || 0); }, 0);
   var pertesVol = 0;
   getLosses().forEach(function(l) {
     var artL = articles.find(function(a) { return a.id === l.article_id; });
@@ -1953,7 +2472,7 @@ function render_dashboard() {
     var m = new Date(now.getFullYear(), now.getMonth() - i, 1);
     var mKey = m.toISOString().slice(0, 7);
     var mProd = prods.filter(function(p) { return (p.date || '').indexOf(mKey) === 0; })
-      .reduce(function(s, p) { return s + (p.volume_total || 0); }, 0);
+      .reduce(function(s, p) { return s + (p.vol_total || p.volume_total || 0); }, 0);
     mVals.push({ label: months[m.getMonth()], vol: mProd });
   }
   var mMax = 0;
