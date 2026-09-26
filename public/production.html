@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-57';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-58';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -400,7 +400,43 @@ function setDB(v) {
   localStorage.setItem(DB_KEY, JSON.stringify(v));
   try { if (_prodChannel) _prodChannel.postMessage({ type: 'shared_key_updated', key: DB_KEY, value: JSON.stringify(v) }); } catch (e) {}
 }
-function getSection(key, def) { var db = getDB(); return db[key] !== undefined ? db[key] : def; }
+function getSection(key, def) {
+  var db = getDB();
+  var v = (db[key] !== undefined && db[key] !== null) ? db[key] : def;
+  /* Garde-fou central : une section peut etre abimee (objet au lieu d'un
+     tableau, chaine, nombre...). On respecte le type attendu par defaut.
+     SANS cela, une seule section abimee suffit a rendre une page entierement
+     blanche (le .filter() plante et le contenu n'est jamais ecrit).
+     seule la lecture est corrigee : rien n'est ecrase sur le disque. */
+  try {
+    if (Array.isArray(def)) return Array.isArray(v) ? v : [];
+    if (def && typeof def === 'object') return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  } catch (eSec) {}
+  return v;
+}
+/* Remet en forme les sections abimees de mdb_production.
+   Retourne la liste des sections reparees (pour l'afficher a l'utilisateur). */
+function prodRepareSections() {
+  var db = getDB();
+  var repaired = [];
+  for (var k in db) {
+    if (!Object.prototype.hasOwnProperty.call(db, k)) continue;
+    if (k === '__prodUpdatedAt') continue;
+    var v = db[k];
+    if (v === null || v === undefined) { db[k] = []; repaired.push(k); continue; }
+    if (Array.isArray(v)) continue;
+    if (typeof v === 'object') {
+      /* un objet { "id": {...} } est un tableau mal forme : on le convertit */
+      var vals = Object.keys(v).map(function (kk) { return v[kk]; })
+        .filter(function (x) { return x && typeof x === 'object'; });
+      if (vals.length) { db[k] = vals; repaired.push(k); }
+    } else {
+      db[k] = []; repaired.push(k);
+    }
+  }
+  if (repaired.length) { try { localStorage.setItem(DB_KEY, JSON.stringify(db)); } catch (e) {} }
+  return repaired;
+}
 function setSection(key, val) {
   var db = getDB();
   db[key] = val;
@@ -1025,6 +1061,31 @@ var PAGE_TITLES = {
   'sanctions': 'Sanctions Disciplinaires'
 };
 
+/* Ecran d'erreur : propose la reparation des donnees plutot qu'une page blanche */
+function prodPageEnErreur(page, err) {
+  var c = document.getElementById('content');
+  if (!c) return;
+  var msg = '';
+  try { msg = (err && err.message) ? String(err.message) : String(err || 'erreur inconnue'); } catch (e) {}
+  c.innerHTML =
+    '<div class="card" style="border-left:3px solid #dc2626">' +
+    '<h3 style="color:#b91c1c">Cette page n\'a pas pu s\'afficher</h3>' +
+    '<p style="font-size:.82rem;color:var(--dim);margin-bottom:.6rem">Les donnees de la page « ' + escH(PAGE_TITLES[page] || page) + ' » sont peut-être corrompues. Vos autres pages ne sont pas affectées.</p>' +
+    '<div style="font-size:.74rem;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:.5rem .6rem;margin-bottom:.6rem;color:#991b1b;word-break:break-word">Détail : ' + escH(msg) + '</div>' +
+    '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
+    '<button class="btn btn-accent" onclick="prodReparerEtRecharger()">Réparer les données et recharger</button>' +
+    '<button class="btn" onclick="renderPage()">Réessayer sans réparer</button>' +
+    '<button class="btn" onclick="goBack()">Retour</button>' +
+    '</div></div>';
+}
+function prodReparerEtRecharger() {
+  try {
+    var r = prodRepareSections();
+    if (r && r.length) toast('Données réparées : ' + r.join(', '), 'success');
+    else toast('Aucune donnée à réparer', 'success');
+  } catch (e) { toast('Réparation impossible', 'error'); }
+  setTimeout(function () { try { renderPage(); } catch (e2) {} }, 200);
+}
 function renderPage() {
   document.getElementById('pageTitle').textContent = PAGE_TITLES[CURRENT_PAGE] || CURRENT_PAGE;
   try {
@@ -1053,9 +1114,18 @@ function renderPage() {
   } else {
     actions.innerHTML = '';
   }
-  var fn = window['render_' + CURRENT_PAGE.replace(/-/g, '_')];
-  if (fn) { document.getElementById('content').innerHTML = fn(); bindEvents(); }
-  else { document.getElementById('content').innerHTML = '<div class="empty">Module en cours de développement...</div>'; }
+var fn = window['render_' + CURRENT_PAGE.replace(/-/g, '_')];
+if (fn) {
+/* Le rendu est protege : si une donnee est abimee, on affiche un message
+   clair au lieu d'une page blanche silencieuse. */
+try { document.getElementById('content').innerHTML = fn(); }
+catch (eRend) {
+console.error('Erreur rendu page ' + CURRENT_PAGE, eRend);
+try { prodPageEnErreur(CURRENT_PAGE, eRend); } catch (e2) {}
+}
+try { bindEvents(); } catch (eBind) { console.warn('bindEvents', eBind); }
+}
+else { document.getElementById('content').innerHTML = '<div class="empty">Module en cours de développement...</div>'; }
   if (CURRENT_PAGE === 'dashboard') {
     try { bindProdDashDnd(); applyProdDashOrder(); } catch (eDbd) {}
   }
@@ -4426,7 +4496,9 @@ function exportStockBLCSV() {
 /* Lignes de stock MP sans bordereau d'achat (ex : BL supprimé avant la déduction auto) */
 function cleanOrphanStockRaw() {
   try {
-    var achats = getAchats();
+var achats = getAchats();
+/* donnee abimee : on ne casse pas la page, on repart d'une liste vide */
+if (!Array.isArray(achats)) { achats = []; try { toast('Liste d\'achats illisible — page affichée vide', 'error'); } catch (e) {} }
     var have = {};
     achats.forEach(function(a) {
       (a.items || []).forEach(function(it) {
