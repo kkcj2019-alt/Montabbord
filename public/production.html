@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-59';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-60';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -1104,6 +1104,236 @@ function prodReparerEtRecharger() {
    Aucun calcul existant n'est modifie : uniquement des lectures.
    ===================================================================== */
 
+
+/* =====================================================================
+   DETECTION AUTOMATIQUE DES FRAIS DE STRUCTURE DEPUIS LA CAISSE
+   ---------------------------------------------------------------------
+   Les depenses de caisse sont lues dans mdb_operationsCaisse (local ou
+   cloud). On ne fait AUCUNE hypothese cachee : chaque poste est affiche,
+   l'utilisateur decide de le garder ou de l'enlever. Rien n'est fige.
+   Regles minimales d'exclusion (securite, parametrables une par une) :
+     - les entrees (recettes) ;
+     - les brouillons et les pieces reverses ;
+     - les transferts entre caisses (ce n'est pas une charge) ;
+     - les transfers en attente ou refuses ;
+     - les operations d'acompte / pret / solde (argent aux employes,
+       deja compte ailleurs) ;
+     - les lignes de frais de transaction rattachees (evite le double
+       compte du 1 % automatique).
+   Les achats fournisseurs (beneficiaireType = fournisseur avec montant
+   global) sont SEPARES et exclus par defaut : ils sont deja valorises
+   dans le cout matiere. Un simple clic les reintegr si besoin.
+   ===================================================================== */
+
+function acOpsCaisse() { try { var o = JSON.parse(localStorage.getItem('mdb_operationsCaisse')); return Array.isArray(o) ? o : []; } catch (e) { return []; } }
+function acCodesCaisse() { try { var o = JSON.parse(localStorage.getItem('mdb_codesCaisse')); return Array.isArray(o) ? o : []; } catch (e) { return []; } }
+function acCaisses() { try { var o = JSON.parse(localStorage.getItem('mdb_caisses')); return Array.isArray(o) ? o : []; } catch (e) { return []; } }
+
+/* codes systeme de l'application principale : ils marquent un reglement
+   d'acompte/solde, pas un achat de bois ni un frais general */
+var AC_CODES_REGLEMENT = ['SOLDE_SALAIRE', 'SOLDE_INDEMNITE', 'ACOMPTE_INDEMNITE'];
+
+function acInfoCode(op) {
+  var id = op.codeId;
+  var cs = acCodesCaisse();
+  for (var i = 0; i < cs.length; i++) {
+    if ((cs[i] || {}).id && String(cs[i].id) === String(id)) return cs[i] || {};
+  }
+  return {};
+}
+function acNomCaisse(cid) {
+  if (!cid) return '';
+  var cs = acCaisses();
+  for (var i = 0; i < cs.length; i++) if (String((cs[i] || {}).id) === String(cid)) return (cs[i].nom || '');
+  return '';
+}
+
+/* Classe une operation de caisse. */
+function acClasseOp(op) {
+  var o = op || {};
+  var code = (o.code || '').toString().trim();
+  if (!code) { var inf = acInfoCode(o); code = (inf.code || '').toString().trim(); }
+  var libBrut = (o.libelle || '').toString().trim();
+  var libCode = (acInfoCode(o).libelle || '').toString().trim();
+  var libelle = libCode || libBrut || code || 'Opération sans libellé';
+
+  if (o.brouillon) return { nature: 'exclu', motif: 'brouillon', poste: '', libelle: libelle };
+  if ((o.sens || '') !== 'sortie') return { nature: 'exclu', motif: 'recette (entrée)', poste: '', libelle: libelle };
+  if (o.reversed) return { nature: 'exclu', motif: 'pièce reversée', poste: '', libelle: libelle };
+  if ((o.typeOp || '') === 'transfert' || (o.beneficiaireType || '') === 'transfert')
+    return { nature: 'exclu', motif: 'transfert entre caisses', poste: '', libelle: libelle };
+  if (o.status === 'refuse') return { nature: 'exclu', motif: 'transfert refusé', poste: '', libelle: libelle };
+  if (o.status === 'en_attente') return { nature: 'exclu', motif: 'transfert non approuvé', poste: '', libelle: libelle };
+  var ap = (o.apType || '').toString();
+  if (ap === 'acompte' || ap === 'pret' || ap === 'solde')
+    return { nature: 'exclu', motif: 'règlement employé (' + ap + ')', poste: '', libelle: libelle };
+  /* ligne de frais rattachee a une operation maitresse : deja comptee */
+  if (o.linkedOpId && libBrut.toLowerCase().indexOf('frais') === 0)
+    return { nature: 'exclu', motif: 'frais de transaction (déjà compté)', poste: '', libelle: libelle };
+
+  var estAchat = ((o.beneficiaireType || '') === 'fournisseur' && (parseFloat(o.montantCharge) || 0) > 0);
+  var poste = code || libelle;
+  return {
+    nature: estAchat ? 'achat' : 'charge',
+    motif: estAchat ? 'achat fournisseur (déjà valorisé en matière)' : '',
+    poste: poste, libelle: libelle, code: code
+  };
+}
+
+/* ---------- exclusions (persistance dans mdb_production) ---------- */
+function acExcl() {
+  var e = getSection('costAutoExcl', {});
+  if (!e || typeof e !== 'object' || Array.isArray(e)) e = {};
+  if (!Array.isArray(e.postes)) e.postes = [];
+  if (!Array.isArray(e.ops)) e.ops = [];
+  if (typeof e.achats !== 'boolean') e.achats = true;   /* achats exclus par defaut */
+  return e;
+}
+function acAutoTogglePoste(cle) {
+  var e = acExcl(), i = e.postes.indexOf(cle);
+  if (i === -1) e.postes.push(cle); else e.postes.splice(i, 1);
+  setSection('costAutoExcl', e);
+  renderPage();
+}
+function acAutoToggleOp(id) {
+  var e = acExcl(), k = String(id), i = e.ops.indexOf(k);
+  if (i === -1) e.ops.push(k); else e.ops.splice(i, 1);
+  setSection('costAutoExcl', e);
+  renderPage();
+}
+function acAutoAchatInclure() { var e = acExcl(); e.achats = !e.achats; setSection('costAutoExcl', e); renderPage(); }
+function acAutoReset() { setSection('costAutoExcl', { postes: [], ops: [], achats: true }); toast('Tous les postes de la caisse sont de nouveau pris en compte'); renderPage(); }
+
+/* ---------- calcul ---------- */
+function acChargesAuto(du, au) {
+  var e = acExcl();
+  var ops = acOpsCaisse();
+  var map = {}, ignores = {}, cles = [];
+  var i;
+  for (i = 0; i < ops.length; i++) {
+    var op = ops[i] || {};
+    var cl = acClasseOp(op);
+    if (cl.nature === 'exclu') { ignores[cl.motif] = (ignores[cl.motif] || 0) + 1; continue; }
+    if (!acDansPeriode(op.date, du, au)) continue;
+    var mt = parseFloat(op.montant) || 0;
+    if (mt <= 0) continue;
+    var key = cl.nature + '|' + cl.poste;
+    if (!map[key]) {
+      map[key] = { cle: key, poste: cl.poste, libelle: cl.libelle, code: cl.code,
+                   nature: cl.nature, motif: cl.motif, montant: 0, ops: [] };
+      cles.push(key);
+    }
+    map[key].montant += mt;
+    map[key].ops.push({
+      id: String(op.id || ''), date: op.date, piece: op.numeroPiece || '',
+      libelle: (op.libelle || cl.libelle), montant: mt,
+      caisse: acNomCaisse(op.caisseId), exclu: e.ops.indexOf(String(op.id || '')) !== -1
+    });
+  }
+  var liste = [];
+  for (i = 0; i < cles.length; i++) {
+    var p = map[cles[i]];
+    p.exclu = e.postes.indexOf(p.cle) !== -1;
+    var retenu = 0;
+    for (var j = 0; j < p.ops.length; j++) if (!p.ops[j].exclu) retenu += p.ops[j].montant;
+    p.montantRetenu = retenu;
+    /* un poste acheteur n'est retenu que si l'utilisateur l'a demande */
+    var prisEnCompte = !p.exclu && (p.nature === 'charge' || e.achats === false);
+    p.prisEnCompte = prisEnCompte;
+    p.totalRetenu = prisEnCompte ? retenu : 0;
+    p.ops.sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+    liste.push(p);
+  }
+  liste.sort(function (a, b) { return b.totalRetenu - a.totalRetenu || b.montant - a.montant; });
+  var total = 0, brut = 0, nbOps = 0;
+  for (i = 0; i < liste.length; i++) { total += liste[i].totalRetenu; brut += liste[i].montant; nbOps += liste[i].ops.length; }
+  var ig = [];
+  for (var k in ignores) if (Object.prototype.hasOwnProperty.call(ignores, k)) ig.push({ motif: k, n: ignores[k] });
+  return { postes: liste, total: total, brut: brut, nbOps: nbOps, ignores: ig };
+}
+
+/* ---------- intégration cloud : la caisse doit suivre sur les autres appareils ---------- */
+function acApplyCaisseCloud(arr) {
+  if (!Array.isArray(arr)) return false;
+  var key = arguments[1] || 'mdb_operationsCaisse';
+  var txt = JSON.stringify(arr);
+  try {
+    if (localStorage.getItem(key) === txt) return false;
+    localStorage.setItem(key, txt);
+    return true;
+  } catch (e) { return false; }
+}
+
+/* ---------- rendu ---------- */
+function acBlocChargesAuto(du, au) {
+  var auto = acChargesAuto(du, au);
+  var h = '';
+  h += '<div class="card" style="padding:.6rem;margin-bottom:.5rem">';
+  h += '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.4rem">';
+  h += '<div style="font-size:.76rem;color:var(--dim);flex:1">Dépenses <strong> relevées automatiquement dans la caisse</strong> sur la période. Chaque poste est modifiable : rien n’est figé.</div>';
+  h += '<button class="btn btn-sm" onclick="acAutoReset()">Tout réintégrer</button>';
+  h += '</div>';
+
+  if (!auto.postes.length) {
+    h += '<div style="font-size:.78rem;color:var(--dim);padding:.4rem 0">Aucune dépense de caisse détectée sur la période. Les recettes, transferts, brouillons et pièces reversées sont ignorés d’emblée.</div>';
+  } else {
+    h += '<table><thead><tr><th style="width:34px"></th><th>Poste</th><th>Nature</th><th style="text-align:right">Montant</th><th style="text-align:right">Retenu</th><th style="width:80px"></th></tr></thead><tbody>';
+    for (var i = 0; i < auto.postes.length; i++) {
+      var p = auto.postes[i];
+      var estExclu = !p.prisEnCompte;
+      h += '<tr' + (estExclu ? ' style="opacity:.55"' : '') + '>';
+      h += '<td><input type="checkbox"' + (estExclu ? '' : ' checked') + ' onchange="acAutoTogglePoste(\'' + escH(p.cle) + '\')" title="' + (estExclu ? 'Réintégrer ce poste' : 'Retirer ce poste des frais') + '" style="width:15px;height:15px;cursor:pointer"></td>';
+      h += '<td><strong>' + escH(p.libelle) + '</strong>' + (p.code ? '<div style="font-size:.66rem;color:var(--dim)">code : ' + escH(p.code) + '</div>' : '') + '</td>';
+      h += '<td style="font-size:.68rem;color:' + (p.nature === 'achat' ? '#b45309' : 'var(--dim)') + '">' + (p.nature === 'achat' ? 'achat fournisseur' : 'charge') + '</td>';
+      h += '<td style="text-align:right">' + fmtF(p.montant) + '</td>';
+      h += '<td style="text-align:right;font-weight:800;color:' + (p.totalRetenu > 0 ? 'var(--accent)' : 'var(--dim)') + '">' + (p.totalRetenu > 0 ? fmtF(p.totalRetenu) : '—') + '</td>';
+      h += '<td style="text-align:right"><button class="btn btn-sm" onclick="acAutoDetailPoste(\'' + escH(p.cle) + '\')" title="Voir les opérations" style="padding:1px 6px;font-size:.68rem">détail</button></td>';
+      h += '</tr>';
+      h += '<tr><td colspan="6" style="padding:0;border-top:none"><div id="acDet_' + escH(p.cle).replace(/[^a-zA-Z0-9]/g, '_') + '" style="display:none;padding:.25rem 0 .4rem .4rem"></div></td></tr>';
+    }
+    h += '<tr style="background:#f8fafc;font-weight:800"><td></td><td>TOTAL</td><td></td><td style="text-align:right">' + fmtF(auto.brut) + '</td><td style="text-align:right;color:var(--accent)">' + fmtF(auto.total) + '</td><td></td></tr>';
+    h += '</tbody></table>';
+    h += '<div style="font-size:.72rem;color:var(--dim);margin-top:.3rem">' + auto.nbOps + ' opération(s) analysée(s). Les achats fournisseurs sont exclus par défaut car ils sont déjà valorisés dans le coût matière :</div>';
+    h += '<button class="btn btn-sm" onclick="acAutoAchatInclure()" style="margin-top:.2rem">' + (acExcl().achats ? 'Inclure aussi les achats fournisseurs' : 'Exclure à nouveau les achats fournisseurs') + '</button>';
+  }
+
+  if (auto.ignores.length) {
+    h += '<div style="font-size:.68rem;color:var(--dim);margin-top:.4rem;padding-top:.35rem;border-top:1px solid var(--border)">Ignorés automatiquement : ';
+    var parts = [];
+    for (var g = 0; g < auto.ignores.length; g++) parts.push(auto.ignores[g].n + ' ' + auto.ignores[g].motif);
+    h += escH(parts.join(' · ')) + '.</div>';
+  }
+  h += '</div>';
+  return h;
+}
+function acAutoDetailPoste(cle) {
+  var p = acPeriode();
+  var auto = acChargesAuto(p.du, p.au);
+  var box = document.getElementById('acDet_' + String(cle).replace(/[^a-zA-Z0-9]/g, '_'));
+  if (!box) return;
+  if (box.getAttribute('data-ouvert') === '1') { box.style.display = 'none'; box.setAttribute('data-ouvert', '0'); return; }
+  var cible = null;
+  for (var i = 0; i < auto.postes.length; i++) if (auto.postes[i].cle === cle) { cible = auto.postes[i]; break; }
+  if (!cible) return;
+  var h = '<table style="margin:0"><thead><tr><th style="width:34px"></th><th>Date</th><th>Pièce</th><th>Libellé</th><th>Caisse</th><th style="text-align:right">Montant</th></tr></thead><tbody>';
+  for (var j = 0; j < cible.ops.length; j++) {
+    var o = cible.ops[j];
+    h += '<tr' + (o.exclu ? ' style="opacity:.5;text-decoration:line-through"' : '') + '>';
+    h += '<td><input type="checkbox"' + (o.exclu ? '' : ' checked') + ' onchange="acAutoToggleOp(\'' + escH(o.id) + '\')" style="width:14px;height:14px;cursor:pointer" title="' + (o.exclu ? 'Réintégrer' : 'Retirer cette opération') + '"></td>';
+    h += '<td>' + fmtD(o.date) + '</td>';
+    h += '<td style="font-size:.7rem">' + escH(o.piece || '—') + '</td>';
+    h += '<td style="font-size:.72rem">' + escH(o.libelle) + '</td>';
+    h += '<td style="font-size:.7rem;color:var(--dim)">' + escH(o.caisse || '—') + '</td>';
+    h += '<td style="text-align:right">' + fmtF(o.montant) + '</td>';
+    h += '</tr>';
+  }
+  h += '</tbody></table>';
+  box.innerHTML = h;
+  box.style.display = 'block';
+  box.setAttribute('data-ouvert', '1');
+}
+
+
 function acJour(d) { return String(d || '').trim().slice(0, 10); }
 function acMoisDe(d) { return String(d || '').trim().slice(0, 7); }
 function acDebutMois(ym) { return String(ym || '').slice(0, 7) + '-01'; }
@@ -1371,11 +1601,15 @@ function render_analyse_couts() {
   var prod = acProduction(p.du, p.au, cuma);
   var prodP = acProduction(pp.du, pp.au, cumaP);
   var conso = acConsommables(p.du, p.au);
+  var _auto = acChargesAuto(p.du, p.au);
+  var chargesAuto = _auto.total; var nbPostesAuto = 0;
+  (function(){ var Lp = _auto.postes; for (var i2 = 0; i2 < Lp.length; i2++) if (Lp[i2].totalRetenu > 0) nbPostesAuto++; })();
   var frais = acFraisSur(p.du, p.au);
   var ventes = acVentes(p.du, p.au);
 
   var coutDirect = prod.coutMatiere + conso.montant;
-  var coutComplet = coutDirect + frais.total;
+  var fraisManuels = frais.total;
+  var coutComplet = coutDirect + chargesAuto + fraisManuels;
   var volProd = prod.volProduit;
   var crDirect = volProd > 0 ? coutDirect / volProd : 0;
   var crComplet = volProd > 0 ? coutComplet / volProd : 0;
@@ -1416,7 +1650,7 @@ function render_analyse_couts() {
         prod.volPerte > 0 ? prod.volPerte.toFixed(3) + ' m³ perdus' : 'aucune perte',
         prod.coutPerte > prod.coutMatiere * 0.15 ? '#dc2626' : 'var(--text)');
   h += acLigneAc(3, 'Coût de revient / m³', crComplet > 0 ? fmtF(crComplet) : '—',
-        volProd > 0 ? 'sur ' + volProd.toFixed(3) + ' m³ produits' : 'pas de production',
+        volProd > 0 ? ('sur ' + volProd.toFixed(3) + ' m³ produits' + (((chargesAuto + fraisManuels) > 0) ? ' · frais ' + fmtF(chargesAuto + fraisManuels) : ' · frais à saisir')) : 'pas de production',
         'var(--accent)');
   h += acLigneAc(4, 'Prix de vente moyen', ventes.prixMoyen > 0 ? fmtF(ventes.prixMoyen) : '—',
         ventes.qte > 0 ? fmt(ventes.qte) + ' unité(s) livrée(s)' : 'aucune livraison',
@@ -1502,9 +1736,10 @@ function render_analyse_couts() {
   h += '</div>';
 
   /* ---------- Frais de structure ---------- */
-  h += '<div class="sec-title"><span></span>FRAIS DE STRUCTURE (À SAISIR)</div>';
+  h += '<div class="sec-title"><span></span>FRAIS DE STRUCTURE</div>';
+  h += acBlocChargesAuto(p.du, p.au);
   h += '<div class="card" style="padding:.6rem;margin-bottom:.5rem">';
-  h += '<div style="font-size:.76rem;color:var(--dim);margin-bottom:.5rem">Le module Exploitation n\'a aucune donnée de charges (loyer, salaires, énergie, transport). Pour obtenir un coût de revient <strong>réel</strong>, saisis-les ici : ils seront comptés dans le coût de revient au m³.</div>';
+  h += '<div style="font-size:.76rem;color:var(--dim);margin:.4rem 0 .5rem">Les dépenses de caisse sont détectées ci-dessus. Ajoute ici ce qui n\'est pas passé par la caisse (loyer, salaires, énergie, transport) : tout est additionné dans le coût de revient au m³.</div>';
   h += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:flex-end">';
   h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Poste</label><input type="text" id="acPoste" placeholder="Loyer, Salaires, Énergie..." style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem;min-width:150px"></div>';
   h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block">Mois</label><input type="month" id="acMois" value="' + escH(acMoisDe(p.au) || thisMonth()) + '" style="padding:.3rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.76rem"></div>';
@@ -1539,7 +1774,8 @@ function render_analyse_couts() {
   h += ligneRec('dont pertes de bois', prod.coutPerte > 0 ? fmtF(prod.coutPerte) + ' (' + prod.volPerte.toFixed(3) + ' m³)' : '—');
   h += ligneRec('Consommables achetés sur la période', conso.montant > 0 ? fmtF(conso.montant) : '—');
   h += ligneRec('Coût direct', coutDirect > 0 ? fmtF(coutDirect) : '—', true);
-  h += ligneRec('Frais de structure saisis', frais.total > 0 ? fmtF(frais.total) : '—');
+ h += ligneRec('Frais détectés dans la caisse', chargesAuto > 0 ? fmtF(chargesAuto) + '  (' + nbPostesAuto + ' poste(s))' : '—');
+ h += ligneRec('Frais saisis manuellement', fraisManuels > 0 ? fmtF(fraisManuels) : '—');
   h += ligneRec('COÛT DE REVIENT COMPLET', coutComplet > 0 ? fmtF(coutComplet) : '—', true);
   h += ligneRec('Volume produit', volProd > 0 ? volProd.toFixed(3) + ' m³' : '—');
   h += ligneRec('Coût de revient au m³ produit', crComplet > 0 ? fmtF(crComplet) : '—', true);
@@ -2021,10 +2257,11 @@ function _prodDataStamp() {
   try {
     var a = localStorage.getItem('mdb_production') || '';
     var b = localStorage.getItem('mdb_dettesFournisseurs') || '';
+    var c = localStorage.getItem('mdb_operationsCaisse') || '';
     var h = 5381, i = 0;
-    var str = a.length + "|" + b.length + "|" + a + b;
+    var str = a.length + "|" + b.length + "|" + c.length + "|" + a + b + c;
     for (i = 0; i < str.length; i += 7) { h = ((h << 5) + h + str.charCodeAt(i)) >>> 0; }
-    return h + ":" + a.length + ":" + b.length;
+    return h + ":" + a.length + ":" + b.length + ":" + c.length;
   } catch (e) { return "err"; }
 }
 function _prodAutoRRun() {
@@ -2201,7 +2438,10 @@ function prodPullNow(silent) {
     if (!row.data) return;
     var r1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
     var r2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
-    if (r1 || r2) { try { prodAutoRefresh(); } catch(e) {} }
+    var r3 = Array.isArray(row.data.mdb_operationsCaisse) ? acApplyCaisseCloud(row.data.mdb_operationsCaisse, 'mdb_operationsCaisse') : false;
+    var r4 = Array.isArray(row.data.mdb_codesCaisse) ? acApplyCaisseCloud(row.data.mdb_codesCaisse, 'mdb_codesCaisse') : false;
+    var r5 = Array.isArray(row.data.mdb_caisses) ? acApplyCaisseCloud(row.data.mdb_caisses, 'mdb_caisses') : false;
+    if ((r1 || r2 || r3 || r4 || r5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
   }).catch(function(err) {});
 }
 function prodStartRealtime() {
@@ -2218,7 +2458,10 @@ function prodStartRealtime() {
         if (!row.data) return;
         var a1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
         var a2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
-        if (a1 || a2) { try { prodAutoRefresh(); } catch(e) {} }
+        var a3 = Array.isArray(row.data.mdb_operationsCaisse) ? acApplyCaisseCloud(row.data.mdb_operationsCaisse, 'mdb_operationsCaisse') : false;
+        var a4 = Array.isArray(row.data.mdb_codesCaisse) ? acApplyCaisseCloud(row.data.mdb_codesCaisse, 'mdb_codesCaisse') : false;
+        var a5 = Array.isArray(row.data.mdb_caisses) ? acApplyCaisseCloud(row.data.mdb_caisses, 'mdb_caisses') : false;
+        if ((a1 || a2 || a3 || a4 || a5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
       } catch(e) {}
     });
     _prodSub.subscribe(function(status) {});
