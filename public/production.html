@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-69';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-70';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -12611,6 +12611,17 @@ function processAllImages(imgs, done) {
   next();
 }
 
+/* Recherche d'un MOT ENTIER dans le texte extrait. Un simple indexOf
+   s'appariait sur des fragments : « TAIL » dans « DETAIL », « EKE » dans
+   n'importe quoi, et le vieux motif /bl/ retrouvait « table ». */
+function _motEntier(texte, mot) {
+  var m = String(mot == null ? '' : mot).toUpperCase().trim();
+  if (!m) return false;
+  var esc = m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/[\s\-'’]+/g, '[\\s\\-\u2019\']*');
+  try { return new RegExp('(^|[^A-Z0-9])' + esc + '([^A-Z0-9]|$)', 'i').test(texte); }
+  catch (e) { return String(texte || '').toUpperCase().indexOf(m) >= 0; }
+}
 function applyExtractedAchatData(text) {
   var lines = text.split(/\r?\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
   var full = lines.join(' ');
@@ -12624,26 +12635,67 @@ function applyExtractedAchatData(text) {
   }
   if (foundFournisseur) document.getElementById('ach_fournisseur').value = foundFournisseur;
   else {
-    // fallback: première ligne qui ressemble à un nom (pas de chiffres, pas de mots-clés facture)
-    for (var i = 0; i < lines.length; i++) {
-      if (!/^\d/.test(lines[i]) && !/facture|bl|bon|livraison|numero|date|total|ht|ttc|tva/i.test(lines[i]) && lines[i].length > 3) {
-        document.getElementById('ach_fournisseur').value = lines[i];
-        break;
+    /* Repli « premiere ligne qui ressemble a un nom » : dangereux sur un
+       texte illisible, il registrait du bruit OCR (« pr es / er ae te »)
+       comme nom de fournisseur. On ne le tente que si le document a une
+       vraie structure (assez de lignes + un libelle de document connu). */
+    var labelsDoc = /bordereau|bon\s*de\s*livraison|facture|n\s*[°ºo]?\s*colis|quantit[ée]|qte|fournisseur|client|destinataire|transporteur|esp[èe]ce|longueur|largeur|[ée]pais|cubage|volume/i;
+    if (lines.length >= 3 && labelsDoc.test(full)) {
+      for (var i = 0; i < lines.length; i++) {
+        var cand = lines[i];
+        var lettres = (cand.match(/[A-Za-zÀ-ÿ]/g) || []).length;
+        if (lettres >= 3 && !/^\d/.test(cand) && !/facture|bl\b|bon|livraison|numero|total|ht|ttc|tva|qte|colis|pointes|bois|longueur|largeur|[ée]pais|cubage/i.test(cand)) {
+          document.getElementById('ach_fournisseur').value = cand;
+          break;
+        }
       }
     }
   }
 
-  // 2. Référence / N° BL
-  var refMatch = full.match(/(?:bl|bon\s*de\s*livraison|facture|n[°o]\s*(?:bl|facture)?)\s*[#:]?\s*([\w\/\-\.]{3,})/i);
-  if (refMatch) document.getElementById('ach_ref').value = refMatch[1];
+  // 2. Référence / N° de document. « bordereau » manquait, et l'ancien motif
+  //    (?:bl|...) attrapait le premier mot d'nimporte quoi. On exige un label
+  //    explicite puis un numero (au moins un chiffre).
+  var refVal = '';
+  var refRe = [
+    /(?:bordereau|bon)\s*(?:de\s*)?(?:livraison|transport)\s*(?:n\s*[°ºo]?\.?\s*|num[ée]ro\s*[:=]?\s*)?[#:]?\s*([A-Za-z0-9][A-Za-z0-9\/\-\.]{2,})/i,
+    /n\s*[°ºo]?\.?\s*(?:de\s*)?(?:bl|bon|bordereau|facture)\s*[#:]?\s*([A-Za-z0-9][A-Za-z0-9\/\-\.]{2,})/i,
+    /(?:^|[\s;|(])(?:bl|facture)\s*(?:n\s*[°ºo]?\.?\s*)?[#:]?\s*([A-Za-z0-9][A-Za-z0-9\/\-\.]{2,})/i
+  ];
+  for (var ri = 0; ri < refRe.length && !refVal; ri++) {
+    var rm = full.match(refRe[ri]);
+    if (rm) refVal = rm[1].replace(/[.\-]+$/, '');
+  }
+  if (refVal && /\d/.test(refVal)) document.getElementById('ach_ref').value = refVal;
 
-  // 3. Essence — matching contre essences connues
+  // 2 bis. Date — elle n'etait pas extraite du tout, le champ restait sur
+  //     la date du jour. D'abord une date etiquetee, sinon la 1re date
+  //     plausible (annee sur 4 chiffres).
+  var dateVal = '';
+  var dRe = [
+    /date\s*(?:de\s*)?(?:chargement|livraison|facture|exp[ée]dition)?\s*[:=]?\s*(\d{1,2})[\/\-. ](\d{1,2})[\/\-. ](\d{2,4})(?!\d)/i,
+    /(?:^|[\s:;|(])(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?!\d)/
+  ];
+  for (var di = 0; di < dRe.length && !dateVal; di++) {
+    var dm = full.match(dRe[di]);
+    if (!dm) continue;
+    var dd = parseInt(dm[1], 10), mo = parseInt(dm[2], 10), yy = parseInt(dm[3], 10);
+    if (yy < 100) yy += 2000;
+    if (mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31 && yy >= 2000 && yy <= 2100) {
+      dateVal = String(yy) + '-' + String(mo).padStart(2, '0') + '-' + String(dd).padStart(2, '0');
+    }
+  }
+  if (dateVal) document.getElementById('ach_date').value = dateVal;
+
+  // 3. Essence — « Acajou » manquait (c'etait le bois du document), et la
+  //    recherche par fragment pouvait s'apparier sur du bruit.
   var species = getSpecies();
-  var essList = ['AYOUS','ASSAMELA','BILINGA','SAPELLI','IROKO','MOVINGUI','PADOUK','TAIL','FRAKE','OKOUME','NIANGON','DOUSSIE','AZOBE','BETE','KOTO','LIMBA','MAHOGANY','TEAK','MERANTI','KERUING','KAPUR','MERBAU'];
+  var essList = ['ACAJOU','KOUATE','SAPI','ESSIVIE','EMANI','OLOF','DABEMA','EKE','KAYA','BAKA','MICKA',
+    'AYOUS','ASSAMELA','BILINGA','SAPELLI','IROKO','MOVINGUI','PADOUK','TAIL','FRAKE','OKOUME','NIANGON',
+    'DOUSSIE','AZOBE','BETE','KOTO','LIMBA','MAHOGANY','TEAK','MERANTI','KERUING','KAPUR','MERBAU'];
   for (var i = 0; i < species.length; i++) essList.push(species[i].code, species[i].nom);
   for (var i = 0; i < essList.length; i++) {
-    var e = essList[i].toUpperCase();
-    if (full.toUpperCase().indexOf(e) >= 0) { document.getElementById('ai_essence').value = e; onAchatEssenceChange(); break; }
+    var e = String(essList[i] || '').toUpperCase();
+    if (e && _motEntier(full, e)) { document.getElementById('ai_essence').value = e; onAchatEssenceChange(); break; }
   }
 
   // 4. Dimensions — pattern L×l×E (ex: 114*8*2, 114 x 8 x 2, 114x8x2)
@@ -12657,21 +12709,51 @@ function applyExtractedAchatData(text) {
     calcItemVolLive();
   }
 
-  // 5. Quantité — nombre avant "pièce", "colis", "qté", "quantité", ou premier gros entier isolé
-  var qteMatch = full.match(/(?:qte|qté|quantite|quantité|colis|pieces?|pièces?)\s*[#:]?\s*(\d+)/i) || full.match(/\b(\d{2,4})\b/);
-  if (qteMatch) document.getElementById('ai_qte').value = qteMatch[1];
+  // 5. Quantite — uniquement si le document la nomme. L'ancien repli
+  //    /\b(\d{2,4})\b/ prenait le PREMIER nombre du texte (225, un code
+  //    postal...) : une quantite fausse fausse le stock et le cout de
+  //    revient sans aucun avertissement. Mieux vaut un champ vide.
+  var qteVal = '';
+  var qm = full.match(/(?:nombre\s*d['’]?[ée]l[ée]ments?|quantit[ée]|qte|qti|nombre|colis|pi[èe]ces?|unit[ée]s?|pcs)\s*(?:n\s*[°ºo]?\.?\s*)?[#:=]?\s*(\d{1,6})(?!\d)/i);
+  if (qm) qteVal = qm[1];
+  if (qteVal) document.getElementById('ai_qte').value = qteVal;
 
-  // 6. Type (Rouge/Blanc)
-  if (/rouge/i.test(full)) document.getElementById('ai_type').value = 'Rouge';
-  else if (/blanc/i.test(full)) document.getElementById('ai_type').value = 'Blanc';
+  // 6. Type (Rouge/Blanc) — mot entier, sinon « blanc » s'apparierait
+  //    dans « blanchi », « blancheur »...
+  if (_motEntier(full, 'rouge')) document.getElementById('ai_type').value = 'Rouge';
+  else if (_motEntier(full, 'blanc')) document.getElementById('ai_type').value = 'Blanc';
 
   // 7. N° Colis
-  var colisMatch = full.match(/(?:n[°o]\s*(?:colis|col))\s*[#:]?\s*([\w\/\-\.]{3,})/i);
-  if (colisMatch) document.getElementById('ai_colis').value = colisMatch[1];
+  var colisVal = '';
+  var colisMatch = full.match(/n\s*[°ºo]?\.?\s*(?:colis|col)\s*[#:]?\s*([A-Za-z0-9][A-Za-z0-9\/\-\.]{2,})/i);
+  if (colisMatch) colisVal = colisMatch[1].replace(/[.\-]+$/, '');
+  if (colisVal) document.getElementById('ai_colis').value = colisVal;
 
   calcItemVolLive();
+
+  /* Le message disait « ✅ Données extraites » meme quand rien n'avait ete
+     trouve : c'est ce qui a laisse passer des lignes fausses. On dit
+     exactement ce qui a ete rempli et ce qui reste a saisir. */
+  var okF = [], koF = [];
+  var f = function (id) { var el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
+  if (f('ach_fournisseur')) okF.push('fournisseur'); else koF.push('fournisseur');
+  if (f('ach_ref')) okF.push('n° document'); else koF.push('n° document');
+  if (dateVal) okF.push('date'); else koF.push('date');
+  if (f('ai_essence')) okF.push('essence'); else koF.push('essence');
+  if (qteVal) okF.push('quantité'); else koF.push('quantité');
+  if (dimMatch) okF.push('dimensions'); else koF.push('dimensions');
   var status = document.getElementById('ach_doc_status');
-  if (status) status.textContent = '✅ Données extraites — vérifiez et complétez avant d\'ajouter la ligne';
+  if (status) {
+    if (!okF.length) {
+      status.style.color = '#b45309';
+      status.textContent = '⚠ Rien de lisible dans ce document. Saisissez les champs à la main (photo ou scan peu lisible).';
+    } else {
+      status.style.color = koF.length ? '#b45309' : '#166534';
+      status.textContent = (koF.length ? '⚠ À compléter : ' + koF.join(', ') + ' — ' : '✅ ')
+        + 'extrait : ' + okF.join(', ')
+        + (lines.length < 3 ? ' (texte très court : extraction peu fiable)' : '');
+    }
+  }
 }
 
 function achatHasMouvements(a) {

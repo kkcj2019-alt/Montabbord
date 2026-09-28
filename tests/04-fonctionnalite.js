@@ -332,6 +332,115 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Import de BL : ce que le texte extrait remplit reellement ---------- */
+  const ocrBordereau = [
+    'SCIERIE S.M.I  TEL: (+228) 27 35 50 73 ABENGOUROU',
+    'BORDEREAU DE LIVRAISON N 000114',
+    'CODE EXPORTEUR TRANSPORTEUR : 146   S.M.I',
+    'DATE DE CHARGEMENT : 30/07/2026',
+    'ESPECE : Acajou',
+    'DESTINATION DU PRODUIT : Depot de Nkol-ogon',
+    'N COLIS   NOMBRE D ELEMENTS   LONGUEUR   LARGEUR   EPAIS   CUBAGE   OBSERVATION'
+  ].join('\n');
+  const razImport = `
+    ['ach_fournisseur','ach_ref','ach_date','ai_essence','ai_qte','ai_long','ai_larg','ai_epais','ai_colis','ach_doc_status']
+      .forEach(function (id) { var e = document.getElementById(id); if (e) e.value = ''; });
+  `;
+
+  r.push({
+    nom: 'Import BL : le numero d\'un BORDEREAU DE LIVRAISON est extrait',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData(${JSON.stringify(ocrBordereau)});
+      var v = String(document.getElementById('ach_ref').value);
+      (v === '000114') ? 'OK : ach_ref = ' + v : 'ECHEC : ach_ref = ' + v
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : la date du document est extraite (avant : la date du jour)',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData(${JSON.stringify(ocrBordereau)});
+      var v = String(document.getElementById('ach_date').value);
+      (v === '2026-07-30') ? 'OK : ach_date = ' + v : 'ECHEC : ach_date = ' + v
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : l\'essence ACAJOU est reconnue',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData(${JSON.stringify(ocrBordereau)});
+      var v = String(document.getElementById('ai_essence').value);
+      (v === 'ACAJOU') ? 'OK : essence = ' + v : 'ECHEC : essence = ' + v
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : aucune quantite inventee quand le document ne la nomme pas',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData(${JSON.stringify(ocrBordereau)});
+      var v = String(document.getElementById('ai_qte').value);
+      (v === '') ? 'OK : champ laisse vide plutot que rempli au hasard'
+                 : 'ECHEC : ai_qte = ' + v + ' (nombre sorti de nulle part)'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : une quantite explicitement nommee est reprise',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData('BON DE LIVRAISON N 4471\\nQUANTITE : 225\\nLONGUEUR 2,50 x LARGEUR 40 x EPAIS 5');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_qte') === '225' && g('ach_ref') === '4471')
+        ? 'OK : qte = ' + g('ai_qte') + ', ref = ' + g('ach_ref')
+        : 'ECHEC : qte=' + g('ai_qte') + ' ref=' + g('ach_ref')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : « BL » ne s\'apparie plus dans un mot qui le contient (table, detail)',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData('SCIERIE TEST\\nTABLEAU DE REPARTITION\\nDETAIL DES COLIS');
+      var v = String(document.getElementById('ach_ref').value);
+      (v === '') ? 'OK : aucun faux numero de document'
+                 : 'ECHEC : ach_ref = ' + v
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : le message annonce ce qui reste a saisir',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData(${JSON.stringify(ocrBordereau)});
+      var m = String(document.getElementById('ach_doc_status').textContent || '');
+      (/extrait/.test(m) && /[àÀ] compl/.test(m) && /quantit/.test(m))
+        ? 'OK : ' + m
+        : 'ECHEC : ' + m
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import BL : un document illisible ne pretend pas avoir extrait des donnees',
+    app: 'production.html', store: storeRealiste,
+    code: razImport + `
+      applyExtractedAchatData('pr es / er ae te\\no n es nat rte 1 0e) Mes ea ts');
+      var m = String(document.getElementById('ach_doc_status').textContent || '');
+      (/Rien de lisible/.test(m)) ? 'OK : ' + m : 'ECHEC : ' + m
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
     app: 'production.html', store: storeRealiste,
