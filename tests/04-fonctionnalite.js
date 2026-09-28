@@ -762,7 +762,7 @@ function controles() {
       var init = r.filter(function (x) { return x.estInitial; })[0] || {};
       var ent = r.filter(function (x) { return x.entree > 0; })[0] || {};
       var sor = r.filter(function (x) { return x.sortie > 0; })[0] || {};
-      (r.length === 3 && init.final === 0 && init.obs === 'Stock initial'
+      (r.length === 3 && init.final === 0 && String(init.obs || '').indexOf('debut de la periode') !== -1
         && ent.date === '2026-07-16' && ent.initial === 0 && ent.entree === 15000 && ent.final === 15000
         && sor.date === '2026-07-20' && sor.initial === 15000 && sor.sortie === 3000 && sor.final === 12000
         && /Consommation/.test(sor.obs || ''))
@@ -974,6 +974,32 @@ function controles() {
         ? 'OK : le registre deroule sous la ligne, avec son bouton imprimer, sans fenetre'
         : 'ECHEC : fenetre=' + (!sansFenetre) + ' deroule=' + deroule + ' cache=' + ligneCachee
           + ' registre=' + registre + ' impression=' + impression
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche de stock : le Stock initial est date du 1er du mois de la premiere ecriture',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'pd1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', created_at: '2026-07-16' },
+        { id: 'pd2', code: 'P7', designation: 'POINTE 7', quantite: 30000, paquets: 200, cartons: 4, cond: 150, ctype: 'POINTE', created_at: '2026-08-05' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var lignes = getStockConsum().map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P7'; });
+      var r = buildConsoMovements(lignes);
+      var init = r.filter(function (x) { return x.estInitial; })[0] || {};
+      var obs = String(init.obs || '');
+      /* La premiere ecriture est du 16/07 : l'ouverture doit porter le
+         01/07/2026, pas le 16/07. */
+      (init.date === '2026-07-01' && obs.indexOf('01/07/26') !== -1 && obs.indexOf('05/08/26') !== -1)
+        ? 'OK : ouverture au 01/07/2026 (1er du mois), periode annoncee jusqu au 05/08/2026'
+        : 'ECHEC : date=' + init.date + ' obs=' + obs
     `,
     attenduPrefixe: 'OK'
   });
