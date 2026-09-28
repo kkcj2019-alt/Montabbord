@@ -954,6 +954,31 @@ function controles() {
   });
 
   r.push({
+    nom: 'Stock : cliquer sur un produit DEROULE le registre (pas de fenetre)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'z1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', created_at: '2026-07-16' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var h = render_stock_consum();
+      var sansFenetre = !/onclick="openConsoDetail/.test(h);
+      var deroule = /toggleConsoDetailRow\\(this\\)/.test(h);
+      var ligneCachee = /id="consoDet_P7"[^>]*display:none/.test(h);
+      var registre = /Stock init/.test(h) && /Stock fin/.test(h) && /Observation/.test(h);
+      var impression = /printConsoDetail\\('P7'\\)/.test(h);
+      (sansFenetre && deroule && ligneCachee && registre && impression)
+        ? 'OK : le registre deroule sous la ligne, avec son bouton imprimer, sans fenetre'
+        : 'ECHEC : fenetre=' + (!sansFenetre) + ' deroule=' + deroule + ' cache=' + ligneCachee
+          + ' registre=' + registre + ' impression=' + impression
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
