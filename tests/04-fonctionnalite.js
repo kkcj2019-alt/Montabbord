@@ -92,6 +92,54 @@ function controles() {
     attendu: 'OK'
   });
 
+  /* ---------- Impression caisse : le resultat filtre s'imprime juste ---------- */
+  r.push({
+    nom: 'Caisse : l\u2019impression lit les bonnes colonnes (beneficiaire, moyen, solde)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Fausse ligne reproduisant la structure reelle du tableau :
+         0 case, 1 Date, 2 Piece, 3 Code, 4 Libelle, 5 Entree, 6 Sortie,
+         7 Charge, 8 Frais, 9 S+F, 10 Beneficiaire, 11 Executant,
+         12 Moyen/N, 13 Remettant, 14 Obs, 15 Solde, 16 Actions. */
+      function cellule(t) { return { textContent: t }; }
+      var ligne = {
+        cells: [cellule(''), cellule('28/09/26'), cellule('KKCJ2609176'), cellule('Carb-G'),
+                cellule('Carburant-groupe'), cellule(''), cellule('- 41 000'), cellule(''), cellule('410'), cellule('41 410'),
+                cellule('ODD - OULAI'), cellule(''), cellule('Wave/0707000155'), cellule('CAISSE KKCI - KANGA KOUAME'),
+                cellule('-'), cellule('1 644 951'), cellule('')],
+        getAttribute: function (k) {
+          if (k === 'data-entree') return '0';
+          if (k === 'data-sortie') return '41000';
+          if (k === 'data-frais') return '410';
+          return '';
+        }
+      };
+      var o = _caisseRowToOp(ligne);
+      (o.date === '28/09/26' && o.piece === 'KKCJ2609176' && o.code === 'Carb-G'
+        && o.libelle === 'Carburant-groupe' && o.benef === 'ODD - OULAI'
+        && o.moyen === 'Wave' && o.trans === '0707000155'
+        && o.remettant === 'CAISSE KKCI - KANGA KOUAME' && o.soldeCell === '1 644 951'
+        && o.sortie === 41000 && o.frais === 410)
+        ? 'OK : beneficiaire, moyen, trans, remettant et solde lus aux bonnes colonnes'
+        : 'ECHEC : ' + JSON.stringify(o)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : la recherche « carb » ne retient que les ecritures carburant',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var a = { code: 'Carb-G', libelle: 'Carburant-groupe', numeroPiece: 'KKCJ1', executant: 'ODD', moyen: 'Wave', remettant: 'X', observations: '' };
+      var b = { code: 'SAL', libelle: 'Salaire septembre', numeroPiece: 'KKCJ2', executant: 'Y', moyen: 'Cash', remettant: 'Z', observations: '' };
+      (_caisseOpMatchRecherche(a, 'carb') === true && _caisseOpMatchRecherche(b, 'carb') === false
+        && _caisseOpMatchRecherche(b, '') === true)
+        ? 'OK : « carb » garde le carburant et ecarte le salaire, vide = tout'
+        : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Code de validation administrateur ---------- */
   r.push({
     nom: 'Le changement du code de validation exige l\'ancien code',
