@@ -1188,6 +1188,51 @@ function controles() {
   });
 
   r.push({
+    nom: 'Stock : un deroulage se REPLIE au second clic (il restait ouvert)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Faux DOM minimal mais fidele : la ligne detaillee suit la ligne
+         cliquable, fermee au depart. */
+      var det = { id: 'consoDet_P7', style: { display: 'none' } };
+      var cell = { textContent: '▸ P7' };
+      var tr = { nextElementSibling: det, style: {}, querySelector: function () { return cell; } };
+      toggleConsoDetailRow(tr);
+      var ouvert = (det.style.display !== 'none');
+      toggleConsoDetailRow(tr);
+      var referme = (det.style.display === 'none');
+      (ouvert && referme)
+        ? 'OK : ouvert au 1er clic, referme au 2e'
+        : 'ECHEC : ouvert=' + ouvert + ' referme=' + referme
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: "Modification d'un achat : une ligne AJOUTEE en modification arrive au stock",
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'ed1', code: 'P5', designation: 'POINTE5', quantite: 0, paquets: 0, cartons: 0, cond: 180, ctype: 'POINTE', created_at: '2026-09-01' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* BL-2809 cree SANS P5, puis modifie pour l'ajouter : avant, P5
+         n'arrivait jamais au stock. */
+      var avant = [];
+      var apres = [{ code: 'P5', designation: 'POINTE5', quantity: 18000, paquets: 100, cartons: 1, cond: 180, ctype: 'POINTE', prix_carton: 28000 }];
+      _reporterEcartAchatConso(avant, apres, 'BL-2809', '2026-09-28', 'TIJANI');
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
+      var r = buildConsoMovements(_consoLignes('P5'));
+      var ligne = r.filter(function (x) { return !x.estInitial; })[0] || {};
+      (agg.unites === 18000 && agg.cartons === 1 && /Modification BL-2809/.test(ligne.obs || ''))
+        ? 'OK : P5 arrive au stock (18 000 / 1 carton), ligne tracee « Modification BL-2809 »'
+        : 'ECHEC : stock=' + JSON.stringify(agg) + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();

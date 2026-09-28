@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-84';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-85';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -6411,6 +6411,51 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     if (aFusionner > 0) setStockConsum(out);
     return aFusionner;
   }
+  /* Ecart entre les lignes d'un achat avant et apres modification : on
+     l'applique au stock produit par produit, sous forme de lignes tracees
+     (« Modification <ref> »). Ainsi une ligne AJOUTEE en modification arrive
+     bien au stock, et une ligne RETIREE en sort. */
+  function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) {
+    function cle(it) { return String((it && (it.code || it.designation)) || '').trim().toUpperCase(); }
+    function somme(lignes) {
+      var m = {}, o = [];
+      (lignes || []).forEach(function (it) {
+        var k = cle(it);
+        if (!k) return;
+        if (m[k] === undefined) { m[k] = { q: 0, paq: 0, cart: 0, it: it }; o.push(k); }
+        m[k].q += parseFloat(it.quantity) || 0;
+        m[k].paq += parseFloat(it.paquets != null ? it.paquets : it.quantity) || 0;
+        m[k].cart += parseFloat(it.cartons) || 0;
+      });
+      return { m: m, o: o };
+    }
+    var A = somme(anciennes), N = somme(nouvelles);
+    var codes = {};
+    A.o.concat(N.o).forEach(function (k) { codes[k] = true; });
+    var stock = getStockConsum();
+    var touche = false;
+    Object.keys(codes).forEach(function (k) {
+      var a = A.m[k] || { q: 0, paq: 0, cart: 0, it: null };
+      var n = N.m[k] || { q: 0, paq: 0, cart: 0, it: (A.m[k] || {}).it };
+      var dQ = (parseFloat(n.q) || 0) - (parseFloat(a.q) || 0);
+      var dPaq = (parseFloat(n.paq) || 0) - (parseFloat(a.paq) || 0);
+      var dCart = (parseFloat(n.cart) || 0) - (parseFloat(a.cart) || 0);
+      if (Math.abs(dQ) < 0.0001 && Math.abs(dPaq) < 0.0001 && Math.abs(dCart) < 0.0001) return;
+      var src = n.it || a.it || {};
+      var obs = 'Modification ' + (ref || 'achat') + (dQ >= 0 ? ' (ligne ajoutée ou augmentée)' : ' (ligne retirée ou réduite)');
+      stock.unshift({
+        id: Date.now() + Math.random(),
+        code: src.code || k, designation: src.designation || k, fournisseur: fournisseur || '',
+        quantite: dQ, paquets: dPaq, cartons: dCart,
+        cond: src.cond || 0, ctype: src.ctype || 'POINTE',
+        emplacement: src.emplacement || '',
+        prix_carton: src.prix_carton || 0, prix_unitaire: src.unit_price || 0,
+        motif: obs, obs: obs, created_at: date || today()
+      });
+      touche = true;
+    });
+    if (touche) setStockConsum(stock);
+  }
   /* Entree de stock d'un achat consommable : on CUMULE dans la fiche du
      produit au lieu d'en creer une nouvelle a chaque achat. C'etait l'origine
      des fiches en double (le meme code en avait plusieurs). */
@@ -6671,7 +6716,10 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     try {
       var nx = tr.nextElementSibling;
       if (!nx || !nx.id) return;
-      var ouvrir = nx.style.display === 'none' || nx.style.display === '';
+      /* Ouvert = tout sauf display:none. L'ancienne condition testait aussi
+         '' (« jamais touche »), si bien qu'une ligne ouverte relisait ''
+         comme « a ouvrir » et ne se refermait jamais. */
+      var ouvrir = nx.style.display === 'none';
       nx.style.display = ouvrir ? '' : 'none';
       tr.style.background = ouvrir ? '#fff7ed' : '';
     var cd = tr.querySelector('td');
@@ -13280,6 +13328,12 @@ function saveAchatByCategory(e, category) {
 
   var existingId = window._editingAchatId || null;
   var existing = existingId ? achats.find(function(x) { return String(x.id) === String(existingId); }) : null;
+  /* Photo des lignes AVANT ecrasement : en cas de modification, on ne
+     re-ecrit pas tout le stock, on y applique l'ECART par produit. Avant,
+     la modification ignorait completement le stock : une ligne ajoutee en
+     modification (le carton de P5 du BL-2809) n'y arrivait jamais. */
+  var _anciennesLignes = existing && Array.isArray(existing.items)
+    ? JSON.parse(JSON.stringify(existing.items)) : [];
 
   if (existing) {
     existing.reference = ref;
@@ -13390,6 +13444,11 @@ function saveAchatByCategory(e, category) {
     setStockMerch(merchStock);
   } else if (category === 'consumables' && !existing) {
     _saveAchatConsumStock(_tempAchatItems, fournisseur);
+  } else if (category === 'consumables' && existing) {
+    /* Modification : on reporte l'ecart par produit, au lieu d'ignorer le
+       stock. Chaque ecart devient une ligne tracee (« Modification BL-x »)
+       visible dans le registre du produit. */
+    _reporterEcartAchatConso(_anciennesLignes, _tempAchatItems, ref, date, fournisseur);
   } else if (category === 'epi' && !existing) {
     var epiCat = getEpiCatalogue();
     var epiPurchases = getEpiPurchases();
