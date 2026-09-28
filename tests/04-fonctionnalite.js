@@ -282,6 +282,57 @@ function controles() {
   });
 
   r.push({
+    nom: 'Achat pointes : « Pointes / paquet » est repris du catalogue (pas la valeur d\'exemple 1000)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setDefinitions([{ id:'d6', code:'P6', designation:'POINTE 6', type:'POINTE', qty_per_packet:165, unit_cost:0 }]);
+      document.getElementById('ai_code').value = 'P6';
+      apAchatCondFill();
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_cond') === '165' && apAchatCondLookup() === 165)
+        ? 'OK : P6 -> ' + g('ai_cond') + ' pointes/paquet (catalogue)'
+        : 'ECHEC : ai_cond=' + g('ai_cond') + ' lookup=' + apAchatCondLookup()
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat pointes : une valeur saisie a la main n\'est pas ecrasee par le catalogue',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setDefinitions([{ id:'d6', code:'P6', designation:'POINTE 6', type:'POINTE', qty_per_packet:165, unit_cost:0 }]);
+      var el = document.getElementById('ai_cond');
+      el.value = '200';
+      apAchatCondTouched();
+      document.getElementById('ai_code').value = 'P6';
+      apAchatCondFill();
+      (String(el.value) === '200')
+        ? 'OK : 200 pointe(s)/paquet conservee(s)'
+        : 'ECHEC : ' + el.value
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat pointes : une ligne POINTE sans conditionnement est refusee (pas de stock faux)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setDefinitions([]);
+      document.getElementById('ai_code').value = 'P8';
+      document.getElementById('ai_designation').value = 'POINTE 8';
+      document.getElementById('ai_constype').value = 'POINTE';
+      document.getElementById('ai_qte').value = '2';
+      document.getElementById('ai_cond').value = '';
+      _tempAchatItems = [];
+      addAchatItemLine('consumable');
+      (_tempAchatItems.length === 0)
+        ? 'OK : aucune ligne ajoutee, conditionnement obligatoire'
+        : 'ECHEC : ' + JSON.stringify(_tempAchatItems[0])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
     app: 'production.html', store: storeRealiste,
     code: `
