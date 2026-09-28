@@ -742,6 +742,83 @@ function controles() {
   });
 
   r.push({
+    nom: 'Fiche de stock : le registre porte date, stock initial, entree, sortie, ajust et stock final',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'm1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', fournisseur: 'TIJANI', created_at: '2026-07-16' },
+        { id: 'm2', code: 'P7', designation: 'POINTE 7', quantite: -3000, cond: 150, ctype: 'POINTE', motif: 'Consommation palette 2605', date: '2026-07-20' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var lignes = getStockConsum().map(consoNorm).filter(function (x) {
+        return x.type === 'POINTE' && String(x.code || '').toUpperCase() === 'P7';
+      });
+      var r = buildConsoMovements(lignes);
+      var init = r.filter(function (x) { return x.estInitial; })[0] || {};
+      var ent = r.filter(function (x) { return x.entree > 0; })[0] || {};
+      var sor = r.filter(function (x) { return x.sortie > 0; })[0] || {};
+      (r.length === 3 && init.final === 0 && init.obs === 'Stock initial'
+        && ent.date === '2026-07-16' && ent.initial === 0 && ent.entree === 15000 && ent.final === 15000
+        && sor.date === '2026-07-20' && sor.initial === 15000 && sor.sortie === 3000 && sor.final === 12000
+        && /Consommation/.test(sor.obs || ''))
+        ? 'OK : initial 0 -> entree +15 000 -> sortie -3 000 -> final 12 000, dates et observations presentes'
+        : 'ECHEC : ' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche de stock : la date d\'un achat est lue dans created_at (elle s\'affichait « - »)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'd1', code: 'P7', designation: 'POINTE 7', quantite: 7500, paquets: 50, cartons: 1, cond: 150, ctype: 'POINTE', created_at: '2026-09-28' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var lignes = getStockConsum().map(consoNorm).filter(function (x) { return x.type === 'POINTE'; });
+      var r = buildConsoMovements(lignes);
+      var ecriture = r.filter(function (x) { return !x.estInitial; })[0] || {};
+      (ecriture.date === '2026-09-28')
+        ? 'OK : date retrouvee = ' + ecriture.date
+        : 'ECHEC : date = "' + ecriture.date + '"'
+    `,
+    attenduPrefixe: 'OK : date'
+  });
+
+  r.push({
+    nom: 'Tableau de bord : la carte Stock Pointes affiche au moins 5 types',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'q1', code: 'P6', designation: 'POINTE 6', quantite: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE' },
+        { id: 'q2', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE' },
+        { id: 'q3', code: 'P5', designation: 'POINTE 5', quantite: 0, paquets: 0, cartons: 0, cond: 180, ctype: 'POINTE' },
+        { id: 'q4', code: 'P8', designation: 'POINTE 8', quantite: 0, paquets: 0, cartons: 0, cond: 120, ctype: 'POINTE' },
+        { id: 'q5', code: 'P4', designation: 'POINTE 4', quantite: 0, paquets: 0, cartons: 0, cond: 200, ctype: 'POINTE' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var h = dashCartePointes();
+      var codes = ['P5', 'P6', 'P7', 'P8', 'P4'].filter(function (c) { return h.indexOf('>' + c + '<') !== -1; });
+      (codes.length >= 5)
+        ? 'OK : ' + codes.join(', ') + ' affiches (5 types, y compris sans stock)'
+        : 'ECHEC : seulement ' + codes.length + ' type(s) : ' + codes.join(', ')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
