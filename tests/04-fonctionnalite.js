@@ -852,6 +852,36 @@ function controles() {
   });
 
   r.push({
+    nom: 'Inventaire : il corrige le stock par un AJUSTEMENT, il n\'ecrase pas l\'achat',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'v1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', created_at: '2026-07-16' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var avant = getStockConsum()[0];
+      /* Reel constate a l'inventaire : 12 000 (soit -3 000) */
+      applyInventoryAsInitial('2026-07', [{ store: 'stockConsum', ref: 'P7', code: 'P7', real_qte: 12000 }]);
+      var lignes = getStockConsum();
+      var achat = lignes.filter(function (l) { return !l._ajustInv; })[0] || {};
+      var aj = lignes.filter(function (l) { return l._ajustInv; })[0] || {};
+      var total = 0;
+      lignes.forEach(function (l) { total += parseFloat(l.quantite) || 0; });
+      var r = buildConsoMovements(lignes.map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P7'; }));
+      var ligneAj = r.filter(function (x) { return x.ajust !== 0; })[0] || {};
+      (achat.quantite === 15000 && aj.quantite === -3000 && total === 12000
+        && ligneAj.ajust === -3000 && ligneAj.entree === 0 && ligneAj.sortie === 0
+        && /Inventaire/.test(ligneAj.obs || '') && r[r.length - 1].final === 12000)
+        ? 'OK : achat conserve (15 000), ecart d\\'inventaire en ajustement (-3 000), stock reel 12 000'
+        : 'ECHEC : achat=' + JSON.stringify(achat) + ' ajust=' + JSON.stringify(aj) + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-77';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-78';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -6438,18 +6438,22 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
         var x = consoNorm(s);
         if (!x || !cibles[x.id]) return;
         var qte = parseFloat(x.unites) || 0;
-        var ajust = parseFloat(s.ajust) || parseFloat(s.ajustement) || 0;
         var date = s.date || s.created_at || s.updated_at || '';
         var obs = s.obs || s.observation || s.motif || '';
+        var estAjust = !!s._ajustInv;
+        /* Un ajustement d'inventaire va dans sa propre colonne : ce n'est
+           ni une entree ni une sortie, c'est la correction du reel. */
+        var ajust = estAjust ? qte : (parseFloat(s.ajust) || parseFloat(s.ajustement) || 0);
+        if (estAjust) { obs = obs || ('Correction inventaire ' + (s._invMois || '')); }
         /* Une fiche a zero et sans ecriture n'apporte rien au registre :
            elle came de l'initialisation du stock, pas d'un mouvement. */
         if (qte === 0 && !ajust && !obs && !s.libelle && !s.mouvement) return;
         var libelle = s.libelle || s.mouvement || '';
-        if (!libelle) libelle = (qte < 0 ? 'Sortie' : 'Entree');
-        if (qte >= 0 && s.fournisseur) libelle = libelle + ' — ' + s.fournisseur;
+        if (!libelle) libelle = estAjust ? 'Ajustement inventaire' : (qte < 0 ? 'Sortie' : 'Entree');
+        if (qte >= 0 && !estAjust && s.fournisseur) libelle = libelle + ' — ' + s.fournisseur;
         if (!obs && s.fournisseur) obs = 'Reception / Achat ' + s.fournisseur;
-        if (!obs && qte < 0) obs = 'Sortie de stock';
-        ecritures.push({ date: date, code: x.code, libelle: libelle, delta: qte, ajust: ajust,
+        if (!obs && qte < 0 && !estAjust) obs = 'Sortie de stock';
+        ecritures.push({ date: date, code: x.code, libelle: libelle, delta: estAjust ? 0 : qte, ajust: ajust,
                          cond: (parseFloat(x.cond) || cond || 0), ppc: _ppc, obs: obs,
                          cartons: parseFloat(s.cartons) || 0, quantite: qte });
       });
@@ -7532,8 +7536,40 @@ function applyInventoryAsInitial(month, items) {
         if (idx !== undefined) { merch[idx].quantite = it.real_qte; }
         break;
       case 'stockConsum':
+        /* L'inventaire ne doit PAS ecraser la quantite d'une fiche d'achat :
+           cette quantite est un MOUVEMENT (une entree). On enregistre donc
+           l'ecart constate comme un AJUSTEMENT date, ce qui laisse le
+           registre exact (entrees - sorties + ajustement = stock reel) et
+           rend la ligne « Stock initial » coherente. */
         idx = consumMap[it.ref];
-        if (idx !== undefined) { _invLog(consum, idx, it.real_qte); consum[idx].quantite_stock = it.real_qte; consum[idx].quantite = it.real_qte; }
+        if (idx !== undefined) {
+          var _ref = String(it.ref || '').toUpperCase();
+          var _cur = 0;
+          consum.forEach(function (_s) {
+            if (String((_s || {}).code || '').toUpperCase() !== _ref) return;
+            _cur += parseFloat(consoNorm(_s).unites) || 0;
+          });
+          var _ecart = (parseFloat(it.real_qte) || 0) - _cur;
+          if (Math.abs(_ecart) > 0.0001) {
+            consum.unshift({
+              id: Date.now() + Math.random(),
+              code: consum[idx].code,
+              designation: consum[idx].designation,
+              fournisseur: '',
+              quantite: _ecart,
+              paquets: 0,
+              cartons: 0,
+              cond: consum[idx].cond || 0,
+              ctype: consum[idx].ctype || 'DIVERS',
+              emplacement: consum[idx].emplacement || '',
+              prix_unitaire: 0,
+              _ajustInv: true,
+              _invMois: month,
+              obs: 'Inventaire ' + monthLabel(month) + ' — écart : ' + fmt(_ecart),
+              created_at: today()
+            });
+          }
+        }
         break;
       case 'epiItems':
         idx = epiMap[it.ref];
