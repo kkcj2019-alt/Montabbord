@@ -1117,6 +1117,36 @@ function controles() {
   });
 
   r.push({
+    nom: 'Miroir app principale : les consommables sont regroupes et valorises au prix du carton',
+    app: 'index.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* Cas reel de la capture : une ligne par achat, dont une avec le prix
+         de carton fourre dans prix_unitaire (ancienne confusion d'unite). */
+      p.stockConsum = [
+        { id: 'r1', code: 'P7', designation: 'POINTE7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', prix_carton: 28000, prix_unitaire: 3.73 },
+        { id: 'r2', code: 'P6', designation: 'POINTE6', quantite: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE', prix_carton: 28000, prix_unitaire: 3.39 },
+        { id: 'r3', code: 'P6', designation: 'POINTE6', quantite: 16500, paquets: 100, cartons: 2, cond: 165, ctype: 'POINTE', prix_carton: 0, prix_unitaire: 28000 }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var list = getProductionStocksReel().filter(function (l) { return l.categorie === 'Consommables'; });
+      var p7 = list.filter(function (l) { return l.designation.indexOf('P7') === 0; })[0] || {};
+      var p6 = list.filter(function (l) { return l.designation.indexOf('P6') === 0; })[0] || {};
+      /* P7 : 1 ligne au lieu des saisies, 2 cartons x 28 000 = 56 000 (et non
+         15 000 x 28 000). P6 : les 2 lignes fusionnees, 5 cartons = 140 000. */
+      (list.length === 2 && p7.montant === 56000 && p7.prixUnitaire === 28000
+        && p6.quantite === 41250 && p6.montant === 140000)
+        ? 'OK : P7 = 56 000 F (2 cart.), P6 = 140 000 F (5 cart.), aucun montant absurde'
+        : 'ECHEC : ' + JSON.stringify(list)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
