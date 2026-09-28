@@ -1147,6 +1147,47 @@ function controles() {
   });
 
   r.push({
+    nom: 'Stock : le deroulement est identique sur BL, specifique, semi-finis et en-cours',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte 120', quantity: 5, volume: 0.0018 }];
+      p.stockRaw = [
+        { id: 'rb1', code: 'K9', colis_number: 'K9', designation: 'BOIS', essence: 'Rouge', quantite: 8, volume: 2.5, zone: 'B', origin: 'SPECIFIC', created_at: '2026-09-01' }
+      ];
+      p.achats = [{ id: 'bl9', category: 'raw-materials', date: '2026-09-01', reference: 'BL-9', fournisseur: 'X',
+                    items: [{ colis_number: 'K9', quantity: 8, volume: 2.5, essence: 'Rouge' }], montant_total: 1000 }];
+      p.productionOrders = [{ numero: 'OP-3', article_id: 'a1', quantite_prevue: 10, quantite_realisee: 4, statut: 'en_cours' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      setSection('stockRawEtat', 'tout');
+      setSection('stockRawTab', 'bl');
+      var bl = render_stock_raw();
+      /* L'onglet BL liste les bons : chaque BL puis chaque colis se deroule
+         avec ses mouvements ( Init / Sortie / Final ). */
+      var blOk = /toggleAccordion\\('blAchat_bl9'\\)/.test(bl) && /toggleAccordion\\('blColis_bl9_0'\\)/.test(bl)
+        && /Init Qté|Sortie Qté|Stock final|Observation/.test(bl);
+      setSection('stockRawTab', 'spe');
+      var spe = render_stock_raw();
+      var speOk = /toggleAccordion\\('mvtColis_rb1'\\)/.test(spe) && /Init Qté/.test(spe);
+      setSection('stockRawTab', 'semi');
+      var semi = render_stock_raw();
+      var semiOk = /toggleAccordion\\('semiDet_L1'\\)/.test(semi) && /Utilisé par/.test(semi) && /PAL7/.test(semi);
+      setSection('stockRawTab', 'wip');
+      var wip = render_stock_raw();
+      var wipOk = /toggleAccordion\\('wipDet_OP-3'\\)/.test(wip) && /Composants restant/.test(wip);
+      (blOk && speOk && semiOk && wipOk)
+        ? 'OK : BL, specifique, semi et en-cours se deroulent tous en ligne'
+        : 'ECHEC : bl=' + blOk + ' spe=' + speOk + ' semi=' + semiOk + ' wip=' + wipOk
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
