@@ -449,6 +449,78 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Consommables : les pointes definies doivent etre proposees ---------- */
+  function storePointeP8() {
+    const s = storeRealiste();
+    const p = JSON.parse(s.mdb_production);
+    p.definitions = (p.definitions || []).concat([{ id: 'd8', code: 'P8', designation: 'Pointe 8 cm', type: 'POINTE', unit_cost: 120 }]);
+    p.composants = (p.composants || []).concat([{ article_id: 'a1', type: 'POINTE', code: 'P8', designation: 'Pointe 8 cm', quantity: 8 }]);
+    p.stockConsum = (p.stockConsum || []).filter(function (x) { return x.code !== 'P8'; });
+    s.mdb_production = JSON.stringify(p);
+    return s;
+  }
+
+  r.push({
+    nom: 'Achat consommables : la pointe P8 definie (sans stock) est proposee',
+    app: 'production.html', store: storePointeP8,
+    code: `
+      var codes = apAchatCatalog('consumables').map(function(o) { return o.code; });
+      var dl = apAchatDatalist('consumables', 'aiCodeList', 'code');
+      var dlD = apAchatDatalist('consumables', 'aiDesigList', 'des');
+      var unique = codes.indexOf('P8') === codes.lastIndexOf('P8');
+      (codes.indexOf('P8') !== -1 && unique && dl.indexOf('value="P8"') !== -1 && dlD.indexOf('value="Pointe 8 cm"') !== -1)
+        ? 'OK : ' + codes.join(',')
+        : 'ECHEC : ' + codes.join(',')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : la pointe P8 definie (sans stock) est proposee',
+    app: 'index.html', store: storePointeP8,
+    code: `
+      var codes = apAchatCatalogue('consumables').map(function(o) { return o.code; });
+      var opts = apAchatCodeOptions('consumables');
+      var dopts = apAchatDesigOptions('consumables');
+      var unique = codes.indexOf('P8') === codes.lastIndexOf('P8');
+      (codes.indexOf('P8') !== -1 && unique && opts.indexOf('value="P8"') !== -1 && dopts.indexOf('value="Pointe 8 cm"') !== -1)
+        ? 'OK : ' + codes.join(',')
+        : 'ECHEC : ' + codes.join(',')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Regressions : le lancement avait lieu AVANT les globales ---------- */
+  r.push({
+    nom: 'Exploitation : ouvrir l\'app directement sur la page Achats ne plante plus',
+    app: 'production.html',
+    store: function () { const s = storeRealiste(); s.mdb_prod_currentPage = 'achats'; return s; },
+    code: `
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('pas pu s') === -1 && h.indexOf('Nouvel Achat') !== -1)
+        ? 'OK : rendu au demarrage sans erreur'
+        : 'ECHEC : ' + h.slice(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Exploitation : l\'historique des achats supporte des lignes abimees',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('achats', [
+        { id: 1, category: 'raw-materials', date: today(), items: { a: 1 } },
+        { id: 2, category: 'raw-materials', date: today(), items: [null, undefined, { colis_number: 'K9', quantity: 1, length: 100 }] }
+      ]);
+      CURRENT_PAGE = 'achats-history'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('pas pu s') === -1 && h.indexOf('Historique des Achats') !== -1)
+        ? 'OK : historique rendu sans erreur'
+        : 'ECHEC : ' + h.slice(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
