@@ -742,6 +742,91 @@ function controles() {
   });
 
   r.push({
+    nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'c1', code: 'P6', designation: 'POINTE 6', quantite: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE' },
+        { id: 'c2', code: 'P6', designation: 'POINTE 6', quantite: 16500, paquets: 100, cartons: 2, cond: 165, ctype: 'POINTE' },
+        { id: 'c3', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var agg = consoAggregate();
+      var p6s = agg.filter(function (a) { return a.code === 'P6'; });
+      var p7s = agg.filter(function (a) { return a.code === 'P7'; });
+      var p6 = p6s[0] || {}, p7 = p7s[0] || {};
+      /* Une seule entree par code, quantites cumulees (les fiches a zero
+         du seed ne changent pas les totaux). */
+      (p6s.length === 1 && p7s.length === 1 && p6.unites === 41250 && p6.paquets === 250 && p6.cartons === 5
+        && p7.unites === 15000 && p7.paquets === 100 && p7.cartons === 2)
+        ? 'OK : une ligne par produit — P6 = 41 250 pointes / 250 paq / 5 cartons, P7 = 15 000 / 100 paq / 2 cartons'
+        : 'ECHEC : P6 x' + p6s.length + ' ' + JSON.stringify(p6) + ' | P7 x' + p7s.length + ' ' + JSON.stringify(p7)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock consommables : la fusion reelle regroupe les fiches en double',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'c1', code: 'P6', designation: 'POINTE 6', quantite: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE' },
+        { id: 'c2', code: 'P6', designation: 'POINTE 6', quantite: 16500, paquets: 100, cartons: 2, cond: 165, ctype: 'POINTE' },
+        { id: 'c3', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var avant = getStockConsum().length;
+      var n = consoRepaire();
+      var apres = getStockConsum();
+      var p6s = apres.filter(function (a) { return a.code === 'P6'; });
+      var p6 = p6s[0] || {};
+      /* Idempotent : un second passage ne doit plus rien regrouper. */
+      var n2 = consoRepaire();
+      (n === 3 && apres.length === avant - 3 && p6s.length === 1
+        && p6.quantite === 41250 && p6.paquets === 250 && p6.cartons === 5 && n2 === 0)
+        ? 'OK : ' + avant + ' fiches -> ' + apres.length + ', P6 cumule a 41 250 / 5 cartons, second passage sans effet'
+        : 'ECHEC : fusionne=' + n + ' avant=' + avant + ' apres=' + apres.length
+          + ' p6x' + p6s.length + ' ' + JSON.stringify(p6) + ' n2=' + n2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock consommables : un nouvel achat CUMULE dans la fiche du produit (pas de nouvelle fiche)',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      setStockConsum([{ id:'k1', code:'P7', designation:'POINTE 7', quantite:15000, paquets:100, cartons:2, cond:150, ctype:'POINTE', prix_unitaire:1.87 }]);
+      _tempAchatItems = [];
+      document.getElementById('ai_code').value = 'P7';
+      apAchatCodeFill('consumable');
+      document.getElementById('ai_qte').value = '1';
+      document.getElementById('ai_paquets').value = '50';
+      document.getElementById('ai_qte_paquet').value = '50';
+      document.getElementById('ai_cond').value = '150';
+      document.getElementById('ai_pu').value = '28000';
+      document.getElementById('ai_constype').value = 'POINTE';
+      addAchatItemLine('consumable');
+      _saveAchatConsumStock(_tempAchatItems, 'TIJANI');
+      var apres = getStockConsum();
+      var p7 = apres.filter(function (a) { return a.code === 'P7'; })[0] || {};
+      (apres.length === 1 && p7.quantite === 22500 && p7.paquets === 150 && p7.cartons === 3)
+        ? 'OK : 2 + 1 carton = 3 cartons, 22 500 pointes, une seule fiche P7'
+        : 'ECHEC : ' + apres.length + ' fiche(s) : ' + JSON.stringify(p7)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
     app: 'production.html', store: storeRealiste,
     code: `
