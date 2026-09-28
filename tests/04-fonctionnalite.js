@@ -203,7 +203,7 @@ function controles() {
     code: `
       localStorage.setItem('mdb_packs_per_carton', '50');
       var t = dashCartePointes().replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
-      (/\\b2 c\\./.test(t) && /\\b100 paq\\./.test(t) && /\\b2 cartons\\b/.test(t))
+      (/\\b2 c\\./.test(t) && /100 paq ·/.test(t) && /100 paquets · 2 cartons/.test(t))
         ? 'OK : 2 cartons / 100 paquets'
         : 'ECHEC : ' + t.substr(0, 220)
     `,
@@ -220,6 +220,21 @@ function controles() {
       (/\\b4 cartons\\b/.test(t) && /25 paquets\\/carton/.test(t))
         ? 'OK : 4 cartons a 25 paquets/carton'
         : 'ECHEC : ' + t.substr(0, 220)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Tableau de bord : la carte Stock Pointes est compacte et partage la rangee des autres cartes',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var h = dashCartePointes();
+      /* Carte de meme gabarit que ses voisines : pas de pleine largeur,
+         anneau reduit, et plus de bande a 5 colonnes. */
+      (/class="card"/.test(h) && !/dash-card/.test(h) && /width:72px/.test(h)
+        && !/flex-wrap:wrap/.test(h) && /TOTAL/.test(h))
+        ? 'OK : carte compacte, anneau 72 px, integratee a la rangee'
+        : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 200)
     `,
     attenduPrefixe: 'OK'
   });
