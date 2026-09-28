@@ -388,6 +388,67 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'App principale : le prix saisi est le prix d\'UN carton (2 cartons x 28 000 F = 56 000 F)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      document.getElementById('ai_code').value = 'P6';
+      document.getElementById('ai_designation').value = 'Pointes 6';
+      document.getElementById('ai_constype').value = 'POINTE';
+      document.getElementById('ai_qte_paquet').value = '1000';
+      document.getElementById('ai_cartons').value = '2';
+      document.getElementById('ai_pu').value = '28000';
+      calcConsommableCartons('cartons');
+      _tempAchatItems = [];
+      addAchatItemLine('consumable');
+      var it = _tempAchatItems[0];
+      (it.cartons === 2 && it.paquets === 100 && it.quantity === 100000
+        && it.prix_carton === 28000 && it.total_price === 56000
+        && Math.abs(it.unit_price - 0.56) < 0.0001)
+        ? 'OK : ' + it.cartons + ' cartons / ' + it.total_price + ' F / ' + it.unit_price + ' F par pointe'
+        : 'ECHEC : ' + JSON.stringify(it)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : reprise d\'une ligne en modification avec le prix du carton',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:60000, paquets:60,
+        cartons:2, ppc:30, cond:1000, ctype:'POINTE', prix_carton:28000, unit_price:0.56, total_price:56000 }];
+      editAchatItemLine(0, 'consumable');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_qte') === '60' && g('ai_cartons') === '2'
+        && g('ai_qte_paquet') === '1000' && g('ai_pu') === '28000')
+        ? 'OK : 60 paquets / 2 cartons / 28 000 F le carton'
+        : 'ECHEC : qte=' + g('ai_qte') + ' cartons=' + g('ai_cartons') + ' pu=' + g('ai_pu')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : le recap live annonce le total en fonction des cartons',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      document.getElementById('ai_constype').value = 'POINTE';
+      document.getElementById('ai_qte_paquet').value = '1000';
+      document.getElementById('ai_cartons').value = '2';
+      document.getElementById('ai_pu').value = '28000';
+      calcConsommableRecap();
+      var t = document.getElementById('ai_conso_resume').innerHTML || '';
+      (t.indexOf('2 carton(s)') !== -1 && t.indexOf('56 000 F') !== -1)
+        ? 'OK : recap = 2 cartons, total 56 000 F'
+        : 'ECHEC : ' + t
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
