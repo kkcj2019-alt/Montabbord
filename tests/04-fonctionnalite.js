@@ -1233,6 +1233,66 @@ function controles() {
   });
 
   r.push({
+    nom: 'Tableau de bord : la carte MARGES PAR ARTICLE a disparu',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      navigate('dashboard');
+      var el = document.getElementById('content');
+      var h = (el && el.innerHTML) || '';
+      (!/MARGES PAR ARTICLE/.test(h))
+        ? 'OK : plus de carte marges sur le tableau de bord'
+        : 'ECHEC : la carte est toujours la'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Palettes : le clic sur le code DEROULE le registre (oeil et fenetre supprimes)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'f1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' }];
+      p.stockFinished = [{ id: 'sf1', article_id: 'f1', quantite: 12 }];
+      p.movements = [{ id: 'mv1', article_id: 'f1', date: '2026-09-10', type: 'entree', quantite: 12, motif: 'Production 2609001' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var h = renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Palettes', 'showAddStock');
+      var deroule = /toggleAccordion\\('finDet_sf1'\\)/.test(h);
+      var registre = /Stock Initial/.test(h) && /Entrée/.test(h) && /Stock Final/.test(h);
+      var sansFenetre = !/showFinishedFiche/.test(h);
+      var impression = /printFinishedFicheId\\('sf1'\\)/.test(h);
+      (deroule && registre && sansFenetre && impression)
+        ? 'OK : le registre deroule sous la ligne, avec son bouton imprimer, sans oeil ni fenetre'
+        : 'ECHEC : deroule=' + deroule + ' registre=' + registre + ' sansFenetre=' + sansFenetre + ' impression=' + impression
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : le deroulage affiche le registre des mouvements du composant',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte 120', quantity: 5, volume: 0.0018 }];
+      p.stockSemi = [{ id: 'sm1', code: 'L1', designation: 'Latte 120', quantite: 40, created_at: '2026-09-05' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var reg = _semiRegistreHtml('L1');
+      var txt = reg.replace(/<[^>]*>/g, ' ');
+      var ok = /Stock initial/.test(reg) && /Entrée/.test(reg) && /Stock fin/.test(reg)
+        && txt.indexOf('05/09/26') !== -1 && /Observation/.test(reg);
+      (ok) ? 'OK : le registre du semi-fini porte date, initial, entree, fin et observation'
+           : 'ECHEC : ' + reg.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 220)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
