@@ -882,6 +882,78 @@ function controles() {
   });
 
   r.push({
+    nom: 'Inventaire : stock 50, reel annonce 10 -> le stock devient bien 10 (ajustement de -40)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'w1', code: 'P5', designation: 'POINTE 5', quantite: 50, paquets: 0, cartons: 0, cond: 0, ctype: 'DIVERS', created_at: '2026-07-01' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      applyInventoryAsInitial('2026-08', [{ store: 'stockConsum', ref: 'P5', code: 'P5', real_qte: 10 }]);
+      var lignes = getStockConsum();
+      var total = 0;
+      lignes.forEach(function (l) { total += parseFloat(l.quantite) || 0; });
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
+      var r = buildConsoMovements(lignes.map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P5'; }));
+      var aj = r.filter(function (x) { return x.ajust !== 0; })[0] || {};
+      var fin = r[r.length - 1] || {};
+      (total === 10 && agg.unites === 10 && aj.ajust === -40 && fin.final === 10)
+        ? 'OK : 50 -> reel 10, le stock vaut 10, l\\'ecart -40 est trace en Ajustement'
+        : 'ECHEC : total=' + total + ' agg=' + JSON.stringify(agg) + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : le materiel et les semi-finis prennent aussi la valeur reelle',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var s0 = getStockSemi();
+      if (!s0.length) { 'OK : aucun semi-fini en base, rien a vérifier'; }
+      else {
+        var code = s0[0].code;
+        var reel = 7;
+        applyInventoryAsInitial('2026-08', [{ store: 'stockSemi', ref: code, code: code, real_qte: reel }]);
+        var apres = getStockSemi().filter(function (l) { return l.code === code; })[0] || {};
+        (parseFloat(apres.quantite) === reel) ? 'OK : ' + code + ' = ' + reel : 'ECHEC : ' + JSON.stringify(apres);
+      }
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Impression : chaque page de stock imprime SA fiche (le bouton semi-finis imprimait la matiere premiere)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockSemi = [{ id: 'sf1', code: 'CP1', designation: 'CHARPENTE PAL', quantite: 12, volume: 0.4, zone: 'A' }];
+      p.stockRaw = [{ id: 'rw1', code: 'K9', designation: 'BOIS ROUGE', quantite: 8, volume: 2.5, zone: 'B' }];
+      p.epiItems = [{ id: 'ep1', code: 'CASQ', designation: 'CASQUE', quantite_stock: 14, emplacement: 'MAG', seuil_minimum: 5 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var capture = '', faux = { document: { write: function (x) { capture = x; }, close: function () {}, title: '' }, onload: null, print: function () {}, focus: function () {} };
+      var vraiOpen = window.open, out = {}, err = '';
+      [['stock-semi'], ['stock-raw'], ['stock-merch'], ['stock-epi']].forEach(function (k) {
+        capture = ''; window.open = function () { return faux; };
+        try { printStockFiche(k[0]); out[k[0]] = capture; } catch (e) { err = err || (k[0] + ': ' + e.message); }
+        window.open = vraiOpen;
+      });
+      var okSemi = /SEMI-FINIS/.test(out['stock-semi'] || '') && /CP1/.test(out['stock-semi'] || '');
+      var okRaw = /MATIERE PREMIERE/.test(out['stock-raw'] || '') && /K9/.test(out['stock-raw'] || '');
+      var okEpi = /EPI/.test(out['stock-epi'] || '') && /CASQ/.test(out['stock-epi'] || '');
+      (okSemi && okRaw && okEpi && !err)
+        ? 'OK : semi-finis, matiere premiere et EPI impriment chacun leur propre fiche'
+        : 'ECHEC : ' + (err || ('semi=' + okSemi + ' raw=' + okRaw + ' epi=' + okEpi))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();

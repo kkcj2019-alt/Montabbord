@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-78';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-79';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -5909,7 +5909,8 @@ function render_stock_raw() {
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
   h += '<input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)">';
   h += '<div style="display:flex;gap:.5rem;align-items:center">' + showEtat;
-  h += '<button class="btn" onclick="exportStockPDF()">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-raw\',\'print\')" title="Imprimer la fiche">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-raw\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
   h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
   h += (tab === 'spe'
     ? '<button class="btn btn-accent" onclick="showNewBoisBrut()">+ Créer bois brut</button>'
@@ -6135,7 +6136,8 @@ function renderStockFiche(key, getFn, title, addFn) {
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
   h += '<input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)">';
   h += '<div style="display:flex;gap:.5rem">';
-  h += '<button class="btn" onclick="exportStockPDF()">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'' + key + '\',\'print\')" title="Imprimer cette fiche de stock">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'' + key + '\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
   h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
   h += '<button class="btn btn-accent" onclick="' + addFn + '(\'' + key + '\')">+ Nouveau</button>';
   h += '</div></div>';
@@ -6642,6 +6644,99 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     h += '</body></html>';
     _printConso(h, 'Fiche ' + cible);
   }
+  /* Impression d'une fiche de stock, sur le meme modele pour toutes les
+     families de stock. L'ancien bouton imprimait toujours la Matiere
+     Premiere, meme depuis la page des semi-finis. */
+  function printStockFiche(key) {
+    var items, titre, noVol = false, avecOrigine = false;
+    try {
+      if (key === 'stock-raw') {
+        var etat = getSection('stockRawEtat', 'actif');
+        var tab = getSection('stockRawTab', 'actif');
+        items = getStockRaw().filter(function (s) {
+          var o = mpOrigin(s);
+          if (tab === 'bl' && o !== 'BL') return false;
+          if (tab === 'spe' && o !== 'SPECIFIC') return false;
+          if (tab === 'semi' && o === 'SPECIFIC') return false;
+          if (etat === 'actif' && (parseFloat(s.quantite) || 0) <= 0) return false;
+          return true;
+        });
+        titre = 'FICHE DE STOCK — MATIERE PREMIERE';
+        avecOrigine = true;
+      } else if (key === 'stock-semi') { items = getStockSemi(); titre = 'FICHE DE STOCK — SEMI-FINIS'; }
+      else if (key === 'stock-merch') { items = getStockMerch(); titre = 'FICHE DE STOCK — MARCHANDISES'; }
+      else if (key === 'stock-epi') {
+        items = (getEpiItems() || []).map(function (e) {
+          return { code: e.code, designation: e.designation, quantite: e.quantite_stock,
+                   zone: e.emplacement, observation: e.observation, taille: e.taille };
+        });
+        titre = 'FICHE DE STOCK — EPI';
+        noVol = true;
+      }
+      else if (key === 'stock-finished') { items = getStockFinished(); titre = 'FICHE DE STOCK — PRODUITS FINIS'; noVol = true; }
+      else if (key === 'stock-consum') { return printStockConsum(); }
+      else { return toast('Stock inconnu : ' + key, 'error'); }
+    } catch (e) { return toast('Impossible de lire le stock', 'error'); }
+    items = items || [];
+    if (!items.length) return toast('Rien a imprimer', 'error');
+
+    var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escH(titre) + '</title><style>' + _CONSO_CSS + '</style></head><body>';
+    h += _consoEntete(titre, items.length + ' article(s)');
+    h += '<table><thead><tr><th>Code</th><th>Designation</th>' + (avecOrigine ? '<th>Origine</th>' : '')
+      + '<th>Dimensions (cm)</th><th>Emplacement</th>'
+      + '<th class="r">Stock</th>' + (noVol ? '' : '<th class="r">Volume (m&sup3;)</th>') + '<th>Observation</th></tr></thead><tbody>';
+    var tQ = 0, tV = 0;
+    items.forEach(function (s) {
+      var v = stkVol(s);
+      tQ += parseFloat(s.quantite) || 0;
+      if (!noVol) tV += v;
+      h += '<tr><td><strong>' + escH(stkCode(s)) + '</strong></td><td>' + escH(stkDes(s)) + '</td>'
+        + (avecOrigine ? '<td>' + escH(mpOriginLabel(mpOrigin(s))) + '</td>' : '')
+        + '<td>' + escH(stkDims(s)) + '</td><td>' + escH(s.zone || s.emplacement || '-') + '</td>'
+        + '<td class="r">' + fmt(s.quantite || 0) + '</td>'
+        + (noVol ? '' : '<td class="r">' + v.toFixed(3) + '</td>')
+        + '<td>' + escH(s.observation || s.obs || '-') + '</td></tr>';
+    });
+    h += '<tr class="total"><td colspan="' + (avecOrigine ? 5 : 4) + '" class="r">TOTAL</td>'
+      + '<td class="r">' + fmt(tQ) + '</td>' + (noVol ? '' : '<td class="r">' + tV.toFixed(3) + '</td>')
+      + '<td></td></tr>';
+    h += '</tbody></table>';
+    h += '<div class="sign"><div>Visa magasinier :<br><br>..............................</div>'
+      + '<div>Visa responsable :<br><br>..............................</div>'
+      + '<div>Date : ....../....../........</div></div>';
+    h += '</body></html>';
+    _printConso(h, titre);
+  }
+  /* Export PDF direct (telechargement), a partir du meme contenu imprime. */
+  function _telechargerPdf(html, nomFichier) {
+    try {
+      if (!window.jspdf || !window.jspdf.jsPDF) { toast('PDF indisponible — verifiez la connexion', 'error'); return; }
+      var porte = document.createElement('div');
+      porte.style.cssText = 'position:fixed;left:-10000px;top:0;width:1100px;background:#fff';
+      porte.innerHTML = html.replace(/^[\s\S]*<body[^>]*>/, '').replace(/<\/body>[\s\S]*$/, '');
+      document.body.appendChild(porte);
+      var opt = { margin: 8, filename: nomFichier || 'fiche-stock.pdf', image: { type: 'jpeg', quality: 0.96 },
+                  html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' } };
+      window.jspdf.jsPDF().html(porte, opt).then(function () {
+        document.body.removeChild(porte);
+        toast('PDF telecharge', 'success');
+      }).catch(function (e) {
+        try { document.body.removeChild(porte); } catch (e2) {}
+        toast('Echec du PDF : ' + (e && e.message ? e.message : e), 'error');
+      });
+    } catch (e) { toast('Echec du PDF', 'error'); }
+  }
+  /* Construit le HTML d'une fiche puis imprime OU telecharge en PDF. */
+  function stockFicheSortie(key, mode) {
+    var prev = window.open;
+    var capture = '';
+    window.open = function () { return { document: { write: function (x) { capture = x; }, close: function () {}, title: '' }, onload: null, print: function () {}, focus: function () {} }; };
+    printStockFiche(key);
+    window.open = prev;
+    if (!capture) { toast('Rien a imprimer', 'error'); return; }
+    if (mode === 'pdf') _telechargerPdf(capture, 'fiche-stock-' + String(key).replace('stock-', '') + '.pdf');
+    else _printConso(capture, 'Fiche de stock');
+  }
   function fusionnerFichesConso() {
     if (!confirm2('Regrouper les fiches de stock en double ? Chaque produit aura une seule fiche, avec le stock total. Les achats ne sont pas modifies.')) return;
     var n = consoRepaire();
@@ -6670,6 +6765,7 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     h += '<input type="text" class="search-box" placeholder="Rechercher code, nom..." oninput="filterTable(\'consoTable\',this.value)">';
     h += '<div style="display:flex;gap:.5rem">';
     h += '<button class="btn" onclick="printStockConsum()" title="Imprimer la fiche de stock">🖨 Imprimer</button>';
+    h += '<button class="btn" onclick="stockFicheSortie(\'stock-consum\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
     h += '<button class="btn" onclick="showAddStock(\'stock-consum\')">+ Ajouter au stock</button>';
     h += '<button class="btn btn-accent" onclick="showAddConsumDirect()">+ Nouveau Consommable</button>';
     h += '<button class="btn" onclick="fusionnerFichesConso()" title="Regrouper les fiches en double : une seule fiche par produit">🧹 Fusionner les fiches en double</button>';
@@ -6724,7 +6820,8 @@ function renderStockPage(key, getFn, setFn, title) {
   var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">';
   h += '<div><input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)"></div>';
   h += '<div style="display:flex;gap:.5rem">';
-  h += '<button class="btn" onclick="exportStockPDF()">📄 PDF</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-epi\',\'print\')" title="Imprimer la fiche">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-epi\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
   h += '<button class="btn" onclick="exportStockExcel()">📊 Excel</button>';
   h += '<button class="btn btn-accent" onclick="showAddStock(\'' + key + '\')">+ Nouveau Produit Fini</button>';
   h += '</div></div>';
@@ -6798,7 +6895,10 @@ function showStockTab(tab) {
   }
 }
 
-function exportStockPDF() {
+/* Ancien point d'entree (garde pour la compatibilite) : la sortie passe
+   maintenant par stockFicheSortie, sur le modele commun. */
+function exportStockPDF() { printStockFiche('stock-raw'); }
+function _exportStockPDFLegacy() {
   var etat = getSection('stockRawEtat', 'actif');
   var tab = getSection('stockRawTab', 'actif');
   var items = getStockRaw().filter(function(s) {
