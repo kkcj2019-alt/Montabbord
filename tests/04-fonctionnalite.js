@@ -605,6 +605,86 @@ function controles() {
   });
 
   r.push({
+    nom: 'Achats : le nombre de paquets est saisi et reste coherent avec les cartons',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      /* 1) on saisit des cartons -> les paquets s'affichent */
+      document.getElementById('ai_qte').value = '4';
+      document.getElementById('ai_qte_paquet').value = '50';
+      apAchatSyncPaquets('cartons');
+      var a = g('ai_paquets');
+      /* 2) on saisit des paquets -> les cartons se calculent */
+      document.getElementById('ai_paquets').value = '100';
+      apAchatSyncPaquets('paquets');
+      var b = g('ai_qte');
+      (a === '200' && b === '2')
+        ? 'OK : 4 cartons = 200 paquets, puis 100 paquets = 2 cartons'
+        : 'ECHEC : 4 cartons -> ' + a + ' paq, 100 paq -> ' + b + ' cartons'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : le message ne dit plus « absent du catalogue » pour un code qui y est',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      /* Reproduction du cas signale : on frappe le code lettre par lettre,
+         la derniere frappe remplit la valeur mais le message restait orange. */
+      document.getElementById('ai_code').value = 'P';
+      apAchatCondFill();
+      document.getElementById('ai_code').value = 'P7';
+      apAchatCondFill();
+      apAchatCodeFill('consumable');
+      var m = String(document.getElementById('ai_cond_hint').textContent || '');
+      var v = String(document.getElementById('ai_cond').value);
+      (/Catalogue : 150/.test(m) && !/absent/.test(m) && v === '150')
+        ? 'OK : "' + m + '"'
+        : 'ECHEC : message = "' + m + '", valeur = ' + v
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : un code au catalogue sans Qté par Paquet est distingue d\'un code absent',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      setDefinitions([
+        { id:'d6', code:'P6', designation:'POINTE 6', type:'POINTE', qty_per_packet:165, prix_carton:28000 },
+        { id:'d9', code:'P9', designation:'POINTE 9', type:'POINTE', qty_per_packet:0, prix_carton:28000 }
+      ]);
+      document.getElementById('ai_code').value = 'P9';
+      apAchatCondFill();
+      var m9 = String(document.getElementById('ai_cond_hint').textContent || '');
+      document.getElementById('ai_code').value = 'ZZ';
+      apAchatCondFill();
+      var mz = String(document.getElementById('ai_cond_hint').textContent || '');
+      (/sans/.test(m9) && /P9/.test(m9) && /absent/.test(mz) && /ZZ/.test(mz))
+        ? 'OK : P9 signale comme "au catalogue mais sans Qté par Paquet", ZZ comme absent'
+        : 'ECHEC : P9 -> "' + m9 + '" | ZZ -> "' + mz + '"'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : une valeur de conditionnement modifiee est signalee comme telle',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      document.getElementById('ai_code').value = 'P7';
+      apAchatCondFill();
+      document.getElementById('ai_cond').value = '200';
+      apAchatCondTouched();
+      apAchatCondHint();
+      var m = String(document.getElementById('ai_cond_hint').textContent || '');
+      (/Valeur modifi/.test(m) && /150/.test(m))
+        ? 'OK : "' + m + '"'
+        : 'ECHEC : "' + m + '"'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
     app: 'production.html', store: storeRealiste,
     code: `
