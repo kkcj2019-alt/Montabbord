@@ -685,6 +685,48 @@ function controles() {
   });
 
   r.push({
+    nom: 'Achats : la liste affiche les cartons par produit (1 carton P6, 2 cartons P7)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var a = { id:'x1', date:'2026-09-28', category:'consumables', reference:'BL-TEST', fournisseur:'X',
+        items: [ { code:'P6', designation:'POINTE 6', cartons:1, paquets:50, quantity:7500, ctype:'POINTE' },
+                 { code:'P7', designation:'POINTE 7', cartons:2, paquets:100, quantity:15000, ctype:'POINTE' } ] };
+      var h = achatResumeColis(a).replace(/<[^>]*>/g, '');
+      (/1 carton P6/.test(h) && /2 cartons P7/.test(h))
+        ? 'OK : "' + h + '"'
+        : 'ECHEC : "' + h + '"'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : le bois garde son comptage de colis, pas un libelle carton',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var a = { id:'x2', category:'raw-materials', items: [ { colis_number:'C1' }, { colis_number:'C2' } ] };
+      var h = achatResumeColis(a);
+      (/2 colis/.test(h) && !/carton/.test(h))
+        ? 'OK : "' + h + '"'
+        : 'ECHEC : "' + h + '"'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achats : les categories sans volume sont reconnues (pas de « 0.000 m3 » trompeur)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      (achatSansVolume('consumables') === true && achatSansVolume('consumable') === true
+        && achatSansVolume('epi') === true && achatSansVolume('raw-materials') === false
+        && achatSansVolume('finished') === false)
+        ? 'OK : consommables/EPI distingues du bois'
+        : 'ECHEC : cons=' + achatSansVolume('consumables') + ' epi=' + achatSansVolume('epi')
+          + ' raw=' + achatSansVolume('raw-materials')
+    `,
+    attenduPrefixe: 'OK : consommables/EPI distingues du bois'
+  });
+
+  r.push({
     nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
     app: 'production.html', store: storeRealiste,
     code: `
