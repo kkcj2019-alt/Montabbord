@@ -1665,6 +1665,51 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Mouvements de Stock : un achat de pointes P5 crée une entrée au journal (visible sur la page)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('movements', []);
+      document.getElementById('ach_ref').value = 'REF-P5';
+      document.getElementById('ach_date').value = today();
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      _tempAchatItems = [{ code:'P5', designation:'Pointes 5', quantity:100000, unit_price:0.28, total_price:56000, paquets:2000, cond:50, ctype:'POINTE', cartons:40 }];
+      saveAchatByCategory({ preventDefault: function(){} }, 'consumables');
+      var movs = getMovements();
+      var entree = movs.filter(function(m){ return m.type === 'entree' && m.reference === 'REF-P5'; });
+      CURRENT_PAGE = 'stock-movements'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (entree.length === 1 && entree[0].code === 'P5' && entree[0].motif === 'Achat REF-P5'
+        && h.indexOf('P5') !== -1 && h.indexOf('Entrée') !== -1)
+        ? 'OK : entrée journal + affichage P5 dans Mouvements de Stock'
+        : 'ECHEC : ' + JSON.stringify(movs)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : un achat de pointes P5 écrit aussi le journal des mouvements',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var p2 = apProdGet();
+      p2.movements = [];
+      p2.stockConsum = [];
+      p2.achats = [];
+      apProdSet(p2);
+      document.getElementById('ach_ref').value = 'REF-P5B';
+      document.getElementById('ach_date').value = getToday();
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      _tempAchatItems = [{ code:'P5', designation:'Pointes 5', quantity:100000, unit_price:0.28, total_price:56000, paquets:2000, cond:50, ctype:'POINTE', cartons:40 }];
+      saveApAchat(null, 'consumables');
+      var apres = apProdGet();
+      var entree = (apres.movements||[]).filter(function(m){ return m.type === 'entree' && m.reference === 'REF-P5B'; });
+      (entree.length === 1 && entree[0].code === 'P5' && entree[0].motif === 'Achat REF-P5B')
+        ? 'OK : entrée journal code P5'
+        : 'ECHEC : ' + JSON.stringify(apres.movements)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
