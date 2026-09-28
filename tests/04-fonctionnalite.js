@@ -1005,6 +1005,118 @@ function controles() {
   });
 
   r.push({
+    nom: 'Sortie de pointe : elle diminue le stock et apparait dans le registre',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'so1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', created_at: '2026-09-01' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var stock = getStockConsum();
+      stock.unshift({ id: 'soX', code: 'P7', designation: 'POINTE 7', fournisseur: '', quantite: -3000,
+                      paquets: 0, cartons: 0, cond: 150, ctype: 'POINTE', emplacement: '',
+                      prix_unitaire: 0, motif: 'Consommation atelier', obs: 'Consommation atelier',
+                      created_at: '2026-09-10' });
+      setStockConsum(stock);
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P7'; })[0] || {};
+      var r = buildConsoMovements(_consoLignes('P7'));
+      var sortie = r.filter(function (x) { return x.sortie > 0; })[0] || {};
+      var final = r[r.length - 1] || {};
+      (agg.unites === 12000 && sortie.sortie === 3000 && sortie.date === '2026-09-10'
+        && /Consommation atelier/.test(sortie.obs || '') && final.final === 12000)
+        ? 'OK : 15 000 - 3 000 = 12 000, sortie datee et motivee dans le registre'
+        : 'ECHEC : ' + JSON.stringify(agg) + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock : une ligne d\'achat sans stock est detectee puis recreatee depuis le BL',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* BL-2809 contient un carton de P5, mais le stock n'a aucune ligne P5. */
+      p.stockConsum = [{ id: 'ok1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', created_at: '2026-09-01' }];
+      p.achats = [{ id: 'bl1', category: 'consumables', date: '2026-09-28', reference: 'BL-2809', fournisseur: 'TIJANI',
+                    items: [{ code: 'P5', designation: 'POINTE5', quantity: 18000, paquets: 100, cartons: 1, cond: 180, ctype: 'POINTE', prix_carton: 28000 }],
+                    montant_total: 28000 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var avant = stockConsumRapport();
+      var reponses = [true];
+      var vraiConfirm = confirm2;
+      confirm2 = function () { return reponses.shift(); };
+      try { reconstruireStockConsum(); } catch (e) { confirm2 = vraiConfirm; }
+      confirm2 = vraiConfirm;
+      var agg = consoAggregate();
+      var p5 = agg.filter(function (a) { return a.code === 'P5'; })[0] || {};
+      var p7 = agg.filter(function (a) { return a.code === 'P7'; })[0] || {};
+      (avant.manquants.length === 1 && avant.manquants[0].code === 'P5'
+        && p5.unites === 18000 && p5.cartons === 1 && p7.unites === 15000)
+        ? 'OK : P5 detecte sans stock puis recree (18 000 pointes / 1 carton), P7 intact'
+        : 'ECHEC : manquants=' + JSON.stringify(avant.manquants) + ' p5=' + JSON.stringify(p5) + ' p7=' + JSON.stringify(p7)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : « Tout » affiche les composants latte/plot/CP meme sans stock (0)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.composants = [
+        { article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte 120', quantity: 5, volume: 0.0018 },
+        { article_id: 'a1', type: 'PLOT', code: 'PL1', designation: 'Plot 100', quantity: 2, volume: 0.002 },
+        { article_id: 'a1', type: 'CP', code: 'CP1', designation: 'Contreplaque', quantity: 1, volume: 0.001 },
+        { article_id: 'a1', type: 'POINTE', code: 'P7', designation: 'Pointe 7', quantity: 90 }
+      ];
+      p.stockSemi = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var agg = semiAggregate();
+      var codes = agg.map(function (e) { return e.code; });
+      (agg.length === 3 && codes.indexOf('L1') !== -1 && codes.indexOf('PL1') !== -1 && codes.indexOf('CP1') !== -1
+        && agg.every(function (e) { return e.quantite === 0; }))
+        ? 'OK : latte, plot et CP affiches a 0 (aucun stock, mais presents)'
+        : 'ECHEC : ' + JSON.stringify(codes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Sortie de pointe : assemblage deduit les pointes et les trace (date, motif, numero)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a1', type: 'POINTE', code: 'P7', designation: 'Pointe 7', quantity: 90 }];
+      p.stockConsum = [{ id: 'sp1', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE', created_at: '2026-09-01' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      /* 2 palettes x 90 pointes = 180 sorties, referencees au numero de fiche */
+      deductAssemblageStock({ numero: '2609007', date: '2026-09-15', assemblage: [{ code: 'PAL7', qte: 2 }] });
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P7'; })[0] || {};
+      var r = buildConsoMovements(_consoLignes('P7'));
+      var sor = r.filter(function (x) { return x.sortie > 0; }).filter(function (x) { return /Production 2609007/.test(x.obs || ''); })[0] || {};
+      (agg.unites === 14820 && sor.sortie === 180 && sor.date === '2026-09-15')
+        ? 'OK : 15 000 - 180 = 14 820, sortie tracee « Production 2609007 » le 15/09'
+        : 'ECHEC : total=' + agg.unites + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();

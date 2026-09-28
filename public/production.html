@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-81';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-82';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -4498,39 +4498,47 @@ function consumStockQty(compCode) {
   }
   return qty;
 }
-function deductConsumQty(compCode, need) {
-  if (!compCode || !(need > 0)) return;
-  var key = (compCode || '').toUpperCase();
-  var stock = getStockConsum();
-  var rest = need;
-  stock.forEach(function(s) {
-    if (rest <= 0) return;
-    if ((s.code || '').toUpperCase() === key) {
-      var q = parseFloat(s.quantite) || 0;
-      var d = Math.min(q, rest);
-      s.quantite = Math.max(0, q - d);
-      if (s.quantite_stock != null) s.quantite_stock = s.quantite;
-      s.updated_at = new Date().toISOString();
-      rest -= d;
-    }
-  });
-  if (rest > 0) {
-    var art = getArticles().find(function(a) { return (a.code || '').toUpperCase() === key; });
-    if (art) {
-      stock.forEach(function(s) {
-        if (rest <= 0) return;
-        if (s.article_id === art.id) {
-          var q2 = parseFloat(s.quantite) || 0;
-          var d2 = Math.min(q2, rest);
-          s.quantite = Math.max(0, q2 - d2);
-          if (s.quantite_stock != null) s.quantite_stock = s.quantite;
-          s.updated_at = new Date().toISOString();
-          rest -= d2;
-        }
-      });
+function deductConsumQty(compCode, need, ref) {
+  if (!compCode || !(need > 0)) return 0;
+  var key = String(compCode).trim().toUpperCase();
+  /* On enregistre la consommation comme un MOUVEMENT (ligne negative),
+     avec la reference de la fiche qui la provoque. Elle apparait donc dans
+     le registre du produit (colonne Sortie) avec sa date et son motif.
+     Avant, la consommation automatique des pointes par l'assemblage
+     modifiait les lignes en place sans laisser de trace : c'etait la raison
+     des « stocks sans mouvements ». */
+  var cat = defCatalog().filter(function(c){ return String(c.code||'').trim().toUpperCase()===key && String(c.type||'').toUpperCase()==='POINTE'; })[0] || {};
+  var cond = parseFloat(cat.qty_per_packet) || 0;
+  if (!cond) {
+    var st = getStockConsum() || [];
+    for (var i = 0; i < st.length; i++) {
+      if (String((st[i]||{}).code||'').trim().toUpperCase() !== key) continue;
+      var c0 = parseFloat(st[i].cond) || 0;
+      if (c0 > 0) { cond = c0; break; }
     }
   }
+  var numero = ref && ref.numero ? ref.numero : '';
+  var date = (ref && ref.date) || today();
+  var motif = numero ? ('Production ' + numero + ' — conso. assemblage') : 'Consommation production (assemblage)';
+  var stock = getStockConsum();
+  stock.unshift({
+    id: Date.now() + Math.random(),
+    code: key,
+    designation: cat.designation || key,
+    fournisseur: '',
+    quantite: -need,
+    paquets: 0,
+    cartons: 0,
+    cond: cond,
+    ctype: 'POINTE',
+    emplacement: '',
+    prix_unitaire: 0,
+    motif: motif,
+    obs: motif,
+    created_at: date
+  });
   setStockConsum(stock);
+  return need;
 }
 
 /* Deduction assemblage : decrementer stock selon composants utilises */
@@ -4552,7 +4560,7 @@ function deductAssemblageStock(p) {
       if (type === "LATTE" || type === "PLOT" || type === "CP") {
         deductSemiQty(comp.code, totalNeeded);
       } else if (type === "POINTE") {
-        deductConsumQty(comp.code, totalNeeded);
+        deductConsumQty(comp.code, totalNeeded, { numero: p.numero, date: p.date });
       } else {
         var rawStock = getStockRaw();
         var rest = totalNeeded;
@@ -5772,6 +5780,45 @@ if (!Array.isArray(achats)) { achats = []; try { toast('Liste d\'achats illisibl
     renderPage();
   } catch(e) { toast('Échec nettoyage', 'error'); }
 }
+/* Referentiel des semi-finis : les composants LATTE / PLOT / CP de la
+   nomenclature, et non les seules lignes de stock (qui n'existent que si
+   on en a produit). « Tout (y compris 0) » affiche donc tous les
+   composants, avec 0 pour ceux sans stock. */
+function semiAggregate() {
+  var map = {}, ordre = [];
+  defCatalog().forEach(function (c) {
+    var t = String(c.type || '').toUpperCase();
+    if (t !== 'LATTE' && t !== 'PLOT' && t !== 'CP') return;
+    var key = String(c.code || '').trim().toUpperCase();
+    if (!key || map[key]) return;
+    map[key] = { code: c.code, designation: c.designation || c.code, type: t,
+      length: c.length || 0, width: c.width || 0, thickness: c.thickness || 0,
+      volumeUnitaire: parseFloat(c.volume) || 0, quantite: 0 };
+    ordre.push(key);
+  });
+  getStockSemi().forEach(function (s) {
+    if (!s) return;
+    var key = String(s.code || '').trim().toUpperCase();
+    if (!key && s.article_id) {
+      var a = getArticles().find(function (x) { return x.id === s.article_id; }) || {};
+      key = String(a.code || '').trim().toUpperCase();
+      if (key && !map[key]) {
+        map[key] = { code: a.code, designation: a.designation || key, type: 'SEMI',
+          length: 0, width: 0, thickness: 0, volumeUnitaire: 0, quantite: 0 };
+        ordre.push(key);
+      }
+    }
+    if (!key || !map[key]) return;
+    map[key].quantite += parseFloat(s.quantite) || 0;
+  });
+  return ordre.map(function (k) {
+    var e = map[k];
+    var vU = e.volumeUnitaire > 0 ? e.volumeUnitaire
+      : ((e.length > 0 && e.width > 0 && e.thickness > 0) ? (e.length * e.width * e.thickness / 1000000) : 0);
+    e.volumeTotal = vU * (parseFloat(e.quantite) || 0);
+    return e;
+  });
+}
 function render_stock_raw() {
   var tab = getSection('stockRawTab', 'actif');
   if (tab === 'all') tab = 'actif';
@@ -5878,19 +5925,18 @@ function render_stock_raw() {
   showEtat += '<button class="btn' + (etat === 'tout' ? ' btn-accent' : '') + '" onclick="setSection(\'stockRawEtat\',\'tout\');renderPage()" style="font-size:.75rem">Tout (y compris 0)</button></div>';
 
   if (tab === 'semi') {
-    var semiL = getStockSemi().filter(function(s) { return etatOk(s.quantite); });
+    var semiL = semiAggregate().filter(function (e) { return etatOk(e.quantite); });
     var totSQ = 0, totSV = 0;
-    semiL.forEach(function(s) { totSQ += parseFloat(s.quantite) || 0; totSV += semiVol(s); });
+    semiL.forEach(function (e) { totSQ += parseFloat(e.quantite) || 0; totSV += parseFloat(e.volumeTotal) || 0; });
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
     h += '<input type="text" class="search-box" placeholder="Rechercher..." oninput="filterTable(\'stockTable\',this.value)">';
     h += '<div style="display:flex;gap:.5rem;align-items:center">' + showEtat + '</div></div>';
-    h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Fournisseur</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
-    semiL.forEach(function(s) {
-      var v = semiVol(s);
-      h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(s.code || '-') + '</td>';
-      h += '<td>' + escH(s.designation || '-') + '</td><td>' + escH(s.fournisseur || '-') + '</td>';
-      h += '<td style="text-align:right;font-weight:700">' + (s.quantite || 0) + '</td>';
-      h += '<td style="text-align:right">' + v.toFixed(3) + '</td>';
+    h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Type</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
+    semiL.forEach(function (e) {
+      h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(e.code || '-') + '</td>';
+      h += '<td>' + escH(e.designation || '-') + '</td><td>' + escH(e.type || '-') + '</td>';
+      h += '<td style="text-align:right;font-weight:700">' + escH(fmt(e.quantite || 0)) + '</td>';
+      h += '<td style="text-align:right">' + (parseFloat(e.volumeTotal) || 0).toFixed(3) + '</td>';
       h += '<td style="white-space:nowrap"></td></tr>';
     });
     h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="3" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totSQ) + '</td><td style="text-align:right">' + totSV.toFixed(3) + '</td><td></td></tr>';
@@ -6768,6 +6814,168 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     if (mode === 'pdf') _telechargerPdf(capture, 'fiche-stock-' + String(key).replace('stock-', '') + '.pdf');
     else _printConso(capture, 'Fiche de stock');
   }
+  /* ---------- SORTIE DE CONSOMMABLE (consommation) ---------- */
+  /* Il n'existait AUCUN moyen d'enregistrer une consommation de pointes :
+     « + Ajouter au stock » saisit une quantite absolue, et rien ne
+     deduisait le stock. La colonne « Sortie » des registres restait vide. */
+  function showSortieConso() {
+    var agg = consoAggregate();
+    var opts = agg.map(function (x) { return '<option value="' + escH(x.code) + '">' + escH(x.code + ' — ' + x.des) + '</option>'; }).join('');
+    if (!opts) return toast('Aucun consommable en stock', 'error');
+    var m = '<div class="modal-overlay" id="sortieConsoOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:520px">';
+    m += '<h2>📤 Sortie de consommable</h2>';
+    m += '<p style="font-size:.78rem;color:var(--dim);margin:0 0 .8rem">Consommation, perte, casse ou pr&#232;t. Le stock est diminu&#233; et la sortie est trac&#233;e dans le registre du produit.</p>';
+    m += '<div class="form-row">' + formField('so_code', 'Produit', '', 'text', true).replace('id="so_code"', 'id="so_code" list="soCodeList" onchange="soRemplir()"') + '</div>';
+    m += '<datalist id="soCodeList">' + opts + '</datalist>';
+    m += '<div class="form-row">' + formField('so_qte', 'Quantit&#233; en pointe', '', 'number', true) + formField('so_carton', 'Equiv. cartons (1 = 50 paquets x cond.)', '', 'number', false) + '</div>';
+    m += '<div class="form-row">' + formField('so_date', 'Date', today(), 'date', true) + formField('so_motif', 'Motif', 'Consommation', 'text', true) + '</div>';
+    m += '<div id="so_help" style="font-size:.74rem;color:var(--dim);margin-bottom:.8rem"></div>';
+    m += '<div style="display:flex;gap:.5rem;margin-top:.6rem">';
+    m += '<button class="btn btn-accent" onclick="saveSortieConso()">✅ Enregistrer la sortie</button>';
+    m += '<button class="btn" onclick="document.getElementById(\'sortieConsoOverlay\').remove()">Annuler</button>';
+    m += '</div></div></div>';
+    var prev = document.getElementById('sortieConsoOverlay');
+    if (prev) prev.remove();
+    document.body.insertAdjacentHTML('beforeend', m);
+    try { document.getElementById('so_code').focus(); } catch (e) {}
+  }
+  function soRemplir() {
+    try {
+      var code = String((document.getElementById('so_code') || {}).value || '').trim().toUpperCase();
+      var a = consoAggregate().filter(function (x) { return String(x.code).toUpperCase() === code; })[0] || {};
+      var help = document.getElementById('so_help');
+      if (a.code) {
+        if (help) help.innerHTML = 'Stock actuel : <strong>' + fmt(a.unites) + '</strong> pointes &middot; ' + fmt(a.paquets) + ' paquets &middot; ' + fmt(a.cartons) + ' carton(s) &middot; cond. ' + (a.cond || '-');
+        var s = document.getElementById('so_code');
+        if (s) s.value = a.code;
+      } else if (help) help.textContent = 'Produit introuvable au stock.';
+    } catch (e) {}
+  }
+  function saveSortieConso() {
+    try {
+      var code = String((document.getElementById('so_code') || {}).value || '').trim().toUpperCase();
+      var qte = parseFloat((document.getElementById('so_qte') || {}).value) || 0;
+      var date = (document.getElementById('so_date') || {}).value || today();
+      var motif = String((document.getElementById('so_motif') || {}).value || '').trim() || 'Sortie de stock';
+      if (!code) return toast('Produit requis', 'error');
+      if (!(qte > 0)) return toast('Quantit&#233; invalide', 'error');
+      var stock = getStockConsum();
+      var base = null;
+      for (var i = 0; i < stock.length; i++) {
+        if (String((stock[i] || {}).code || '').trim().toUpperCase() === code) { base = stock[i]; break; }
+      }
+      if (!base) return toast('Produit absent du stock', 'error');
+      var cur = 0, cond = 0;
+      stock.forEach(function (s) {
+        if (String((s || {}).code || '').trim().toUpperCase() !== code) return;
+        cur += parseFloat(consoNorm(s).unites) || 0;
+        if ((parseFloat(s.cond) || 0) > 0) cond = parseFloat(s.cond);
+      });
+      if (qte > cur) {
+        if (!confirm('Stock insuffisant : ' + fmt(cur) + ' disponible(s). Enregistrer quand meme ?')) return;
+      }
+      stock.unshift({
+        id: Date.now() + Math.random(),
+        code: base.code, designation: base.designation, fournisseur: '',
+        quantite: -qte, paquets: 0, cartons: 0,
+        cond: cond || 0, ctype: base.ctype || 'POINTE',
+        emplacement: base.emplacement || '',
+        prix_unitaire: 0,
+        motif: motif, obs: motif,
+        created_at: date
+      });
+      setStockConsum(stock);
+      document.getElementById('sortieConsoOverlay').remove();
+      toast(fmt(qte) + ' pointe(s) sorti(es) — ' + motif, 'success');
+      renderPage();
+    } catch (e) { toast('Sortie impossible : ' + e.message, 'error'); }
+  }
+  /* ---------- RECONSTRUCTION DU STOCK DEPUIS LES ACHATS ---------- */
+  /* Les achats (BL) sont la source de verite. Cette fonction reconstruit les
+     lignes d'entree du stock a partir d'eux, en conservant les ajustements
+     d'inventaire. Elle corrige les drifts (ligne d'achat sans stock, achat
+     modifie sans report sur le stock). */
+  function stockConsumRapport() {
+    var achats = getAchats() || [];
+    var stock = getStockConsum() || [];
+    var manquants = [];
+    achats.forEach(function (a) {
+      var cat = a.category || a.type || '';
+      if (cat !== 'consumables' && cat !== 'consumable') return;
+      (Array.isArray(a.items) ? seulementObjets(a.items) : []).forEach(function (it) {
+        var code = String(it.code || '').trim().toUpperCase();
+        if (!code) return;
+        var attendu = parseFloat(it.quantity) || 0;
+        var dansStock = 0;
+        stock.forEach(function (s) {
+          if (String((s || {}).code || '').trim().toUpperCase() !== code) return;
+          dansStock += parseFloat(s.quantite) || 0;
+        });
+        /* Une entree achetee qui n'apparait pas dans le stock = drift. */
+        if (dansStock === 0 && attendu > 0) {
+          manquants.push({ achat: a.reference || ('BL-' + a.id), date: a.date, code: it.code, qte: attendu });
+        }
+      });
+    });
+    return { manquants: manquants };
+  }
+  function reconstruireStockConsum() {
+    var stock = getStockConsum() || [];
+    var rap = stockConsumRapport();
+    var lignes = [];
+    /* 1) les entrees, reconstruites depuis les achats (vérité) */
+    (getAchats() || []).forEach(function (a) {
+      var cat = a.category || a.type || '';
+      if (cat !== 'consumables' && cat !== 'consumable') return;
+      (Array.isArray(a.items) ? seulementObjets(a.items) : []).forEach(function (it) {
+        if (String(it.code || '').trim() === '') return;
+        lignes.push({
+          id: Date.now() + Math.random(),
+          code: it.code, designation: it.designation, fournisseur: a.fournisseur || '',
+          quantite: parseFloat(it.quantity) || 0,
+          paquets: it.paquets != null ? it.paquets : it.quantity,
+          cartons: it.cartons, cond: it.cond || 0, ctype: it.ctype || 'POINTE',
+          emplacement: it.emplacement || '', prix_carton: it.prix_carton || 0,
+          prix_unitaire: it.unit_price || 0,
+          obs: (it.obs || ('Achat ' + (a.reference || ''))).toString(),
+          created_at: a.date || today(), _achatId: a.id
+        });
+      });
+    });
+    /* 2) les ajustements d'inventaire (déjà saisis) */
+    stock.forEach(function (s) { if (s && s._ajustInv) lignes.push(s); });
+    /* 3) les sorties manuelles, déjà enregistrées */
+    stock.forEach(function (s) {
+      if (!s || s._ajustInv) return;
+      if (parseFloat(s.quantite) < 0) lignes.push(s);
+    });
+    if (!lignes.length) return toast('Aucun achat consommable a reconstruire', 'error');
+    /* Codes couverts par un achat : une saisie manuelle de ces codes est
+       remplacee (sinon on compterait deux fois). Les autres saisies
+       manuelles sont CONSERVEES — on n'efface jamais une donnee qui n'est
+       dans aucun bon de livraison. */
+    var codesAchetes = {};
+    lignes.forEach(function (l) { codesAchetes[String(l.code || '').trim().toUpperCase()] = true; });
+    var conservees = 0;
+    stock.forEach(function (s) {
+      if (!s) return;
+      if (s._ajustInv || (parseFloat(s.quantite) < 0)) return;   /* deja pris */
+      var code = String(s.code || '').trim().toUpperCase();
+      if (codesAchetes[code]) return;                            /* remplacee par l'achat */
+      if (parseFloat(s.quantite) === 0) return;                  /* ligne vide : retiree */
+      lignes.push(s); conservees++;
+    });
+    var msg = 'Reconstruire le stock a partir des achats ?\n\n'
+      + '- ' + rap.manquants.length + ' ligne(s) d\'achat sans stock sera(ont) recree(s)'
+      + (rap.manquants.length ? ' : ' + rap.manquants.slice(0, 6).map(function (x) { return x.code + ' (' + fmt(x.qte) + ') ' + x.achat; }).join(', ') : '')
+      + '\n- ' + conservees + ' saisie(s) manuelle(s) sans bon sont conservees'
+      + '\n- Les ajustements d\'inventaire et les sorties sont conserves'
+      + '\n- Les lignes a zero sont retirees';
+    if (!confirm2(msg)) return;
+    setStockConsum(lignes);
+    toast('Stock reconstruit : ' + lignes.length + ' ligne(s)', 'success');
+    renderPage();
+  }
   function fusionnerFichesConso() {
     if (!confirm2('Regrouper les fiches de stock en double ? Chaque produit aura une seule fiche, avec le stock total. Les achats ne sont pas modifies.')) return;
     var n = consoRepaire();
@@ -6797,7 +7005,9 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     h += '<div style="display:flex;gap:.5rem">';
     h += '<button class="btn" onclick="printStockConsum()" title="Imprimer la fiche de stock">🖨 Imprimer</button>';
     h += '<button class="btn" onclick="stockFicheSortie(\'stock-consum\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
+    h += '<button class="btn" onclick="showSortieConso()" title="Enregistrer une consommation ou une perte">📤 Sortie / consommation</button>';
     h += '<button class="btn" onclick="showAddStock(\'stock-consum\')">+ Ajouter au stock</button>';
+    h += '<button class="btn" onclick="reconstruireStockConsum()" title="Recreer le stock a partir des achats (BL)">🔄 Reconstruire le stock</button>';
     h += '<button class="btn btn-accent" onclick="showAddConsumDirect()">+ Nouveau Consommable</button>';
     h += '<button class="btn" onclick="fusionnerFichesConso()" title="Regrouper les fiches en double : une seule fiche par produit">🧹 Fusionner les fiches en double</button>';
     h += '</div></div>';
