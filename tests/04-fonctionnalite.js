@@ -441,6 +441,169 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Prix du carton : parametre par le catalogue, jamais melange
+     avec le prix a la pointe (cas reel : P7 a 28 000 F/carton affichait
+     3,733 = 28000/7500 dans le champ « Prix du carton ») ---------- */
+  const storePrixCarton = () => {
+    const s = storeRealiste();
+    const p = JSON.parse(s.mdb_production);
+    p.definitions = [
+      { id: 'd7', code: 'P7', designation: 'POINTE7', type: 'POINTE', qty_per_packet: 150, prix_carton: 28000, unit_cost: 3.73 }
+    ];
+    s.mdb_production = JSON.stringify(p);
+    return s;
+  };
+
+  r.push({
+    nom: 'Prix carton : le catalogue remplit le prix du carton a la selection du code',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      document.getElementById('ai_code').value = 'P7';
+      apAchatCodeFill('consumable');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_pu') === '28000' && g('ai_cond') === '150')
+        ? 'OK : cond = ' + g('ai_cond') + ', prix carton = ' + g('ai_pu')
+        : 'ECHEC : cond=' + g('ai_cond') + ' prix=' + g('ai_pu')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prix carton : le cout unitaire A LA POINTE ne remplit jamais le prix du carton',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      var d = defCatalog().filter(function (c) { return c.code === 'P7'; })[0] || {};
+      (d.prix_carton === 28000 && d.unit_cost === 3.73)
+        ? 'OK : le catalogue distingue prix carton (28000) et cout pointe (3.73)'
+        : 'ECHEC : ' + JSON.stringify(d)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prix carton : une 2e ligne ne recupere pas le prix a la pointe de la 1re (3,733 au lieu de 28 000)',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      _tempAchatItems = [];
+      document.getElementById('ai_constype').value = 'POINTE';
+      document.getElementById('ai_code').value = 'P7';
+      apAchatCodeFill('consumable');
+      document.getElementById('ai_qte').value = '1';
+      document.getElementById('ai_qte_paquet').value = '50';
+      document.getElementById('ai_cond').value = '150';
+      document.getElementById('ai_pu').value = '28000';
+      addAchatItemLine('consumable');
+      var l1 = _tempAchatItems[0];
+      /* On simule la saisie de la ligne suivante : le conditionnement a ete
+         vide par apAchatResetInputs, l'utilisateur resaisit le code. */
+      document.getElementById('ai_code').value = 'P7';
+      apAchatCodeFill('consumable');
+      document.getElementById('ai_cond').value = '150';
+      addAchatItemLine('consumable');
+      var l2 = _tempAchatItems[1];
+      (l1 && l1.prix_carton === 28000 && Math.abs(l1.unit_price - 3.7333) < 0.001
+        && l2 && l2.prix_carton === 28000)
+        ? 'OK : ligne 1 = 28000 F/carton (3,73 F/pointe), ligne 2 = 28000 F/carton'
+        : 'ECHEC : l1=' + JSON.stringify(l1) + ' l2=' + JSON.stringify(l2)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat pointes : les zones de saisie sont liberees apres la ligne (pas de report sur la suivante)',
+    app: 'production.html', store: storePrixCarton,
+    code: `
+      _tempAchatItems = [];
+      document.getElementById('ai_constype').value = 'POINTE';
+      document.getElementById('ai_code').value = 'P7';
+      document.getElementById('ai_designation').value = 'POINTE7';
+      apAchatCodeFill('consumable');
+      document.getElementById('ai_qte').value = '3';
+      document.getElementById('ai_qte_paquet').value = '50';
+      document.getElementById('ai_cond').value = '150';
+      document.getElementById('ai_pu').value = '28000';
+      document.getElementById('ai_emplacement').value = 'Zone A';
+      document.getElementById('ai_obs').value = 'note test';
+      addAchatItemLine('consumable');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_code') === '' && g('ai_designation') === '' && g('ai_cond') === ''
+        && g('ai_pu') === '' && g('ai_emplacement') === '' && g('ai_obs') === ''
+        && g('ai_qte') === '1' && g('ai_qte_paquet') === '50')
+        ? 'OK : champs liberes, quantites remises a 1 carton / 50 paquets par carton'
+        : 'ECHEC : code=' + g('ai_code') + ' cond=' + g('ai_cond') + ' pu=' + g('ai_pu')
+          + ' qte=' + g('ai_qte') + ' ppc=' + g('ai_qte_paquet')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : le cout a la pointe ne devient pas un prix de carton',
+    app: 'index.html', store: storePrixCarton,
+    code: `
+      var items = apAchatCatalogue('consumables');
+      var p7 = items.filter(function (i) { return i.code === 'P7'; })[0];
+      (p7 && p7.pu === 28000)
+        ? 'OK : P7 propose a 28 000 F le carton (et non 3,73 F la pointe)'
+        : 'ECHEC : ' + JSON.stringify(p7)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : une ligne POINTE sans conditionnement est refusee',
+    app: 'index.html', store: storePrixCarton,
+    code: `
+      document.getElementById('ai_code').value = 'P7';
+      document.getElementById('ai_constype').value = 'POINTE';
+      document.getElementById('ai_qte').value = '1';
+      document.getElementById('ai_qte_paquet').value = '';
+      document.getElementById('ai_pu').value = '28000';
+      _tempAchatItems = [];
+      addAchatItemLine('consumable');
+      (_tempAchatItems.length === 0)
+        ? 'OK : aucune ligne ajoutee, conditionnement obligatoire'
+        : 'ECHEC : ' + JSON.stringify(_tempAchatItems[0])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : un prix saisi a la main n\'est pas ecrase par le catalogue',
+    app: 'index.html', store: storePrixCarton,
+    code: `
+      document.getElementById('ai_pu').value = '31000';
+      apMarkUserSet(document.getElementById('ai_pu'));
+      document.getElementById('ai_code').value = 'P7';
+      apFillConsumableCond();
+      var v = String(document.getElementById('ai_pu').value);
+      (v === '31000') ? 'OK : 31 000 conserve' : 'ECHEC : ' + v
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : les zones de saisie sont liberees apres la ligne',
+    app: 'index.html', store: storePrixCarton,
+    code: `
+      _tempAchatItems = [];
+      document.getElementById('ai_code').value = 'P7';
+      document.getElementById('ai_constype').value = 'POINTE';
+      apFillConsumableCond();
+      document.getElementById('ai_qte').value = '2';
+      document.getElementById('ai_cartons').value = '2';
+      document.getElementById('ai_pu').value = '28000';
+      document.getElementById('ai_emplacement').value = 'Quai';
+      addAchatItemLine('consumable');
+      var g = function (id) { return String(document.getElementById(id).value); };
+      (g('ai_code') === '' && g('ai_pu') === '' && g('ai_emplacement') === ''
+        && g('ai_qte_paquet') === '' && g('ai_qte') === '1' && g('ai_cartons') === '0')
+        ? 'OK : champs liberes'
+        : 'ECHEC : code=' + g('ai_code') + ' pu=' + g('ai_pu')
+          + ' cond=' + g('ai_qte_paquet') + ' qte=' + g('ai_qte')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'Stock pointes : les cartons saisis sont repris tels quels, les anciennes lignes restent deductible',
     app: 'production.html', store: storeRealiste,
