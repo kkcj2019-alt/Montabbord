@@ -819,6 +819,39 @@ function controles() {
   });
 
   r.push({
+    nom: 'Impression : la fiche de stock se genere avec totaux et une ligne par produit',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'i1', code: 'P6', designation: 'POINTE 6', quantite: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE' },
+        { id: 'i2', code: 'P7', designation: 'POINTE 7', quantite: 15000, paquets: 100, cartons: 2, cond: 150, ctype: 'POINTE' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var capture = '';
+      var faux = { document: { write: function (x) { capture = x; }, close: function () {}, title: '' }, onload: null, print: function () {}, focus: function () {} };
+      var vraiOpen = window.open;
+      var l1 = '', l2 = '', err = '';
+      window.open = function () { return faux; };
+      try { printStockConsum(); l1 = capture; } catch (e) { err = 'fiche: ' + e.message; }
+      capture = '';
+      try { printConsoDetail('P7'); l2 = capture; } catch (e) { err = err || ('detail: ' + e.message); }
+      window.open = vraiOpen;
+      (/FICHE DE STOCK/.test(l1) && /P6/.test(l1) && /P7/.test(l1)
+        && /TOTAL/.test(l1) && /Visa responsable/.test(l1)
+        && /HISTORIQUE DES MOUVEMENTS/.test(l2) && /Stock init/.test(l2)
+        && /Stock fin/.test(l2) && /Visa magasinier/.test(l2))
+        ? 'OK : fiche complete + fiche detaillee generees, totaux et signatures inclus'
+        : 'ECHEC : ' + (err || ('l1=' + l1.length + ' l2=' + l2.length + ' | ' + l2.substr(0, 160)))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
