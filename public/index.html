@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-09-26-87';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-88';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -36351,7 +36351,7 @@ function openApAchatModal(cat) {
   m += '<div><h2 style="font-size:1.25rem;font-weight:700;color:#1e293b;margin:0 0 0.25rem 0">' + title + '</h2>';
   m += '<p style="font-size:0.85rem;color:#64748b;margin:0">' + subtitle + '</p></div>';
   m += '<button type="button" onclick="apCloseModal()" style="background:none;border:none;font-size:1.2rem;color:#94a3b8;cursor:pointer;padding:4px">&times;</button>';
-  m += '<div id="apEditWarn" style="display:none;gap:8px;align-items:flex-start;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:.55rem .7rem;margin-bottom:1rem;font-size:.8rem;color:#92400e"><span style="font-size:1rem">⚠️</span><span><b>Modification d\'un achat existant.</b> Le stock a déjà été approvisionné : il ne sera pas rejoué. Pour changer les quantités et le stock, supprimez l\'achat puis ressaisissez-le.</span></div>';
+  m += '<div id="apEditWarn" style="display:none;gap:8px;align-items:flex-start;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:.55rem .7rem;margin-bottom:1rem;font-size:.8rem;color:#92400e"><span style="font-size:1rem">⚠️</span><span><b>Modification d\'un achat existant.</b> L\'écart de quantités (lignes ajoutées, retirées ou modifiées) est automatiquement reporté au stock, avec une ligne tracée « Modification ».</span></div>';
   m += '</div>';
   m += '<form onsubmit="saveApAchat(event,\'' + cat + '\')">';
   m += '<div style="margin-bottom:1rem"><div style="font-size:.8rem;font-weight:700;color:#334155;margin-bottom:.5rem">Quoi acheter ?</div>';
@@ -36981,6 +36981,41 @@ function applyExtractedAchatData(text) {
   var status = document.getElementById('ach_doc_status');
   if (status) status.textContent = '✅ Données extraites — vérifiez et complétez avant d\'ajouter la ligne';
 }
+/* Report d'ecart lors de la modification d'un achat consommables (miroir de
+   _reporterEcartAchatConso de l'app production) : chaque ecart par produit
+   devient une ligne tracee (« Modification REF ») dans le stock. Ainsi une
+   ligne AJOUTEE en modification (ex. P5) arrive bien au stock, et une ligne
+   RETIREE en sort. */
+function _apReporterEcartAchatConso(anciennes, nouvelles, ref, date, fourn, p) {
+  function cle(it) { return String((it && (it.code || it.designation)) || '').trim().toUpperCase(); }
+  function somme(lignes) {
+    var m = {}, o = [];
+    (lignes || []).forEach(function (it) {
+      var k = cle(it);
+      if (!k) return;
+      if (m[k] === undefined) { m[k] = { q: 0, paq: 0, cart: 0, it: it }; o.push(k); }
+      m[k].q += parseFloat(it.quantity) || 0;
+      m[k].paq += parseFloat(it.paquets != null ? it.paquets : it.quantity) || 0;
+      m[k].cart += parseFloat(it.cartons) || 0;
+    });
+    return { m: m, o: o };
+  }
+  var A = somme(anciennes), N = somme(nouvelles);
+  var codes = {};
+  A.o.concat(N.o).forEach(function (k) { codes[k] = true; });
+  var stock = apProdArr(p, 'stockConsum');
+  Object.keys(codes).forEach(function (k) {
+    var a = A.m[k] || { q: 0, paq: 0, cart: 0, it: null };
+    var n = N.m[k] || { q: 0, paq: 0, cart: 0, it: (A.m[k] || {}).it };
+    var dQ = (parseFloat(n.q) || 0) - (parseFloat(a.q) || 0);
+    var dPaq = (parseFloat(n.paq) || 0) - (parseFloat(a.paq) || 0);
+    var dCart = (parseFloat(n.cart) || 0) - (parseFloat(a.cart) || 0);
+    if (Math.abs(dQ) < 0.0001 && Math.abs(dPaq) < 0.0001 && Math.abs(dCart) < 0.0001) return;
+    var src = n.it || a.it || {};
+    var obs = 'Modification ' + (ref || 'achat') + (dQ >= 0 ? ' (ligne ajoutée ou augmentée)' : ' (ligne retirée ou réduite)');
+    stock.unshift({ id: DB.genId(), code: src.code || k, designation: src.designation || k, fournisseur: fourn || '', quantite: dQ, paquets: dPaq, cartons: dCart, cond: src.cond || 0, ctype: src.ctype || 'POINTE', emplacement: src.emplacement || '', prix_carton: src.prix_carton || 0, prix_unitaire: src.unit_price || 0, motif: obs, obs: obs, created_at: date || getToday() });
+  });
+}
 function saveApAchat(e, category) {
   if (e && e.preventDefault) e.preventDefault();
   var ref = ((document.getElementById('ach_ref') || {}).value || '').trim();
@@ -37003,7 +37038,10 @@ function saveApAchat(e, category) {
   var rec;
   if (existing) {
     /* Modification : on met a jour l'enregistrement existant, on n'en cree pas
-       un second, et on ne touche pas au stock ( deja approvisionne). */
+       un second. En consommables on reporte l'ecart au stock (lignes ajoutees,
+       retirees ou modifiees), exactement comme dans l'app production : sans
+       cela une ligne P5 ajoutee en modification n'arrivait jamais au stock. */
+    var _anciennesLignes = JSON.parse(JSON.stringify(existing.items || []));
     rec = existing;
     rec.category = category;
     rec.reference = ref;
@@ -37022,6 +37060,7 @@ function saveApAchat(e, category) {
   }
   window._apEditingId = null;
   if (existing) {
+    if (category === 'consumables') _apReporterEcartAchatConso(_anciennesLignes, _tempAchatItems, ref, date, fourn, p);
     apProdSet(p);
     apCloseModal();
     renderAchatsProduction();

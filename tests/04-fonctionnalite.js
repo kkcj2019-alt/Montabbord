@@ -1710,6 +1710,60 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+r.push({
+    nom: 'App principale : ajouter une ligne P5 en modification reporte l\'ecart au stock',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      var p3 = apProdGet();
+      p3.achats = [{ id:'BL1', reference:'BL1', date:'2026-09-26', fournisseur:'TIJANI', receiver_name:'X',
+        category:'consumables', montant_total:28000,
+        items:[{ code:'P7', designation:'Pointes 7', quantity:7500, unit_price:1.87, total_price:28000, paquets:50, cond:150, ctype:'POINTE', cartons:1 }] }];
+      p3.stockConsum = [];
+      p3.movements = [];
+      apProdSet(p3);
+      window._apEditingId = 'BL1';
+      document.getElementById('ach_ref').value = 'BL1';
+      document.getElementById('ach_date').value = getToday();
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:7500, unit_price:1.87, total_price:28000, paquets:50, cond:150, ctype:'POINTE', cartons:1 },
+        { code:'P5', designation:'Pointes 5', quantity:15000, unit_price:0.28, total_price:4200, paquets:100, cond:150, ctype:'POINTE', cartons:2 }];
+      saveApAchat(null, 'consumables');
+      var apres = apProdGet();
+      var p5 = (apres.stockConsum||[]).filter(function(x){ return String(x.code||'').toUpperCase() === 'P5'; });
+      (apres.achats.length === 1 && p5.length === 1 && p5[0].quantite === 15000
+        && String(p5[0].motif || '').indexOf('Modification BL1') === 0)
+        ? 'OK : P5 arrive au stock (15 000, ligne tracee Modification BL1)'
+        : 'ECHEC : ' + JSON.stringify(apres.stockConsum)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : une modification sans changement de quantites ne touche pas au stock',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      var p4 = apProdGet();
+      p4.achats = [{ id:'BL2', reference:'BL2', date:'2026-09-26', fournisseur:'TIJANI', receiver_name:'X',
+        category:'consumables', montant_total:28000,
+        items:[{ code:'P7', designation:'Pointes 7', quantity:7500, unit_price:1.87, total_price:28000, paquets:50, cond:150, ctype:'POINTE', cartons:1 }] }];
+      p4.stockConsum = [];
+      apProdSet(p4);
+      window._apEditingId = 'BL2';
+      document.getElementById('ach_ref').value = 'BL2';
+      document.getElementById('ach_date').value = getToday();
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:7500, unit_price:1.87, total_price:28000, paquets:50, cond:150, ctype:'POINTE', cartons:1 }];
+      saveApAchat(null, 'consumables');
+      var apres = apProdGet();
+      (apres.achats.length === 1 && (apres.stockConsum||[]).length === 0)
+        ? 'OK : aucun ecart, aucune ligne stock creee'
+        : 'ECHEC : ' + JSON.stringify(apres.stockConsum)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
