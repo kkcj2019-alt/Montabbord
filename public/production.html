@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-95';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-96';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -3101,8 +3101,18 @@ function render_dashboard() {
 
   var articles = getArticles();
   var volProdTotal = prods.reduce(function(s, p) { return s + (p.vol_total || p.volume_total || 0); }, 0);
-  var volEncours = getProductions().filter(function(p) { return p.statut !== 'validated'; })
-    .reduce(function(s, p) { return s + (p.vol_total || p.volume_total || 0); }, 0);
+  /* En-cours = les entrees moins les reprises d'encours de TOUTES les fiches
+     (pas le total des brouillons). La carte bouge donc a chaque entree ou
+     sortie d'encours saisie. */
+  var volEncours = 0;
+  getProductions().forEach(function (p) {
+    (p.encours || []).forEach(function (e) {
+      var v = parseFloat(e.volume) || 0;
+      if ((e.wip_type || 'entrée') === 'reprise') volEncours -= v;
+      else volEncours += v;
+    });
+  });
+  volEncours = Math.max(0, volEncours);
   var pertesVol = 0;
   getLosses().forEach(function(l) {
     var artL = articles.find(function(a) { return a.id === l.article_id; });
@@ -3674,7 +3684,7 @@ function render_production() {
   h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1rem">';
   h += formField('prod_date', 'Date', today(), 'date', true);
   h += '<div class="form-group"><label>N° Fiche de Production</label><input type="text" id="prod_numero" value="' + numero + '" readonly style="background:#f8f9fa;font-weight:700"></div>';
-  h += formField('prod_chef', 'Chef de Projet', '', 'text', true);
+  h += formField('prod_chef', 'Chef de Production *', '', 'text', true);
   var tauxPerteDisabled = isAdmin ? '' : ' disabled style="background:#f5f5f5;cursor:not-allowed"';
   h += '<div class="form-group"><label>% Taux de Perte Accepté</label><input type="number" id="prod_taux_perte" data-auto="1" value="' + getTauxPerteFor(today()) + '"' + tauxPerteDisabled + '></div>';
   h += '</div>';
@@ -4766,6 +4776,7 @@ function saveProduction(validate) {
   var employes = [];
 
   if (!date) return toast('Sélectionnez la date', 'error');
+  if (!String(chef || '').trim()) return toast('Indiquez le Chef de Production (obligatoire)', 'error');
 
   /* Collecter les lignes Sortie Bois */
   var sortieBois = [];
@@ -4969,7 +4980,7 @@ function generateProdFichePrintHTML(p) {
   h += '<div class="header"><h1>📋 Fiche de Production — ' + escH(p.numero) + '</h1><span class="badge badge-' + (p.statut || 'draft') + '">' + (p.statut || 'draft') + '</span></div>';
   h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;font-size:12px">';
   h += '<div><strong>Date:</strong> ' + fmtD(p.date) + '</div>';
-  h += '<div><strong>Chef de Projet:</strong> ' + escH(p.chef || '-') + '</div>';
+  h += '<div><strong>Chef de Production :</strong> ' + escH(p.chef || '-') + '</div>';
   h += '<div><strong>Taux Perte:</strong> ' + escH(p.taux_perte || '10') + '%</div>';
   h += '<div><strong>Rendement:</strong> ' + (p.rendement ? p.rendement.toFixed(1) + '%' : '0%') + '</div>';
   h += '</div>';
@@ -5371,7 +5382,7 @@ function deleteProd(id) {
   }
   if (!confirm2(msg)) return;
   if (p.statut === 'validated') {
-    restoreBoisSorti(p);
+    var _rest = restoreBoisSorti(p);
     /* Annulation complete des ecritures tracees de la fiche (entrees usinage,
        consos assemblage, entrees produits finis) : sans cela, supprimer une
        fiche validee laissait ses lignes au stock. On retire les lignes dont
@@ -5390,18 +5401,86 @@ function deleteProd(id) {
     }
   }
   setProductions(prods.filter(function(x) { return x.id !== id; }));
-  toast('Fiche supprimée');
+  var _msgSup = 'Fiche supprimée';
+  if (p.statut === 'validated' && _rest) {
+    var _bits = [];
+    if (_rest.restaures.length) _bits.push(_rest.restaures.length + ' lot(s) restauré(s)');
+    if (_rest.recrees.length) _bits.push(_rest.recrees.length + ' lot(s) recréé(s) : ' + _rest.recrees.slice(0, 4).join(', '));
+    if (_rest.retires.length) _bits.push(_rest.retires.length + ' entrée(s) d\u2019encours retirée(s)');
+    if (_bits.length) _msgSup += ' — ' + _bits.join(', ');
+  }
+  toast(_msgSup);
   renderPage();
 }
 function restoreBoisSorti(p) {
+  /* Miroir exact de deductBoisSorti : tout ce que la validation a pris ou
+     mis repart ou revient. Avant, un lot introuvable etait ignore en
+     silence (le bois ne revenait pas), et les entrees d'encours ajoutees a
+     la validation n'etaient jamais retirees (le stock restait gonfle).
+     Desormais on le dit : restaure, recree, ou retire. */
   var stockRaw = getStockRaw();
-  function lot(code) { return stockRaw.find(function(s) { return s.code === code; }); }
+  var restaures = [], recrees = [], retires = [];
+  function lot(code) {
+    return stockRaw.find(function(s) { return (s.code || s.colis_number) === code; });
+  }
+  function recreer(sb, q, v) {
+    var nl = { id: 'rw_' + Date.now() + '_' + Math.floor(Math.random() * 1e6),
+      code: sb.code, colis_number: sb.code,
+      designation: sb.designation || sb.essence || sb.code,
+      essence: sb.essence || '', type: sb.type || '',
+      longueur: sb.long || sb.longueur || 0, largeur: sb.larg || sb.largeur || 0,
+      epaisseur: sb.epais || sb.epaisseur || 0,
+      quantite: Math.max(0, q), volume: Math.max(0, v),
+      fournisseur: sb.fournisseur || '', zone: sb.zone || '',
+      origin: 'BL', created_at: new Date().toISOString(),
+      obs: 'Lot recree par annulation de la fiche ' + (p.numero || '') };
+    stockRaw.unshift(nl);
+    return nl;
+  }
   (p.sortie_bois || []).forEach(function(sb) {
     if (!sb.code) return;
+    var q = parseFloat(sb.qte) || 0, v = parseFloat(sb.volume) || 0;
+    if (q <= 0 && v <= 0) return;
     var item = lot(sb.code);
-    if (item) { item.quantite = (parseFloat(item.quantite) || 0) + (parseFloat(sb.qte) || 0); item.volume = (parseFloat(item.volume) || 0) + (parseFloat(sb.volume) || 0); item.updated_at = new Date().toISOString(); }
+    if (item) {
+      item.quantite = (parseFloat(item.quantite) || 0) + q;
+      item.volume = (parseFloat(item.volume) || 0) + v;
+      item.updated_at = new Date().toISOString();
+      restaures.push(sb.code);
+    } else {
+      recreer(sb, q, v);
+      recrees.push(sb.code);
+    }
+  });
+  (p.encours || []).forEach(function(e) {
+    if (!e.code) return;
+    var q = parseFloat(e.qte) || 0, v = parseFloat(e.volume) || 0;
+    if (q <= 0 && v <= 0) return;
+    var estReprise = (e.wip_type || '') === 'reprise';
+    var item = lot(e.code);
+    /* La validation AJOUTAIT une entree et DEDUISAIT une reprise : a la
+       suppression on fait l'inverse. */
+    if (estReprise) {
+      if (item) {
+        item.quantite = (parseFloat(item.quantite) || 0) + q;
+        item.volume = (parseFloat(item.volume) || 0) + v;
+        item.updated_at = new Date().toISOString();
+        restaures.push(e.code + ' (reprise)');
+      } else {
+        recreer(e, q, v);
+        recrees.push(e.code + ' (reprise)');
+      }
+    } else {
+      if (item) {
+        item.quantite = Math.max(0, (parseFloat(item.quantite) || 0) - q);
+        item.volume = Math.max(0, (parseFloat(item.volume) || 0) - v);
+        item.updated_at = new Date().toISOString();
+        retires.push(e.code);
+      }
+    }
   });
   setStockRaw(stockRaw);
+  return { restaures: restaures, recrees: recrees, retires: retires };
 }
 
 /* ==================== ORDRES DE PRODUCTION ==================== */

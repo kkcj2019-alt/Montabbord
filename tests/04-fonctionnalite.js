@@ -303,19 +303,20 @@ function controles() {
   });
 
   r.push({
-    nom: 'Tableau de bord : la carte « En Cours Production » totalise le volume des fiches non validees (brouillon = 4 m³), pas celles validees',
+    nom: 'Tableau de bord : la carte « En Cours Production » suit les entrees et sorties d\u2019encours',
     app: 'production.html', store: storeRealiste,
     code: `
       var jours = new Date().toISOString().slice(0, 10);
       var prods = getProductions();
-      prods.push({ id: 'p2', numero: '2609002', date: jours, statut: 'draft', vol_sortie_bois: 4, vol_total: 4, sortie_bois: [], lattes: [], plots: [], cp: [], assemblage: [], encours: [] });
+      prods.push({ id: 'p2', numero: '2609002', date: jours, statut: 'draft', vol_sortie_bois: 4, vol_total: 4, sortie_bois: [], lattes: [], plots: [], cp: [], assemblage: [],
+        encours: [{ code: 'E1', qte: 10, volume: 2.5, wip_type: 'entrée' }, { code: 'E1', qte: 4, volume: 1.0, wip_type: 'reprise' }] });
       setProductions(prods);
       CURRENT_PAGE = 'dashboard'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
       var i = h.indexOf('kpi-encours');
       var carte = i === -1 ? '' : h.slice(i, i + 320);
-      (i !== -1 && carte.indexOf('4.00 m³') !== -1 && carte.indexOf('En Cours Production') !== -1)
-        ? 'OK : brouillon 4 m³ affiche en En Cours Production (la fiche validee n y est pas comptee)'
+      (i !== -1 && carte.indexOf('1.50 m') !== -1 && carte.indexOf('En Cours Production') !== -1)
+        ? 'OK : 2.5 entree - 1.0 reprise = 1.50 m3 en En Cours (et non le total du brouillon)'
         : 'ECHEC : ' + (carte || h.substr(0, 200)).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 200)
     `,
     attenduPrefixe: 'OK'
@@ -1480,6 +1481,50 @@ function controles() {
       (f.statut === 'validated' && agg.unites === 3400 && sor.sortie === 1600)
         ? 'OK : fiche validee, 10 x 160 = 1 600 pointes sorties et tracees « Production 260910 »'
         : 'ECHEC : statut=' + f.statut + ' stock=' + agg.unites + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Suppression fiche : le bois sorti REVIENT, meme si le lot a disparu (il est recree)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* Le lot C10 n'existe plus au stock (consomme ou fusionne) : avant, la
+         restitution l'ignorait en silence et le bois ne revenait jamais. */
+      p.stockRaw = [{ id: 'r9', code: 'C11', quantite: 5, volume: 1.0 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var r = restoreBoisSorti({ numero: '260901', sortie_bois: [{ code: 'C10', qte: 30, volume: 1.5, essence: 'Rouge' }], encours: [] });
+      var lot = getStockRaw().filter(function (x) { return (x.code || x.colis_number) === 'C10'; })[0] || {};
+      (lot.quantite === 30 && lot.volume === 1.5 && r.recrees.length === 1)
+        ? 'OK : lot C10 recree a 30 / 1.5 m3, restitution annoncee'
+        : 'ECHEC : ' + JSON.stringify(lot) + ' rapport=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Suppression fiche : les entrees d\u2019encours sont retirees (le stock ne reste pas gonfle)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockRaw = [{ id: 'r8', code: 'C20', quantite: 100, volume: 5.0 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* La validation avait AJOUTE 20 au lot (entree encours) : la
+         suppression doit les retirer. */
+      restoreBoisSorti({ numero: '260902', sortie_bois: [],
+        encours: [{ code: 'C20', qte: 20, volume: 1.0, wip_type: 'entr\u00e9e' },
+                  { code: 'C20', qte: 5, volume: 0.25, wip_type: 'reprise' }] });
+      var lot = getStockRaw().filter(function (x) { return (x.code || x.colis_number) === 'C20'; })[0] || {};
+      (lot.quantite === 85 && Math.abs(lot.volume - 4.25) < 0.001)
+        ? 'OK : 100 - 20 (entree retiree) + 5 (reprise rendue) = 85'
+        : 'ECHEC : ' + JSON.stringify(lot)
     `,
     attenduPrefixe: 'OK'
   });
