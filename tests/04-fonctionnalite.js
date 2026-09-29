@@ -1457,6 +1457,34 @@ function controles() {
   });
 
   r.push({
+    nom: 'Validation depuis l\u2019historique : elle deduit aussi l\u2019assemblage (pas seulement le bois)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a9', code: 'PAL114', designation: 'Palette 114', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a9', type: 'POINTE', code: 'P5', designation: 'Pointe 5', quantity: 160 }];
+      p.stockConsum = [{ id: 'vp1', code: 'P5', designation: 'POINTE5', quantite: 5000, paquets: 0, cartons: 0, cond: 180, ctype: 'POINTE', created_at: '2026-09-01' }];
+      p.productions = [{ id: 'fh1', numero: '260910', date: '2026-09-29', statut: 'draft',
+                         sortie_bois: [], lattes: [], plots: [], cp: [],
+                         assemblage: [{ code: 'PAL114', qte: 10 }] }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      window.confirm2 = function () { return true; };
+      validateProd('fh1');
+      var f = getProductions().filter(function (x) { return x.id === 'fh1'; })[0] || {};
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
+      var r = buildConsoMovements(_consoLignes('P5'));
+      var sor = r.filter(function (x) { return x.sortie > 0 && /Production 260910/.test(x.obs || ''); })[0] || {};
+      (f.statut === 'validated' && agg.unites === 3400 && sor.sortie === 1600)
+        ? 'OK : fiche validee, 10 x 160 = 1 600 pointes sorties et tracees « Production 260910 »'
+        : 'ECHEC : statut=' + f.statut + ' stock=' + agg.unites + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
