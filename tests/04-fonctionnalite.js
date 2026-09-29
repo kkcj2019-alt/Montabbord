@@ -1555,6 +1555,79 @@ function controles() {
   });
 
   r.push({
+    nom: 'Suppression fiche : elle ecrit ANNULATION dans le journal (et rend le bois)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockRaw = [{ id: 'ra1', code: 'C10', colis_number: 'C10', designation: 'DAB', quantite: 160, volume: 24.0 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      restoreBoisSorti({ numero: '260901', sortie_bois: [{ code: 'C10', qte: 30, volume: 4.5 }], encours: [] });
+      var lot = getStockRaw().filter(function (x) { return (x.code || x.colis_number) === 'C10'; })[0] || {};
+      var ann = getMovements().filter(function (m) { return m && m.famille === 'annulation-bois' && String(m.code).toUpperCase() === 'C10'; })[0] || {};
+      (lot.quantite === 190 && ann.quantite === 30 && /ANNULATION fiche 260901/.test(ann.motif || ''))
+        ? 'OK : lot rendu a 190, ANNULATION +30 tracee au journal'
+        : 'ECHEC : lot=' + JSON.stringify(lot) + ' annulation=' + JSON.stringify(ann)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Registre colis : les ANNULATION s\u2019affichent et l\u2019ecart ne les recompte pas',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.achats = [{ id: 'bl1', category: 'raw-materials', date: '2026-09-01', reference: 'BL-1', fournisseur: 'X',
+                    items: [{ colis_number: 'C10', quantity: 200, volume: 30 }], montant_total: 1 }];
+      p.stockRaw = [{ id: 'ra1', code: 'C10', colis_number: 'C10', designation: 'DAB', quantite: 170, volume: 25.5 }];
+      p.productions = [{ id: 'fp1', numero: '260901', date: '2026-09-05', statut: 'validated',
+                         sortie_bois: [{ code: 'C10', qte: 40, volume: 6 }] }];
+      p.movements = [{ id: 'an1', date: '2026-09-08', famille: 'annulation-bois', code: 'C10',
+                       quantite: 10, volume: 1.5, motif: 'ANNULATION fiche 260902', fiche: '260902' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* 200 achetes - 40 sortis + 10 annulation rendue = 170 en stock.
+         L'ecart doit etre 0 (tout est explique), pas un faux inventaire. */
+      var h = colisMouvementsHTML('C10', { date: '2026-09-01', ref: 'BL-1', q0: 200, v0: 30, label: 'Entree' }, null, 'DAB');
+      var txt = h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      var aAnnulation = /ANNULATION/.test(txt) && /260902/.test(txt);
+      var aEcart = /cart non justifi|non justifi/.test(txt) || /Ajustement inventaire/.test(txt);
+      (aAnnulation && !aEcart)
+        ? 'OK : ANNULATION affichee, aucun faux « ajustement inventaire » (200-40+10=170 explique)'
+        : 'ECHEC : ' + txt.substr(0, 320)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Registre colis : un ecart inexplique se dit « Ecart », pas « inventaire »',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.achats = [{ id: 'bl1', category: 'raw-materials', date: '2026-09-01', reference: 'BL-1', fournisseur: 'X',
+                    items: [{ colis_number: 'C10', quantity: 200, volume: 30 }], montant_total: 1 }];
+      /* 160 en stock sans sortie ni annulation : 40 inexpliques. */
+      p.stockRaw = [{ id: 'ra1', code: 'C10', colis_number: 'C10', designation: 'DAB', quantite: 160, volume: 24.0 }];
+      p.productions = [];
+      p.movements = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var h = colisMouvementsHTML('C10', { date: '2026-09-01', ref: 'BL-1', q0: 200, v0: 30, label: 'Entree' }, null, 'DAB');
+      var txt = h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      (/cart/.test(txt) && !/Ajustement inventaire/.test(txt))
+        ? 'OK : les 40 manquants sont un « Ecart » honnete, sans pretendre a un inventaire'
+        : 'ECHEC : ' + txt.substr(0, 320)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
