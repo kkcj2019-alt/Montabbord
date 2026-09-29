@@ -1530,6 +1530,31 @@ function controles() {
   });
 
   r.push({
+    nom: 'Stock BL : chaque BL affiche sa synthese (initial, entree, sortie, final, observation)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.achats = [{ id: 'bl1', category: 'raw-materials', date: '2026-09-01', reference: 'BL-36683', fournisseur: 'SMI',
+                    items: [{ colis_number: '10', quantity: 200, volume: 30, essence: 'DAB', type: 'Rouge' }], montant_total: 1000 }];
+      p.stockRaw = [{ id: 'rw1', code: '10', colis_number: '10', designation: 'DAB', essence: 'DAB', quantite: 160, volume: 24.0, origin: 'BL', created_at: '2026-09-01' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      setSection('stockRawEtat', 'tout');
+      setSection('stockRawTab', 'bl');
+      var h = render_stock_raw();
+      var txt = h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      /* 200 entres, 40 sortis (200-160), 160 restants, avec l'initial */
+      (/Stock initial/.test(txt) && /Entrée/.test(txt) && /Sortie/.test(txt)
+        && /Stock final/.test(txt) && /BL-36683/.test(txt) && /SMI/.test(txt))
+        ? 'OK : synthese du BL affichee (initial, entree, sortie, final, BL + fournisseur)'
+        : 'ECHEC : ' + txt.substr(0, 300)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
