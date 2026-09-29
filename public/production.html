@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-98';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-99';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -5366,6 +5366,87 @@ function validateProd(id) {
   renderPage();
 }
 
+/* Rattrapage d'annulation pour les fiches validees AVANT le tracage des
+   mouvements (deductions silencieuses en place, sans ligne tracee).
+   On recalcule ce que la fiche a produit et consomme d'apres ses propres
+   lignes, on compare a ce que le retrait des lignes tracees a deja rendu,
+   et on n'ajoute que le MANQUANT sous forme de lignes ANNULATION.
+   Sans cela, supprimer une vieille fiche ne rendait rien (cas des pointes
+   signale : la sortie restait deduite pour toujours). */
+function _rattraperAnnulationFiche(p, renduSemiOut, renduSemiConso, renduConso, renduFin) {
+  var articles = getArticles();
+  var composants = getSection('composants', []);
+  var attenduSemiOut = {}, attenduSemiConso = {}, attenduConso = {}, attenduFin = {};
+  function ajoute(m, code, q) {
+    var k = String(code || '').trim().toUpperCase();
+    if (!k || !(q > 0)) return;
+    m[k] = (m[k] || 0) + q;
+  }
+  (p.lattes || []).concat(p.plots || [], p.cp || []).forEach(function (l) {
+    ajoute(attenduSemiOut, l.code, parseFloat(l.qte) || 0);
+  });
+  (p.assemblage || []).forEach(function (row) {
+    if (!row.code || !row.qte) return;
+    var article = articles.find(function (a) { return (a.code || '').toUpperCase() === String(row.code).toUpperCase(); });
+    if (article) {
+      ajoute(attenduFin, article.code, parseFloat(row.qte) || 0);
+      composants.filter(function (c) { return c.article_id === article.id; }).forEach(function (comp) {
+        var besoin = (parseFloat(comp.quantity) || 0) * (parseFloat(row.qte) || 0);
+        if (!(besoin > 0)) return;
+        var t = String(comp.type || '').toUpperCase();
+        if (t === 'LATTE' || t === 'PLOT' || t === 'CP') ajoute(attenduSemiConso, comp.code, besoin);
+        else if (t === 'POINTE') ajoute(attenduConso, comp.code, besoin);
+      });
+    }
+  });
+  var date = today();
+  var obs = function (sens, quoi) { return 'ANNULATION fiche ' + (p.numero || '') + ' — ' + sens + ' ' + quoi + ' (rattrapage, fiche non tracee)'; };
+  /* Semi : sorties d'usinage a retirer + consommations d'assemblage a rendre */
+  var semi = getStockSemi(), semiTouche = false;
+  Object.keys(attenduSemiOut).forEach(function (k) {
+    var manque = (attenduSemiOut[k] || 0) - (renduSemiOut[k] || 0);
+    if (manque > 0.0001) {
+      semi.unshift({ id: Date.now() + Math.random(), code: k, designation: k, quantite: -manque,
+        motif: obs('retrait', 'sortie usinage'), obs: obs('retrait', 'sortie usinage'), created_at: date });
+      semiTouche = true;
+    }
+  });
+  Object.keys(attenduSemiConso).forEach(function (k) {
+    var manque = (attenduSemiConso[k] || 0) - (renduSemiConso[k] || 0);
+    if (manque > 0.0001) {
+      semi.unshift({ id: Date.now() + Math.random(), code: k, designation: k, quantite: manque,
+        motif: obs('retour', 'conso. assemblage'), obs: obs('retour', 'conso. assemblage'), created_at: date });
+      semiTouche = true;
+    }
+  });
+  if (semiTouche) setStockSemi(semi);
+  /* Pointes : consommations a rendre */
+  var conso = getStockConsum(), consoTouche = false;
+  Object.keys(attenduConso).forEach(function (k) {
+    var manque = (attenduConso[k] || 0) - Math.abs(renduConso[k] || 0);
+    if (manque > 0.0001) {
+      var cat = defCatalog().filter(function (c) { return String(c.code || '').trim().toUpperCase() === k; })[0] || {};
+      conso.unshift({ id: Date.now() + Math.random(), code: k, designation: cat.designation || k,
+        fournisseur: '', quantite: manque, paquets: 0, cartons: 0,
+        cond: parseFloat(cat.qty_per_packet) || 0, ctype: 'POINTE', emplacement: '',
+        prix_unitaire: 0, motif: obs('retour', 'conso. assemblage'), obs: obs('retour', 'conso. assemblage'),
+        created_at: date });
+      consoTouche = true;
+    }
+  });
+  if (consoTouche) setStockConsum(conso);
+  /* Produits finis : entrees a retirer */
+  var fin = getStockFinished(), finTouche = false;
+  Object.keys(attenduFin).forEach(function (k) {
+    var manque = (attenduFin[k] || 0) - Math.abs(renduFin[k] || 0);
+    if (manque > 0.0001) {
+      fin.unshift({ id: Date.now() + Math.random(), code: k, quantite: -manque,
+        motif: obs('retrait', 'entree PF'), obs: obs('retrait', 'entree PF'), created_at: date });
+      finTouche = true;
+    }
+  });
+  if (finTouche) setStockFinished(fin);
+}
 function deleteProd(id) {
   var prods = getProductions();
   var p = prods.find(function(x) { return x.id === id; });
@@ -5391,9 +5472,47 @@ function deleteProd(id) {
     if (p.numero) {
       var _pfx = 'Production ' + p.numero + ' ';
       var _tracee = function(s) { return String((s && (s.motif || s.obs)) || '').indexOf(_pfx) === 0; };
-      try { var _a = getStockSemi(); var _b = _a.filter(function(s) { return !_tracee(s); }); if (_b.length !== _a.length) setStockSemi(_b); } catch(eS) {}
-      try { var _c = getStockConsum(); var _d = _c.filter(function(s) { return !_tracee(s); }); if (_d.length !== _c.length) setStockConsum(_d); } catch(eC) {}
-      try { var _e = getStockFinished(); var _f = _e.filter(function(s) { return !_tracee(s); }); if (_f.length !== _e.length) setStockFinished(_f); } catch(eF) {}
+      /* On distingue les sorties d'usinage (+) des consos d'assemblage (−)
+         pour ne pas melanger les sens dans le rattrapage. */
+      var _renduSemiOut = {}, _renduSemiConso = {}, _renduConso = {}, _renduFin = {};
+      try {
+        var _a = getStockSemi();
+        var _b = _a.filter(function(s) {
+          if (!_tracee(s)) return true;
+          var _k = String(s.code || '').trim().toUpperCase();
+          var _q = parseFloat(s.quantite) || 0;
+          if (_q >= 0) _renduSemiOut[_k] = (_renduSemiOut[_k] || 0) + _q;
+          else _renduSemiConso[_k] = (_renduSemiConso[_k] || 0) + (-_q);
+          return false;
+        });
+        if (_b.length !== _a.length) setStockSemi(_b);
+      } catch(eS) {}
+      try {
+        var _c = getStockConsum();
+        var _d = _c.filter(function(s) {
+          if (!_tracee(s)) return true;
+          var _k = String(s.code || '').trim().toUpperCase();
+          _renduConso[_k] = (_renduConso[_k] || 0) + (parseFloat(s.quantite) || 0);
+          return false;
+        });
+        if (_d.length !== _c.length) setStockConsum(_d);
+      } catch(eC) {}
+      try {
+        var _e = getStockFinished();
+        var _f = _e.filter(function(s) {
+          if (!_tracee(s)) return true;
+          var _k = String(s.code || '').trim().toUpperCase();
+          _renduFin[_k] = (_renduFin[_k] || 0) + (parseFloat(s.quantite) || 0);
+          return false;
+        });
+        if (_f.length !== _e.length) setStockFinished(_f);
+      } catch(eF) {}
+      /* Rattrapage des fiches validees AVANT le tracage (deductions
+         silencieuses) : on recalcule ce que la fiche a consomme et produit,
+         et on n'ajoute que ce que les lignes tracees n'ont pas deja rendu.
+         Sans cela, supprimer une vieille fiche ne rendait rien (cas des
+         pointes signale : la sortie restait deduite pour toujours). */
+      try { _rattraperAnnulationFiche(p, _renduSemiOut, _renduSemiConso, _renduConso, _renduFin); } catch(eR) {}
     }
     /* Annulation legacy : les produits finis entrés en stock repartent (sortie) */
     if (!((p.sortie_bois && p.sortie_bois.length) || (p.encours && p.encours.length)) && p.article_id && (parseFloat(p.quantite) || 0) > 0) {
@@ -7538,7 +7657,23 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       if (!s || s._ajustInv) return;
       if (parseFloat(s.quantite) < 0) lignes.push(s);
     });
-    if (!lignes.length) return toast('Aucun achat consommable a reconstruire', 'error');
+    if (!lignes.length) {
+      /* Plus aucun achat : apres confirmation explicite, on vide les entrees
+         d'achat (sinon des lignes orphelines restent pour toujours, comme
+         les pointes vues apres suppression de tous les achats). Les saisies
+         manuelles avec quantite sont conservees. */
+      var vides = stock.filter(function (s) { return s && (parseFloat(s.quantite) || 0) === 0; }).length;
+      if (!confirm2('Aucun achat consommable restant.\n\nVider les ' + (stock.length - vides) + ' ligne(s) d\u2019entree orphelines ?\n(Les saisies manuelles avec quantite et les ajustements sont conserves.)')) return;
+      var garde = stock.filter(function (s) {
+        if (!s) return false;
+        if (s._ajustInv || (parseFloat(s.quantite) < 0)) return true;
+        return (parseFloat(s.quantite) || 0) !== 0;
+      });
+      setStockConsum(garde);
+      toast('Stock nettoye : ' + (stock.length - garde.length) + ' ligne(s) orpheline(s) retiree(s)', 'success');
+      renderPage();
+      return;
+    }
     /* Codes couverts par un achat : une saisie manuelle de ces codes est
        remplacee (sinon on compterait deux fois). Les autres saisies
        manuelles sont CONSERVEES — on n'efface jamais une donnee qui n'est
@@ -14225,7 +14360,7 @@ function deleteAchat(id) {
     '• Fournisseur : ' + (a.fournisseur || '-') + '\n\n' +
     'Le stock sera impacté si cet achat a déjà été réceptionné.\nConfirmer ?';
   if (!confirm2(msg)) return;
-  reverseAchatStock(a);
+  var _rev = reverseAchatStock(a);
   try {
     var _dfs = lsArr('mdb_dettesFournisseurs');
     var _ref = 'Achat production ' + (a.reference || '');
@@ -14238,13 +14373,37 @@ function deleteAchat(id) {
     })));
   } catch(e) {}
   setAchats(achats.filter(function(x) { return String(x.id) !== String(id); }));
-  toast('Achat supprimé — stock déduit', 'success');
+  /* Le message dit ce qui a VRAIMENT ete retire du stock, et signale ce qui
+     n'a pas pu l'etre (au lieu d'annoncer « stock deduit » a tous les coups,
+     ce qui cachait les cas comme les pointes restees en stock). */
+  (function () {
+    var bits = [];
+    var inc = [];
+    try {
+      Object.keys((_rev && _rev.consoRetire) || {}).forEach(function (k) { bits.push(k + ' −' + fmt((_rev.consoRetire || {})[k])); });
+      ((_rev && _rev.consoIntrouvable) || []).forEach(function (x) { inc.push(x); });
+    } catch (e) {}
+    if ((a.category || '') === 'consumables' || (a.category || '') === 'consumable') {
+      if (bits.length && !inc.length) toast('Achat supprimé — stock déduit : ' + bits.join(', '), 'success');
+      else if (bits.length && inc.length) toast('Achat supprimé — déduit : ' + bits.join(', ') + ' ; INTROUVABLE au stock : ' + inc.join(', '), 'error');
+      else if (inc.length) toast('Achat supprimé — RIEN retire du stock, introuvable : ' + inc.join(', '), 'error');
+      else toast('Achat supprimé — stock déduit', 'success');
+    } else {
+      toast('Achat supprimé — stock déduit', 'success');
+    }
+  })();
   renderPage();
 }
-/* Suppression bordereau : retire du stock les quantités qu'il avait apportées */
+/* Suppression bordereau : retire du stock les quantités qu'il avait apportées.
+   Renvoie un rapport { consoRetire, consoIntrouvable } pour que le message
+   dise la verite au lieu d'annoncer « stock deduit » a tous les coups. */
 function reverseAchatStock(a) {
+  var _revRapport = { consoRetire: {}, consoIntrouvable: [] };
   try {
-    if (!a || !a.items || !a.items.length) return;
+    if (!a) return _revRapport;
+    var _items0 = seulementObjets(a.items);
+    if (!_items0.length) return _revRapport;
+    a.items = _items0;
     var cat = a.category || '';
     function pull(get, set, match, qtyOf, volOf) {
       var arr = get();
@@ -14286,29 +14445,48 @@ function reverseAchatStock(a) {
     } else if (cat === 'merchandises') {
       pull(getStockMerch, setStockMerch, codeMatch, qtyIt, null);
     } else if (cat === 'consumables') {
-      /* Annulation exacte : lignes taguees de CET achat (achat_id) retirees,
-         reliquat retranche des lignes non taguees (fiches cumulees). */
+      /* Annulation exacte : lignes taguees de CET achat retirees, reliquat
+         retranche des lignes non taguees (fiches cumulees). Ne peut plus
+         echouer en silence : items normalises (tableau OU objet), les deux
+         orthographes de tag reconnues (_achatId et achat_id), et rapport
+         de ce qui a vraiment ete retire. */
       var _cs = getStockConsum();
-      var _settled = {};
+      var _retire = {}, _introuvable = [];
+      var _items = seulementObjets(a.items);
       function _csKey(it) { return String((it && (it.code || it.designation)) || '').trim().toUpperCase(); }
-      function _csTagged(s) { return s && s.achat_id !== undefined && s.achat_id !== null && s.achat_id !== '' && a && a.id !== undefined && a.id !== null && a.id !== '' && String(s.achat_id) === String(a.id); }
-      for (var _cj = _cs.length - 1; _cj >= 0; _cj--) {
-        if (_csTagged(_cs[_cj])) { _settled[_csKey(_cs[_cj])] = true; _cs.splice(_cj, 1); }
+      function _tagDe(s) {
+        if (!s) return '';
+        if (s.achat_id !== undefined && s.achat_id !== null && s.achat_id !== '') return String(s.achat_id);
+        if (s._achatId !== undefined && s._achatId !== null && s._achatId !== '') return String(s._achatId);
+        return '';
       }
-      a.items.forEach(function(it) {
-        if (_settled[_csKey(it)]) return;
+      function _csTagged(s) { return _tagDe(s) !== '' && a && a.id !== undefined && a.id !== null && a.id !== '' && _tagDe(s) === String(a.id); }
+      for (var _cj = _cs.length - 1; _cj >= 0; _cj--) {
+        if (_csTagged(_cs[_cj])) {
+          var _k0 = _csKey(_cs[_cj]);
+          _retire[_k0] = (_retire[_k0] || 0) + (parseFloat(_cs[_cj].quantite) || 0);
+          _cs.splice(_cj, 1);
+        }
+      }
+      _items.forEach(function(it) {
         var _q = qtyIt(it);
         if (_q <= 0) return;
+        var _trouve = false;
         for (var _j = 0; _j < _cs.length; _j++) {
-          if (_cs[_j].achat_id !== undefined && _cs[_j].achat_id !== null && _cs[_j].achat_id !== '') continue;
+          if (_tagDe(_cs[_j]) !== '') continue;
           if (codeMatch(_cs[_j], it)) {
             _cs[_j].quantite = Math.max(0, (parseFloat(_cs[_j].quantite) || 0) - _q);
+            _retire[_csKey(it)] = (_retire[_csKey(it)] || 0) + _q;
+            _trouve = true;
             if ((parseFloat(_cs[_j].quantite) || 0) <= 0) { _cs.splice(_j, 1); }
             break;
           }
         }
+        if (!_trouve) _introuvable.push(_csKey(it) + ' (' + fmt(_q) + ')');
       });
       setStockConsum(_cs);
+      _revRapport.consoRetire = _retire;
+      _revRapport.consoIntrouvable = _introuvable;
       /* Nettoyer aussi les entrees de journal creees par cet achat, sinon
          l'achat supprime reste affiche dans Mouvements de Stock. */
       try {
@@ -14336,6 +14514,7 @@ function reverseAchatStock(a) {
       } catch(e) {}
     }
   } catch(e) {}
+  return _revRapport;
 }
 /* Sauvegarde / Restauration complète par fichier (aligner téléphone ↔ PC) */
 function exportProdBackup() {

@@ -1628,6 +1628,45 @@ function controles() {
   });
 
   r.push({
+    nom: 'Suppression achats : quand tous les achats partent, le stock ne garde pas les entrees orphelines',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.achats = [
+        { id: 901, category: 'consumables', date: '2026-09-28', reference: 'BL-A', fournisseur: 'TIJANI',
+          items: [{ code: 'P5', designation: 'POINTE5', quantity: 9000, paquets: 50, cartons: 1, cond: 180, ctype: 'POINTE' }], montant_total: 28000 },
+        { id: 902, category: 'consumables', date: '2026-09-28', reference: 'BL-B', fournisseur: 'TIJANI',
+          items: [{ code: 'P6', designation: 'POINTE6', quantity: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE' }], montant_total: 84000 }
+      ];
+      p.stockConsum = [
+        { id: 'sa1', code: 'P5', designation: 'POINTE5', quantite: 9000, paquets: 50, cartons: 1, cond: 180, ctype: 'POINTE', created_at: '2026-09-28' },
+        { id: 'sa2', code: 'P6', designation: 'POINTE6', quantite: 24750, paquets: 150, cartons: 3, cond: 165, ctype: 'POINTE', created_at: '2026-09-28' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var vraiConfirm = null;
+      try { vraiConfirm = confirm2; confirm2 = function () { return true; }; } catch (e) {}
+      var messages = [];
+      var vraiToast = null;
+      try { vraiToast = toast; toast = function (m) { messages.push(String(m)); }; } catch (e) {}
+      try {
+        deleteAchat(901);
+        deleteAchat(902);
+      } catch (e) { messages.push('ERREUR: ' + e.message); }
+      try { if (vraiConfirm) confirm2 = vraiConfirm; } catch (e) {}
+      try { if (vraiToast) toast = vraiToast; } catch (e) {}
+      var reste = getStockConsum().filter(function (x) { return (parseFloat(x.quantite) || 0) !== 0; });
+      var ditRetire = messages.some(function (m) { return /stock déduit|déduit/i.test(m); });
+      (getAchats().length === 0 && reste.length === 0 && ditRetire)
+        ? 'OK : 2 achats supprimes, stock vide, message de retrait affiche'
+        : 'ECHEC : achats=' + getAchats().length + ' stock restant=' + JSON.stringify(reste.map(function(x){return x.code + '=' + x.quantite;})) + ' messages=' + JSON.stringify(messages)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
