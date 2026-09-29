@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-89';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-90';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -4469,6 +4469,28 @@ function deductSemiQty(compCode, need, ref) {
   setStockSemi(semi);
   return need;
 }
+/* Credit de la production d'usinage (lattes/plots/CP du jour) au stock semi,
+   a la validation de la fiche : chaque ligne produite devient une ENTREE
+   tracee (« Production <numero> »), visible dans le registre du composant.
+   Sans cela, la production du jour n'existait jamais au stock alors que seule
+   la consommation d'assemblage y etait ecrite (stock faux apres validation). */
+function creditUsinageStock(p) {
+  if (!p) return;
+  var lignes = (p.lattes || []).concat(p.plots || [], p.cp || []);
+  if (!lignes.length) return;
+  var numero = p.numero || '';
+  var date = p.date || today();
+  var motif = numero ? ('Production ' + numero) : 'Production (usinage)';
+  var semi = getStockSemi();
+  lignes.forEach(function(l) {
+    var q = parseFloat(l.qte) || 0;
+    if (!l || !l.code || q <= 0) return;
+    var key = String(l.code).trim().toUpperCase();
+    var cat = defCatalog().filter(function(c){ return String(c.code||'').trim().toUpperCase()===key && ['LATTE','PLOT','CP'].indexOf(String(c.type||'').toUpperCase()) !== -1; })[0] || {};
+    semi.unshift({ id: Date.now() + Math.random(), code: key, designation: l.designation || cat.designation || key, quantite: q, motif: motif, obs: motif, created_at: date });
+  });
+  setStockSemi(semi);
+}
 /* Stock conso par code : direct s.code, sinon via article P5/P6/P7... (article_id) */
 function consumStockQty(compCode) {
   if (!compCode) return 0;
@@ -4566,10 +4588,18 @@ function deductAssemblageStock(p) {
   });
 }
 
-function checkAssemblageStock(assemblage) {
+function checkAssemblageStock(assemblage, prodJour) {
   if (!assemblage || !assemblage.length) return { ok: true, errors: [] };
   var articles = getArticles();
   var composants = getSection('composants', []);
+  /* Production d'usinage de LA fiche en cours (lattes/plots/CP du jour) :
+     elle compte dans le stock disponible pour l'assemblage. On ne bloque que
+     si stock d'avant + production du jour ne suffisent pas. */
+  var bonus = {};
+  (prodJour || []).forEach(function(l) {
+    var k = String((l && l.code) || '').trim().toUpperCase();
+    if (k) bonus[k] = (bonus[k] || 0) + (parseFloat(l.qte) || 0);
+  });
   var errors = [];
   assemblage.forEach(function(row) {
     if (!row.code || !row.qte) return;
@@ -4582,7 +4612,7 @@ function checkAssemblageStock(assemblage) {
       if (totalNeeded <= 0) return;
       var stock = 0;
       if (c.type === 'LATTE' || c.type === 'PLOT' || c.type === 'CP') {
-        stock = semiStockQty(c.code);
+        stock = semiStockQty(c.code) + (bonus[String(c.code || '').trim().toUpperCase()] || 0);
       } else if (c.type === 'POINTE') {
         stock = consumStockQty(c.code);
       } else {
@@ -4731,7 +4761,7 @@ function saveProduction(validate) {
   };
   /* Le brouillon ne vérifie jamais le stock : enregistrement libre */
   if (assemblage.length && mode !== 'brouillon') {
-    var stockCheck = checkAssemblageStock(assemblage);
+    var stockCheck = checkAssemblageStock(assemblage, lattes.concat(plots, cps));
     if (!stockCheck.ok) {
       toast('❌ Stock insuffisant pour assemblage :\n' + stockCheck.errors.join('\n'), 'error');
       return;
@@ -4751,6 +4781,9 @@ function saveProduction(validate) {
   if (mode === 'validate') {
     /* Sortie nette : sortie (-) + entrée encours (reste en stock) + reprise (re-sort) */
     deductBoisSorti(prod);
+    /* Entree usinage : la production du jour (lattes/plots/CP) entre au stock
+       AVANT la consommation d'assemblage, comme dans la realite de l'atelier */
+    creditUsinageStock(prod);
     /* Deduction assemblage : decrementer stock selon composants utilises */
     deductAssemblageStock(prod);
     clearAutoDraft();

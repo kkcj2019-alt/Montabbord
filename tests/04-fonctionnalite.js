@@ -1899,6 +1899,42 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+r.push({
+    nom: 'Assemblage : la production du jour compte dans le stock disponible (stock 0 + 1000 lattes >= besoin 800)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('articles', [{ id:'a1', code:'PAL114', designation:'Palette 114' }]);
+      setSection('composants', [{ article_id:'a1', code:'L114*8*2', type:'LATTE', quantity:8 }]);
+      setStockSemi([]);
+      var sans = checkAssemblageStock([{ code:'PAL114', qte:100 }]);
+      var avec = checkAssemblageStock([{ code:'PAL114', qte:100 }], [{ code:'L114*8*2', qte:1000 }]);
+      var court = checkAssemblageStock([{ code:'PAL114', qte:100 }], [{ code:'L114*8*2', qte:500 }]);
+      (!sans.ok && sans.errors.join(' ').indexOf('stock 0 < besoin 800') !== -1 && avec.ok && !court.ok)
+        ? 'OK : bloque a 0 sans prod du jour, passe avec 1000, bloque avec 500'
+        : 'ECHEC : ' + JSON.stringify(sans) + ' / ' + JSON.stringify(avec) + ' / ' + JSON.stringify(court)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Validation : l\'usinage du jour est crédité au stock semi (entrée tracée Production)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockSemi([]);
+      creditUsinageStock({ numero:'260901', date:'2026-09-29',
+        lattes:[{ code:'L114*8*2', designation:'L114*8*2', qte:1000 }],
+        plots:[{ code:'P114*10', designation:'P114*10', qte:500 }], cp:[] });
+      var lignes = getStockSemi();
+      var e1 = lignes.filter(function(x){ return x.code === 'L114*8*2'; })[0] || {};
+      var e2 = lignes.filter(function(x){ return x.code === 'P114*10'; })[0] || {};
+      (semiStockQty('L114*8*2') === 1000 && semiStockQty('P114*10') === 500
+        && String(e1.motif || '') === 'Production 260901')
+        ? 'OK : +1000 lattes / +500 plots traces Production 260901'
+        : 'ECHEC : ' + JSON.stringify(lignes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
