@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-99';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-100';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -7630,6 +7630,46 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
   function reconstruireStockConsum() {
     var stock = getStockConsum() || [];
     var rap = stockConsumRapport();
+    /* Aucun achat consommable restant : on propose le nettoyage complet des
+       orphelines (meme a quantite non nulle), avec le detail par produit.
+       Detecte sur les ACHATS eux-memes, et non sur les lignes (une sortie
+       manuelle ne doit pas faire croire qu'il reste des achats). */
+    var _nbAchatsConso = (getAchats() || []).filter(function (a) {
+      var _c = a.category || a.type || '';
+      return _c === 'consumables' || _c === 'consumable';
+    }).length;
+    if (_nbAchatsConso === 0) {
+      /* Plus aucun achat : on propose de retirer TOUTES les entrees
+         orphelines (pas seulement celles a zero), avec le detail par
+         produit. Sans cela, des lignes d'achats supprimes restaient pour
+         toujours avec des quantites. Les ajustements d'inventaire et les
+         sorties manuelles sont toujours conserves. */
+      var _orphelines = {};
+      stock.forEach(function (s) {
+        if (!s || s._ajustInv || (parseFloat(s.quantite) < 0)) return;
+        var _q = parseFloat(s.quantite) || 0;
+        if (_q === 0) return;
+        var _k = String(s.code || s.designation || '?').trim().toUpperCase();
+        _orphelines[_k] = (_orphelines[_k] || 0) + _q;
+      });
+      var _cles = Object.keys(_orphelines);
+      var _vides = stock.filter(function (s) { return s && (parseFloat(s.quantite) || 0) === 0 && !s._ajustInv; }).length;
+      if (!_cles.length && !_vides) return toast('Stock deja vide', 'success');
+      var _detail = _cles.map(function (k) { return k + ' (' + fmt(_orphelines[k]) + ')'; }).join(', ');
+      if (!confirm2('Aucun achat consommable restant.\n\nRetirer ' + _cles.length + ' produit(s) orphelin(s)'
+        + (_detail ? ' : ' + _detail : '')
+        + (_vides ? '\n+ ' + _vides + ' ligne(s) a zero' : '')
+        + '\n\n(Les ajustements d\u2019inventaire et les sorties sont conserves.)')) return;
+      var garde = stock.filter(function (s) {
+        if (!s) return false;
+        if (s._ajustInv || (parseFloat(s.quantite) < 0)) return true;
+        return false;
+      });
+      setStockConsum(garde);
+      toast('Stock nettoye : ' + (stock.length - garde.length) + ' ligne(s) orpheline(s) retiree(s)', 'success');
+      renderPage();
+      return;
+    }
     var lignes = [];
     /* 1) les entrees, reconstruites depuis les achats (vérité) */
     (getAchats() || []).forEach(function (a) {
@@ -7657,23 +7697,6 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       if (!s || s._ajustInv) return;
       if (parseFloat(s.quantite) < 0) lignes.push(s);
     });
-    if (!lignes.length) {
-      /* Plus aucun achat : apres confirmation explicite, on vide les entrees
-         d'achat (sinon des lignes orphelines restent pour toujours, comme
-         les pointes vues apres suppression de tous les achats). Les saisies
-         manuelles avec quantite sont conservees. */
-      var vides = stock.filter(function (s) { return s && (parseFloat(s.quantite) || 0) === 0; }).length;
-      if (!confirm2('Aucun achat consommable restant.\n\nVider les ' + (stock.length - vides) + ' ligne(s) d\u2019entree orphelines ?\n(Les saisies manuelles avec quantite et les ajustements sont conserves.)')) return;
-      var garde = stock.filter(function (s) {
-        if (!s) return false;
-        if (s._ajustInv || (parseFloat(s.quantite) < 0)) return true;
-        return (parseFloat(s.quantite) || 0) !== 0;
-      });
-      setStockConsum(garde);
-      toast('Stock nettoye : ' + (stock.length - garde.length) + ' ligne(s) orpheline(s) retiree(s)', 'success');
-      renderPage();
-      return;
-    }
     /* Codes couverts par un achat : une saisie manuelle de ces codes est
        remplacee (sinon on compterait deux fois). Les autres saisies
        manuelles sont CONSERVEES — on n'efface jamais une donnee qui n'est
@@ -14402,9 +14425,61 @@ function reverseAchatStock(a) {
   try {
     if (!a) return _revRapport;
     var _items0 = seulementObjets(a.items);
-    if (!_items0.length) return _revRapport;
     a.items = _items0;
     var cat = a.category || '';
+    /* Les lignes « Modification <ref> » de CET achat partent TOUJOURS avec
+       lui, meme si ses lignes courantes sont vides (cas d'une ligne retiree
+       en modification : sans cela, le -9000 orphelin rendait le stock
+       NEGATIF pour toujours). */
+    if (cat === 'consumables' || cat === 'consumable') {
+      (function () {
+        var _cs0 = getStockConsum();
+        var _refs = [];
+        if (a.reference) _refs.push(String(a.reference));
+        if (a.id !== undefined && a.id !== null && a.id !== '') _refs.push(String(a.id));
+        var _garde = [], _enleve = 0;
+        var _modifs = [];
+        _cs0.forEach(function (s) {
+          var _o = String((s && (s.motif || s.obs)) || '');
+          if (_o.indexOf('Modification ') !== 0) { _garde.push(s); return; }
+          var _vise = _refs.some(function (r) { return r && _o.indexOf(r) !== -1; });
+          if (_vise) {
+            var _kk = String((s.code || s.designation) || '').trim().toUpperCase();
+            var _qq = parseFloat(s.quantite) || 0;
+            _revRapport.consoRetire[_kk + ' (modif)'] = (_revRapport.consoRetire[_kk + ' (modif)'] || 0) + _qq;
+            _modifs.push({ code: _kk, q: _qq });
+            _enleve++;
+          } else { _garde.push(s); }
+        });
+        /* Chaque ligne « Modification » negative annulait une ecriture
+           d'origine positive : on retire aussi cette ecriture, sinon elle
+           reste orpheline (cas du +9000 reste apres le -9000 parti). */
+        _modifs.forEach(function (m) {
+          if (!(m.q < 0)) return;
+          var _besoin = -m.q;
+          for (var _j = 0; _j < _garde.length; _j++) {
+            var _g = _garde[_j];
+            var _tag = '';
+            if (_g) {
+              if (_g.achat_id !== undefined && _g.achat_id !== null && _g.achat_id !== '') _tag = String(_g.achat_id);
+              else if (_g._achatId !== undefined && _g._achatId !== null && _g._achatId !== '') _tag = String(_g._achatId);
+            }
+            if (_tag !== '') continue;
+            if (String((_g.code || _g.designation) || '').trim().toUpperCase() !== m.code) continue;
+            var _qa = parseFloat(_g.quantite) || 0;
+            if (_qa <= 0) continue;
+            var _prend = Math.min(_qa, _besoin);
+            _g.quantite = _qa - _prend;
+            _besoin -= _prend;
+            _revRapport.consoRetire[m.code + ' (origine)'] = (_revRapport.consoRetire[m.code + ' (origine)'] || 0) + _prend;
+            if ((parseFloat(_g.quantite) || 0) <= 0) { _garde.splice(_j, 1); _j--; }
+            if (_besoin <= 0.0001) break;
+          }
+        });
+        if (_enleve > 0) setStockConsum(_garde);
+      })();
+    }
+    if (!_items0.length) return _revRapport;
     function pull(get, set, match, qtyOf, volOf) {
       var arr = get();
       var changed = false;
@@ -14452,7 +14527,6 @@ function reverseAchatStock(a) {
          de ce qui a vraiment ete retire. */
       var _cs = getStockConsum();
       var _retire = {}, _introuvable = [];
-      var _items = seulementObjets(a.items);
       function _csKey(it) { return String((it && (it.code || it.designation)) || '').trim().toUpperCase(); }
       function _tagDe(s) {
         if (!s) return '';
@@ -14468,6 +14542,7 @@ function reverseAchatStock(a) {
           _cs.splice(_cj, 1);
         }
       }
+      var _items = seulementObjets(a.items);
       _items.forEach(function(it) {
         var _q = qtyIt(it);
         if (_q <= 0) return;

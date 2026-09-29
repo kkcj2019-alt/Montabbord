@@ -1667,6 +1667,67 @@ function controles() {
   });
 
   r.push({
+    nom: 'Suppression achat : les lignes « Modification » du meme achat partent aussi (pas de stock negatif)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* BL cree avec P5, puis modifie pour retirer P5 (ligne -9000),
+         puis supprime : il ne doit rester ni le +9000 ni le -9000. */
+      p.achats = [{ id: 903, category: 'consumables', date: '2026-09-28', reference: 'BL-C', fournisseur: 'TIJANI',
+                    items: [], montant_total: 0 }];
+      p.stockConsum = [
+        { id: 'sc1', code: 'P5', designation: 'POINTE5', quantite: 9000, cond: 180, ctype: 'POINTE', created_at: '2026-09-28' },
+        { id: 'sc2', code: 'P5', designation: 'POINTE5', quantite: -9000, cond: 180, ctype: 'POINTE', motif: 'Modification BL-C (ligne retiree)', obs: 'Modification BL-C (ligne retiree)', created_at: '2026-09-28' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var vraiConfirm = null;
+      try { vraiConfirm = confirm2; confirm2 = function () { return true; }; } catch (e) {}
+      try { deleteAchat(903); } catch (e) {}
+      try { if (vraiConfirm) confirm2 = vraiConfirm; } catch (e) {}
+      var p5 = getStockConsum().filter(function (x) { return String(x.code).toUpperCase() === 'P5'; });
+      var total = 0;
+      p5.forEach(function (x) { total += parseFloat(x.quantite) || 0; });
+      (p5.length === 0 && total === 0)
+        ? 'OK : +9000 et -9000 partis ensemble, P5 absent (pas de -9000 fantome)'
+        : 'ECHEC : ' + p5.length + ' ligne(s), total=' + total
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Reconstruction a zero : elle liste et retire toutes les orphelines, pas seulement celles a zero',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.achats = [];
+      p.stockConsum = [
+        { id: 'oz1', code: 'P5', designation: 'POINTE5', quantite: 9000, cond: 180, ctype: 'POINTE', created_at: '2026-09-28' },
+        { id: 'oz2', code: 'P6', designation: 'POINTE6', quantite: 24750, cond: 165, ctype: 'POINTE', created_at: '2026-09-28' },
+        { id: 'oz3', code: 'P7', designation: 'POINTE7', quantite: 0, cond: 150, ctype: 'POINTE', created_at: '2026-09-28' },
+        { id: 'oz4', code: 'P6', designation: 'POINTE6', quantite: -500, cond: 165, ctype: 'POINTE', motif: 'Sortie manuelle', obs: 'Sortie manuelle', created_at: '2026-09-28' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var vraiConfirm = null;
+      try { vraiConfirm = confirm2; confirm2 = function () { return true; }; } catch (e) {}
+      try { reconstruireStockConsum(); } catch (e) {}
+      try { if (vraiConfirm) confirm2 = vraiConfirm; } catch (e) {}
+      var reste = getStockConsum();
+      var positifs = reste.filter(function (x) { return (parseFloat(x.quantite) || 0) > 0; });
+      var sorties = reste.filter(function (x) { return (parseFloat(x.quantite) || 0) < 0; });
+      (positifs.length === 0 && sorties.length === 1 && reste.length <= 2)
+        ? 'OK : P5/P6 orphelins partis (meme a quantite non nulle), sortie manuelle conservee'
+        : 'ECHEC : reste=' + reste.map(function(x){ return x.code + '=' + x.quantite; }).join(', ')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
