@@ -1415,6 +1415,48 @@ function controles() {
   });
 
   r.push({
+    nom: 'Assemblage : la production du jour compte (500 lattes produites couvrent 80 demandees)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a9', code: 'PAL114', designation: 'Palette 114', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a9', type: 'LATTE', code: 'L114*8*2', designation: 'Latte', quantity: 8 }];
+      p.stockSemi = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var r = checkAssemblageStock([{ code: 'PAL114', qte: 10 }], [{ code: 'L114*8*2', qte: 500 }]);
+      (r.ok === true && r.errors.length === 0)
+        ? 'OK : stock ancien 0 + 500 du jour >= besoin 80, validation autorisee'
+        : 'ECHEC : ' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Assemblage : sans production du jour le controle bloque avec le detail compte',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a9', code: 'PAL114', designation: 'Palette 114', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a9', type: 'LATTE', code: 'L114*8*2', designation: 'Latte', quantity: 8 }];
+      p.stockSemi = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var r = checkAssemblageStock([{ code: 'PAL114', qte: 10 }], []);
+      var m = (r.errors[0] || '');
+      (!r.ok && m.indexOf('stock ancien 0') !== -1 && m.indexOf('besoin 80') !== -1
+        && m.indexOf('aucune production du jour transmise') !== -1)
+        ? 'OK : bloque avec le detail (ancien 0, jour 0, besoin 80)'
+        : 'ECHEC : ' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
@@ -1983,7 +2025,7 @@ r.push({
       var sans = checkAssemblageStock([{ code:'PAL114', qte:100 }]);
       var avec = checkAssemblageStock([{ code:'PAL114', qte:100 }], [{ code:'L114*8*2', qte:1000 }]);
       var court = checkAssemblageStock([{ code:'PAL114', qte:100 }], [{ code:'L114*8*2', qte:500 }]);
-      (!sans.ok && sans.errors.join(' ').indexOf('stock 0 < besoin 800') !== -1 && avec.ok && !court.ok)
+      (!sans.ok && sans.errors.join(' ').indexOf('stock ancien 0 + prod. du jour 0 = 0 < besoin 800') !== -1 && avec.ok && !court.ok)
         ? 'OK : bloque a 0 sans prod du jour, passe avec 1000, bloque avec 500'
         : 'ECHEC : ' + JSON.stringify(sans) + ' / ' + JSON.stringify(avec) + ' / ' + JSON.stringify(court)
     `,
