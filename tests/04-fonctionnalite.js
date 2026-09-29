@@ -1756,6 +1756,32 @@ function controles() {
   });
 
   r.push({
+    nom: 'Semi-finis (page dediee) : une ligne par composant avec deroulage, pas les lignes brutes',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' }];
+      p.composants = [{ article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte 120', quantity: 5, volume: 0.0018 }];
+      p.stockSemi = [
+        { id: 'ss1', code: 'L1', designation: 'Latte 120', quantite: 500, created_at: '2026-09-01' },
+        { id: 'ss2', code: 'L1', designation: 'Latte 120', quantite: -80, motif: 'Production 1', obs: 'Production 1', created_at: '2026-09-02' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var h = render_stock_semi();
+      var txt = h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      /* Une seule ligne L1 a 420 (500-80), deroulable, avec son registre. */
+      var lignes = (txt.match(/L1/g) || []).length;
+      (/420/.test(txt) && /toggleAccordion\\('semiPage_L1'\\)/.test(h) && /Mouvements/.test(txt))
+        ? 'OK : L1 regroupe a 420, deroulage avec registre'
+        : 'ECHEC : ' + txt.substr(0, 300)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();
