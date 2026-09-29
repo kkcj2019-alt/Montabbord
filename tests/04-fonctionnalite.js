@@ -2027,7 +2027,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Observations stock : la conso assemblage cite la quantite et l\'article fabrique',
+    nom: 'Observations stock : la conso assemblage cite la production et la quantite fabriquee',
     app: 'production.html', store: storeRealiste,
     code: `
       setStockSemi([]);
@@ -2036,9 +2036,9 @@ r.push({
       deductConsumQty('P5', 1600, { numero:'260901', date:'2026-09-29', article:'PAL114', qteAssemblee:100 });
       var s = getStockSemi().filter(function(x){ return x.code === 'L114*8*2'; })[0] || {};
       var c = getStockConsum().filter(function(x){ return x.code === 'P5'; })[0] || {};
-      (String(s.motif || '') === 'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)'
-        && String(c.motif || '') === 'Production 260901 — PAL114 ×100 → P5 : 1600 (conso. assemblage)')
-        ? 'OK : observations explicites semi + pointes'
+      (String(s.motif || '') === 'Production 260901 - 100 PAL114'
+        && String(c.motif || '') === 'Production 260901 - 100 PAL114')
+        ? 'OK : « Production 260901 - 100 PAL114 » sur le semi et la pointe'
         : 'ECHEC : ' + JSON.stringify(s.motif) + ' / ' + JSON.stringify(c.motif)
     `,
     attenduPrefixe: 'OK'
