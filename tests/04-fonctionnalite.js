@@ -1928,9 +1928,150 @@ r.push({
       var e1 = lignes.filter(function(x){ return x.code === 'L114*8*2'; })[0] || {};
       var e2 = lignes.filter(function(x){ return x.code === 'P114*10'; })[0] || {};
       (semiStockQty('L114*8*2') === 1000 && semiStockQty('P114*10') === 500
-        && String(e1.motif || '') === 'Production 260901')
+        && String(e1.motif || '').indexOf('Production 260901') === 0 && String(e1.motif || '').indexOf('+1000 L114*8*2') !== -1)
         ? 'OK : +1000 lattes / +500 plots traces Production 260901'
         : 'ECHEC : ' + JSON.stringify(lignes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Validation : les quantites assemblees entrent au stock produits finis (visibles tableau de bord)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('articles', [{ id:'a1', code:'PAL114', designation:'Palette 114', prix_vente:50000 }]);
+      setStockFinished([]);
+      creditAssemblageFini({ numero:'260901', date:'2026-09-29', assemblage:[{ code:'PAL114', designation:'Palette 114', qte:100 }] });
+      var lignes = getStockFinished();
+      var e = lignes.filter(function(x){ return String(x.code || '') === 'PAL114'; })[0] || {};
+      (lignes.length === 1 && e.quantite === 100 && e.article_id === 'a1'
+        && String(e.motif || '').indexOf('Production 260901') === 0 && String(e.motif || '').indexOf('+100 PAL114') !== -1)
+        ? 'OK : +100 PAL114 trace, article_id resolu (carte dashboard)'
+        : 'ECHEC : ' + JSON.stringify(lignes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Observations stock : la conso assemblage cite la quantite et l\'article fabrique',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockSemi([]);
+      setStockConsum([]);
+      deductSemiQty('L114*8*2', 800, { numero:'260901', date:'2026-09-29', article:'PAL114', qteAssemblee:100 });
+      deductConsumQty('P5', 1600, { numero:'260901', date:'2026-09-29', article:'PAL114', qteAssemblee:100 });
+      var s = getStockSemi().filter(function(x){ return x.code === 'L114*8*2'; })[0] || {};
+      var c = getStockConsum().filter(function(x){ return x.code === 'P5'; })[0] || {};
+      (String(s.motif || '') === 'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)'
+        && String(c.motif || '') === 'Production 260901 — PAL114 ×100 → P5 : 1600 (conso. assemblage)')
+        ? 'OK : observations explicites semi + pointes'
+        : 'ECHEC : ' + JSON.stringify(s.motif) + ' / ' + JSON.stringify(c.motif)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Suppression fiche validee : toutes ses ecritures tracees repartent (semi, conso, finis, bois)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      setSection('productions', [{ id:'f1', numero:'260901', date:'2026-09-29', statut:'validated',
+        sortie_bois:[{ code:'C10', qte:30, volume:1.5 }], assemblage:[{ code:'PAL114', qte:100 }] }]);
+      setStockRaw([{ id:'r1', code:'C10', quantite:0, volume:0 }]);
+      setStockSemi([
+        { id:'s1', code:'L114*8*2', quantite:1000, motif:'Production 260901 — usinage : +1000 L114*8*2' },
+        { id:'s2', code:'L114*8*2', quantite:-800, motif:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)' }
+      ]);
+      setStockConsum([
+        { id:'c1', code:'P5', quantite:-1600, motif:'Production 260901 — PAL114 ×100 → P5 : 1600 (conso. assemblage)' },
+        { id:'c2', code:'P7', quantite:5, motif:'Achat BL-1' }
+      ]);
+      setStockFinished([
+        { id:'f1s', code:'PAL114', quantite:100, motif:'Production 260901 — assemblage : +100 PAL114' }
+      ]);
+      deleteProd('f1');
+      var lot = getStockRaw().filter(function(x){ return x.code === 'C10'; })[0] || {};
+      var okSemi = getStockSemi().length === 0;
+      var conso = getStockConsum();
+      var okFin = getStockFinished().length === 0;
+      (getProductions().length === 0 && lot.quantite === 30 && okSemi && conso.length === 1 && conso[0].code === 'P7' && okFin)
+        ? 'OK : fiche supprimee, bois restaure (30), ecritures 260901 purgees, achat P7 intact'
+        : 'ECHEC : semi=' + JSON.stringify(getStockSemi()) + ' conso=' + JSON.stringify(conso) + ' finis=' + JSON.stringify(getStockFinished())
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Rattrapage PF : les fiches validees sans entree finie sont creditessans doublon',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      setSection('articles', [{ id:'a1', code:'PAL114', designation:'Palette 114' }]);
+      setSection('productions', [{ id:'f1', numero:'260901', date:'2026-09-29', statut:'validated', assemblage:[{ code:'PAL114', qte:100 }] }]);
+      setStockFinished([]);
+      backfillFinishedCredits();
+      backfillFinishedCredits();
+      var lignes = getStockFinished().filter(function(x){ return String(x.code || '') === 'PAL114'; });
+      (lignes.length === 1 && lignes[0].quantite === 100)
+        ? 'OK : +100 PAL114 cree une fois (2 passages, pas de doublon)'
+        : 'ECHEC : ' + JSON.stringify(lignes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Semi-finis : le registre dit d\'ou vient chaque mouvement (production du jour ou achat)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockSemi([
+        { id:'u1', code:'L114*8*2', designation:'L114*8*2', quantite:1000, motif:'Production 260901 — usinage : +1000 L114*8*2', obs:'Production 260901 — usinage : +1000 L114*8*2', created_at:'2026-09-29' },
+        { id:'c1', code:'L114*8*2', designation:'L114*8*2', quantite:-800, motif:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)', obs:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)', created_at:'2026-09-29' },
+        { id:'a1', code:'L114*8*2', designation:'L114*8*2', quantite:500, fournisseur:'TIJANI', created_at:'2026-09-28' }
+      ]);
+      var rows = _semiMouvements('L114*8*2');
+      var libs = rows.map(function(r){ return r.libelle; }).join(' | ');
+      (libs === 'Stock initial | Entree — TIJANI | Entrée — Production | Sortie — Production')
+        ? 'OK : ' + libs
+        : 'ECHEC : ' + libs
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : le registre affiche Code + observations explicites (comme la fiche pointes)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockSemi([
+        { id:'u1', code:'L114*8*2', designation:'L114*8*2', quantite:1000, motif:'Production 260901 — usinage : +1000 L114*8*2', obs:'Production 260901 — usinage : +1000 L114*8*2', created_at:'2026-09-29' },
+        { id:'c1', code:'L114*8*2', designation:'L114*8*2', quantite:-800, motif:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)', obs:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)', created_at:'2026-09-29' }
+      ]);
+      var h = _semiRegistreHtml('L114*8*2');
+      (h.indexOf('>Code<') !== -1 && h.indexOf('L114*8*2') !== -1
+        && h.indexOf('Entrée — Production') !== -1 && h.indexOf('Sortie — Production') !== -1
+        && h.indexOf('PAL114 ×100') !== -1 && h.indexOf('Stock fin') !== -1)
+        ? 'OK : colonne Code, libelles et observation explicite presents'
+        : 'ECHEC : ' + h.slice(0, 300)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : l\'onglet ne montre plus le tableau brut des lignes (registre seul, comme pointes)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockRawTab', 'semi');
+      setSection('stockRawEtat', 'tout');
+      setSection('composants', []);
+      setSection('definitions', [{ id:'d1', code:'L114*8*2', designation:'L114*8*2', type:'LATTE', length:114, width:8, thickness:2 }]);
+      setStockSemi([
+        { id:'u1', code:'L114*8*2', designation:'L114*8*2', quantite:1000, motif:'Production 260901 — usinage : +1000 L114*8*2', obs:'Production 260901 — usinage : +1000 L114*8*2', created_at:'2026-09-29' },
+        { id:'c1', code:'L114*8*2', designation:'L114*8*2', quantite:-800, motif:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)', obs:'Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage)', created_at:'2026-09-29' }
+      ]);
+      CURRENT_PAGE = 'stock-raw'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('Mouvements — L114*8*2') !== -1 && h.indexOf('ligne(s) de stock') === -1)
+        ? 'OK : registre affiche, tableau brut retire'
+        : 'ECHEC : ' + h.slice(0, 300)
     `,
     attenduPrefixe: 'OK'
   });

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-90';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-91';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -4454,7 +4454,13 @@ function deductSemiQty(compCode, need, ref) {
      lignes sans laisser de trace. */
   var numero = ref && ref.numero ? ref.numero : '';
   var date = (ref && ref.date) || today();
-  var motif = numero ? ('Production ' + numero + ' — conso. assemblage') : 'Consommation production (assemblage)';
+  /* Observation explicite : quantite consommee + article fabrique
+     (ex : « Production 260901 — PAL114 ×100 → L114*8*2 : 800 (conso. assemblage) ») */
+  var art = (ref && ref.article) ? String(ref.article) : '';
+  var qfab = (ref && ref.qteAssemblee) ? parseFloat(ref.qteAssemblee) || 0 : 0;
+  var motif = numero
+    ? ('Production ' + numero + (art ? ' — ' + art + (qfab > 0 ? ' ×' + qfab : '') + ' → ' + key + ' : ' + need + ' (conso. assemblage)' : ' — conso. assemblage'))
+    : 'Consommation production (assemblage)';
   var cat = defCatalog().filter(function(c){ return String(c.code||'').trim().toUpperCase()===key && ['LATTE','PLOT','CP'].indexOf(String(c.type||'').toUpperCase()) !== -1; })[0] || {};
   var semi = getStockSemi();
   semi.unshift({
@@ -4480,16 +4486,71 @@ function creditUsinageStock(p) {
   if (!lignes.length) return;
   var numero = p.numero || '';
   var date = p.date || today();
-  var motif = numero ? ('Production ' + numero) : 'Production (usinage)';
+  /* Observation explicite : quantite produite (ex : « Production 260901 — usinage : +1000 L114*8*2 ») */
   var semi = getStockSemi();
   lignes.forEach(function(l) {
     var q = parseFloat(l.qte) || 0;
     if (!l || !l.code || q <= 0) return;
     var key = String(l.code).trim().toUpperCase();
     var cat = defCatalog().filter(function(c){ return String(c.code||'').trim().toUpperCase()===key && ['LATTE','PLOT','CP'].indexOf(String(c.type||'').toUpperCase()) !== -1; })[0] || {};
+    var motif = numero ? ('Production ' + numero + ' — usinage : +' + q + ' ' + key) : 'Production (usinage)';
     semi.unshift({ id: Date.now() + Math.random(), code: key, designation: l.designation || cat.designation || key, quantite: q, motif: motif, obs: motif, created_at: date });
   });
   setStockSemi(semi);
+}
+/* Ligne d'entree produit fini pour une ligne d'assemblage : quantite assemblee
+   + article fabrique, avec article_id pour que la carte Produits Finis du
+   tableau de bord l'affiche (elle ignore les lignes sans article connu).
+   Observation explicite (ex : « Production 260901 — assemblage : +100 PAL114 »).
+   Partagee par la validation et le rattrapage des fiches deja validees. */
+function creditFinishedRow(row, p) {
+  var q = parseFloat((row && row.qte) || 0);
+  if (!row || !row.code || q <= 0) return false;
+  var articles = getArticles();
+  var numero = (p && p.numero) || '';
+  var date = (p && p.date) || today();
+  var key = String(row.code).trim().toUpperCase();
+  var art = articles.find(function(a) { return (a.code || '').toUpperCase() === key; });
+  var motif = numero ? ('Production ' + numero + ' — assemblage : +' + q + ' ' + key) : 'Production (assemblage)';
+  var fin = getStockFinished();
+  fin.unshift({ id: genId(), article_id: art ? art.id : '', code: key, designation: row.designation || (art && art.designation) || key, quantite: q, prix_unitaire: (art && (art.prix_vente || art.prix_revient)) || 0, motif: motif, obs: motif, created_at: date });
+  setStockFinished(fin);
+  return true;
+}
+/* Credit des produits finis assembles a la validation : sans cela, les
+   quantites assemblees (PAL114...) n'arrivaient jamais au stock et la carte
+   Produits Finis du tableau de bord restait a 0. */
+function creditAssemblageFini(p) {
+  if (!p || !p.assemblage || !p.assemblage.length) return;
+  (p.assemblage || []).forEach(function(row) { creditFinishedRow(row, p); });
+}
+/* Rattrapage : certaines fiches ont ete validees avant le credit automatique
+   des produits finis (leurs quantites assemblees n'apparaissent pas en stock).
+   On cree les entrees manquees, sans doublon (lignes tracees « Production N »
+   existantes detectees par prefixe). */
+function backfillFinishedCredits() {
+  try {
+    var prods = getProductions().filter(function(p) { return p && p.statut === 'validated' && p.assemblage && p.assemblage.length && p.numero; });
+    if (!prods.length) { toast('Aucune fiche validée avec assemblage', 'info'); return; }
+    var fin = getStockFinished();
+    var missing = [];
+    prods.forEach(function(p) {
+      var pfx = 'Production ' + p.numero + ' ';
+      (p.assemblage || []).forEach(function(row) {
+        var q = parseFloat((row && row.qte) || 0);
+        if (!row || !row.code || q <= 0) return;
+        var key = String(row.code).trim().toUpperCase();
+        var exists = fin.some(function(s) { return String(s.code || '').trim().toUpperCase() === key && String(s.motif || s.obs || '').indexOf(pfx) === 0 && (parseFloat(s.quantite) || 0) > 0; });
+        if (!exists) missing.push({ p: p, row: row });
+      });
+    });
+    if (!missing.length) { toast('Aucun produit fini manquant — stock cohérent', 'success'); return; }
+    var lbl = missing.slice(0, 10).map(function(m) { return m.row.code + ' ×' + m.row.qte + ' (fiche ' + m.p.numero + ')'; }).join('\n');
+    if (!confirm2(missing.length + ' ligne(s) produit fini sans entrée tracée :\n' + lbl + (missing.length > 10 ? '\n…' : '') + '\n\nCréer ces entrées au stock ?')) return;
+    missing.forEach(function(m) { creditFinishedRow(m.row, m.p); });
+    toast(missing.length + ' entrée(s) créée(s) au stock produits finis', 'success');
+    renderPage();
+  } catch(e) { toast('Échec rattrapage', 'error'); }
 }
 /* Stock conso par code : direct s.code, sinon via article P5/P6/P7... (article_id) */
 function consumStockQty(compCode) {
@@ -4527,7 +4588,13 @@ function deductConsumQty(compCode, need, ref) {
   }
   var numero = ref && ref.numero ? ref.numero : '';
   var date = (ref && ref.date) || today();
-  var motif = numero ? ('Production ' + numero + ' — conso. assemblage') : 'Consommation production (assemblage)';
+  /* Observation explicite : quantite consommee + article fabrique
+     (ex : « Production 260901 — PAL114 ×100 → P5 : 1600 (conso. assemblage) ») */
+  var art = (ref && ref.article) ? String(ref.article) : '';
+  var qfab = (ref && ref.qteAssemblee) ? parseFloat(ref.qteAssemblee) || 0 : 0;
+  var motif = numero
+    ? ('Production ' + numero + (art ? ' — ' + art + (qfab > 0 ? ' ×' + qfab : '') + ' → ' + key + ' : ' + need + ' (conso. assemblage)' : ' — conso. assemblage'))
+    : 'Consommation production (assemblage)';
   var stock = getStockConsum();
   stock.unshift({
     id: Date.now() + Math.random(),
@@ -4565,10 +4632,11 @@ function deductAssemblageStock(p) {
       var totalNeeded = (parseFloat(comp.quantity) || 0) * (parseFloat(row.qte) || 0);
       if (totalNeeded <= 0) return;
       var type = comp.type;
+      var ctx = { numero: p.numero, date: p.date, article: row.code, qteAssemblee: parseFloat(row.qte) || 0 };
       if (type === "LATTE" || type === "PLOT" || type === "CP") {
-        deductSemiQty(comp.code, totalNeeded, { numero: p.numero, date: p.date });
+        deductSemiQty(comp.code, totalNeeded, ctx);
       } else if (type === "POINTE") {
-        deductConsumQty(comp.code, totalNeeded, { numero: p.numero, date: p.date });
+        deductConsumQty(comp.code, totalNeeded, ctx);
       } else {
         var rawStock = getStockRaw();
         var rest = totalNeeded;
@@ -4632,6 +4700,13 @@ function saveProduction(validate) {
   var mode = (validate === 'brouillon') ? 'brouillon' : (validate === true || validate === 'validate') ? 'validate' : 'save';
   var editId = localStorage.getItem('mdb_prod_editId') || '';
   var existing = editId ? getProductions().find(function(x) { return x.id === editId; }) : null;
+  /* Une fiche VALIDEE ne se re-sauvegarde pas : la re-validation compterait
+     deux fois les stocks, et la re-sauvegarde simple la ferait retomber en
+     brouillon SANS annuler les stocks (fiche fantome : mouvements ecrits mais
+     0 fiche validee au tableau de bord). Supprimez-la pour la ressaisir. */
+  if (existing && existing.statut === 'validated') {
+    return toast('Fiche ' + (existing.numero || '') + ' déjà VALIDÉE : supprimez-la pour la ressaisir (les stocks seront restaurés).', 'error');
+  }
 
   var date = (document.getElementById('prod_date') || {}).value || today();
   var article_id = (document.getElementById('prod_article_id') || {}).value || '';
@@ -4786,6 +4861,9 @@ function saveProduction(validate) {
     creditUsinageStock(prod);
     /* Deduction assemblage : decrementer stock selon composants utilises */
     deductAssemblageStock(prod);
+    /* Entree produits finis : les quantites assemblees entrent au stock
+       (carte Produits Finis du tableau de bord) */
+    creditAssemblageFini(prod);
     clearAutoDraft();
     localStorage.removeItem('mdb_prod_editId');
     toast('Fiche de Production validée ✅ — Rendement: ' + prod.rendement.toFixed(1) + '%');
@@ -4960,6 +5038,7 @@ function exportProductionHistoryPDF() {
 function openDraftProd(id) {
   var p = getProductions().find(function(x) { return x.id === id; });
   if (!p) return;
+  if (p.statut === 'validated') return toast('Fiche déjà VALIDÉE : supprimez-la pour la ressaisir (les stocks seront restaurés).', 'error');
   if (!confirm2('Reprendre le brouillon ' + (p.numero || '') + ' dans le formulaire ?\nVous pourrez continuer la saisie puis l\'enregistrer ou la valider.')) return;
   localStorage.setItem('mdb_prod_editId', id);
   clearAutoDraft();
@@ -5094,7 +5173,7 @@ function render_history() {
 
   if (tab === 'saisies') {
     if (prods.length === 0) return h + '<div class="empty">Aucune fiche de production</div>';
-    h += '<div class="card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📋 Fiches de Production (' + prods.length + ')</h3><div style="display:flex;gap:.5rem"><button class="btn" onclick="printProductionHistory()">🖨 Imprimer</button><button class="btn" onclick="exportProductionHistoryPDF()">📄 Export PDF</button></div></div>';
+    h += '<div class="card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📋 Fiches de Production (' + prods.length + ')</h3><div style="display:flex;gap:.5rem"><button class="btn" onclick="backfillFinishedCredits()" title="Créer les entrées produits finis des fiches validées qui n\'en ont pas">💰 PF manquants</button><button class="btn" onclick="printProductionHistory()">🖨 Imprimer</button><button class="btn" onclick="exportProductionHistoryPDF()">📄 Export PDF</button></div></div>';
     h += '<table><tr><th>N°</th><th>Date</th><th>Article / Produit</th><th>Chef Projet</th><th style="text-align:right">Vol. Bois Sorti</th><th style="text-align:right">Vol. Lattes</th><th style="text-align:right">Vol. Plots</th><th style="text-align:right">Rendement</th><th>Statut</th><th>Actions</th></tr>';
     prods.forEach(function(p) {
       var art = getArticles().find(function(a) { return a.id === p.article_id; });
@@ -5218,7 +5297,19 @@ function deleteProd(id) {
   if (!confirm2(msg)) return;
   if (p.statut === 'validated') {
     restoreBoisSorti(p);
-    /* Annulation : les produits finis entrés en stock repartent (sortie) */
+    /* Annulation complete des ecritures tracees de la fiche (entrees usinage,
+       consos assemblage, entrees produits finis) : sans cela, supprimer une
+       fiche validee laissait ses lignes au stock. On retire les lignes dont
+       l'observation commence par « Production <numero> » (l'espace final evite
+       de confondre 260901 et 2609012). */
+    if (p.numero) {
+      var _pfx = 'Production ' + p.numero + ' ';
+      var _tracee = function(s) { return String((s && (s.motif || s.obs)) || '').indexOf(_pfx) === 0; };
+      try { var _a = getStockSemi(); var _b = _a.filter(function(s) { return !_tracee(s); }); if (_b.length !== _a.length) setStockSemi(_b); } catch(eS) {}
+      try { var _c = getStockConsum(); var _d = _c.filter(function(s) { return !_tracee(s); }); if (_d.length !== _c.length) setStockConsum(_d); } catch(eC) {}
+      try { var _e = getStockFinished(); var _f = _e.filter(function(s) { return !_tracee(s); }); if (_f.length !== _e.length) setStockFinished(_f); } catch(eF) {}
+    }
+    /* Annulation legacy : les produits finis entrés en stock repartent (sortie) */
     if (!((p.sortie_bois && p.sortie_bois.length) || (p.encours && p.encours.length)) && p.article_id && (parseFloat(p.quantite) || 0) > 0) {
       updateStockArticle(p.article_id, parseFloat(p.quantite) || 0, 'sortie', 'production', p.numero, 'ANNULATION Production ' + (p.numero || '') + ' – Assemblage (Produits Finis) (Sortie) – Annulation – suppression fiche');
     }
@@ -5921,7 +6012,12 @@ function _semiMouvements(code) {
     var estAjustLigne = !!s._ajustInv;
     var obs = s.obs || s.observation || s.motif || '';
     var lib = s.libelle || s.mouvement || '';
-    if (!lib) lib = estAjustLigne ? 'Ajustement inventaire' : (q < 0 ? 'Sortie' : 'Entree');
+    if (!lib) {
+      /* Comme la fiche pointes, le libellé dit d'où vient le mouvement
+         (production du jour ou achat de semi-fini), pas seulement son sens. */
+      if (obs.indexOf('Production ') === 0) lib = (q < 0 ? 'Sortie — Production' : 'Entrée — Production');
+      else lib = estAjustLigne ? 'Ajustement inventaire' : (q < 0 ? 'Sortie' : 'Entree');
+    }
     if (q >= 0 && !estAjustLigne && s.fournisseur) lib = lib + ' — ' + s.fournisseur;
     if (!obs && s.fournisseur) obs = 'Reception / Achat ' + s.fournisseur;
     if (estAjustLigne && !obs) obs = 'Correction inventaire ' + (s._invMois || '');
@@ -5945,6 +6041,7 @@ function _semiRegistreHtml(code) {
   var h = '<div style="font-size:.74rem;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.3rem">Mouvements — ' + escH(code) + '</div>';
   h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="background:#f1f5f9">'
     + '<th style="' + th + ';text-align:left">Date</th>'
+    + '<th style="' + th + ';text-align:left">Code</th>'
     + '<th style="' + th + ';text-align:left">Libellé</th>'
     + '<th style="' + th + ';text-align:right">Stock init</th>'
     + '<th style="' + th + ';text-align:right">Entrée</th>'
@@ -5960,6 +6057,7 @@ function _semiRegistreHtml(code) {
     if (r.estInitial) {
       h += '<tr style="background:#f8fafc;font-weight:700">'
         + '<td style="' + td + '">' + (r.date ? fmtD(r.date) : '-') + '</td>'
+        + '<td style="' + td + '">' + escH(r.code || '') + '</td>'
         + '<td style="' + td + '">' + escH(r.libelle || '') + '</td>'
         + '<td style="' + td + ';text-align:right">' + fmt(r.initial) + '</td>'
         + '<td style="' + td + ';text-align:right;' + dim + '">-</td>'
@@ -5972,6 +6070,7 @@ function _semiRegistreHtml(code) {
     }
     h += '<tr>'
       + '<td style="' + td + '">' + (r.date ? fmtD(r.date) : '<span style="' + dim + '">-</span>') + '</td>'
+      + '<td style="' + td + '">' + escH(r.code || '') + '</td>'
       + '<td style="' + td + ';white-space:normal">' + escH(r.libelle || '') + '</td>'
       + '<td style="' + td + ';text-align:right">' + fmt(r.initial) + '</td>'
       + '<td style="' + td + ';text-align:right;font-weight:700;' + (r.entree ? g : dim) + '">' + (r.entree ? '+' + fmt(r.entree) : '-') + '</td>'
@@ -5984,20 +6083,12 @@ function _semiRegistreHtml(code) {
   h += '</tbody></table></div>';
   return h;
 }
-/* Detail d'un semi-fini : dimensions, articles qui l'utilisent et lignes
-   de stock le concernant. Utilise pour le deroulement dans l'onglet. */
+/* Detail d'un semi-fini : articles qui l'utilisent (quantite par unite).
+   Utilise pour le deroulement dans l'onglet, suivi du registre des mouvements
+   (meme presentation que la fiche pointes). */
 function _semiDetailHtml(code) {
   var key = String(code || '').trim().toUpperCase();
   var comps = getSection('composants', []).filter(function (c) { return String(c.code || '').trim().toUpperCase() === key; });
-  var stocks = getStockSemi().filter(function (s) {
-    if (!s) return false;
-    if (String(s.code || '').trim().toUpperCase() === key) return true;
-    if (s.article_id) {
-      var a0 = getArticles().find(function (x) { return x.id === s.article_id; }) || {};
-      return String(a0.code || '').trim().toUpperCase() === key;
-    }
-    return false;
-  });
   var h = '<div style="font-size:.74rem;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.3rem">Détail — ' + escH(code) + '</div>';
   if (comps.length) {
     h += '<div style="font-size:.72rem;margin-bottom:.3rem"><strong>Utilisé par :</strong> ';
@@ -6008,18 +6099,8 @@ function _semiDetailHtml(code) {
     });
     h += noms.join(' · ') + '</div>';
   }
-  if (stocks.length) {
-    h += '<div style="font-size:.72rem"><strong>' + stocks.length + ' ligne(s) de stock :</strong></div>';
-    h += '<table style="font-size:.72rem;border-collapse:collapse;margin-top:.2rem"><tr style="background:#f1f5f9"><th style="padding:2px 6px;text-align:left">Désignation</th><th style="padding:2px 6px;text-align:right">Qté</th><th style="padding:2px 6px;text-align:right">Volume (m³)</th></tr>';
-    stocks.forEach(function (s) {
-      h += '<tr><td style="padding:2px 6px">' + escH(s.designation || s.code || '-') + '</td>'
-        + '<td style="padding:2px 6px;text-align:right;font-weight:700">' + escH(fmt(s.quantite || 0)) + '</td>'
-        + '<td style="padding:2px 6px;text-align:right">' + semiVol(s).toFixed(3) + '</td></tr>';
-    });
-    h += '</table>';
-  } else {
-    h += '<div style="font-size:.72rem;color:var(--dim)">Aucune ligne de stock pour ce composant (quantité 0).</div>';
-  }
+  /* Pas de tableau brut des lignes : comme la fiche pointes, seul le registre
+     des mouvements est affiché (les quantités s'y retrouvent en Entrée/Sortie). */
   return h;
 }
 function render_stock_raw() {
