@@ -1698,16 +1698,16 @@ function controles() {
   });
 
   r.push({
-    nom: 'Reconstruction a zero : elle liste et retire toutes les orphelines, pas seulement celles a zero',
+    nom: 'Reconstruction a zero : tout part sauf les ajustements d\u2019inventaire (meme le -9000 fantome)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
       p.achats = [];
       p.stockConsum = [
-        { id: 'oz1', code: 'P5', designation: 'POINTE5', quantite: 9000, cond: 180, ctype: 'POINTE', created_at: '2026-09-28' },
+        { id: 'oz1', code: 'P5', designation: 'POINTE5', quantite: -9000, cond: 180, ctype: 'POINTE', motif: 'Modification BL-X (ligne retiree)', obs: 'Modification BL-X (ligne retiree)', created_at: '2026-09-28' },
         { id: 'oz2', code: 'P6', designation: 'POINTE6', quantite: 24750, cond: 165, ctype: 'POINTE', created_at: '2026-09-28' },
         { id: 'oz3', code: 'P7', designation: 'POINTE7', quantite: 0, cond: 150, ctype: 'POINTE', created_at: '2026-09-28' },
-        { id: 'oz4', code: 'P6', designation: 'POINTE6', quantite: -500, cond: 165, ctype: 'POINTE', motif: 'Sortie manuelle', obs: 'Sortie manuelle', created_at: '2026-09-28' }
+        { id: 'oz4', code: 'P6', designation: 'POINTE6', quantite: 500, cond: 165, ctype: 'POINTE', _ajustInv: true, _invMois: '2026-09', obs: 'Inventaire 2026-09', created_at: '2026-09-28' }
       ];
       s.mdb_production = JSON.stringify(p);
       return s;
@@ -1718,11 +1718,39 @@ function controles() {
       try { reconstruireStockConsum(); } catch (e) {}
       try { if (vraiConfirm) confirm2 = vraiConfirm; } catch (e) {}
       var reste = getStockConsum();
-      var positifs = reste.filter(function (x) { return (parseFloat(x.quantite) || 0) > 0; });
-      var sorties = reste.filter(function (x) { return (parseFloat(x.quantite) || 0) < 0; });
-      (positifs.length === 0 && sorties.length === 1 && reste.length <= 2)
-        ? 'OK : P5/P6 orphelins partis (meme a quantite non nulle), sortie manuelle conservee'
+      var aj = reste.filter(function (x) { return x._ajustInv; });
+      (reste.length === 1 && aj.length === 1 && aj[0].code === 'P6')
+        ? 'OK : -9000 fantome, P6 orphelin et ligne a zero partis ; seul l\u2019ajustement d\u2019inventaire reste'
         : 'ECHEC : reste=' + reste.map(function(x){ return x.code + '=' + x.quantite; }).join(', ')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Tableau de bord : PRODUCTION DU MOIS totalise les assemblages, pas le volume de bois',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      var mois = new Date().toISOString().slice(0, 7);
+      p.productions = [
+        { id: 'pm1', numero: '260901', date: mois + '-05', statut: 'validated', vol_total: 4.5,
+          assemblage: [{ code: 'PAL114', qte: 10 }, { code: 'PAL112', qte: 5 }] },
+        { id: 'pm2', numero: '260902', date: mois + '-10', statut: 'draft', vol_total: 9.9,
+          assemblage: [{ code: 'PAL114', qte: 100 }] }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var i = h.indexOf('PRODUCTION DU MOIS');
+      var carte = i === -1 ? '' : h.slice(i, i + 900).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      /* 10 + 5 = 15 articles assembles sur fiches validees du mois (le
+         brouillon a 100 n'est pas compte, et ce n'est pas un volume). */
+      (i !== -1 && /15 article/.test(carte) && !/m³/.test(carte.split('Total assembl')[0]))
+        ? 'OK : 15 articles assembles affiches (et non 4,5 m3 de bois)'
+        : 'ECHEC : ' + carte.substr(0, 200)
     `,
     attenduPrefixe: 'OK'
   });

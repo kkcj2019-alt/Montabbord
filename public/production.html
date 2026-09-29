@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-100';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-101';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -3258,7 +3258,16 @@ function render_dashboard() {
   var repairs = [];
   try { repairs = getSection('palette_repairs', []).concat(getSection('repair_services', [])); } catch (eRep) { repairs = []; }
   var repDone = repairs.filter(function(r) { return r.statut === 'termine' || r.statut === 'terminee' || r.statut === 'done'; }).length;
-  var pctMois = volProdTotal > 0 ? Math.round(volProduction / volProdTotal * 100) : (volProduction > 0 ? 100 : 0);
+  /* PRODUCTION DU MOIS = le total des ASSEMBLAGES (articles finis fabriques)
+     des fiches validees du mois, et non un volume de bois. */
+  var assMois = 0, assTotal = 0;
+  prods.forEach(function (p) {
+    var q = 0;
+    (p.assemblage || []).forEach(function (r) { q += parseFloat(r.qte) || 0; });
+    assTotal += q;
+    if ((p.date || '').indexOf(thisM) === 0) assMois += q;
+  });
+  var pctMois = assTotal > 0 ? Math.round(assMois / assTotal * 100) : (assMois > 0 ? 100 : 0);
   h += '<div data-dashkey="achats" data-cardparent="achats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-top:1rem">';
   h += '<div class="card dashed-card" data-cardkey="ach-achats" style="margin-bottom:0"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="cursor:pointer;margin:0" onclick="navigate(\'achats-history\')" title="Voir l\'historique">🛒 ACHATS PRODUITS FINIS</h3><button class="btn" onclick="navigate(\'achats-history\')" style="font-size:.65rem;padding:2px 8px">✏️ Modifier</button></div>';
   if (!fourList.length) h += '<div class="empty">Aucun achat de produits finis</div>';
@@ -3281,7 +3290,7 @@ function render_dashboard() {
   h += '</div>';
   h += '<div class="card" style="margin-bottom:0"><h3 style="cursor:pointer" onclick="navigate(\'history\')" title="Voir la source">🏭 PRODUCTION DU MOIS</h3>';
   h += '<div style="margin:.4rem 0">' + donut(pctMois, '#f97316', 96, pctMois + '%') + '</div>';
-  h += '<div style="text-align:center;margin-top:.5rem"><span style="font-size:1.15rem;font-weight:800;color:var(--accent)">' + volProduction.toFixed(2) + ' m³</span><br><span style="font-size:.68rem;color:var(--dim)">Total validé : ' + volProdTotal.toFixed(2) + ' m³</span></div>';
+  h += '<div style="text-align:center;margin-top:.5rem"><span style="font-size:1.15rem;font-weight:800;color:var(--accent)">' + fmt(assMois) + ' article(s)</span><br><span style="font-size:.68rem;color:var(--dim)">Total assemblé : ' + fmt(assTotal) + ' article(s)</span></div>';
   h += '</div>';
   h += '</div>';
 
@@ -7639,30 +7648,37 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       return _c === 'consumables' || _c === 'consumable';
     }).length;
     if (_nbAchatsConso === 0) {
-      /* Plus aucun achat : on propose de retirer TOUTES les entrees
-         orphelines (pas seulement celles a zero), avec le detail par
-         produit. Sans cela, des lignes d'achats supprimes restaient pour
-         toujours avec des quantites. Les ajustements d'inventaire et les
-         sorties manuelles sont toujours conserves. */
+      /* Plus aucun achat : on propose de retirer TOUTES les lignes
+         orphelines, positives comme negatives (un -9000 « Modification »
+         dont l'achat a disparu n'est pas une vraie sortie, c'est un
+         fantome). Seuls les ajustements d'inventaire sont toujours
+         conserves. Sans cela, des restes d'achats supprimes (dont des
+         negatifs) restaient pour toujours. */
       var _orphelines = {};
       stock.forEach(function (s) {
-        if (!s || s._ajustInv || (parseFloat(s.quantite) < 0)) return;
+        if (!s || s._ajustInv) return;
         var _q = parseFloat(s.quantite) || 0;
         if (_q === 0) return;
         var _k = String(s.code || s.designation || '?').trim().toUpperCase();
-        _orphelines[_k] = (_orphelines[_k] || 0) + _q;
+        if (!_orphelines[_k]) _orphelines[_k] = { q: 0, natures: {} };
+        _orphelines[_k].q += _q;
+        var _nat = (String(s.motif || s.obs || '').indexOf('Modification ') === 0) ? 'modif. orpheline'
+          : (_q < 0 ? 'sortie sans entree' : 'entree orpheline');
+        _orphelines[_k].natures[_nat] = true;
       });
       var _cles = Object.keys(_orphelines);
       var _vides = stock.filter(function (s) { return s && (parseFloat(s.quantite) || 0) === 0 && !s._ajustInv; }).length;
       if (!_cles.length && !_vides) return toast('Stock deja vide', 'success');
-      var _detail = _cles.map(function (k) { return k + ' (' + fmt(_orphelines[k]) + ')'; }).join(', ');
+      var _detail = _cles.map(function (k) {
+        return k + ' (' + fmt(_orphelines[k].q) + ' : ' + Object.keys(_orphelines[k].natures).join(', ') + ')';
+      }).join(', ');
       if (!confirm2('Aucun achat consommable restant.\n\nRetirer ' + _cles.length + ' produit(s) orphelin(s)'
         + (_detail ? ' : ' + _detail : '')
         + (_vides ? '\n+ ' + _vides + ' ligne(s) a zero' : '')
-        + '\n\n(Les ajustements d\u2019inventaire et les sorties sont conserves.)')) return;
+        + '\n\n(Seuls les ajustements d\u2019inventaire sont conserves.)')) return;
       var garde = stock.filter(function (s) {
         if (!s) return false;
-        if (s._ajustInv || (parseFloat(s.quantite) < 0)) return true;
+        if (s._ajustInv) return true;
         return false;
       });
       setStockConsum(garde);
