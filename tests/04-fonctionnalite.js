@@ -1764,6 +1764,141 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+r.push({
+    nom: 'App principale : supprimer l\'ancien de 2 achats P7 deduit vraiment le stock et nettoie le journal',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      window.confirm = function(){ return true; };
+      var p5 = apProdGet();
+      p5.achats = [];
+      p5.stockConsum = [];
+      p5.movements = [];
+      apProdSet(p5);
+      function sauver(ref, date) {
+        document.getElementById('ach_ref').value = ref;
+        document.getElementById('ach_date').value = date;
+        document.getElementById('ach_fournisseur').value = 'TIJANI';
+        _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:15000, unit_price:1.87, total_price:28000, paquets:100, cond:150, ctype:'POINTE', cartons:2 }];
+        saveApAchat(null, 'consumables');
+      }
+      sauver('BL-2909', '2026-09-29');
+      sauver('BL-3009', '2026-09-30');
+      var idAncien = apProdGet().achats.filter(function(a){ return a.reference === 'BL-2909'; })[0].id;
+      deleteApAchat(idAncien);
+      var apres = apProdGet();
+      var lignes = (apres.stockConsum||[]).filter(function(x){ return String(x.code||'').toUpperCase() === 'P7'; });
+      var refs = (apres.movements||[]).map(function(m){ return m.reference; }).join(',');
+      (apres.achats.length === 1 && lignes.length === 1 && lignes[0].quantite === 15000
+        && String(lignes[0].created_at || '').indexOf('2026-09-30') === 0 && refs === 'BL-3009')
+        ? 'OK : reste la ligne du 30/09 (15 000), journal sans BL-2909'
+        : 'ECHEC : ' + JSON.stringify(apres.stockConsum) + ' / ' + refs
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Suppression achat consommables : la fiche cumulee est deduite et le journal nettoye',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      window.confirm = function(){ return true; };
+      setSection('movements', []);
+      setStockConsum([]);
+      setAchats([]);
+      function sauver(ref, date) {
+        document.getElementById('ach_ref').value = ref;
+        document.getElementById('ach_date').value = date;
+        document.getElementById('ach_fournisseur').value = 'TIJANI';
+        _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:15000, unit_price:1.87, total_price:28000, paquets:100, cond:150, ctype:'POINTE', cartons:2 }];
+        saveAchatByCategory({ preventDefault: function(){} }, 'consumables');
+      }
+      sauver('BL-2909', '2026-09-29');
+      sauver('BL-3009', '2026-09-30');
+      var idAncien = getAchats().filter(function(a){ return a.reference === 'BL-2909'; })[0].id;
+      deleteAchat(idAncien);
+      var lignes = getStockConsum().filter(function(x){ return String(x.code||'').toUpperCase() === 'P7'; });
+      var refs = getMovements().map(function(m){ return m.reference; }).join(',');
+      (getAchats().length === 1 && lignes.length === 1 && lignes[0].quantite === 15000 && refs === 'BL-3009')
+        ? 'OK : fiche P7 a 15 000, journal sans BL-2909'
+        : 'ECHEC : ' + JSON.stringify(lignes) + ' / ' + refs
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Mouvements de Stock : le bouton Orphelins supprime les entrees sans achat',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      setAchats([{ id:'x1', reference:'BL-3009', category:'consumables', date:'2026-09-30', items:[] }]);
+      setSection('movements', [
+        { id:'m1', date:'2026-09-29', type:'entree', article_id:'', code:'P7', designation:'Pointes 7', quantite:15000, reference:'BL-2909', motif:'Achat BL-2909' },
+        { id:'m2', date:'2026-09-30', type:'entree', article_id:'', code:'P7', designation:'Pointes 7', quantite:15000, reference:'BL-3009', motif:'Achat BL-3009' }
+      ]);
+      cleanOrphanMovements();
+      var refs = getMovements().map(function(m){ return m.reference; }).join(',');
+      (refs === 'BL-3009')
+        ? 'OK : entree orpheline BL-2909 supprimee'
+        : 'ECHEC : ' + refs
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'App principale : modification (P5 ajoute) puis suppression — plus aucune ligne de l\'achat au stock',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', nom:'Test', isSuperAdmin:true, isAdmin:true };
+      window.confirm = function(){ return true; };
+      var p6 = apProdGet();
+      p6.achats = [{ id:'BL3', reference:'BL3', date:'2026-09-29', fournisseur:'TIJANI', receiver_name:'X',
+        category:'consumables', montant_total:28000,
+        items:[{ code:'P7', designation:'Pointes 7', quantity:7500, unit_price:1.87, total_price:28000, paquets:50, cond:150, ctype:'POINTE', cartons:1 }] }];
+      p6.stockConsum = [];
+      p6.movements = [];
+      apProdSet(p6);
+      window._apEditingId = 'BL3';
+      document.getElementById('ach_ref').value = 'BL3';
+      document.getElementById('ach_date').value = getToday();
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      _tempAchatItems = [{ code:'P7', designation:'Pointes 7', quantity:7500, unit_price:1.87, total_price:28000, paquets:50, cond:150, ctype:'POINTE', cartons:1 },
+        { code:'P5', designation:'Pointes 5', quantity:15000, unit_price:0.28, total_price:4200, paquets:100, cond:150, ctype:'POINTE', cartons:2 }];
+      saveApAchat(null, 'consumables');
+      var idAchat = apProdGet().achats.filter(function(a){ return a.reference === 'BL3'; })[0].id;
+      deleteApAchat(idAchat);
+      var apres = apProdGet();
+      (apres.achats.length === 0 && (apres.stockConsum||[]).length === 0 && (apres.movements||[]).length === 0)
+        ? 'OK : achat, lignes taguees (origine + ecart) et journal supprimes'
+        : 'ECHEC : ' + JSON.stringify(apres.stockConsum) + ' / ' + JSON.stringify(apres.movements)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'I-USINAGE : les listes Lattes/Plots/CP ne proposent que les definitions du type (pas le catalogue articles)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setSection('definitions', [
+        { id:'d1', code:'LAT1', designation:'Latte 5x10', type:'LATTE', length:500, width:10, thickness:5 },
+        { id:'d2', code:'PL1', designation:'Plot 20x20', type:'PLOT', length:100, width:20, thickness:20 },
+        { id:'d3', code:'CP1', designation:'CP 122x61', type:'CP', length:122, width:61, thickness:1 }
+      ]);
+      setSection('articles', [
+        { id:'a1', code:'PAL1', designation:'Palette Europe', categorie:'fini' },
+        { id:'a2', code:'P5', designation:'POINTE5', categorie:'consum' }
+      ]);
+      var lat = compDefOptionsHTML('LATTE'), plo = compDefOptionsHTML('PLOT'), cp = compDefOptionsHTML('CP');
+      (lat.indexOf('LAT1') !== -1 && lat.indexOf('PAL1') === -1 && lat.indexOf('PL1') === -1 && lat.indexOf('[Article]') === -1
+        && plo.indexOf('PL1') !== -1 && plo.indexOf('PAL1') === -1 && plo.indexOf('LAT1') === -1
+        && cp.indexOf('CP1') !== -1 && cp.indexOf('PAL1') === -1)
+        ? 'OK : LATTE->LAT1 seul, PLOT->PL1 seul, CP->CP1 seul, aucun article'
+        : 'ECHEC : ' + lat + ' / ' + plo + ' / ' + cp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

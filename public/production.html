@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-88';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-89';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -5790,6 +5790,30 @@ if (!Array.isArray(achats)) { achats = []; try { toast('Liste d\'achats illisibl
     renderPage();
   } catch(e) { toast('Échec nettoyage', 'error'); }
 }
+/* Entrees de journal creees par un achat (« Achat REF ») dont l'achat
+   n'existe plus (ex : achat supprime avant le nettoyage auto) */
+function cleanOrphanMovements() {
+  try {
+    var achats = getAchats();
+    if (!Array.isArray(achats)) achats = [];
+    var have = {};
+    achats.forEach(function(a) { if (a && a.reference) have[String(a.reference)] = true; });
+    var movs = getMovements();
+    var orph = movs.filter(function(m) {
+      return m && m.type === 'entree' && (m.motif || '').indexOf('Achat') === 0 && m.reference && !have[String(m.reference)];
+    });
+    if (!orph.length) { toast('Aucun orphelin — journal cohérent', 'success'); return; }
+    var lbl = orph.slice(0, 10).map(function(m) { return (m.reference || '') + ' (' + (m.quantite || 0) + ')'; }).join('\n');
+    if (!confirm2(orph.length + ' entrée(s) sans achat :\n' + lbl + (orph.length > 10 ? '\n…' : '') + '\n\nSupprimer ces entrées du journal ?')) return;
+    var refs = {};
+    orph.forEach(function(m) { refs[String(m.reference)] = true; });
+    setMovements(movs.filter(function(m) {
+      return !(m && m.type === 'entree' && (m.motif || '').indexOf('Achat') === 0 && m.reference && refs[String(m.reference)]);
+    }));
+    toast(orph.length + ' entrée(s) orpheline(s) supprimée(s)', 'success');
+    renderPage();
+  } catch(e) { toast('Échec nettoyage', 'error'); }
+}
 /* Referentiel des semi-finis : les composants LATTE / PLOT / CP de la
    nomenclature, et non les seules lignes de stock (qui n'existent que si
    on en a produit). « Tout (y compris 0) » affiche donc tous les
@@ -7699,7 +7723,8 @@ function render_stock_movements() {
   var articles = getArticles();
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem">';
   h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'movTable\',this.value)">';
-  h += '<button class="btn btn-accent" onclick="showAddMovement()">+ Nouveau Mouvement</button>';
+  h += '<div style="display:flex;gap:.5rem"><button class="btn" onclick="cleanOrphanMovements()" title="Supprimer les entrées d\'achats supprimés">🧹 Orphelins</button>';
+  h += '<button class="btn btn-accent" onclick="showAddMovement()">+ Nouveau Mouvement</button></div>';
   h += '</div>';
   if (movs.length === 0) return h + '<div class="empty">Aucun mouvement</div>';
   h += '<div class="card"><table id="movTable"><tr><th>Date</th><th>Type</th><th>Article</th><th style="text-align:right">Quantité</th><th>Référence</th><th>Motif</th></tr>';
@@ -12211,15 +12236,14 @@ function ensureEssenceDatalist() {
   else dl.innerHTML = essenceOptionsHTML();
 }
 
-/* === AUTOCOMPLÉTION COMPOSANTS (lattes/plots/CP) === */
+/* === AUTOCOMPLÉTION COMPOSANTS (lattes/plots/CP) : UNIQUEMENT les définitions
+   de composants du type demandé. Le catalogue articles (palettes, produits
+   finis) n'a rien à y faire : un code palette saisi en I-USINAGE fausserait
+   la fiche. === */
 function compDefOptionsHTML(type) {
   var html = defCatalog().filter(function(c) { return c.type === type; }).map(function(c) {
     var dims = (parseFloat(c.length) || 0) + '×' + (parseFloat(c.width) || 0) + '×' + (parseFloat(c.thickness) || 0);
     return '<option value="' + escH(c.code) + '">' + escH(c.designation || c.code) + (c.length ? ' — ' + dims : '') + '</option>';
-  }).join('');
-  /* Ajoute aussi le catalogue articles (produits finis existants, hors consommables) */
-  html += getArticles().filter(function(a) { return (a.categorie || '') !== 'consum'; }).map(function(a) {
-    return '<option value="' + escH(a.code) + '">' + escH(a.designation || a.code) + ' [Article]</option>';
   }).join('');
   return html;
 }
@@ -12244,15 +12268,10 @@ function onCompCodeChange(input, type) {
     if (defs[i].type === type && defs[i].code === code) { def = defs[i]; break; }
   }
   if (!def) {
-    var arts = getArticles();
-    for (var j = 0; j < arts.length; j++) {
-      if (arts[j].code === code) {
-        def = { designation: arts[j].designation || arts[j].code, length: arts[j].length || 0, width: arts[j].width || 0, thickness: arts[j].thickness || 0 };
-        break;
-      }
-    }
+    /* Pas de repli sur le catalogue articles : en I-USINAGE on ne saisit que
+       des définitions de composants (un code palette n'y remplit rien). */
+    return;
   }
-  if (!def) return;
   var cells = tr.querySelectorAll('input');
   if (cells.length >= 2 && cells[1] && !cells[1].value) cells[1].value = def.designation || code;
   if (type === 'CP') {
@@ -13933,7 +13952,36 @@ function reverseAchatStock(a) {
     } else if (cat === 'merchandises') {
       pull(getStockMerch, setStockMerch, codeMatch, qtyIt, null);
     } else if (cat === 'consumables') {
-      pull(getStockConsum, setStockConsum, codeMatch, qtyIt, null);
+      /* Annulation exacte : lignes taguees de CET achat (achat_id) retirees,
+         reliquat retranche des lignes non taguees (fiches cumulees). */
+      var _cs = getStockConsum();
+      var _settled = {};
+      function _csKey(it) { return String((it && (it.code || it.designation)) || '').trim().toUpperCase(); }
+      function _csTagged(s) { return s && s.achat_id !== undefined && s.achat_id !== null && s.achat_id !== '' && a && a.id !== undefined && a.id !== null && a.id !== '' && String(s.achat_id) === String(a.id); }
+      for (var _cj = _cs.length - 1; _cj >= 0; _cj--) {
+        if (_csTagged(_cs[_cj])) { _settled[_csKey(_cs[_cj])] = true; _cs.splice(_cj, 1); }
+      }
+      a.items.forEach(function(it) {
+        if (_settled[_csKey(it)]) return;
+        var _q = qtyIt(it);
+        if (_q <= 0) return;
+        for (var _j = 0; _j < _cs.length; _j++) {
+          if (_cs[_j].achat_id !== undefined && _cs[_j].achat_id !== null && _cs[_j].achat_id !== '') continue;
+          if (codeMatch(_cs[_j], it)) {
+            _cs[_j].quantite = Math.max(0, (parseFloat(_cs[_j].quantite) || 0) - _q);
+            if ((parseFloat(_cs[_j].quantite) || 0) <= 0) { _cs.splice(_j, 1); }
+            break;
+          }
+        }
+      });
+      setStockConsum(_cs);
+      /* Nettoyer aussi les entrees de journal creees par cet achat, sinon
+         l'achat supprime reste affiche dans Mouvements de Stock. */
+      try {
+        var _mc = getMovements();
+        _mc = _mc.filter(function(m) { return !(m && m.type === 'entree' && m.reference === a.reference && (m.motif || '').indexOf('Achat') === 0); });
+        setMovements(_mc);
+      } catch(e2) {}
     } else if (cat === 'epi') {
       var _ecat = getEpiCatalogue();
       var _changed = false;
