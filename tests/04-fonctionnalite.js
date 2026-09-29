@@ -287,6 +287,80 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Tableau de bord : la carte « Consommation Bois (mois) » affiche le bois sorti (vol_sortie_bois) des fiches validees du mois',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var i = h.indexOf('kpi-consom');
+      var carte = i === -1 ? '' : h.slice(i, i + 320);
+      (i !== -1 && carte.indexOf('5.00 m³') !== -1 && carte.indexOf('Consommation Bois (mois)') !== -1)
+        ? 'OK : carte Consommation Bois = 5.00 m³ (vol_sortie_bois de la fiche validee du mois)'
+        : 'ECHEC : ' + (carte || h.substr(0, 200)).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Tableau de bord : la carte « En Cours Production » totalise le volume des fiches non validees (brouillon = 4 m³), pas celles validees',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var jours = new Date().toISOString().slice(0, 10);
+      var prods = getProductions();
+      prods.push({ id: 'p2', numero: '2609002', date: jours, statut: 'draft', vol_sortie_bois: 4, vol_total: 4, sortie_bois: [], lattes: [], plots: [], cp: [], assemblage: [], encours: [] });
+      setProductions(prods);
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var i = h.indexOf('kpi-encours');
+      var carte = i === -1 ? '' : h.slice(i, i + 320);
+      (i !== -1 && carte.indexOf('4.00 m³') !== -1 && carte.indexOf('En Cours Production') !== -1)
+        ? 'OK : brouillon 4 m³ affiche en En Cours Production (la fiche validee n y est pas comptee)'
+        : 'ECHEC : ' + (carte || h.substr(0, 200)).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Produits finis : la validation ecrit la production dans le JOURNAL, la fiche de l\'article nest plus vide',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var d = new Date().toISOString().slice(0, 10);
+      creditAssemblageFini({ numero: '260901', date: d, assemblage: [{ code: 'PAL', designation: 'Palette', qte: 100 }] });
+      var fin = getStockFinished();
+      var ligne = fin.find(function(s){ return s.code === 'PAL' && (s.quantite || 0) === 100; });
+      var reg = _finRegistreData(ligne.id);
+      var journal = getMovements().filter(function(m){ return m.article_id === 'a1' && m.type === 'entree'; });
+      (reg && reg.movs.length === 1 && journal.length === 1 && reg.initial === 0
+        && String(reg.movs[0].motif || '').indexOf('Production 260901') === 0)
+        ? 'OK : fiche article = 1 mouvement, stock initial 0, motif « ' + reg.movs[0].motif + ' »'
+        : 'ECHEC : fiche=' + (reg ? reg.movs.length : 'null') + ' journal=' + journal.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Rattrapage : les entrees produits finis deja au stock sans journal sont rejouees dans la fiche de l\'article (sans doublon)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var d = new Date().toISOString().slice(0, 10);
+      setStockFinished([{ id: 'pfX', article_id: 'a1', code: 'PAL', designation: 'Palette', quantite: 100, motif: 'Production 260901 — assemblage : +100 PAL', obs: 'Production 260901 — assemblage : +100 PAL', created_at: d }]);
+      var prods = getProductions();
+      prods.push({ id: 'pX', numero: '260901', date: d, statut: 'validated', assemblage: [{ code: 'PAL', designation: 'Palette', qte: 100 }], sortie_bois: [], lattes: [], plots: [], cp: [], encours: [] });
+      setProductions(prods);
+      window.confirm2 = function(){ return true; };
+      backfillFinishedCredits();
+      var n = getMovements().filter(function(m){ return m.article_id === 'a1' && m.type === 'entree' && m.quantite === 100; }).length;
+      backfillFinishedCredits();
+      var n2 = getMovements().filter(function(m){ return m.article_id === 'a1' && m.type === 'entree' && m.quantite === 100; }).length;
+      var reg = _finRegistreData(getStockFinished().find(function(s){ return s.article_id === 'a1'; }).id);
+      (n === 1 && n2 === 1 && reg.movs.length === 1 && reg.initial === 0)
+        ? 'OK : journal = 1 entree (2e passage sans doublon), fiche de l article remplie'
+        : 'ECHEC : n=' + n + ' n2=' + n2 + ' fiche=' + (reg ? reg.movs.length : '-')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',

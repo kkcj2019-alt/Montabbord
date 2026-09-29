@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-91';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-92';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -3116,6 +3116,9 @@ function render_dashboard() {
     var _lastInv = _invs.length ? _invs[_invs.length - 1] : null;
     if (_lastInv) (_lastInv.items || []).forEach(function(it) { volInitialTab += (parseFloat(it.volume) || 0) * (parseFloat(it.real_qte) || 0); });
   } catch (e) {}
+  /* Consommation de bois = bois SORTI du stock par les fiches de production
+     validees (p.vol_sortie_bois), sur le mois courant comme les cartes voisines. */
+  var volConsomBoisMois = volProduction > 0 ? prodMois.reduce(function(s, p) { return s + (parseFloat(p.vol_sortie_bois) || parseFloat(p.vol_total) || 0); }, 0) : 0;
 
   var h = '';
   h += '<div id="prodDashboardView">';
@@ -3124,6 +3127,7 @@ function render_dashboard() {
   h += kpiCard(volStock.raw, 'Stock Actuel (Global)', '📦', 'stock-raw', null, 'linear-gradient(135deg,#0d9488,#0f766e)', 'kpi-stock');
   h += kpiCard(volInitialTab, 'Stock Initial (Global)', '📊', 'inventory', null, 'linear-gradient(135deg,#4f46e5,#3730a3)', 'kpi-initial');
   h += kpiCard(volEncours, 'En Cours Production', '🏭', 'history', null, 'linear-gradient(135deg,#a855f7,#7e22ce)', 'kpi-encours');
+  h += kpiCard(volConsomBoisMois, 'Consommation Bois (mois)', '🪵', 'history', 'Bois sorti du stock par les fiches de production validées ce mois', 'linear-gradient(135deg,#65a30d,#4d7c0f)', 'kpi-consom');
   h += kpiCard(pertesVol, 'Bois Perdu (Cumul)', '⚠️', 'history', null, 'linear-gradient(135deg,#f43f5e,#be123c)', 'kpi-pertes');
   h += '</div>';
 
@@ -4515,6 +4519,14 @@ function creditFinishedRow(row, p) {
   var fin = getStockFinished();
   fin.unshift({ id: genId(), article_id: art ? art.id : '', code: key, designation: row.designation || (art && art.designation) || key, quantite: q, prix_unitaire: (art && (art.prix_vente || art.prix_revient)) || 0, motif: motif, obs: motif, created_at: date });
   setStockFinished(fin);
+  /* La fiche de stock de l'article (Produits Finis) et l'onglet Mouvements
+     lisent le JOURNAL par article_id : sans cette entrée, la fiche restait
+     vide alors que le stock avait bien augmenté (mouvements « invisibles »). */
+  try {
+    var movs = getMovements();
+    movs.push({ id: genId(), date: date, type: 'entree', article_id: art ? art.id : '', code: key, designation: row.designation || (art && art.designation) || key, quantite: q, reference: numero, motif: motif, created_at: new Date().toISOString() });
+    setMovements(movs);
+  } catch (eM) {}
   return true;
 }
 /* Credit des produits finis assembles a la validation : sans cela, les
@@ -4533,22 +4545,53 @@ function backfillFinishedCredits() {
     var prods = getProductions().filter(function(p) { return p && p.statut === 'validated' && p.assemblage && p.assemblage.length && p.numero; });
     if (!prods.length) { toast('Aucune fiche validée avec assemblage', 'info'); return; }
     var fin = getStockFinished();
-    var missing = [];
+    var movs = getMovements();
+    var missing = [], missingMovs = 0;
     prods.forEach(function(p) {
       var pfx = 'Production ' + p.numero + ' ';
       (p.assemblage || []).forEach(function(row) {
         var q = parseFloat((row && row.qte) || 0);
         if (!row || !row.code || q <= 0) return;
         var key = String(row.code).trim().toUpperCase();
+        var art = getArticles().find(function(a) { return (a.code || '').trim().toUpperCase() === key; });
         var exists = fin.some(function(s) { return String(s.code || '').trim().toUpperCase() === key && String(s.motif || s.obs || '').indexOf(pfx) === 0 && (parseFloat(s.quantite) || 0) > 0; });
         if (!exists) missing.push({ p: p, row: row });
+        /* La fiche de l'article lit le JOURNAL par article_id : une entree de
+           stock existante sans entree journal laisse la fiche vide. */
+        if (art) {
+          var hasMov = movs.some(function(m) { return m.article_id && m.article_id === art.id && m.type === 'entree'
+            && (parseFloat(m.quantite) || 0) === q && String(m.motif || '').indexOf(pfx) === 0; });
+          if (!hasMov) missingMovs++;
+        }
       });
     });
-    if (!missing.length) { toast('Aucun produit fini manquant — stock cohérent', 'success'); return; }
+    if (!missing.length && missingMovs === 0) { toast('Aucun produit fini manquant — stock et journal cohérents', 'success'); return; }
     var lbl = missing.slice(0, 10).map(function(m) { return m.row.code + ' ×' + m.row.qte + ' (fiche ' + m.p.numero + ')'; }).join('\n');
-    if (!confirm2(missing.length + ' ligne(s) produit fini sans entrée tracée :\n' + lbl + (missing.length > 10 ? '\n…' : '') + '\n\nCréer ces entrées au stock ?')) return;
+    var msg = (missing.length ? (missing.length + ' ligne(s) produit fini sans entrée de stock :\n' + lbl + '\n\n') : '')
+      + (missingMovs ? missingMovs + ' entrée(s) de production absentes du journal (fiche de l\'article vide) :\n' : '')
+      + '\nCréer ces écritures ?';
+    if (!confirm2(msg)) return;
     missing.forEach(function(m) { creditFinishedRow(m.row, m.p); });
-    toast(missing.length + ' entrée(s) créée(s) au stock produits finis', 'success');
+    /* Cree les entrees journal manquantes (y compris pour les entrees de
+       stock deja presentes mais jamais tracees). */
+    movs = getMovements();
+    prods.forEach(function(p) {
+      var pfx = 'Production ' + p.numero + ' ';
+      (p.assemblage || []).forEach(function(row) {
+        var q = parseFloat((row && row.qte) || 0);
+        if (!row || !row.code || q <= 0) return;
+        var key = String(row.code).trim().toUpperCase();
+        var art = getArticles().find(function(a) { return (a.code || '').trim().toUpperCase() === key; });
+        if (!art) return;
+        var hasMov = movs.some(function(m) { return m.article_id && m.article_id === art.id && m.type === 'entree'
+          && (parseFloat(m.quantite) || 0) === q && String(m.motif || '').indexOf(pfx) === 0; });
+        if (!hasMov) {
+          movs.push({ id: genId(), date: p.date || today(), type: 'entree', article_id: art.id, code: key, designation: row.designation || art.designation || key, quantite: q, reference: p.numero, motif: 'Production ' + p.numero + ' — assemblage : +' + q + ' ' + key, created_at: new Date().toISOString() });
+        }
+      });
+    });
+    setMovements(movs);
+    toast((missing.length ? missing.length + ' entrée(s) stock créée(s) ; ' : '') + 'journal synchronisé pour les fiches validées', 'success');
     renderPage();
   } catch(e) { toast('Échec rattrapage', 'error'); }
 }
@@ -5173,7 +5216,7 @@ function render_history() {
 
   if (tab === 'saisies') {
     if (prods.length === 0) return h + '<div class="empty">Aucune fiche de production</div>';
-    h += '<div class="card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📋 Fiches de Production (' + prods.length + ')</h3><div style="display:flex;gap:.5rem"><button class="btn" onclick="backfillFinishedCredits()" title="Créer les entrées produits finis des fiches validées qui n\'en ont pas">💰 PF manquants</button><button class="btn" onclick="printProductionHistory()">🖨 Imprimer</button><button class="btn" onclick="exportProductionHistoryPDF()">📄 Export PDF</button></div></div>';
+    h += '<div class="card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📋 Fiches de Production (' + prods.length + ')</h3><div style="display:flex;gap:.5rem"><button class="btn" onclick="backfillFinishedCredits()" title="Créer les entrées produits finis manquantes (stock + journal des fiches validées)">💰 PF manquants</button><button class="btn" onclick="printProductionHistory()">🖨 Imprimer</button><button class="btn" onclick="exportProductionHistoryPDF()">📄 Export PDF</button></div></div>';
     h += '<table><tr><th>N°</th><th>Date</th><th>Article / Produit</th><th>Chef Projet</th><th style="text-align:right">Vol. Bois Sorti</th><th style="text-align:right">Vol. Lattes</th><th style="text-align:right">Vol. Plots</th><th style="text-align:right">Rendement</th><th>Statut</th><th>Actions</th></tr>';
     prods.forEach(function(p) {
       var art = getArticles().find(function(a) { return a.id === p.article_id; });
