@@ -1782,6 +1782,86 @@ function controles() {
   });
 
   r.push({
+    nom: 'Cout de revient deduit de la nomenclature : bois (volume x chute x prix/m3) + consommables',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* a1 = PAL : 5 lattes de 0,0018 m3 (=> 0,009 m3) + 90 pointes a 15 F.
+         Achat bois du mois : 5 m3 pour 225000 F => 45000 F/m3.
+         Chute par defaut 8 % => 0,00972 m3 x 45000 = 437,4 F
+         + 90 x 15 = 1350 F  => 1787,4 F de matiere. */
+      var c = acCoutArticleAuto('a1');
+      var okVol = Math.abs(c.volNet - 0.009) < 0.000001;
+      var okPx = Math.abs(c.pxM3 - 45000) < 1;
+      var okBois = Math.abs(c.coutBois - 437.4) < 0.5;
+      var okConso = Math.abs(c.coutConso - 1350) < 0.5;
+      var okTot = Math.abs(c.matiere - 1787.4) < 1;
+      var okMarge = Math.abs(c.marge - (45000 - 1787.4)) < 1;
+      (okVol && okPx && okBois && okConso && okTot && okMarge)
+        ? 'OK : ' + c.matiere.toFixed(2) + ' F (bois ' + c.coutBois.toFixed(2) + ' + conso ' + c.coutConso.toFixed(2) + ')'
+        : 'ECHEC vol=' + c.volNet + ' pxM3=' + c.pxM3 + ' bois=' + c.coutBois + ' conso=' + c.coutConso + ' tot=' + c.matiere
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de revient deduit : les composants sans prix signale le manque, sans bloquer le calcul',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.composants = [{ article_id: 'a1', type: 'POINTE', code: 'INCONNU', designation: 'Clous sans prix', quantity: 100 }];
+      p.definitions = [];
+      p.stockConsum = [];
+      p.achats = p.achats.filter(function (a) { return a.category === 'raw-materials'; });
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var c = acCoutArticleAuto('a1');
+      /* Aucun prix pour le clou, aucun volume bois : rien ne doit exploser,
+         le manque doit etre nomme. */
+      var ok = (c.coutConso === 0) && (c.manquants.length >= 1) && isFinite(c.matiere) && (c.matiere === 0);
+      ok ? 'OK : manques lists (' + c.manquants.length + ')' : 'ECHEC : ' + JSON.stringify(c.manquants) + ' matiere=' + c.matiere
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Articles : le cout de revient est affiche en "auto" quand il est deduit, marge recalculee',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'articles'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      /* Les nombres sont groupes avec une espace insecable : on compare les
+         chiffres seuls pour ne pas dependre du formatage. */
+      var chiffres = h.replace(/[^0-9]/g, '');
+      var ok = (h.indexOf('showCoutArticleAuto') !== -1)
+        && (chiffres.indexOf('1787') !== -1) && (chiffres.indexOf('43213') !== -1)
+        && (h.indexOf('auto') !== -1);
+      ok ? 'OK : cout auto + bouton detail' : 'ECHEC : ' + chiffres.substr(0, 300)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de revient deduit : le detail composant par composant et l enregistrement du cout',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var m = acCoutAutoHtml('a1', false);
+      var chiffres = m.replace(/[^0-9]/g, '');
+      var okHtml = (m.indexOf('coût de revient déduit') !== -1)
+        && (m.indexOf('acEnregistrerCoutArticle') !== -1)
+        && (m.indexOf('Latte') !== -1) && (m.indexOf('Pointes') !== -1)
+        && (chiffres.indexOf('437') !== -1) && (chiffres.indexOf('1350') !== -1)
+        && (chiffres.indexOf('1787') !== -1);
+      acEnregistrerCoutArticle('a1');
+      var a = getArticles().filter(function (x) { return x.id === 'a1'; })[0];
+      var okSave = (a && Math.round(a.prix_revient) === 1787 && a._cout_auto === 1);
+      (okHtml && okSave) ? 'OK : detail + cout enregistre 1787' : 'ECHEC : html=' + okHtml + ' prix_revient=' + (a && a.prix_revient)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock consommables : une seule ligne par PRODUIT meme si le meme code a plusieurs fiches',
     app: 'production.html', store: () => {
       const s = storeRealiste();

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-102';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-103';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -1385,6 +1385,183 @@ function acNomenclatureArticle(articleId) {
   }
   return r;
 }
+/* =====================================================================
+   COÛT DE REVIENT DÉDUIT DE LA NOMENCLATURE (sans saisie)
+   ---------------------------------------------------------------------
+   Le prix n'est plus tapé à la main : l'application le calcule.
+     A. bois        = volume de la nomenclature x (1 + chute) x prix du m³
+     B. consommables= quantité de la nomenclature x prix d'achat à l'unité
+   Prix du m³  : CUMP de la période, sinon tout l'historique des achats bois.
+   Prix unitaire consommable : BL le plus récent, sinon catalogue, sinon fiche.
+   ===================================================================== */
+function acPrixM3Auto() {
+  var cfg = acLaborCfg();
+  var px = parseFloat(cfg.prixM3) || 0;
+  if (px > 0) return px;
+  var p = acPeriode();
+  px = acCump(p.du, p.au).prixM3 || 0;
+  if (!(px > 0)) px = acCump('', '').prixM3 || 0;
+  return px > 0 ? px : 0;
+}
+function acPUConsommable(code) {
+  var key = String(code || '').trim().toUpperCase();
+  if (!key) return 0;
+  var i, q = 0, mt = 0, dernier = 0, dDate = '';
+  /* 1) Les achats : moyenne pondérée du prix à l'unité réellement payé. */
+  (getAchats() || []).forEach(function (a) {
+    var cat = a.category || a.type || '';
+    if (cat !== 'consumables' && cat !== 'consumable') return;
+    (Array.isArray(a.items) ? a.items : []).forEach(function (it) {
+      if (!it || String(it.code || '').trim().toUpperCase() !== key) return;
+      var qt = parseFloat(it.quantity) || 0;
+      var pu = parseFloat(it.unit_price) || 0;
+      var cond = parseFloat(it.cond || it.qty_per_packet) || 0;
+      var pc = parseFloat(it.prix_carton) || 0;
+      if (!(pu > 0) && pc > 0 && cond > 0) pu = pc / cond;
+      if (pu > 0 && qt > 0) { q += qt; mt += pu * qt; }
+      var d = String(a.date || '');
+      if (pu > 0 && d >= dDate) { dDate = d; dernier = pu; }
+    });
+  });
+  if (q > 0 && mt > 0) return mt / q;
+  if (dernier > 0) return dernier;
+  /* 2) Le catalogue des définitions composants. */
+  var defs = defCatalog() || [];
+  for (i = 0; i < defs.length; i++) {
+    var d = defs[i] || {};
+    if (String(d.code || '').trim().toUpperCase() !== key) continue;
+    var uc = parseFloat(d.unit_cost) || 0;
+    if (uc > 0) return uc;
+    var c2 = parseFloat(d.qty_per_packet) || 0, p2 = parseFloat(d.prix_carton) || 0;
+    if (p2 > 0 && c2 > 0) return p2 / c2;
+  }
+  /* 3) Les fiches de stock consommables (en dernier recours). */
+  var st = getStockConsum() || [];
+  for (i = 0; i < st.length; i++) {
+    var s = st[i] || {};
+    if (String(s.code || '').trim().toUpperCase() !== key) continue;
+    var pu3 = parseFloat(s.prix_unitaire) || 0;
+    if (pu3 > 0) return pu3;
+    var c3 = parseFloat(s.cond != null ? s.cond : s.qty_per_packet) || 0;
+    var p3 = parseFloat(s.prix_carton) || 0;
+    if (p3 > 0 && c3 > 0) return p3 / c3;
+  }
+  return 0;
+}
+function acCoutArticleAuto(articleId) {
+  var arts = getArticles(), art = null, i;
+  for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(articleId)) { art = arts[i]; break; }
+  var comps = (getSection('composants', []) || []).filter(function (c) {
+    return c && String(c.article_id) === String(articleId) && (parseFloat(c.quantity) || 0) > 0;
+  });
+  var cfg = acLaborCfg();
+  var chute = 1 + (Math.max(0, parseFloat(cfg.tauxPerte) || 0) / 100);
+  var pxM3 = acPrixM3Auto();
+  var bois = [], conso = [], volNet = 0, coutBois = 0, coutConso = 0, manquants = [];
+  comps.forEach(function (c) {
+    var type = String(c.type || '').toUpperCase();
+    var qte = parseFloat(c.quantity) || 0;
+    var lib = c.designation || c.code || type;
+    if (type === 'LATTE' || type === 'PLOT' || type === 'CP') {
+      var v = parseFloat(c.volume) || 0;
+      if (!(v > 0)) {
+        var L = parseFloat(c.length) || 0, W = parseFloat(c.width) || 0, T = parseFloat(c.thickness) || 0;
+        if (L > 0 && W > 0 && T > 0) v = (L * W * T) / 1000000;
+      }
+      if (!(v > 0)) { manquants.push('le volume de ' + lib); return; }
+      var vt = qte * v;
+      volNet += vt;
+      bois.push({ libelle: lib, type: type, qte: qte, volUn: v, volTot: vt });
+    } else {
+      var pu = acPUConsommable(c.code);
+      if (pu > 0) { coutConso += qte * pu; conso.push({ libelle: lib, type: type, qte: qte, pu: pu, mont: qte * pu }); }
+      else { conso.push({ libelle: lib, type: type, qte: qte, pu: 0, mont: 0 }); manquants.push('le prix d\'achat de ' + lib); }
+    }
+  });
+  var volAchat = volNet * chute;
+  coutBois = volAchat * pxM3;
+  var matiere = coutBois + coutConso;
+  var pv = parseFloat(art && art.prix_vente) || 0;
+  if (!(pxM3 > 0) && volNet > 0) manquants.push('le prix du m³ de bois (aucun achat de matière première)');
+  return {
+    art: art, comps: comps, bois: bois, conso: conso, volNet: volNet, volAchat: volAchat,
+    chute: chute, pxM3: pxM3, coutBois: coutBois, coutConso: coutConso, matiere: matiere,
+    nbBois: bois.length, nbConso: conso.length, manquants: manquants, pv: pv,
+    marge: pv > 0 ? pv - matiere : 0, taux: pv > 0 ? ((pv - matiere) / pv * 100) : 0
+  };
+}
+/* Bloc html du coût déduit. compact = dans la page Coût de revient. */
+function acCoutAutoHtml(articleId, compact) {
+  if (!articleId) return '';
+  var c = acCoutArticleAuto(articleId);
+  var a = c.art || {};
+  var nomArt = (a.code ? a.code + ' · ' : '') + (a.designation || 'Article');
+  if (!c.comps.length) {
+    return '<div style="font-size:.7rem;color:#b45309;margin-top:.4rem">Aucune nomenclature pour ' + escH(nomArt) +
+      ' : sans composants, aucun coût ne peut être déduit.</div>';
+  }
+  var h = '<div style="margin-top:.6rem;padding:.5rem .6rem;background:#f8fafc;border:1px solid var(--border);border-radius:9px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;flex-wrap:wrap;margin-bottom:.3rem">';
+  h += '<div style="font-size:.72rem;font-weight:800">' + escH(nomArt) + ' — coût de revient déduit</div>';
+  h += '<div style="font-size:.68rem;color:var(--dim)">' + c.nbBois + ' composant(s) bois' + (c.nbConso ? ' + ' + c.nbConso + ' consommable(s)' : '') + '</div>';
+  h += '</div>';
+  if (!compact) {
+    h += '<table style="margin-bottom:.35rem"><tr><th>Composant</th><th style="text-align:right">Quantité</th><th style="text-align:right">Prix unitaire</th><th style="text-align:right">Montant</th></tr>';
+    c.bois.forEach(function (b) {
+      h += '<tr><td>' + escH(b.libelle) + ' <span style="font-size:.66rem;color:var(--dim)">' + escH(b.type) + '</span></td>' +
+        '<td style="text-align:right">' + fmt(b.qte) + ' × ' + b.volUn.toFixed(5) + ' m³</td>' +
+        '<td style="text-align:right;color:var(--dim)">—</td><td style="text-align:right">' + b.volTot.toFixed(5) + ' m³</td></tr>';
+    });
+    c.conso.forEach(function (x) {
+      h += '<tr><td>' + escH(x.libelle) + ' <span style="font-size:.66rem;color:var(--dim)">' + escH(x.type) + '</span></td>' +
+        '<td style="text-align:right">' + fmt(x.qte) + '</td>' +
+        '<td style="text-align:right">' + (x.pu > 0 ? fmtF(x.pu) : '<span style="color:#b45309">?</span>') + '</td>' +
+        '<td style="text-align:right">' + (x.mont > 0 ? fmtF(x.mont) : '—') + '</td></tr>';
+    });
+    h += '</table>';
+  }
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.4rem">';
+  h += acLigneAc(1, 'Bois', (c.volAchat > 0 ? fmtF(Math.round(c.coutBois)) : '—'), c.volAchat.toFixed(4) + ' m³' + (c.pxM3 > 0 ? ' × ' + fmtF(Math.round(c.pxM3)) + '/m³' : ''), 'var(--text)');
+  h += acLigneAc(1, 'Consommables', (c.coutConso > 0 ? fmtF(Math.round(c.coutConso)) : '—'), c.nbConso + ' référence(s)', 'var(--text)');
+  h += acLigneAc(1, 'Coût matière', c.matiere > 0 ? fmtF(Math.round(c.matiere)) : '—', 'hors main-d’œuvre et structure', 'var(--accent)');
+  h += acLigneAc(1, 'Marge unitaire', c.pv > 0 ? fmtF(Math.round(c.marge)) : '—', c.pv > 0 ? 'prix de vente ' + fmtF(c.pv) : 'renseigne le prix de vente', c.pv <= 0 ? 'var(--dim)' : (c.marge > 0 ? '#16a34a' : '#dc2626'));
+  h += '</div>';
+  if (c.manquants.length) {
+    h += '<div style="font-size:.68rem;color:#b45309;margin-top:.35rem">Il manque : ' + escH(c.manquants.join(', ')) + '. Renseigne ces prix pour un coût complet.</div>';
+  }
+  if (!compact) {
+    h += '<div style="display:flex;gap:.4rem;justify-content:flex-end;margin-top:.5rem">';
+    h += '<button class="btn" onclick="closeModal()">Fermer</button>';
+    h += '<button class="btn btn-accent" onclick="acEnregistrerCoutArticle(\'' + escH(articleId) + '\')"' + (c.matiere > 0 ? '' : ' disabled') + '>💾 Garder ce coût de revient</button>';
+    h += '</div>';
+  } else {
+    h += '<div style="font-size:.66rem;color:var(--dim);margin-top:.3rem">Détail composant par composant : Articles (onglet Articles) → bouton 💰.</div>';
+  }
+  h += '</div>';
+  return h;
+}
+function showCoutArticleAuto(id) {
+  var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:720px">';
+  m += '<h2 style="font-size:1.05rem">Coût de revient — déduit de la nomenclature</h2>';
+  m += acCoutAutoHtml(id, false);
+  m += '</div></div>';
+  document.body.insertAdjacentHTML('beforeend', m);
+}
+function acEnregistrerCoutArticle(id) {
+  var arts = getArticles(), idx = -1, i;
+  for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(id)) { idx = i; break; }
+  if (idx < 0) return;
+  var c = acCoutArticleAuto(id);
+  if (!(c.matiere > 0)) { toast('Aucun coût calculable pour cet article', 'error'); return; }
+  var ancien = parseFloat(arts[idx].prix_revient) || 0;
+  arts[idx].prix_revient = Math.round(c.matiere);
+  arts[idx]._cout_auto = 1;
+  setArticles(arts);
+  toast('Coût de revient de ' + (arts[idx].code || 'l\'article') + ' : ' + fmt(Math.round(c.matiere)) + ' FCFA' +
+    (ancien > 0 ? ' (remplace ' + fmt(ancien) + ')' : ''), 'success');
+  try { closeModal(); } catch (e) {}
+  renderPage();
+}
 function acVolumePalette(articleId, overrideM3) {
   var ov = parseFloat(overrideM3);
   if (!isNaN(ov) && ov > 0) return { m3: ov, source: 'saisie', nom: null };
@@ -1602,6 +1779,7 @@ function render_cout_revient() {
        (c.volUn > 0 ? c.volUn.toFixed(5) + ' m³' : '—') + '</strong> (source : ' +
        ({ nomenclature: 'fiche technique', dimensions: 'dimensions de l\'article', saisie: 'saisie manuelle' }[c.volInfo.source] || '—') + ')' +
        (c.volUn <= 0 ? ' — renseigne la fiche technique de la palette pour un calcul exact.' : '') + '</div>';
+  h += acCoutAutoHtml(c.cfg.articleId, true);
   h += '</div>';
 
   /* ---------- 2. Main-d'oeuvre ---------- */
@@ -8823,21 +9001,30 @@ function render_articles() {
     var plots = comp.filter(function(c) { return c.type === 'PLOT'; });
     var pointes = comp.filter(function(c) { return c.type === 'POINTE'; });
     var cp = comp.filter(function(c) { return c.type === 'CP'; });
-    var marge = (a.prix_vente || 0) - (a.prix_revient || 0);
+    /* Le coût de revient n'est plus une saisie : s'il n'y en a pas, il est
+       déduit de la nomenclature (bois + consommables). Une valeur saisie à la
+       main reste prioritaire. */
+    var auto = acCoutArticleAuto(a.id);
+    var saisie = parseFloat(a.prix_revient) || 0;
+    var cout = saisie > 0 ? saisie : auto.matiere;
+    var estAuto = !(saisie > 0) || !!a._cout_auto;
+    var marge = (parseFloat(a.prix_vente) || 0) - cout;
     h += '<tr>';
     h += '<td style="font-weight:600">' + escH(a.code) + '</td>';
     h += '<td>' + escH(a.designation) + '</td>';
     h += '<td style="font-size:.75rem;color:var(--dim)">' + escH(a.destination || '') + '</td>';
     h += '<td style="text-align:right">' + fmt(a.prix_vente || 0) + ' FCFA</td>';
-    h += '<td style="text-align:right">' + fmt(a.prix_revient || 0) + ' FCFA</td>';
-    h += '<td style="text-align:right;color:var(--accent);font-weight:600">' + fmt(marge) + ' FCFA</td>';
+    h += '<td style="text-align:right">' + (cout > 0 ? fmt(Math.round(cout)) + ' FCFA' : '<span style="color:var(--dim)">—</span>') +
+      (estAuto && cout > 0 ? ' <span style="font-size:.58rem;background:#ecfdf5;color:#047857;border-radius:8px;padding:1px 5px;font-weight:700" title="Déduit de la nomenclature (volume de bois + consommables)">auto</span>' : '') + '</td>';
+    h += '<td style="text-align:right;color:' + (marge > 0 ? 'var(--accent)' : '#dc2626') + ';font-weight:600">' + fmt(Math.round(marge)) + ' FCFA</td>';
     h += '<td style="font-size:.75rem">' + comp.length + ' composant(s)';
     if (lattes.length) h += '<br><span style="color:var(--accent)">-latte(s):' + lattes.length + '</span>';
     if (plots.length) h += ' <span style="color:var(--blue)">plot(s):' + plots.length + '</span>';
     if (pointes.length) h += ' <span style="color:var(--dim)">pointe(s):' + pointes.length + '</span>';
     if (cp.length) h += ' <span style="color:var(--green)">CP:' + cp.length + '</span>';
     h += '</td>';
-    h += '<td>';
+    h += '<td style="white-space:nowrap">';
+    h += '<button class="btn" onclick="showCoutArticleAuto(\'' + a.id + '\')" style="font-size:.7rem" title="Coût de revient déduit de la nomenclature" aria-label="Coût de revient">💰</button> ';
     h += '<button class="btn" onclick="showArticleDetail(\'' + a.id + '\')" style="font-size:.7rem" title="Voir" aria-label="Voir">👁️</button> ';
     h += '<button class="btn" onclick="editArticle(\'' + a.id + '\')" style="font-size:.7rem" title="Modifier" aria-label="Modifier">✏️</button> ';
     h += '<button class="btn btn-red" onclick="deleteArticle(\'' + a.id + '\')" style="font-size:.7rem" title="Supprimer" aria-label="Supprimer">🗑️</button>';
