@@ -1782,6 +1782,148 @@ function controles() {
   });
 
   r.push({
+    nom: 'Achat matiere premiere : le montant global de la ligne est P.U/m3 x volume, pas P.U x nb pieces',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* 20 pieces de 50 x 20 x 5 cm = 0,005 m3 chacune, soit 0,1 m3,
+         au prix de 40 000 F le m3. */
+      _tempAchatItems = [];
+      var setv = function(id, v) { var el = document.getElementById(id); if (el) el.value = v; };
+      setv('ai_qte', 20); setv('ai_long', 50); setv('ai_larg', 20); setv('ai_epais', 5);
+      setv('ai_essence', 'AY'); setv('ai_type', 'Rouge'); setv('ai_pu', 40000);
+      calcItemVolLive();
+      var vol = parseFloat((document.getElementById('ai_vol') || {}).value || 0);
+      addAchatItemLine('raw-materials');
+      var it = _tempAchatItems[0] || {};
+      /* 0,1 m3 x 40000 = 4 000 F. L'ancien calcul donnait
+         20 x 40000 = 800 000 F, soit un prix du m3 de 8 millions. */
+      var okVol = Math.abs(vol - 0.1) < 0.0001;
+      var okBase = it.prix_base === 'm3';
+      var okTot = Math.abs((parseFloat(it.total_price) || 0) - 4000) < 1;
+      (okVol && okBase && okTot)
+        ? 'OK : ' + it.total_price + ' F pour ' + vol.toFixed(4) + ' m3'
+        : 'ECHEC vol=' + vol + ' base=' + it.prix_base + ' total=' + it.total_price
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Achat matiere premiere : le CUMP utilise P.U x volume (le prix du m3 n\'est plus gonfle)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* 10 pieces, 0,25 m3 total, 40 000 F le m3 => 10 000 F reels.
+         total_price存量ait 10 x 40000 = 400 000 (pieces x prix). */
+      p.achats = [{
+        id: 991, category: 'raw-materials', date: new Date().toISOString().slice(0, 10),
+        reference: 'BL-M3', fournisseur: 'F', items: [{
+          colis_number: 'C1', quantity: 10, volume: 0.25, essence: 'AY',
+          unit_price: 40000, total_price: 400000
+        }], item_count: 1, total_volume: 0.25, montant_total: 400000
+      }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      window._acTout = true;
+      var c = acCump('', '');
+      var px = c.prixM3;
+      /* 40000 F/m3 attendu. Avec le volume on recalcule 0,25 x 40000 = 10000 F,
+         donc 10000 / 0,25 = 40000 F/m3. L'ancien code divisait 400000 par
+         0,25 et obtenait 1 600 000 F/m3. */
+      (Math.abs(px - 40000) < 1)
+        ? 'OK : prix du m3 = ' + px
+        : 'ECHEC : prix du m3 = ' + px
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Main-d\'oeuvre indirecte : poste de la campagne calcule et reporte dans l\'impression',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var poste = AC_POSTES.filter(function(p) { return p.cle === 'indirect'; })[0];
+      if (!poste) { throw new Error('ECHEC : poste indirect absent de AC_POSTES'); }
+      setSection('costLabor', { articleId: 'a1', quantite: 100, jours: 10,
+        monteur: { nb: 2, coutJour: 2000 }, machiniste: { nb: 1, coutJour: 2500 },
+        manutentionnaire: { nb: 1, coutJour: 1800 }, indirect: { nb: 2, coutJour: 3000 } });
+      window._acTout = true;
+      var c = acCalcul('', '');
+      var ind = c.mo.postes.filter(function(p) { return p.cle === 'indirect'; })[0];
+      var okInd = ind && ind.montant === 2 * 10 * 3000;
+      /* La directe ne doit PAS englober l'indirecte. */
+      var directe = 0;
+      c.mo.postes.forEach(function(p) { if (p.cle !== 'indirect') directe += p.montant; });
+      var okSep = (directe === 2 * 10 * 2000 + 1 * 10 * 2500 + 1 * 10 * 1800);
+      var okTotal = Math.abs(c.mo.total - (ind ? ind.montant : 0) - directe) < 0.01;
+      (okInd && okSep && okTotal)
+        ? 'OK : indirect ' + (ind ? ind.montant : 0) + ' F, directe ' + directe + ' F'
+        : 'ECHEC ind=' + JSON.stringify(ind) + ' directe=' + directe + ' total=' + c.mo.total
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Cout de revient deduit : les frais fixes (main-d\'oeuvre indirecte) s\'ajoutent au cout de matiere',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var avant = acCoutArticleAuto('a1');
+      acSetFraisArticle('a1', 'main_oeuvre', 500);
+      acSetFraisArticle('a1', 'autre', 100);
+      var apres = acCoutArticleAuto('a1');
+      var a = getArticles().filter(function(x) { return x.id === 'a1'; })[0];
+      var okMatiere = Math.abs(apres.matiere - avant.matiere) < 0.001;
+      var okTotal = Math.abs(apres.total - (apres.matiere + 600)) < 0.01;
+      var okPersiste = a && a.frais_fixes && a.frais_fixes.main_oeuvre === 500 && a.frais_fixes.autre === 100;
+      var okMarge = Math.abs(apres.marge - (45000 - apres.total)) < 0.01;
+      (okMatiere && okTotal && okPersiste && okMarge)
+        ? 'OK : matiere ' + apres.matiere.toFixed(0) + ' + frais 600 = ' + apres.total.toFixed(0)
+        : 'ECHEC matiere=' + apres.matiere + ' total=' + apres.total + ' marge=' + apres.marge
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Enregistrement du cout deduit : il porte la matiere ET les frais fixes',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      acSetFraisArticle('a1', 'main_oeuvre', 800);
+      acEnregistrerCoutArticle('a1');
+      var a = getArticles().filter(function(x) { return x.id === 'a1'; })[0];
+      var attendu = Math.round(acCoutArticleAuto('a1').total);
+      (a && a.prix_revient === attendu && attendu > 1787)
+        ? 'OK : prix_revient = ' + a.prix_revient + ' (matiere 1787 + indirecte 800)'
+        : 'ECHEC prix_revient=' + (a && a.prix_revient) + ' attendu=' + attendu
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
+    nom: 'Impression du cout de revient : les deux documents se construisent (fenetre et page)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var captured = [];
+      window.open = function () { return { document: { write: function (h) { captured.push(h); }, close: function () {} }, print: function () {} }; };
+      window._acTout = true;
+      setSection('costLabor', { articleId: 'a1', quantite: 100, jours: 10,
+        monteur: { nb: 2, coutJour: 2000 }, machiniste: { nb: 1, coutJour: 2500 },
+        manutentionnaire: { nb: 1, coutJour: 1800 }, indirect: { nb: 2, coutJour: 3000 } });
+      printCoutRevient();
+      printCoutArticle('a1');
+      var un = captured[0] || '', deux = captured[1] || '';
+      var okUn = (un.indexOf('CO\\u00dbT DE REVIENT TOTAL') !== -1) && (un.indexOf('Main-d\\u2019\\u0153uvre indirecte') !== -1)
+        && (un.indexOf('MATI\\u00c8RE PREMI\\u00c8RE') !== -1) && (un.indexOf('CHARGES DE STRUCTURE') !== -1);
+      var okDeux = (deux.indexOf('CO\\u00dbT DE REVIENT UNITAIRE') !== -1)
+        && (deux.indexOf('FRAIS FIXES PAR UNIT') !== -1) && (deux.indexOf('Latte') !== -1);
+      var okDoc = (un.indexOf('<!DOCTYPE html>') === 0) && (deux.indexOf('@page') !== -1);
+      (captured.length === 2 && okUn && okDeux && okDoc)
+        ? 'OK : campagne + article imprimables, indirecte presente'
+        : 'ECHEC docs=' + captured.length + ' un=' + okUn + ' deux=' + okDeux + ' doc=' + okDoc
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+r.push({
     nom: 'Cout de revient deduit de la nomenclature : bois (volume x chute x prix/m3) + consommables',
     app: 'production.html', store: storeRealiste,
     code: `

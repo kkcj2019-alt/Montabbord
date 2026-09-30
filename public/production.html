@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-103';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-26-104';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -1448,6 +1448,31 @@ function acPUConsommable(code) {
   }
   return 0;
 }
+/* Frais fixes par unite rattaches a un article : ce que la nomenclature ne peut
+   pas deduire (main-d'oeuvre indirecte, quotes, emballage, deplacement). Valeurs
+   positives = frais, negatives = rabais. */
+function acFraisArticleAuto(articleId) {
+  var arts = getArticles(), a = null, i;
+  for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(articleId)) { a = arts[i]; break; }
+  var g = { mainOeuvre: 0, autre: 0, sousTotal: 0, article: a };
+  var l = a && a.frais_fixes ? a.frais_fixes : null;
+  if (l && typeof l === 'object') {
+    g.mainOeuvre = parseFloat(l.main_oeuvre) || 0;
+    g.autre = parseFloat(l.autre) || 0;
+  }
+  g.sousTotal = g.mainOeuvre + g.autre;
+  return g;
+}
+function acSetFraisArticle(articleId, champ, valeur) {
+  var arts = getArticles(), idx = -1, i;
+  for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(articleId)) { idx = i; break; }
+  if (idx < 0) return;
+  var a = arts[idx];
+  if (!a.frais_fixes || typeof a.frais_fixes !== 'object') a.frais_fixes = {};
+  a.frais_fixes[champ] = parseFloat(valeur) || 0;
+  setArticles(arts);
+  renderPage();
+}
 function acCoutArticleAuto(articleId) {
   var arts = getArticles(), art = null, i;
   for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(articleId)) { art = arts[i]; break; }
@@ -1481,13 +1506,18 @@ function acCoutArticleAuto(articleId) {
   var volAchat = volNet * chute;
   coutBois = volAchat * pxM3;
   var matiere = coutBois + coutConso;
+  /* Frais fixes par unite : ils ne se deduisent pas de la nomenclature, ils se
+     saisissent une fois pour toutes (ils ne changent pas a chaque campagne). */
+  var frais = acFraisArticleAuto(articleId);
+  var total = matiere + frais.sousTotal;
   var pv = parseFloat(art && art.prix_vente) || 0;
   if (!(pxM3 > 0) && volNet > 0) manquants.push('le prix du m³ de bois (aucun achat de matière première)');
   return {
     art: art, comps: comps, bois: bois, conso: conso, volNet: volNet, volAchat: volAchat,
     chute: chute, pxM3: pxM3, coutBois: coutBois, coutConso: coutConso, matiere: matiere,
+    frais: frais, total: total,
     nbBois: bois.length, nbConso: conso.length, manquants: manquants, pv: pv,
-    marge: pv > 0 ? pv - matiere : 0, taux: pv > 0 ? ((pv - matiere) / pv * 100) : 0
+    marge: pv > 0 ? pv - total : 0, taux: pv > 0 ? ((pv - total) / pv * 100) : 0
   };
 }
 /* Bloc html du coût déduit. compact = dans la page Coût de revient. */
@@ -1519,11 +1549,21 @@ function acCoutAutoHtml(articleId, compact) {
         '<td style="text-align:right">' + (x.mont > 0 ? fmtF(x.mont) : '—') + '</td></tr>';
     });
     h += '</table>';
+    /* Les frais fixes ne sortent pas de la nomenclature : ils se disent, une
+       fois, en FCFA par unité. C'est là que vit la main-d'oeuvre indirecte. */
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.4rem;margin:.45rem 0">';
+    h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block" title="Salaires indirects rapportés à une palette : encadrement, magasin, entretien, énergie">Main-d’œuvre indirecte (F/unité)</label>' +
+      '<input type="number" id="acFMoArt" value="' + (c.frais.mainOeuvre || 0) + '" onchange="acSetFraisArticle(\'' + escH(articleId) + '\',\'main_oeuvre\',this.value);this.blur()" style="width:100%;padding:.32rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.78rem;text-align:right"></div>';
+    h += '<div><label style="font-size:.64rem;font-weight:700;color:var(--dim);display:block" title="Emballage, déplacement, frais bancaires, pertes">Autres frais fixes (F/unité)</label>' +
+      '<input type="number" id="acFAutArt" value="' + (c.frais.autre || 0) + '" onchange="acSetFraisArticle(\'' + escH(articleId) + '\',\'autre\',this.value);this.blur()" style="width:100%;padding:.32rem .45rem;border:1px solid var(--border);border-radius:7px;font-size:.78rem;text-align:right"></div>';
+    h += '</div>';
   }
   h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.4rem">';
   h += acLigneAc(1, 'Bois', (c.volAchat > 0 ? fmtF(Math.round(c.coutBois)) : '—'), c.volAchat.toFixed(4) + ' m³' + (c.pxM3 > 0 ? ' × ' + fmtF(Math.round(c.pxM3)) + '/m³' : ''), 'var(--text)');
   h += acLigneAc(1, 'Consommables', (c.coutConso > 0 ? fmtF(Math.round(c.coutConso)) : '—'), c.nbConso + ' référence(s)', 'var(--text)');
-  h += acLigneAc(1, 'Coût matière', c.matiere > 0 ? fmtF(Math.round(c.matiere)) : '—', 'hors main-d’œuvre et structure', 'var(--accent)');
+  h += acLigneAc(1, 'Coût matière', c.matiere > 0 ? fmtF(Math.round(c.matiere)) : '—', 'bois + consommables', 'var(--text)');
+  h += acLigneAc(1, 'Frais fixes', c.frais.sousTotal !== 0 ? fmtF(Math.round(c.frais.sousTotal)) : '—', 'main-d’œuvre indirecte + autres', 'var(--text)');
+  h += acLigneAc(1, 'Coût de revient', c.total > 0 ? fmtF(Math.round(c.total)) : '—', 'par unité, tout compris', 'var(--accent)');
   h += acLigneAc(1, 'Marge unitaire', c.pv > 0 ? fmtF(Math.round(c.marge)) : '—', c.pv > 0 ? 'prix de vente ' + fmtF(c.pv) : 'renseigne le prix de vente', c.pv <= 0 ? 'var(--dim)' : (c.marge > 0 ? '#16a34a' : '#dc2626'));
   h += '</div>';
   if (c.manquants.length) {
@@ -1542,23 +1582,201 @@ function acCoutAutoHtml(articleId, compact) {
 }
 function showCoutArticleAuto(id) {
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:720px">';
+  m += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">';
   m += '<h2 style="font-size:1.05rem">Coût de revient — déduit de la nomenclature</h2>';
+  m += '<button class="btn btn-sm" onclick="printCoutArticle(\'' + escH(id) + '\')" title="Imprimer ou enregistrer ce calcul en PDF">🖨️ Imprimer / PDF</button>';
+  m += '</div>';
   m += acCoutAutoHtml(id, false);
   m += '</div></div>';
   document.body.insertAdjacentHTML('beforeend', m);
+}
+/* ---------- impression du calcul ---------- */
+function acOuvre(html, titre) {
+  var w = window.open('', '_blank');
+  if (!w) { toast('Le bloqueur de fenetres a empêche l\'ouverture', 'error'); return false; }
+  w.document.write(html);
+  w.document.close();
+  w.onload = function () { w.print(); };
+  return true;
+}
+function acCssImpression(titre) {
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escH(titre) + '</title>' +
+    '<style>@page{size:A4;margin:14mm}' +
+    'body{font-family:Arial,Helvetica,sans-serif;margin:0;font-size:11px;color:#0f172a}' +
+    'table{width:100%;border-collapse:collapse;margin-bottom:.8rem}' +
+    'th,td{border:1px solid #94a3b8;padding:4px 6px;font-size:10px}' +
+    'th{background:#f1f5f9;text-align:left}' +
+    'tr.total td{font-weight:bold;background:#f8fafc}' +
+    '.section{font-weight:bold;font-size:12px;border-bottom:2px solid #0f172a;padding-bottom:2px;margin:1rem 0 .5rem}' +
+    '.header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #0f172a;padding-bottom:.5rem;margin-bottom:1rem}' +
+    '.header h1{margin:0;font-size:17px}' +
+    '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.4rem;margin-bottom:.8rem}' +
+    '.card{border:1px solid #94a3b8;border-radius:6px;padding:.4rem .5rem}' +
+    '.card .lab{font-size:8.5px;color:#64748b;font-weight:bold;text-transform:uppercase}' +
+    '.card .val{font-size:14px;font-weight:bold}' +
+    '.card .sub{font-size:8.5px;color:#64748b}' +
+    '.note{font-size:9.5px;color:#64748b;margin-bottom:.8rem}' +
+    '.warn{background:#fffbeb;border:1px solid #fcd34d;padding:.4rem .6rem;font-size:10px;margin-bottom:.6rem}' +
+    '.ok{background:#f0fdf4;border:1px solid #86efac;padding:.4rem .6rem;font-size:10px;margin-bottom:.6rem}' +
+    'tr.avoid{page-break-inside:avoid}</style></head><body>';
+}
+function acCarteImpression(lab, val, sub, coul) {
+  return '<div class="card"><div class="lab">' + escH(lab) + '</div>' +
+    '<div class="val"' + (coul ? ' style="color:' + coul + '"' : '') + '>' + val + '</div>' +
+    (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
+}
+function acPiedImpression() {
+  return '<div style="margin-top:1.2rem;border-top:1px solid #cbd5e1;padding-top:.4rem;font-size:8.5px;color:#94a3b8;display:flex;justify-content:space-between">' +
+    '<span>Document genere par Exploitation — Montabbord</span>' +
+    '<span>' + escH(acJour(new Date()) ? fmtD(acJour(new Date())) : '') + '</span></div></body></html>';
+}
+/* Calcul deduit d'un seul article, sur une page. */
+function printCoutArticle(id) {
+  var c = acCoutArticleAuto(id);
+  if (!c.comps.length) { toast('Aucune nomenclature : rien a imprimer', 'error'); return; }
+  var a = c.art || {};
+  var nomArt = (a.code ? a.code + ' — ' : '') + (a.designation || 'Article');
+  var h = acCssImpression('Cout de revient ' + nomArt);
+  h += '<div class="header"><h1>Coût de revient — ' + escH(nomArt) + '</h1>' +
+    '<div style="text-align:right;font-size:9.5px">Détail par composant<br>Unité : 1 ' + escH(a.code || 'unité') + '</div></div>';
+  h += '<div class="grid">';
+  h += acCarteImpression('Volume de bois', c.volNet.toFixed(4) + ' m³', 'net, hors chute');
+  h += acCarteImpression('Volume acheté', c.volAchat.toFixed(4) + ' m³', 'chute ' + Math.round((c.chute - 1) * 100) + ' %');
+  h += acCarteImpression('Prix du bois', c.pxM3 > 0 ? fmtF(Math.round(c.pxM3)) + '/m³' : '—', c.pxM3 > 0 ? 'prix d\'achat moyen' : 'non renseigné');
+  h += acCarteImpression('Prix de vente', c.pv > 0 ? fmtF(Math.round(c.pv)) : '—', c.pv > 0 ? 'par unité' : 'non renseigné');
+  h += '</div>';
+  h += '<div class="section">1 · MATIÈRE PREMIÈRE (déduite de la nomenclature)</div>';
+  h += '<table><tr><th>Composant</th><th>Type</th><th style="text-align:right">Quantité</th><th style="text-align:right">Prix unitaire</th><th style="text-align:right">Montant</th></tr>';
+  c.bois.forEach(function (b) {
+    h += '<tr class="avoid"><td>' + escH(b.libelle) + '</td><td>' + escH(b.type) + '</td>' +
+      '<td style="text-align:right">' + fmt(b.qte) + '</td>' +
+      '<td style="text-align:right">' + b.volUn.toFixed(5) + ' m³</td>' +
+      '<td style="text-align:right">' + b.volTot.toFixed(5) + ' m³</td></tr>';
+  });
+  c.conso.forEach(function (x) {
+    h += '<tr class="avoid"><td>' + escH(x.libelle) + '</td><td>' + escH(x.type) + '</td>' +
+      '<td style="text-align:right">' + fmt(x.qte) + '</td>' +
+      '<td style="text-align:right">' + (x.pu > 0 ? fmtF(x.pu) : '?') + '</td>' +
+      '<td style="text-align:right">' + (x.mont > 0 ? fmtF(x.mont) : '—') + '</td></tr>';
+  });
+  h += '<tr class="total"><td colspan="2">Matière première</td>' +
+    '<td style="text-align:right">' + c.volAchat.toFixed(4) + ' m³</td>' +
+    '<td style="text-align:right">' + (c.pxM3 > 0 ? fmtF(Math.round(c.pxM3)) + '/m³' : '—') + '</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.matiere)) + '</td></tr>';
+  h += '</table>';
+  h += '<div class="section">2 · FRAIS FIXES PAR UNITÉ</div>';
+  h += '<table><tr><th>Poste</th><th style="text-align:right">Par unité</th><th>Origine</th></tr>';
+  h += '<tr><td>Matière première (bois + consommables)</td><td style="text-align:right">' + fmtF(Math.round(c.matiere)) + '</td><td>déduit</td></tr>';
+  h += '<tr><td>Main-d’œuvre indirecte</td><td style="text-align:right">' + fmtF(Math.round(c.frais.mainOeuvre)) + '</td><td>saisi (encadrement, magasin, entretien)</td></tr>';
+  h += '<tr><td>Autres frais fixes</td><td style="text-align:right">' + fmtF(Math.round(c.frais.autre)) + '</td><td>saisi (emballage, déplacement…)</td></tr>';
+  h += '<tr class="total"><td>COÛT DE REVIENT UNITAIRE</td><td style="text-align:right">' + fmtF(Math.round(c.total)) + '</td><td>tout compris</td></tr>';
+  h += '</table>';
+  h += '<div class="section">3 · RÉSULTAT</div>';
+  h += '<div class="grid">';
+  h += acCarteImpression('Coût de revient', fmtF(Math.round(c.total)), 'par unité', '#ea580c');
+  h += acCarteImpression('Prix de vente', c.pv > 0 ? fmtF(Math.round(c.pv)) : '—', c.pv > 0 ? 'par unité' : 'non renseigné');
+  h += acCarteImpression('Marge unitaire', c.pv > 0 ? fmtF(Math.round(c.marge)) : '—', c.pv > 0 ? c.taux.toFixed(1) + ' % du prix de vente' : '', c.pv <= 0 ? '#64748b' : (c.marge > 0 ? '#16a34a' : '#dc2626'));
+  h += '</div>';
+  if (c.pv > 0) {
+    h += c.marge > 0
+      ? '<div class="ok">Marge de <strong>' + fmtF(Math.round(c.marge)) + '</strong> par unité (' + c.taux.toFixed(1) + ' %).</div>'
+      : '<div class="warn">À ' + fmtF(c.pv) + ' la vente, la perte est de <strong>' + fmtF(Math.round(-c.marge)) + '</strong> par unité.</div>';
+  }
+  if (c.manquants.length) h += '<div class="warn">Calcul incomplet — il manque : ' + escH(c.manquants.join(', ')) + '.</div>';
+  h += '<div class="note">Coût matière déduit de la nomenclature de l\'article ; main-d’œuvre directe et charges de structure de la campagne : voir la page Coût de revient.</div>';
+  h += acPiedImpression();
+  acOuvre(h, 'Cout de revient ' + nomArt);
+}
+/* Campagne complete : main-d'oeuvre directe, indirecte, structure, marge. */
+function printCoutRevient() {
+  var p = acPeriode();
+  var c = acCalcul(p.du, p.au);
+  var nomArt = (c.art ? (c.art.code ? c.art.code + ' — ' : '') + (c.art.designation || '') : 'Article non choisi');
+  var h = acCssImpression('Cout de revient ' + nomArt);
+  h += '<div class="header"><h1>Coût de revient — campagne</h1>' +
+    '<div style="text-align:right;font-size:9.5px">' + escH(nomArt) + '<br>' +
+    escH(acPeriodeLabel(p)) + '<br>Édité le ' + escH(fmtD(today())) + '</div></div>';
+  h += '<div class="grid">';
+  h += acCarteImpression('Quantité fabriquée', fmt(c.Q) + ' palette(s)', c.J > 0 ? 'en ' + c.J + ' jour(s)' : '');
+  h += acCarteImpression('Coût de revient unitaire', c.crUnitaire > 0 ? fmtF(Math.round(c.crUnitaire)) : '—', 'par palette');
+  h += acCarteImpression('Coût au m³', c.crM3 > 0 ? fmtF(Math.round(c.crM3)) : '—', 'par m³ produit');
+  h += acCarteImpression('Prix de vente', c.pv > 0 ? fmtF(Math.round(c.pv)) : '—', 'par palette');
+  h += acCarteImpression('Marge', c.pv > 0 ? fmtF(Math.round(c.marge)) : '—', c.pv > 0 ? c.tauxMarge.toFixed(1) + ' %' : '', c.pv <= 0 ? '#64748b' : (c.marge > 0 ? '#16a34a' : '#dc2626'));
+  h += acCarteImpression('Résultat de campagne', c.Q > 0 ? fmtF(Math.round(c.resultat)) : '—', fmt(c.Q) + ' × ' + fmtF(c.pv));
+  h += '</div>';
+  h += '<div class="section">1 · MATIÈRE PREMIÈRE</div>';
+  h += '<table><tr><th>Poste</th><th style="text-align:right">Quantité</th><th style="text-align:right">Prix unitaire</th><th style="text-align:right">Montant</th><th style="text-align:right">Par palette</th></tr>';
+  function lg(lib, qte, pu, mont) {
+    var pp = c.Q > 0 ? mont / c.Q : 0;
+    return '<tr class="avoid"><td>' + lib + '</td><td style="text-align:right">' + qte + '</td>' +
+      '<td style="text-align:right">' + pu + '</td>' +
+      '<td style="text-align:right">' + (mont > 0 ? fmtF(Math.round(mont)) : '—') + '</td>' +
+      '<td style="text-align:right">' + (pp > 0 ? fmtF(Math.round(pp)) : '—') + '</td></tr>';
+  }
+  h += lg('Bois <span style="font-size:8.5px;color:#64748b">(volume nomenclature × chute)</span>',
+    c.volAchat.toFixed(3) + ' m³', c.pxM3 > 0 ? fmtF(Math.round(c.pxM3)) + '/m³' : '—', c.coutBois);
+  h += lg('Consommables — pointes', c.nbPointes > 0 ? fmt(c.nbPointes) + ' pointe(s)' : '—',
+    c.nom.pointePU > 0 ? fmtF(c.nom.pointePU) : '—', c.coutPointes);
+  h += '<tr class="total"><td colspan="3">Matière première</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.coutVar)) + '</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.Q > 0 ? c.coutVar / c.Q : 0)) + '</td></tr>';
+  h += '</table>';
+  h += '<div class="section">2 · MAIN-D\'ŒUVRE</div>';
+  h += '<table><tr><th>Poste</th><th style="text-align:right">Effectif</th><th style="text-align:right">Jours</th><th style="text-align:right">Coût journalier</th><th style="text-align:right">Montant</th><th style="text-align:right">Par palette</th></tr>';
+  c.mo.postes.forEach(function (mp) {
+    var ind = mp.cle === 'indirect';
+    h += '<tr class="avoid"' + (ind ? ' style="background:#f8fafc"' : '') + '><td>' + escH(mp.libelle) +
+      (ind ? ' <span style="font-size:8.5px;color:#64748b">(indirecte)</span>' : '') + '</td>' +
+      '<td style="text-align:right">' + fmt(mp.nb) + '</td><td style="text-align:right">' + mp.jours + '</td>' +
+      '<td style="text-align:right">' + (mp.coutJour > 0 ? fmtF(Math.round(mp.coutJour)) : '—') + '</td>' +
+      '<td style="text-align:right">' + (mp.montant > 0 ? fmtF(Math.round(mp.montant)) : '—') + '</td>' +
+      '<td style="text-align:right">' + (c.Q > 0 && mp.montant > 0 ? fmtF(Math.round(mp.montant / c.Q)) : '—') + '</td></tr>';
+  });
+  /* L'indirecte est isolee : elle ne fait pas partie de la directe. */
+  var moInd = 0;
+  for (var mi = 0; mi < c.mo.postes.length; mi++) if (c.mo.postes[mi].cle === 'indirect') moInd = c.mo.postes[mi].montant;
+  var moDirecte = c.mo.total - moInd;
+  h += '<tr class="total"><td colspan="4">Main-d\'œuvre directe</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(moDirecte)) + '</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.Q > 0 ? moDirecte / c.Q : 0)) + '</td></tr>';
+  h += '<tr class="total"><td colspan="4">Main-d\'œuvre indirecte</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(moInd)) + '</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.Q > 0 ? moInd / c.Q : 0)) + '</td></tr>';
+  h += '</table>';
+  h += '<div class="section">3 · CHARGES DE STRUCTURE ET TOTAL</div>';
+  h += '<table><tr><th>Poste de coût</th><th style="text-align:right">Quantité</th><th style="text-align:right">Prix unitaire</th><th style="text-align:right">Montant</th><th style="text-align:right">Par palette</th><th style="text-align:right">% du total</th></tr>';
+  h += lg('Charges de structure', c.volNet > 0 ? c.volNet.toFixed(3) + ' m³' : '—',
+    c.structM3 > 0 ? fmtF(Math.round(c.structM3)) + '/m³' : '—', c.coutStruct).replace(/<\/tr>$/, '');
+  var part = c.total > 0 ? (c.coutStruct / c.total * 100) : 0;
+  h += '<td style="text-align:right">' + (part > 0 ? part.toFixed(1) + ' %' : '—') + '</td></tr>';
+  h += '<tr class="total"><td>COÛT DE REVIENT TOTAL</td><td style="text-align:right">' + fmt(c.Q) + ' palette(s)</td>' +
+    '<td style="text-align:right">' + (c.crUnitaire > 0 ? fmtF(Math.round(c.crUnitaire)) + '/palette' : '—') + '</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.total)) + '</td>' +
+    '<td style="text-align:right">' + fmtF(Math.round(c.crUnitaire)) + '</td><td>100 %</td></tr>';
+  h += '</table>';
+  if (c.pv > 0) {
+    h += c.marge >= 0
+      ? '<div class="ok">Marge de <strong>' + fmtF(Math.round(c.marge)) + '</strong> par palette (' + c.tauxMarge.toFixed(1) + ' %), soit <strong>' + fmtF(Math.round(c.resultat)) + '</strong> sur la campagne.</div>'
+      : '<div class="warn">À ' + fmtF(c.pv) + ' la palette, la perte est de <strong>' + fmtF(Math.round(-c.marge)) + '</strong> par unité.</div>';
+  }
+  h += '<div class="note">Matière première = coût variable (proportionnel à la quantité) ; main-d\'œuvre et charges de structure = coûts fixes de la campagne, répartis sur les ' +
+    fmt(c.Q) + ' palettes produites.</div>';
+  h += acPiedImpression();
+  acOuvre(h, 'Cout de revient ' + nomArt);
 }
 function acEnregistrerCoutArticle(id) {
   var arts = getArticles(), idx = -1, i;
   for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(id)) { idx = i; break; }
   if (idx < 0) return;
   var c = acCoutArticleAuto(id);
-  if (!(c.matiere > 0)) { toast('Aucun coût calculable pour cet article', 'error'); return; }
+  if (!(c.total > 0)) { toast('Aucun coût calculable pour cet article', 'error'); return; }
   var ancien = parseFloat(arts[idx].prix_revient) || 0;
-  arts[idx].prix_revient = Math.round(c.matiere);
+  arts[idx].prix_revient = Math.round(c.total);
   arts[idx]._cout_auto = 1;
   setArticles(arts);
-  toast('Coût de revient de ' + (arts[idx].code || 'l\'article') + ' : ' + fmt(Math.round(c.matiere)) + ' FCFA' +
-    (ancien > 0 ? ' (remplace ' + fmt(ancien) + ')' : ''), 'success');
+  toast('Coût de revient de ' + (arts[idx].code || 'l\'article') + ' : ' + fmt(Math.round(c.total)) + ' FCFA' +
+    (c.frais.sousTotal !== 0 ? ' (dont ' + fmt(Math.round(c.frais.sousTotal)) + ' de frais fixes)' : '') +
+    (ancien > 0 ? ' — remplace ' + fmt(ancien) : ''), 'success');
   try { closeModal(); } catch (e) {}
   renderPage();
 }
@@ -1577,12 +1795,13 @@ function acVolumePalette(articleId, overrideM3) {
 var AC_POSTES = [
   { cle: 'monteur', libelle: 'Montage (assemblage)', aide: 'ceux qui montent et clouent les palettes' },
   { cle: 'machiniste', libelle: 'Machiniste (débit / sciage)', aide: 'débit des lattes, plots, chevrons' },
-  { cle: 'manutentionnaire', libelle: 'Manutentionnaire', aide: 'stock, approvisionnement, chargement' }
+  { cle: 'manutentionnaire', libelle: 'Manutentionnaire', aide: 'stock, approvisionnement, chargement' },
+  { cle: 'indirect', libelle: 'Main-d’œuvre indirecte', aide: 'encadrement, magasin, entretien, énergie du workshop : elle ne se voit pas sur la palette mais elle se paie' }
 ];
 function acLaborCfg() {
   var l = getSection('costLabor', {});
   if (!l || typeof l !== 'object' || Array.isArray(l)) l = {};
-  var defNb = { monteur: 2, machiniste: 1, manutentionnaire: 1 };
+  var defNb = { monteur: 2, machiniste: 1, manutentionnaire: 1, indirect: 1 };
   for (var i = 0; i < AC_POSTES.length; i++) {
     var k = AC_POSTES[i].cle;
     if (!l[k] || typeof l[k] !== 'object' || Array.isArray(l[k])) l[k] = {};
@@ -1723,6 +1942,7 @@ function render_cout_revient() {
   h += '<button class="btn btn-sm" onclick="acRaccourci(\'trimestre\')">3 mois</button>';
   h += '<button class="btn btn-sm" onclick="acRaccourci(\'annee\')">12 mois</button>';
   h += '</div>';
+  h += '<button class="btn btn-sm" onclick="printCoutRevient()" title="Imprimer ou enregistrer ce calcul en PDF">🖨️ Imprimer / PDF</button>';
   h += '<div style="flex:1"></div><div style="font-size:.7rem;color:var(--dim)">Période : <strong>' + escH(acPeriodeLabel(p)) + '</strong> (sert au prix du bois et aux charges de structure)</div>';
   h += '</div></div>';
   h += '<div class="card" style="padding:.6rem;margin-bottom:.5rem"><div style="font-size:.78rem;color:var(--dim)">' +
@@ -1796,7 +2016,7 @@ function render_cout_revient() {
   }
   h += '<tr style="background:#f8fafc;font-weight:800"><td colspan="3">MAIN-D’ŒUVRE DIRECTE TOTALE</td><td style="text-align:right">' + (c.mo.total > 0 ? fmtF(c.mo.total) : '—') + '</td></tr>';
   h += '</tbody></table>';
-  h += '<div style="font-size:.68rem;color:var(--dim);margin-top:.3rem">Coût journalier = salaire du poste pour une journée de travail, charges et primes comprises.</div>';
+  h += '<div style="font-size:.68rem;color:var(--dim);margin-top:.3rem">Coût journalier = salaire du poste pour une journée de travail, charges et primes comprises. La main-d’œuvre <strong>indirecte</strong> (encadrement, magasin, entretien) ne se voit pas sur une palette : elle est répartis ici sur toutes les palettes de la campagne.</div>';
   h += '</div>';
 
   /* ---------- 3. Prix ---------- */
@@ -1846,9 +2066,11 @@ function render_cout_revient() {
   }
   h += lg('Consommables — pointes', c.nbPointes > 0 ? fmt(c.nbPointes) + ' pointe(s)' : '—',
     c.nom.pointePU > 0 ? fmtF(c.nom.pointePU) : '—', c.coutPointes);
+  /* La main-d'oeuvre indirecte sort du lot des autres postes : elle n'est pas
+     dans la main-d'oeuvre directe, et c'est ce que l'utilisateur a demande. */
   for (var m2 = 0; m2 < c.mo.postes.length; m2++) {
     var mp = c.mo.postes[m2];
-    h += lg('Main-d’œuvre — ' + escH(mp.libelle),
+    h += lg('Main-d’œuvre — ' + escH(mp.libelle) + (mp.cle === 'indirect' ? ' <span style="font-size:.66rem;color:var(--dim)">(indirecte)</span>' : ''),
       fmt(mp.nb) + ' pers. × ' + mp.jours + ' j', mp.coutJour > 0 ? fmtF(mp.coutJour) + '/j' : '—', mp.montant);
   }
   h += lg('Charges de structure', c.volNet > 0 ? c.volNet.toFixed(3) + ' m³' : '—',
@@ -2005,6 +2227,20 @@ function acPeriodeLabel(p) {
 }
 
 /* ---------------- CUMP du bois (achats matiere premiere) ---------------- */
+/* Montant reellement paye pour une ligne de bois. Le prix du bois s'entend
+   AU M³ : le montant vaut donc P.U x volume. Les BL saisis avant la
+   correction avaient « nombre de pieces x P.U », d'ou un prix du m³ gonfle
+   d'un facteur pieces/m³. On recalcule des que le volume est connu, sinon on
+   se rabat sur le montant stocke. */
+function acMontantBois(it) {
+  if (!it) return 0;
+  var vol = parseFloat(it.volume) || 0;
+  var pu = parseFloat(it.unit_price) || 0;
+  if (vol > 0 && pu > 0) return vol * pu;
+  var mt = parseFloat(it.total_price) || 0;
+  if (!mt && pu > 0) mt = pu * (parseFloat(it.quantity) || 0);
+  return mt;
+}
 function acCump(du, au) {
   var map = {}, g = { vol: 0, montant: 0, qte: 0, lots: 0 };
   getAchats().forEach(function (a) {
@@ -2015,8 +2251,7 @@ function acCump(du, au) {
     for (var i = 0; i < items.length; i++) {
       var it = items[i] || {};
       var vol = parseFloat(it.volume) || 0;
-      var mt = parseFloat(it.total_price) || 0;
-      if (!mt && it.unit_price) mt = (parseFloat(it.unit_price) || 0) * (parseFloat(it.quantity) || 0);
+      var mt = acMontantBois(it);
       var ese = (it.essence || it.type || 'Autre').toString().trim() || 'Autre';
       if (!map[ese]) map[ese] = { essence: ese, vol: 0, montant: 0, qte: 0, lots: 0 };
       map[ese].vol += vol;
@@ -13697,7 +13932,7 @@ function showNewAchat(category) {
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Essence</label><input type="text" id="ai_essence" placeholder="AY" list="essenceList" oninput="onAchatEssenceChange()" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Type</label><select id="ai_type" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"><option value="Rouge">Rouge</option><option value="Blanc">Blanc</option><option value="Autre">Autre</option></select></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Zone</label><input type="text" id="ai_zone" placeholder="Zone" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
-    m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">P.U (FCFA)</label><input type="number" id="ai_pu" placeholder="0" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;text-align:right"></div>';
+    m += '    <div><label style="font-size:0.7rem;font-weight:700;color:#ea580c" title="Prix du bois au m³. Le montant de la ligne sera ce prix multiplié par le volume en m³">P.U (FCFA/m³)</label><input type="number" id="ai_pu" placeholder="0" style="width:100%;padding:0.35rem 0.5rem;border:1px solid #ffedd5;border-radius:6px;font-size:0.8rem;font-weight:700;color:#ea580c;background:#fff;text-align:right"></div>';
     m += '    <div><label style="font-size:0.7rem;font-weight:600;color:#64748b">Obs.</label><input type="text" id="ai_obs" placeholder="Obs." style="width:100%;padding:0.35rem 0.5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem"></div>';
 
     m += '    <div style="display:flex;align-items:flex-end"><button type="button" onclick="addAchatItemLine(\'raw-materials\')" style="background:#f97316;color:#fff;border:none;border-radius:8px;padding:0.45rem 0.75rem;font-weight:700;cursor:pointer;font-size:1.1rem;line-height:1" title="Ajouter" aria-label="Ajouter">+</button></div>';
@@ -13741,7 +13976,7 @@ function showNewAchat(category) {
   m += '  <table style="width:100%;font-size:0.8rem;border-collapse:collapse">';
   m += '    <thead style="background:#f8fafc;border-bottom:1px solid #e2e8f0;color:#64748b;font-weight:600">';
   if (category === 'raw-materials') {
-    m += '      <tr><th style="padding:0.5rem">N° Colis</th><th style="padding:0.5rem;text-align:right">Qté</th><th style="padding:0.5rem;text-align:right">Long</th><th style="padding:0.5rem;text-align:right">Larg</th><th style="padding:0.5rem;text-align:right">L. Glob</th><th style="padding:0.5rem;text-align:right">Ep</th><th style="padding:0.5rem;text-align:right">Vol (m³)</th><th style="padding:0.5rem">Essence</th><th style="padding:0.5rem">Type</th><th style="padding:0.5rem">Zone</th><th style="padding:0.5rem;text-align:right">P.U</th><th style="padding:0.5rem;text-align:right">Total</th><th style="padding:0.5rem">Obs.</th><th style="padding:0.5rem">Action</th></tr>';
+    m += '      <tr><th style="padding:0.5rem">N° Colis</th><th style="padding:0.5rem;text-align:right">Qté</th><th style="padding:0.5rem;text-align:right">Long</th><th style="padding:0.5rem;text-align:right">Larg</th><th style="padding:0.5rem;text-align:right">L. Glob</th><th style="padding:0.5rem;text-align:right">Ep</th><th style="padding:0.5rem;text-align:right">Vol (m³)</th><th style="padding:0.5rem">Essence</th><th style="padding:0.5rem">Type</th><th style="padding:0.5rem">Zone</th><th style="padding:0.5rem;text-align:right" title="Prix du bois au m³ : le total de la ligne vaut ce prix multiplié par le volume en m³">P.U /m³</th><th style="padding:0.5rem;text-align:right">Total</th><th style="padding:0.5rem">Obs.</th><th style="padding:0.5rem">Action</th></tr>';
   } else {
     m += '      <tr><th style="padding:0.5rem">Code</th><th style="padding:0.5rem">Désignation</th><th style="padding:0.5rem;text-align:right">Qté</th><th style="padding:0.5rem;text-align:right">P.U FCFA</th><th style="padding:0.5rem;text-align:right">Total FCFA</th><th style="padding:0.5rem">Obs.</th><th style="padding:0.5rem">Action</th></tr>';
     if (category === 'consumable' || category === 'consumables') {
@@ -13959,7 +14194,15 @@ function editAchatItemLine(i, category) {
       var _ci = document.getElementById('ai_colis');
       if (_ci) _ci.value = colis;
     }
-    item = { colis_number: colis, quantity: qte, length: L, width: l, lglob: lglob, thickness: e, volume: vol, essence: essence, type: type, zone: zone, unit_price: puMP, total_price: qte * puMP, obs: obs };
+    /* Le bois se paie AU M³ : le montant global d'une ligne est
+       P.U (FCFA/m³) x volume (m³). On ne retombait pas sur « nombre de
+       pieces x P.U », qui gonflait le BL d'un facteur pieces/m³ et faussait
+       ensuite le prix du m³ du cout de revient. */
+    var baseM3 = vol > 0;
+    item = { colis_number: colis, quantity: qte, length: L, width: l, lglob: lglob, thickness: e,
+      volume: vol, essence: essence, type: type, zone: zone,
+      unit_price: puMP, prix_base: baseM3 ? 'm3' : 'unite',
+      total_price: (baseM3 ? vol : qte) * puMP, obs: obs };
   } else if (category === 'consumables' || category === 'consumable') {
     var code = (document.getElementById('ai_code') || {}).value || 'ART-' + Date.now().toString().slice(-4);
     var des = (document.getElementById('ai_designation') || {}).value || 'Consommable';
@@ -14061,8 +14304,9 @@ function renderAchatItemsTable(category) {
       h += '<td style="padding:0.5rem">' + escH(it.essence) + '</td>';
       h += '<td style="padding:0.5rem">' + escH(it.type) + '</td>';
       h += '<td style="padding:0.5rem">' + escH(it.zone || '-') + '</td>';
-      h += '<td style="padding:0.5rem;text-align:right">' + fmt(it.unit_price || 0) + '</td>';
-      h += '<td style="padding:0.5rem;text-align:right;font-weight:700">' + fmt(it.total_price || 0) + '</td>';
+      h += '<td style="padding:0.5rem;text-align:right" title="Prix au m³ — le total vaut ce prix × le volume">' + fmt(it.unit_price || 0) + '</td>';
+      h += '<td style="padding:0.5rem;text-align:right;font-weight:700">' + fmt(it.total_price || 0) +
+        (parseFloat(it.volume) > 0 ? '<div style="font-size:.62rem;color:var(--dim)">' + parseFloat(it.volume).toFixed(4) + ' m³ × ' + fmt(it.unit_price || 0) + '</div>' : '') + '</td>';
       h += '<td style="padding:0.5rem">' + escH(it.obs || '-') + '</td>';
     } else if (category === 'consumable' || category === 'consumables') {
       h += '<td style="padding:0.5rem;font-weight:600">' + escH(it.code) + '</td>';
@@ -14103,7 +14347,10 @@ function renderAchatItemsSummary(category) {
   v = Math.round(v * 10000) / 10000; m = Math.round(m * 100) / 100;
   if (!n) { tf.innerHTML = ''; return; }
   if (category === 'raw-materials') {
-    tf.innerHTML = '<tr style="background:#fff7ed;font-weight:800"><td style="padding:0.5rem">TOTAL (' + n + ' colis)</td><td style="padding:0.5rem;text-align:right">' + q + '</td><td colspan="4"></td><td style="padding:0.5rem;text-align:right">' + v.toFixed(4) + ' m³</td><td colspan="3"></td><td></td><td style="padding:0.5rem;text-align:right">' + fmt(m) + '</td><td colspan="2"></td></tr>';
+    /* Le prix moyen au m³ est ce qui compte pour la matière première : c'est
+       lui qui alimente le cout de revient. */
+    var puM3 = v > 0 ? Math.round(m / v) : 0;
+    tf.innerHTML = '<tr style="background:#fff7ed;font-weight:800"><td style="padding:0.5rem">TOTAL (' + n + ' colis)</td><td style="padding:0.5rem;text-align:right">' + q + '</td><td colspan="4"></td><td style="padding:0.5rem;text-align:right">' + v.toFixed(4) + ' m³</td><td colspan="3"></td><td style="padding:0.5rem;text-align:right">' + (puM3 > 0 ? fmt(puM3) + ' /m³' : '—') + '</td><td style="padding:0.5rem;text-align:right">' + fmt(m) + '</td><td colspan="2"></td></tr>';
   } else {
     tf.innerHTML = '<tr style="background:#f8fafc;font-weight:800"><td style="padding:0.5rem">TOTAL (' + n + ' lignes)</td><td></td><td style="padding:0.5rem;text-align:right">' + q + '</td><td></td><td style="padding:0.5rem;text-align:right">' + fmt(m) + '</td><td colspan="2"></td></tr>';
   }
