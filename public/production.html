@@ -1,10 +1,11 @@
 <!DOCTYPE html>
+    'cout-production': 'Cout de Production par Jour',
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-26-106';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-27-107';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -648,6 +649,7 @@ var NAV = [
     { id: 'reports', label: 'Rapports', icon: '📈' },
     { id: 'analyse-couts', label: 'Analyse des coôuts', icon: '\ud83d\udcb0' },
     { id: 'cout-revient', label: 'Coût de revient palette', icon: '\ud83d\udcca' },
+    { id: 'cout-production', label: 'Coût de production par jour', icon: '\ud83d\udcca' },
     { id: 'rh-group', label: 'RH & Présence', icon: '👤', children: [
       { id: 'rh-dashboard', label: 'Tableau de Bord RH' },
       { id: 'departments', label: 'Départements' },
@@ -879,6 +881,7 @@ var PROD_PAGE_PERM = {
   'reports': 'prodRapports',
   'analyse-couts': 'prodRapports',
   'cout-revient': 'prodRapports',
+  'cout-production': 'prodRapports',
   'rh-dashboard': 'prodRH', 'departments': 'prodRH', 'positions': 'prodRH', 'presence': 'prodRH', 'leaves': 'prodRH', 'sanctions': 'prodRH'
 };
 function prodGrantedMap() { try { var g = JSON.parse(localStorage.getItem('mdb_prod_granted')); if (g && g.pages) return g.pages; } catch(e) {} return null; }
@@ -2357,7 +2360,8 @@ function acComputeLaborFromPointage(targetDate, J) {
     indirect: { nb: 0, tot: 0, sumH: 0, names: [] }
   };
 
-  var nbPresentsTotal = 0;
+var nbPresentsTotal = 0;
+  var nomsPresents = [];
   for (var i = 0; i < emps.length; i++) {
     var emp = emps[i];
     if (!emp || !emp.id) continue;
@@ -2366,7 +2370,8 @@ function acComputeLaborFromPointage(targetDate, J) {
     });
     if (!pt || pt.present === false) continue;
 
-    nbPresentsTotal++;
+nbPresentsTotal++;
+    nomsPresents.push((emp.nom || emp.matricule || 'Employe') + (emp.fonction ? ' (' + emp.fonction + ')' : ''));
     var hPt = 8;
     if (pt.heures) hPt = parseFloat(pt.heures) || 8;
     else if (pt.j_arr && (pt.j_dep || pt.j_pd)) {
@@ -2447,8 +2452,11 @@ function acComputeLaborFromPointage(targetDate, J) {
       detailOuvriers: postes.accessoiresClouage.names.join(', ')
     };
   } else {
-    res.accessoiresClouage = { nb: 0, tot: 0, sumH: 0, detailOuvriers: '' };
+res.accessoiresClouage = { nb: 0, tot: 0, sumH: 0, detailOuvriers: '' };
   }
+
+  res.nbPresents = nbPresentsTotal;
+  res.detailPresents = nomsPresents.join(', ');
 
   return res;
 }
@@ -2457,18 +2465,26 @@ function acDatePointageChanged(d) {
   var l = getSection('costLabor', {});
   if (!l || typeof l !== 'object' || Array.isArray(l)) l = {};
   l.datePointage = d;
-  /* Quand on choisit une date, passer automatiquement en mode Coût Réel */
+  /* Quand on choisit une date, passer automatiquement en mode Cout Reel */
   l.modeLabor = 'pointage';
   l.autoSyncPointage = true;
   setSection('costLabor', l);
-  toast('📋 Date du pointage : ' + d + ' — Coût Réel activé');
+  var r = acAppliquerPointage();
+  if (r.ok) toast('📋 Pointage Paye du ' + acDateFr(d) + ' : ' + r.nbPresents + ' présent(s), ' + fmt(r.montantJour) + ' FCFA/jour');
+  else toast('⚠️ Aucun pointage Paye au ' + acDateFr(d) + ' : le tableau garde la simulation', 'error');
   renderPage();
 }
 
 function acToggleAutoSync(checked) {
   var l = acLaborCfg();
   l.autoSyncPointage = checked;
+  if (checked) l.modeLabor = 'pointage';
   setSection('costLabor', l);
+  if (checked) {
+    var r = acAppliquerPointage();
+    if (r.ok) toast('📋 Coût Réel synchronisé — pointage du ' + acDateFr(r.date) + ' : ' + r.nbPresents + ' présent(s)');
+    else toast('⚠️ Aucun pointage Paye au ' + acDateFr(r.date), 'error');
+  }
   renderPage();
 }
 
@@ -2556,20 +2572,90 @@ function acCalcJours() {
 }
 
 
+/* Recalcule la main-d'oeuvre depuis le pointage Paye, la PERSISTE,
+   puis renvoie un resume lisible : c'est ce qui rend le tableau immediatement
+   coherent quand on bascule sur le mode Cout Reel. */
+function acAppliquerPointage() {
+  var l = acLaborCfg();
+  var datePt = l.datePointage || new Date().toISOString().substring(0, 10);
+  var res = { ok: false, date: datePt, nbPresents: 0, detail: '', montantJour: 0 };
+  try {
+    var auto = acComputeLaborFromPointage(datePt, parseFloat(l.jours) || 1);
+    if (auto) {
+      l._autoPointageActif = true;
+      l._datePointageUtilisee = datePt;
+      l._nbPresentsPointage = auto.nbPresents || 0;
+      l._detailPointage = auto.detailPresents || '';
+      ['monteur', 'machiniste', 'manutentionnaire', 'indirect'].forEach(function (k) {
+        if (auto[k]) l[k] = auto[k];
+      });
+      if (auto.accessoiresClouage) l.accessoiresClouage = auto.accessoiresClouage;
+      var tot = 0;
+      ['monteur', 'machiniste', 'manutentionnaire', 'indirect'].forEach(function (k) {
+        tot += parseFloat((l[k] || {}).coutJour) || 0;
+      });
+      res.montantJour = Math.round(tot);
+      res.nbPresents = auto.nbPresents || 0;
+      res.detail = auto.detailPresents || '';
+      res.ok = true;
+    } else {
+      l._autoPointageActif = false;
+      l._datePointageUtilisee = '';
+      l._nbPresentsPointage = 0;
+      l._detailPointage = '';
+    }
+  } catch (e) { l._autoPointageActif = false; }
+  setSection('costLabor', l);
+  return res;
+}
+
+function acDateFr(d) {
+  if (!d) return '(aucune)';
+  var p = String(d).split('-');
+  return (p.length === 3) ? (p[2] + '/' + p[1] + '/' + p[0]) : String(d);
+}
+
+/* Bandeau affiche au-dessus du tableau : dit d'ou viennent les chiffres */
+function acLaborSourceHtml() {
+  var cfg = getSection('costLabor', {});
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) cfg = {};
+  var estAuto = (cfg.modeLabor === 'pointage' || cfg.autoSyncPointage === true);
+  var J = parseFloat(cfg.jours) || 0;
+  var Q = parseFloat(cfg.quantite) || 0;
+  var badge, bord, fond;
+  if (!estAuto) {
+    badge = '<span style="color:#1d4ed8;font-weight:800">\u2699\ufe0f Simulation manuelle</span> \u2014 effectifs et taux saisis \u00e0 la main.';
+    bord = '#bfdbfe'; fond = '#eff6ff';
+  } else if (cfg._autoPointageActif) {
+    badge = '<span style="color:#16a34a;font-weight:800">\ud83d\udccb Co\u00fbt r\u00e9el \u2014 pointage Paye du ' + escH(acDateFr(cfg.datePointage)) + '</span> : ' +
+      (cfg._nbPresentsPointage || 0) + ' personne(s) pr\u00e9sente(s)' + (cfg._detailPointage ? ' \u2014 ' + escH(cfg._detailPointage) : '') + '.';
+    bord = '#86efac'; fond = '#f0fdf4';
+  } else {
+    badge = '<span style="color:#b91c1c;font-weight:800">\u26a0\ufe0f Pointage Paye introuvable au ' + escH(acDateFr(cfg.datePointage)) + '</span> \u2014 le tableau garde les valeurs de simulation. Changez la date du pointage, ou saisissez le pointage dans Paye.';
+    bord = '#fca5a5'; fond = '#fef2f2';
+  }
+  var camp = (J > 0 || Q > 0)
+    ? '<span style="color:#475569"> Campagne : <strong>' + Q + '</strong> palette(s) sur <strong>' + J + '</strong> jour(s).</span>'
+    : '';
+  return '<div style="padding:.45rem .7rem;border-radius:6px;font-size:.73rem;margin-bottom:.5rem;border:1.5px solid ' + bord + ';background:' + fond + '">' + badge + camp + '</div>';
+}
+
 function acSetLaborMode(mode) {
   var l = getSection('costLabor', {});
   if (!l || typeof l !== 'object' || Array.isArray(l)) l = {};
   l.modeLabor = mode;
   l.autoSyncPointage = (mode === 'pointage');
   if (mode === 'pointage' && !l.datePointage) {
-    /* Initialiser la date du pointage au jour actuel si pas encore définie */
     l.datePointage = new Date().toISOString().substring(0, 10);
   }
   setSection('costLabor', l);
-  toast(mode === 'pointage'
-    ? '📋 Mode Coût Réel activé — Pointage Paye du ' + (l.datePointage || "aujourd'hui")
-    : '⚙️ Mode Simulation Manuelle activé');
-  /* Force renderPage pour mettre à jour le tableau en temps réel */
+  if (mode === 'pointage') {
+    var r = acAppliquerPointage();
+    if (r.ok) toast('\ud83d\udccb Co\u00fbt R\u00e9el activ\u00e9 \u2014 pointage Paye du ' + acDateFr(r.date) + ' : ' + r.nbPresents + ' pr\u00e9sent(s), ' + fmt(r.montantJour) + ' FCFA/jour');
+    else toast('\u26a0\ufe0f Aucun pointage Paye au ' + acDateFr(r.date) + ' : le tableau garde la simulation', 'error');
+  } else {
+    toast('\u2699\ufe0f Mode Simulation Manuelle activ\u00e9');
+  }
   if (typeof renderPage === 'function') renderPage();
 }
 
@@ -2741,7 +2827,7 @@ function acGetChargesModele(articleId) {
     cloueur = calcPoste('monteur', 600);
   }
 
-  return {
+  var res = {
     machiniste: calcPoste('machiniste', 500),
     cloueur: cloueur,
     manutention: calcPoste('manutentionnaire', 200),
@@ -2759,9 +2845,18 @@ function acGetChargesModele(articleId) {
     libelle_loyer: (artCfg && artCfg.libelle_loyer) || 'Loyer Atelier & Dépôt',
     libelle_divers: (artCfg && artCfg.libelle_divers) || 'Divers & Imprévus d’exploitation',
     libelle_aide_divers: (artCfg && artCfg.libelle_aide_divers) || 'Fournitures, télécom, entretien général',
-    _prixClouagePaye: prixClouagePaye,
+_prixClouagePaye: prixClouagePaye,
     _artCode: artCodeTrouve
   };
+
+  /* Repercussion fidele des reglages persistes : mode de calcul (/pal ou /mois)
+     et libelles d'aide. Sans cette recopie, le selecteur de la rubrique 4
+     retombait toujours sur /pal et le prorata mensuel du loyer etait perdu. */
+  Object.keys(artCfg || {}).forEach(function (k) {
+    if (k.indexOf('mode_') === 0 || k.indexOf('libelle_aide_') === 0) res[k] = artCfg[k];
+  });
+
+  return res;
 }
 
 function acSaveChargeModelePoste(articleId, champ, val) {
@@ -2787,6 +2882,97 @@ function acGetCustomRows(articleId) {
   return (rows || []).filter(function(r) {
     return !r.article_id || String(r.article_id) === String(articleId);
   });
+}
+
+/* Jours ouvres du mois courant : denominateur commun des proratas mensuels */
+function acJoursOuvresMois(mois) {
+  var d = mois ? new Date(mois) : new Date();
+  var y = d.getFullYear(), mo = d.getMonth();
+  var total = new Date(y, mo + 1, 0).getDate();
+  var ouv = 0;
+  for (var i = 1; i <= total; i++) {
+    var dow = new Date(y, mo, i).getDay();
+    if (dow !== 0 && dow !== 6) ouv++;
+  }
+  return ouv > 0 ? ouv : 26;
+}
+
+/* Les cinq lignes standard de la rubrique 4 */
+var AC_POSTES_STRUCT = ['fraisBancaires', 'commissionDU', 'commissionLog', 'loyer', 'divers'];
+
+/* Regle en une fois la base de calcul de toutes ces lignes (/pal ou /mois) */
+function acStructSetTousModes(mode, articleId) {
+  if (mode !== 'palette' && mode !== 'mensuel') return;
+  var cfg = getSection('costChargesModele', {});
+  var key = articleId || 'global';
+  if (!cfg[key]) cfg[key] = {};
+  if (!cfg['global']) cfg['global'] = {};
+  AC_POSTES_STRUCT.forEach(function (cle) {
+    cfg[key]['mode_' + cle] = mode;
+    cfg['global']['mode_' + cle] = mode;
+  });
+  setSection('costChargesModele', cfg);
+  toast(mode === 'mensuel'
+    ? '\ud83d\udcc5 Rubrique 4 : toutes les lignes sont au prorata mensuel (montant du mois \u00f7 jours ouvr\u00e9s \u00d7 jours de campagne)'
+    : '\ud83d\udce6 Rubrique 4 : toutes les lignes sont factur\u00e9es \u00e0 la palette');
+  renderPage();
+}
+
+/* Reglage fin : chaque ligne choisit son montant et sa base (/pal ou /mois).
+   Une seule fenetre, tout le contenu, rien \u00e0 recopier. */
+function acStructReglerLignes(articleId) {
+  var key = articleId || 'global';
+  var cfg = getSection('costChargesModele', {});
+  var artCfg = (articleId && cfg[articleId]) ? cfg[articleId] : (cfg['global'] || {});
+  var noms = {
+    fraisBancaires: 'Frais bancaires',
+    commissionDU: 'Commission DU',
+    commissionLog: 'Commission LOGISTICIEN',
+    loyer: 'Loyer atelier',
+    divers: 'Divers'
+  };
+  var J = parseFloat((acLaborCfg() || {}).jours) || 0;
+  var ouvres = acJoursOuvresMois();
+  var aide = AC_POSTES_STRUCT.map(function (cle) {
+    var m = artCfg['mode_' + cle] || 'palette';
+    var v = parseFloat(artCfg[cle]) || 0;
+    var mt = (m === 'mensuel') ? Math.round(v * ((J > 0 ? J : 1) / ouvres)) : Math.round(v);
+    return '   ' + cle + ' = ' + v + ' | ' + (m === 'mensuel' ? 'MOIS' : 'PAL') +
+      '   (libelle : ' + (artCfg['libelle_' + cle] || noms[cle]) + '  \u2014  contribution : ' + mt + ' F)';
+  }).join('\n');
+  var r = prompt('RUBRIQUE 4 \u2014 BASE DE CALCUL DE CHAQUE LIGNE\n\n' +
+    'PAL  = le montant s\u2019applique \u00e0 chaque palette.\n' +
+    'MOIS = le montant est le total du mois, r\u00e9parti au prorata des jours de campagne\n' +
+    '       (' + (J > 0 ? J : 1) + ' jour(s) \u00f7 ' + ouvres + ' jours ouvr\u00e9s du mois).\n\n' +
+    'Exemple : un loyer de 100000 F/mois sur 1 jour = ' + Math.round(100000 / ouvres) + ' F.\n\n' +
+    'Modifiez montant et base, une ligne par ligne, puis validez.\n\n' + aide,
+    aide);
+  if (!r) return;
+  var modifs = 0;
+  String(r).split('\n').forEach(function (l) {
+    var t = l.trim();
+    if (!t || t.indexOf('=') < 0) return;
+    var cle = t.slice(0, t.indexOf('=')).trim();
+    var reste = t.slice(t.indexOf('=') + 1);
+    var p2 = reste.indexOf('|');
+    if (p2 < 0) return;
+    var v = parseFloat(reste.slice(0, p2));
+    var mode = (reste.slice(p2 + 1).trim().toUpperCase().indexOf('MOIS') === 0) ? 'mensuel' : 'palette';
+    if (AC_POSTES_STRUCT.indexOf(cle) < 0) return;
+    if (isNaN(v)) v = 0;
+    cfg[key] = cfg[key] || {};
+    cfg['global'] = cfg['global'] || {};
+    cfg[key]['mode_' + cle] = mode;
+    cfg[key][cle] = v;
+    cfg['global']['mode_' + cle] = mode;
+    cfg['global'][cle] = v;
+    modifs++;
+  });
+  if (modifs) {
+    setSection('costChargesModele', cfg);
+    toast(modifs + ' ligne(s) de la rubrique 4 mise(s) \u00e0 jour');
+    renderPage();
+  }
 }
 
 function acAddCustomRowPrompt(articleId) {
@@ -3227,22 +3413,15 @@ function acEtapesHtml(articleId, cAuto, compact) {
   h += '<tr style="background:#f8fafc;' + bdrSec + '">';
   h += '<td style="' + tdC + 'font-weight:900;color:#334155;background:#e2e8f0">4</td>';
   h += '<td colspan="10" style="' + td + 'font-weight:900;color:#334155;font-size:.8rem;letter-spacing:.3px">' +
-    '🏢 4. DIVERSES CHARGES DE STRUCTURE & GESTION GÉNÉRALE ' + (isCampagneQ ? '· Pour ' + fmt(Q) + ' palettes' : '') + '</td>';
+    '🏢 4. DIVERSES CHARGES DE STRUCTURE & GESTION GÉNÉRALE ' + (isCampagneQ ? '· Pour ' + fmt(Q) + ' palettes' : '') + '\n    '
+    + '<div style="display:flex;gap:4px;justify-content:flex-end;width:100%;margin-top:3px">' +
+    '<button class="btn btn-sm" onclick="acStructReglerLignes(\'' + escH(articleId) + '\')" style="font-size:.64rem;padding:2px 8px;font-weight:800" title="Choisir pour chaque ligne si elle est liée au mois ou à la palette">⚙ Régler la base de calcul</button>' +
+    '<button class="btn btn-sm" onclick="acStructSetTousModes(\'mensuel\', \'' + escH(articleId) + '\')" style="font-size:.64rem;padding:2px 8px;font-weight:800;background:#7c3aed;color:#fff" title="Toutes les lignes : montant du mois réparti au prorata des jours de campagne">U0001F4C5 Tout /mois</button>' +
+    '<button class="btn btn-sm" onclick="acStructSetTousModes(\'palette\', \'' + escH(articleId) + '\')" style="font-size:.64rem;padding:2px 8px;font-weight:800;background:#334155;color:#fff" title="Toutes les lignes : montant facturé à chaque palette">U0001F4E6 Tout /pal</button>' +
+    '</div></td>';
   h += '</tr>';
 
-  /* Jours ouvrés du mois en cours (26 par défaut) */
-  var _joursOuvresMois = 26;
-  try {
-    var _now = new Date();
-    var _y = _now.getFullYear(), _mo = _now.getMonth();
-    var _daysInMo = new Date(_y, _mo + 1, 0).getDate();
-    var _ouv = 0;
-    for (var _di = 1; _di <= _daysInMo; _di++) {
-      var _dow = new Date(_y, _mo, _di).getDay();
-      if (_dow !== 0 && _dow !== 6) _ouv++;
-    }
-    if (_ouv > 0) _joursOuvresMois = _ouv;
-  } catch(e) {}
+  var _joursOuvresMois = acJoursOuvresMois();
 
   function ligneStruct(num, cle, libelle, aide, defVal) {
     var val = ch[cle] !== undefined ? ch[cle] : defVal;
@@ -3421,6 +3600,233 @@ function acEtapesHtml(articleId, cAuto, compact) {
   return h;
 }
 /* ============================ PAGE PRINCIPALE ============================ */
+/* =====================================================================
+   COUT DE PRODUCTION AUTOMATIQUE PAR JOUR + SYNTHESE DU MOIS
+   ---------------------------------------------------------------------
+   Pour chaque fiche de production on recalcule, sans ressaisie :
+     - les matieres (nomenclature + prix du m3 + consommables)
+     - la main-d'oeuvre du jour (pointage Paye de la date de la fiche)
+     - le clouage (tarif Paye ou main-d'oeuvre monteur)
+     - les charges de structure au prorata du jour (1 jour ouvre)
+   Le total du mois est la somme des jours, et non un prorata unique.
+   ===================================================================== */
+
+function acStructureJour(palettes, nbJours, articleId) {
+  var ch = acGetChargesModele(articleId || (acLaborCfg() || {}).articleId);
+  var ouvres = acJoursOuvresMois();
+  var total = 0;
+  var detail = [];
+  AC_POSTES_STRUCT.forEach(function (cle) {
+    var v = parseFloat(ch[cle]) || 0;
+    if (!(v > 0)) return;
+    var mode = ch['mode_' + cle] || 'palette';
+    var mt = (mode === 'mensuel') ? Math.round(v * ((nbJours > 0 ? nbJours : 1) / ouvres)) : Math.round(v * (palettes || 0));
+    total += mt;
+    detail.push({ cle: cle, libelle: ch['libelle_' + cle] || cle, mode: mode, mt: mt });
+  });
+  /* Energie atelier : par palette comme les autres charges techniques */
+  var elec = Math.round((parseFloat(ch.electricite) || 0) * (palettes || 0));
+  total += elec;
+  detail.push({ cle: 'electricite', libelle: 'Electricite / Energie atelier', mode: 'palette', mt: elec });
+
+  var dist = Math.round((parseFloat(ch.distribution) || 0) * (palettes || 0));
+  total += dist;
+  detail.push({ cle: 'distribution', libelle: 'Frais de distribution', mode: 'palette', mt: dist });
+  return { total: total, detail: detail };
+}
+
+/* Cout complet d'une fiche de production */
+function acCoutFicheJour(p) {
+  var arts = getArticles();
+  var parCode = {};
+  arts.forEach(function (a) { if (a && a.code) parCode[String(a.code).trim().toUpperCase()] = a; });
+
+  var lignes = [];
+  var Q = 0;
+  (p.assemblage || []).forEach(function (r) {
+    if (!r) return;
+    var qte = parseFloat(r.qte) || 0;
+    if (!(qte > 0)) return;
+    var code = String(r.code || '').trim().toUpperCase();
+    var art = parCode[code] || null;
+    var artId = art ? art.id : '';
+    var c = artId ? acCoutArticleAuto(artId) : null;
+    var matiere = c ? Math.round(c.matiere * qte) : 0;
+    var artIdRef = artId;
+    Q += qte;
+    lignes.push({
+      code: code, qte: qte,
+      designation: (art && art.designation) || r.designation || code,
+      matiere: matiere,
+      pv: art ? (parseFloat(art.prix_vente) || 0) : 0,
+      manquant: !art || !c || (c.manquants && c.manquants.length > 0),
+      artId: artIdRef
+    });
+  });
+
+  /* Main-d'oeuvre du jour : pointage Paye de la date de la fiche */
+  var mo = { total: 0, nb: 0, detail: '' };
+  try {
+    var auto = acComputeLaborFromPointage(p.date, 1);
+    if (auto) {
+      var t = 0;
+      ['monteur', 'machiniste', 'manutentionnaire', 'indirect'].forEach(function (k) {
+        t += parseFloat((auto[k] || {}).coutJour) || 0;
+      });
+      mo.total = Math.round(t);
+      mo.nb = auto.nbPresents || 0;
+      mo.detail = auto.detailPresents || '';
+      mo.ok = true;
+    }
+  } catch (e) {}
+
+  /* Clouage / montage : tarif Paye s'il existe, sinon main-d'oeuvre monteur */
+  var ch = acGetChargesModele(lignes.length ? lignes[0].artId : (acLaborCfg() || {}).articleId);
+  var tarifClouage = (parseFloat(ch.cloueur) || 0);
+  var clouage = Math.round(tarifClouage * Q);
+  var acc = (acLaborCfg() || {}).accessoiresClouage;
+  var accessoires = acc && (acc.tot !== undefined) ? Math.round(acc.tot) : 0;
+
+  /* Structure : prorata de 1 jour ouvre pour ce jour */
+  var struct = acStructureJour(Q, 1, lignes.length ? lignes[0].artId : '');
+
+  var matiereTot = lignes.reduce(function (s, l) { return s + l.matiere; }, 0);
+  var ca = lignes.reduce(function (s, l) { return s + (l.qte * l.pv); }, 0);
+  var total = matiereTot + mo.total + clouage + accessoires + struct.total;
+
+  return {
+    p: p, lignes: lignes, Q: Q, matiere: matiereTot, mo: mo,
+    clouage: clouage, accessoires: accessoires, struct: struct,
+    ca: Math.round(ca), total: Math.round(total),
+    coutPal: Q > 0 ? Math.round(total / Q) : 0,
+    matierePal: Q > 0 ? Math.round(matiereTot / Q) : 0,
+    marge: Math.round(ca) - Math.round(total)
+  };
+}
+
+function render_cout_production() {
+  var p = acPeriode();
+  var prods = getProductions().filter(function (x) {
+    return x && acDansPeriode(x.date, p.du, p.au);
+  }).sort(function (a, b) { return String(a.date || '').localeCompare(String(b.date || '')); });
+
+  var h = '';
+  h += '<div class="card" style="padding:.7rem;margin-bottom:.8rem;background:#ffffff">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem;margin-bottom:.5rem;padding-bottom:.5rem;border-bottom:1px solid #e2e8f0">';
+  h += '<div><h2 style="font-size:1.1rem;font-weight:900;color:#0f172a;margin:0">\u{1F4CA} Coût de Production par Jour</h2>';
+  h += '<div style="font-size:.72rem;color:var(--dim)">Calcul automatique de chaque fiche : matières + main-d\'œuvre du jour (pointage Paye) + clouage + structure au prorata du jour</div></div>';
+  h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
+  h += '<span style="font-size:.7rem;color:var(--dim)">Période : <strong>' + escH(acPeriodeLabel(p)) + '</strong></span>';
+  h += '<button class="btn btn-sm" onclick="acRaccourci(\'mois\')">Mois</button>';
+  h += '<button class="btn btn-sm" onclick="window._acTout=true;renderPage()">Tout</button>';
+  h += '<button class="btn btn-sm btn-accent" onclick="printCoutProduction()" title="Imprimer la synthèse">🖨️️ Imprimer</button>';
+  h += '</div></div>';
+
+  /* --------- SYNTHESE DU MOIS --------- */
+  var tot = { q: 0, mat: 0, mo: 0, clouage: 0, acc: 0, struct: 0, ca: 0, total: 0, nbFiches: 0, nbJours: 0, sansPointage: 0, incomplets: 0 };
+  var parJour = {};
+  prods.forEach(function (x) {
+    var c = acCoutFicheJour(x);
+    tot.q += c.Q; tot.mat += c.matiere; tot.mo += c.mo.total; tot.clouage += c.clouage;
+    tot.acc += c.accessoires; tot.struct += c.struct.total; tot.ca += c.ca; tot.total += c.total;
+    tot.nbFiches++;
+    if (!c.mo.ok) tot.sansPointage++;
+    if (c.lignes.some(function (l) { return l.manquant; })) tot.incomplets++;
+    if (c.Q > 0) tot.nbJours++;
+    parJour[x.date] = (parJour[x.date] || 0) + c.Q;
+  });
+
+  var coutPalMois = tot.q > 0 ? Math.round(tot.total / tot.q) : 0;
+  var matPalMois = tot.q > 0 ? Math.round(tot.mat / tot.q) : 0;
+  var margeMois = Math.round(tot.ca) - Math.round(tot.total);
+  var tauxMarge = tot.ca > 0 ? (margeMois / tot.ca * 100) : 0;
+
+  var K = function (lbl, val, coul, note) {
+    return '<div style="padding:.5rem .6rem;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc">' +
+      '<div style="font-size:.62rem;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.3px">' + lbl + '</div>' +
+      '<div style="font-size:1.05rem;font-weight:900;color:' + coul + '">' + val + '</div>' +
+      (note ? '<div style="font-size:.6rem;color:#94a3b8">' + note + '</div>' : '') + '</div>';
+  };
+
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.5rem;margin-bottom:.6rem">';
+  h += K('Palettes produites', fmt(tot.q), '#0f172a', tot.nbFiches + ' fiche(s), ' + tot.nbJours + ' jour(s) productif(s)');
+  h += K('Matières', fmt(Math.round(tot.mat)) + ' F', '#b45309', matPalMois + ' F/palette');
+  h += K('Main-d\'œuvre', fmt(Math.round(tot.mo)) + ' F', '#1d4ed8', 'pointage Paye');
+  h += K('Clouage', fmt(Math.round(tot.clouage + tot.acc)) + ' F', '#16a34a', 'montage');
+  h += K('Structure', fmt(Math.round(tot.struct)) + ' F', '#7c3aed', 'prorata jours');
+  h += K('Coût total', fmt(Math.round(tot.total)) + ' F', '#ea580c', coutPalMois + ' F/palette');
+  h += K('Chiffre d\'affaires', fmt(Math.round(tot.ca)) + ' F', '#0f172a', 'prix catalogue');
+  h += K('Marge', (margeMois >= 0 ? '+' : '') + fmt(margeMois) + ' F', margeMois >= 0 ? '#16a34a' : '#dc2626', tauxMarge.toFixed(1) + ' % du CA');
+  h += '</div>';
+
+  if (tot.sansPointage > 0) {
+    h += '<div style="padding:.45rem .7rem;border:1.5px solid #fcd34d;background:#fffbeb;border-radius:6px;font-size:.73rem;color:#92400e;margin-bottom:.6rem">';
+    h += '\u26A0\uFE0F <strong>' + tot.sansPointage + ' jour(s)</strong> sans pointage Paye : leur main-d\'œuvre est à 0 dans cette synthèse. Saisissez le pointage dans Paye pour compléter.</div>';
+  }
+  if (tot.incomplets > 0) {
+    h += '<div style="padding:.45rem .7rem;border:1.5px solid #fdba74;background:#fff7ed;border-radius:6px;font-size:.73rem;color:#9a3412;margin-bottom:.6rem">';
+    h += '📍 <strong>' + tot.incomplets + ' fiche(s)</strong> ont une nomenclature ou un prix manquant : leur matière est sous-estimée.</div>';
+  }
+
+  h += '<h3 style="font-size:.85rem;font-weight:900;color:#0f172a;margin:.6rem 0 .3rem">Détail jour par jour</h3>';
+  if (!prods.length) {
+    h += '<div class="empty">Aucune fiche de production sur la période</div>';
+  } else {
+    h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.73rem">';
+    h += '<thead><tr style="background:#0f172a;color:#fff"><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:left">N° fiche</th><th style="padding:6px;text-align:left">Articles</th><th style="padding:6px;text-align:right">Palettes</th><th style="padding:6px;text-align:right">Matières</th><th style="padding:6px;text-align:right">Main-d\'œuvre</th><th style="padding:6px;text-align:right">Clouage</th><th style="padding:6px;text-align:right">Structure</th><th style="padding:6px;text-align:right">Coût total</th><th style="padding:6px;text-align:right">F/pal</th><th style="padding:6px;text-align:right">Marge</th><th style="padding:6px;text-align:center">État</th></tr></thead><tbody>';
+    prods.forEach(function (x) {
+      var c = acCoutFicheJour(x);
+      var st = { label: '', coul: '' };
+      if (x.statut === 'validated') { st = { label: 'Validée', coul: '#16a34a' }; }
+      else if (x.statut === 'termine' || x.statut === 'termine_e') { st = { label: 'Terminée', coul: '#0f172a' }; }
+      else { st = { label: 'Brouillon', coul: '#b45309' }; }
+      var alertes = [];
+      if (!c.mo.ok) alertes.push('pas de pointage');
+      if (c.lignes.some(function (l) { return l.manquant; })) alertes.push('nomenclature incomplète');
+      h += '<tr style="border-bottom:1px solid #e2e8f0;background:' + (alertes.length ? '#fffbeb' : '#fff') + '">';
+      h += '<td style="padding:5px 6px;white-space:nowrap">' + escH(fmtD(x.date)) + '</td>';
+      h += '<td style="padding:5px 6px">' + escH(x.numero || '—') + '</td>';
+      h += '<td style="padding:5px 6px;font-size:.68rem">' + (c.lignes.length
+        ? c.lignes.map(function (l) { return escH(l.code + ' ×' + l.qte); }).join(', ')
+        : '<span style="color:#94a3b8">aucun assemblage</span>') + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right;font-weight:800">' + fmt(c.Q) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right">' + fmt(Math.round(c.matiere)) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right' + (c.mo.ok ? '' : ';color:#b45309') + '">' + fmt(Math.round(c.mo.total)) + (c.mo.ok ? '' : ' ⚠') + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right">' + fmt(Math.round(c.clouage + c.accessoires)) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right">' + fmt(Math.round(c.struct.total)) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right;font-weight:900;color:#ea580c">' + fmt(Math.round(c.total)) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right;font-weight:700">' + fmt(c.coutPal) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right;font-weight:700;color:' + (c.marge >= 0 ? '#16a34a' : '#dc2626') + '">' + (c.marge >= 0 ? '+' : '') + fmt(c.marge) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:center;font-size:.66rem;font-weight:800;color:' + st.coul + '">' + st.label + '</td>';
+      h += '</tr>';
+    });
+    h += '<tr style="background:#0f172a;color:#fff;font-weight:900"><td style="padding:6px" colspan="3">SYNTHÈSE ' + escH(acPeriodeLabel(p).toUpperCase()) + '</td>';
+    h += '<td style="padding:6px;text-align:right">' + fmt(tot.q) + '</td>';
+    h += '<td style="padding:6px;text-align:right">' + fmt(Math.round(tot.mat)) + '</td>';
+    h += '<td style="padding:6px;text-align:right">' + fmt(Math.round(tot.mo)) + '</td>';
+    h += '<td style="padding:6px;text-align:right">' + fmt(Math.round(tot.clouage + tot.acc)) + '</td>';
+    h += '<td style="padding:6px;text-align:right">' + fmt(Math.round(tot.struct)) + '</td>';
+    h += '<td style="padding:6px;text-align:right;color:#fb923c;font-size:.9rem">' + fmt(Math.round(tot.total)) + '</td>';
+    h += '<td style="padding:6px;text-align:right;color:#fb923c">' + fmt(coutPalMois) + '</td>';
+    h += '<td style="padding:6px;text-align:right;color:' + (margeMois >= 0 ? '#4ade80' : '#f87171') + '">' + (margeMois >= 0 ? '+' : '') + fmt(margeMois) + '</td>';
+    h += '<td style="padding:6px"></td></tr>';
+    h += '</tbody></table></div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+function printCoutProduction() {
+  var el = document.getElementById('content');
+  if (!el) return toast('Page introuvable', 'error');
+  var w = window.open('', '_blank');
+  if (!w) return alert('Veuillez autoriser les fenêtres pop-up pour imprimer.');
+  var css = Array.prototype.slice.call(document.querySelectorAll('style')).map(function (s) { return s.outerHTML; }).join('');
+  w.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Coût de production</title>' + css +
+    '<style>@page{size:landscape;margin:8mm}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:10px;color:#0f172a;-webkit-print-color-adjust:exact;print-color-adjust:exact}.btn{display:none}</style></head><body>' +
+    el.innerHTML + '<script>window.onload=function(){setTimeout(function(){window.print()},250)}<\/script></body></html>');
+  w.document.close();
+}
 function render_cout_revient() {
   var p = acPeriode();
   var arts = getArticles();
@@ -3576,6 +3982,7 @@ function render_cout_revient() {
   /* LE GRAND TABLEAU CONTINU UNIQUE DE COUT DE REVIENT */
   h += '<div class="card" style="padding:.8rem;background:#ffffff;border:1px solid #cbd5e1;box-shadow:0 2px 6px rgba(0,0,0,.04)">';
   var cArticle = acCoutArticleAuto(cfg.articleId);
+  h += acLaborSourceHtml();
   h += acEtapesHtml(cfg.articleId, cArticle, false);
   h += '</div>';
 

@@ -27,6 +27,111 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
+/* ---------- Cout de revient : le mode Cout Reel doit recalculer la table ---------- */
+  r.push({
+    nom: 'Cout de revient : le mode Cout Reel recharge la main-d\u2019oeuvre depuis le pointage',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'cout-revient';
+      acSetLaborMode('pointage');
+      var cfg = getSection('costLabor', {});
+      var h = document.getElementById('content').innerHTML || '';
+      (cfg.modeLabor === 'pointage' && cfg._autoPointageActif === true && cfg._nbPresentsPointage >= 1
+        && h.indexOf('Coût réel') !== -1)
+        ? 'OK : pointage du ' + cfg.datePointage + ' (' + cfg._nbPresentsPointage + ' présent(s)) injecté dans le tableau'
+        : 'ECHEC mode=' + cfg.modeLabor + ' actif=' + cfg._autoPointageActif + ' presents=' + cfg._nbPresentsPointage
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de revient : une date sans pointage est signalée au lieu de laisser la simulation',
+    app: 'production.html', store: storeRealiste,
+    code: `
+CURRENT_PAGE = 'cout-revient';
+      acSetLaborMode('pointage');
+      acDatePointageChanged('2001-01-01');
+      var cfg = getSection('costLabor', {});
+      var h = document.getElementById('content').innerHTML || '';
+      (cfg._autoPointageActif === false && h.indexOf('introuvable') !== -1)
+        ? 'OK : absence de pointage annoncée'
+        : 'ECHEC actif=' + cfg._autoPointageActif
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Rubrique 4 : le prorata mensuel du loyer est conserve et se relit',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'cout-revient';
+      acSaveChargeModelePoste('a1', 'mode_loyer', 'mensuel');
+      acSaveChargeModelePoste('a1', 'loyer', 100000);
+      var ch = acGetChargesModele('a1');
+      var h = document.getElementById('content').innerHTML || '';
+      (ch.mode_loyer === 'mensuel' && ch.loyer === 100000 && h.indexOf('Prorata mensuel') !== -1)
+        ? 'OK : loyer 100000 F/mois lu en prorata mensuel'
+        : 'ECHEC mode=' + ch.mode_loyer + ' loyer=' + ch.loyer + ' mention=' + (h.indexOf('Prorata mensuel') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Rubrique 4 : le reglage par ligne et le reglage en lot existent',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'cout-revient'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (typeof acStructSetTousModes === 'function' && typeof acStructReglerLignes === 'function'
+        && typeof acJoursOuvresMois === 'function' && acJoursOuvresMois() >= 20
+        && h.indexOf('acStructReglerLignes') !== -1 && h.indexOf('Tout /mois') !== -1)
+        ? 'OK : reglage par ligne + reglage en lot prêts'
+        : 'ECHEC outils ou boutons manquants'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de production : la page calcule chaque jour et synthétise le mois',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'cout-production'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var ok = (typeof render_cout_production === 'function') && (typeof acCoutFicheJour === 'function')
+        && h.indexOf('Coût de Production par Jour') !== -1
+        && h.indexOf('Matières') !== -1 && h.indexOf('Main-d') !== -1
+        && h.indexOf('SYNTH') !== -1;
+      ok ? 'OK : cout journalier + synthese mensuelle' : 'ECHEC page incomplete'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de production : elle resiste aussi aux données corrompues',
+    app: 'production.html', store: storeCorrompu,
+    code: `
+      CURRENT_PAGE = 'cout-production'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('Coût de Production par Jour') !== -1 && h.indexOf('Aucune fiche') !== -1)
+        ? 'OK : page vide mais lisible' : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : les deux pages de cout sont accessibles depuis le menu',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var h = document.body.innerHTML || '';
+      var okMod = (typeof MODULES !== 'undefined') && MODULES.some(function (m) {
+        return m.key === 'production' && m.pages.indexOf('prodCoutRevient') !== -1 && m.pages.indexOf('prodCoutJour') !== -1;
+      });
+      var okMap = (typeof PROD_PAGE_MAP !== 'undefined') && PROD_PAGE_MAP.prodCoutRevient === 'cout-revient' && PROD_PAGE_MAP.prodCoutJour === 'cout-production';
+      (okMod && okMap) ? 'OK : menu et routage cout présents' : 'ECHEC menu=' + okMod + ' routage=' + okMap
+    `,
+attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'Exploitation : le bouton « Marquer une présence » est présent',
     app: 'production.html', store: storeRealiste,
