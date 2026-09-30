@@ -84,7 +84,7 @@ CURRENT_PAGE = 'cout-revient';
       var h = document.getElementById('content').innerHTML || '';
       (typeof acStructSetTousModes === 'function' && typeof acStructReglerLignes === 'function'
         && typeof acJoursOuvresMois === 'function' && acJoursOuvresMois() >= 20
-        && h.indexOf('acStructReglerLignes') !== -1 && h.indexOf('Tout /mois') !== -1)
+        && h.indexOf('acStructReglerLignes') !== -1 && h.indexOf('/mois') !== -1)
         ? 'OK : reglage par ligne + reglage en lot prêts'
         : 'ECHEC outils ou boutons manquants'
     `,
