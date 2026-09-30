@@ -27,12 +27,15 @@ function controles() {
     attenduPrefixe: 'OK'
   });
 
-/* ---------- Cout de revient : le mode Cout Reel doit recalculer la table ---------- */
+  /* Les pages de cout exigent une autorisation explicite de l'app principale. */
+  /* ---------- Cout de revient : le mode Cout Reel doit recalculer la table ---------- */
   r.push({
     nom: 'Cout de revient : le mode Cout Reel recharge la main-d\u2019oeuvre depuis le pointage',
     app: 'production.html', store: storeRealiste,
     code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       CURRENT_PAGE = 'cout-revient';
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       acSetLaborMode('pointage');
       var cfg = getSection('costLabor', {});
       var h = document.getElementById('content').innerHTML || '';
@@ -48,6 +51,7 @@ function controles() {
     nom: 'Cout de revient : une date sans pointage est signalée au lieu de laisser la simulation',
     app: 'production.html', store: storeRealiste,
     code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
 CURRENT_PAGE = 'cout-revient';
       acSetLaborMode('pointage');
       acDatePointageChanged('2001-01-01');
@@ -64,7 +68,9 @@ CURRENT_PAGE = 'cout-revient';
     nom: 'Rubrique 4 : le prorata mensuel du loyer est conserve et se relit',
     app: 'production.html', store: storeRealiste,
     code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       CURRENT_PAGE = 'cout-revient';
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       acSaveChargeModelePoste('a1', 'mode_loyer', 'mensuel');
       acSaveChargeModelePoste('a1', 'loyer', 100000);
       var ch = acGetChargesModele('a1');
@@ -80,7 +86,9 @@ CURRENT_PAGE = 'cout-revient';
     nom: 'Rubrique 4 : le reglage par ligne et le reglage en lot existent',
     app: 'production.html', store: storeRealiste,
     code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       CURRENT_PAGE = 'cout-revient'; renderPage();
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       var h = document.getElementById('content').innerHTML || '';
       (typeof acStructSetTousModes === 'function' && typeof acStructReglerLignes === 'function'
         && typeof acJoursOuvresMois === 'function' && acJoursOuvresMois() >= 20
@@ -95,7 +103,9 @@ CURRENT_PAGE = 'cout-revient';
     nom: 'Cout de production : la page calcule chaque jour et synthétise le mois',
     app: 'production.html', store: storeRealiste,
     code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       CURRENT_PAGE = 'cout-production'; renderPage();
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       var h = document.getElementById('content').innerHTML || '';
       var ok = (typeof render_cout_production === 'function') && (typeof acCoutFicheJour === 'function')
         && h.indexOf('Coût de Production par Jour') !== -1
@@ -110,10 +120,93 @@ CURRENT_PAGE = 'cout-revient';
     nom: 'Cout de production : elle resiste aussi aux données corrompues',
     app: 'production.html', store: storeCorrompu,
     code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       CURRENT_PAGE = 'cout-production'; renderPage();
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
       var h = document.getElementById('content').innerHTML || '';
       (h.indexOf('Coût de Production par Jour') !== -1 && h.indexOf('Aucune fiche') !== -1)
         ? 'OK : page vide mais lisible' : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Cout de revient : les deux sources, manuel et auto ---------- */
+  r.push({
+    nom: 'Cout de revient : les onglets MANUEL et AUTO existent et se memorisent',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      CURRENT_PAGE = 'cout-revient';
+      acSetModeCout('manuel'); renderPage();
+      var hM = document.getElementById('content').innerHTML || '';
+      acSetModeCout('auto'); renderPage();
+      var hA = document.getElementById('content').innerHTML || '';
+      var cfg = getSection('costLabor', {});
+      (typeof acSetModeCout === 'function' && getSection('costModeSource', 'manuel') === 'auto'
+        && hM.indexOf('MANUEL') !== -1 && hA.indexOf('AUTO') !== -1
+        && hA.indexOf('fiche de production du jour') !== -1
+        && hA.indexOf('onglet AUTO') !== -1
+        && cfg.modeLabor === 'pointage' && cfg._autoPointageActif === true)
+        ? 'OK : mode auto = pointage Paye (' + cfg._nbPresentsPointage + ' présent(s)), mode manuel = saisie'
+        : 'ECHEC source=' + getSection('costModeSource', 'manuel') + ' actif=' + cfg._autoPointageActif
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de revient : la page est refusee sans autorisation explicite',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodDashboard: 'write' } }));
+      var k = prodPageKey('cout-revient');
+      CURRENT_PAGE = 'cout-revient'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (k === 'prodCoutRevient' && prodCanRead(k) === false && h.indexOf('Acc') !== -1 && h.indexOf('non autoris') !== -1)
+        ? 'OK : acces bloque, message affiche'
+        : 'ECHEC cle=' + k + ' lecture=' + prodCanRead(k)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de production : la page est refusee sans autorisation explicite',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write' } }));
+      var k = prodPageKey('cout-production');
+      CURRENT_PAGE = 'cout-production'; renderPage();
+      (k === 'prodCoutJour' && prodCanRead(k) === false)
+        ? 'OK : acces bloque'
+        : 'ECHEC cle=' + k + ' lecture=' + prodCanRead(k)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de revient : les autres pages ne sont pas affectees par la protection',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodStock: 'write' } }));
+      (prodCanRead('prodStock') === true && prodCanRead('prodArticles') === true && prodCanRead('prodRapports') === true)
+        ? 'OK : stocks, articles et rapports restent accessibles'
+        : 'ECHEC la protection a deborde sur les autres pages'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : le cout de revient ouvre le tableau complet de Exploitation',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      renderCostPrice();
+      var h = document.getElementById('content').innerHTML || '';
+      var aAcces = canAccess('costPrice', false);
+      var okLiens = h.indexOf('prodCoutRevient') !== -1 && h.indexOf('prodCoutJour') !== -1;
+      var okCadre = h.indexOf('production.html?page=cout-revient') !== -1;
+      var okRefus = h.indexOf('non autoris') !== -1;
+      (okLiens && (aAcces ? okCadre : okRefus))
+        ? 'OK : ' + (aAcces ? 'cadre du module Exploitation affiche' : 'refus affiche, liens conserves')
+        : 'ECHEC acces=' + aAcces + ' cadre=' + okCadre + ' refus=' + okRefus + ' liens=' + okLiens
     `,
     attenduPrefixe: 'OK'
   });
