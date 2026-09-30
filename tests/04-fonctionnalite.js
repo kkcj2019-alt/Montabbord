@@ -15,6 +15,19 @@ function controles() {
 
   /* ---------- Exploitation : le pointage doit rester accessible ---------- */
   r.push({
+    nom: 'Pointage : la grille horaire porte son id et son bouton d\'impression dediee',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'presence'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var okTable = h.indexOf('id="ptGrilleTable"') !== -1;
+      var okBtn = h.indexOf('printPointageGrille()') !== -1;
+      (okTable && okBtn) ? 'OK : grille imprimable branchee' : 'ECHEC table=' + okTable + ' bouton=' + okBtn
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Exploitation : le bouton « Marquer une présence » est présent',
     app: 'production.html', store: storeRealiste,
     code: `
