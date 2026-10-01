@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-01-118';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-119';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16649,6 +16649,59 @@ function _reconcileAcomptesPretsFromCaisse() {
   }
 }
 
+/* Compte les acomptes dont le mois de deduction differe du mois de
+   l'operation. C'est le cas quand l'ancien champ "Mois de deduction"
+   portait un autre mois que la piece : ces acomptes disparaissent du
+   mois affiche alors que l'operation y est. Les prets ne sont jamais
+   touches : eux s'etalent vraiment sur plusieurs mois. */
+function apCompterDesalignes() {
+  var list = [];
+  try { list = dbArr('mdb_acomptesPrets') || []; } catch (e) { return 0; }
+  var n = 0;
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
+    if (!a || a.type !== 'acompte') continue;
+    var opMois = String(a.date || '').substring(0, 7);
+    if (!opMois) continue;
+    if ((a.moisDeduction || '') !== opMois) n++;
+  }
+  return n;
+}
+
+/* Remet chaque acompte sur le mois de son operation, apres confirmation.
+   Ne touche ni aux prets, ni aux montants, ni aux validations. */
+function apRealignerMois() {
+  var list = [];
+  try { list = dbArr('mdb_acomptesPrets') || []; } catch (e) { return; }
+  var cibles = [];
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
+    if (!a || a.type !== 'acompte') continue;
+    var opMois = String(a.date || '').substring(0, 7);
+    if (!opMois || (a.moisDeduction || '') === opMois) continue;
+    cibles.push({ id: a.id, avant: a.moisDeduction || '-', apres: opMois });
+  }
+  if (!cibles.length) { toast('Aucun acompte \u00e0 r\u00e9aligner', 'success'); return; }
+  if (!confirm2(cibles.length + ' acompte(s) ont un mois de d\u00e9duction diff\u00e9rent de leur mois d\u2019op\u00e9ration. Les remettre sur le mois d\u2019op\u00e9ration ?')) return;
+  var ops = [];
+  try { ops = dbArr('mdb_operationsCaisse') || []; } catch (e2) {}
+  for (var j = 0; j < cibles.length; j++) {
+    var c = cibles[j], opId = '';
+    for (var k = 0; k < list.length; k++) {
+      if (list[k] && list[k].id === c.id) { list[k].moisDeduction = c.apres; opId = list[k].caisseOpId || ''; break; }
+    }
+    if (opId) {
+      for (var m = 0; m < ops.length; m++) {
+        if (ops[m] && ops[m].id === opId) { ops[m].apMoisDeduction = c.apres; break; }
+      }
+    }
+  }
+  try { DB.set('mdb_acomptesPrets', list); markDirty('mdb_acomptesPrets'); } catch (e3) {}
+  try { DB.set('mdb_operationsCaisse', ops); markDirty('mdb_operationsCaisse'); } catch (e4) {}
+  toast(cibles.length + ' acompte(s) r\u00e9align\u00e9(s) sur leur mois d\u2019op\u00e9ration', 'success');
+  try { renderAcomptesPrets(); } catch (e5) {}
+}
+
 function renderAcomptesPrets() {
   // Nettoyage orphelins générique avant chaque rendu du module acomptes.
   try{ _purgeOrphanAcomptes(); }catch(e){}
@@ -16708,6 +16761,10 @@ function renderAcomptesPrets() {
   html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">';
   html += '<input type="month" id="apFilterMonthInput" value="' + apFilterMonth + '" onchange="window._apFilterMonth=this.value;renderAcomptesPrets()" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:12px;outline:none">';
   html += '<button class="btn btn-sm btn-outline" onclick="window._apFilterMonth=\'\';renderAcomptesPrets()"' + (apFilterMonth ? '' : ' disabled') + '>Tout</button>';
+  try {
+    var _nbDesal = apCompterDesalignes();
+    if (_nbDesal > 0) html += '<button class="btn btn-sm" onclick="apRealignerMois()" title="Remettre chaque acompte sur le mois de son op\u00e9ration" style="background:#7c3aed;color:#fff;border:none">\u21c4 R\u00e9aligner (' + _nbDesal + ')</button>';
+  } catch (eRA) {}
   var _apHideIdle = (window._apHideIdle === undefined) ? true : !!window._apHideIdle;
   html += '<label title="Masquer les employes sans pret ni acompte a la periode affichee" style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--gray-300);border-radius:20px;font-size:11.5px;cursor:pointer;user-select:none;background:' + (_apHideIdle ? 'var(--primary-light)' : '#fff') + '">';
   html += '<input type="checkbox" ' + (_apHideIdle ? 'checked' : '') + ' onchange="window._apHideIdle=this.checked;renderAcomptesPrets()" style="width:15px;height:15px;cursor:pointer">';
