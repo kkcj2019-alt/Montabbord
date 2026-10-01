@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-27-113';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-114';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -640,14 +640,15 @@ var NAV = [
     ]},
     { id: 'prestation-group', label: 'Prestations', icon: '🔧', children: [
       { id: 'preventive', label: 'Préventive' },
-      { id: 'corrective', label: 'Corrective' }
+      { id: 'corrective', label: 'Corrective' },
+      { id: 'reparations-clients', label: 'Reparations clients', icon: '\ud83d\udd27' }
     ]}
   ]},
   { group: 'GÉNÉRAL', items: [
     { id: 'qualite', label: 'Service Qualité & NC', icon: '🎯' },
     { id: 'reports', label: 'Rapports', icon: '📈' },
     { id: 'analyse-couts', label: 'Analyse des coôuts', icon: '\ud83d\udcb0' },
-    { id: 'cout-revient', label: 'Coût de revient palette', icon: '\ud83d\udcca' },
+    { id: 'cout-revient', label: 'Coût de production palette', icon: '\ud83d\udcca' },
     { id: 'cout-production', label: 'Coût de production par jour', icon: '\ud83d\udcca' },
     { id: 'rh-group', label: 'RH & Présence', icon: '👤', children: [
       { id: 'rh-dashboard', label: 'Tableau de Bord RH' },
@@ -1105,9 +1106,10 @@ var PAGE_TITLES = {
   'achats-history': 'Achats',
   'preventive': 'Maintenance Préventive',
   'corrective': 'Maintenance Corrective',
+  'reparations-clients': 'Reparations chez les clients',
   'reports': 'Rapports',
   'analyse-couts': 'Analyse des Coúts de Production',
-  'cout-revient': 'Coût de Revient — Fabrication de Palettes',
+  'cout-revient': 'Coût de Production — Fabrication de Palettes',
   'cout-production': 'Coût de Production par Jour',
   'rh-dashboard': 'Tableau de Bord RH',
   'departments': 'Départements',
@@ -3318,6 +3320,27 @@ function acCompositionDepuisFiches() {
    ===================================================================== */
 
 /* Liste des articles de la campagne : [{ article_id, qte }] */
+/* Le bandeau du haut est desormais calcule A PARTIR de la composition :
+     il ne peut donc plus diverger du tableau. Les 4 champs en dur
+     (palette, prix du m3, prix de vente, taux de chute) ont disparu :
+     ils se reglent dans la composition et dans le tableau. */
+function acBandeauResumeHtml() {
+  var comp = acComposition().filter(function (l) { return (parseFloat(l.qte) || 0) > 0; });
+  var arts = getArticles();
+  var tq = 0, ca = 0;
+  comp.forEach(function (l) {
+    var a = arts.find(function (x) { return String(x.id) === String(l.article_id); }) || {};
+    tq += parseFloat(l.qte) || 0;
+    ca += (parseFloat(l.qte) || 0) * (parseFloat(a.prix_vente) || 0);
+  });
+  var h = '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;padding:.4rem .6rem;margin-bottom:.6rem;border:1.5px solid #cbd5e1;border-radius:6px;background:#f8fafc;font-size:.76rem">';
+  h += '<span style="color:#475569;font-weight:700">Campagne : <strong style="color:#0f172a">' + comp.length + '</strong> article(s) — <strong style="color:#0f172a">' + fmt(tq) + '</strong> palette(s)</span>';
+  h += '<span style="color:#475569;font-weight:700">Chiffre d\'affaires : <strong style="color:#0f172a">' + fmt(Math.round(ca)) + ' F</strong></span>';
+  h += '<span style="color:#64748b;font-size:.7rem">Modifier la composition ci-dessous — tout le tableau se recalcule</span>';
+  h += '</div>';
+  return h;
+}
+
 function acComposition() {
   var comp = getSection('costComposition', []);
   if (!Array.isArray(comp)) comp = [];
@@ -4213,6 +4236,446 @@ function acCoutFicheJour(p) {
   };
 }
 
+/* =====================================================================
+   REPARATIONS CHEZ LES CLIENTS — fiche journaliere
+   ---------------------------------------------------------------------
+   Ce qui existe : des reclamations (non-conformites). Ce qui manquait :
+   enregistrer AU JOUR LE JOUR les reparations faites chez un client, et
+   sortir automatiquement du stock les pieces consommees sur place.
+
+   Une fiche de reparation = une date, un client, une intervention, et
+   les pieces sorties (palette, latte, pointe, clou...). Chaque ligne de
+   piece declenche une SORTIE de stock datee et tracee, et la fiche
+   reste consultable jour par jour.
+   ===================================================================== */
+
+/* Sortie (ou remise) des pieces d'une fiche de reparation.
+   Certaines lignes de stock n'ont pas d'article_id : on travaille alors
+   directement sur la ligne, par code, pour que le stock bouge vraiment. */
+function reparSortieStock(ligne, sens, motif) {
+  var arts = getArticles() || [];
+  var artId = ligne.article_id || '';
+  var code = String(ligne.code || '').trim().toUpperCase();
+  var a = null;
+  if (artId) a = arts.find(function (x) { return String(x.id) === String(artId); }) || null;
+  if (!a && code) a = arts.find(function (x) { return String((x && x.code) || '').trim().toUpperCase() === code; }) || null;
+
+  var qte = parseFloat(ligne.qte) || 0;
+  if (!(qte > 0)) return;
+
+  if (a) {
+    updateStockArticle(a.id, qte, sens, motif, '', motif);
+    return;
+  }
+  /* Pas d'article : on modifie la ligne de stock directement, par code. */
+  var cat = (ligne.categorie === 'stockConsum') ? getStockConsum()
+    : (ligne.categorie === 'stockSemi') ? getStockSemi()
+      : (ligne.categorie === 'stockMerch') ? getStockMerch() : getStockFinished();
+  var setFn = (ligne.categorie === 'stockConsum') ? setStockConsum
+    : (ligne.categorie === 'stockSemi') ? setStockSemi
+      : (ligne.categorie === 'stockMerch') ? setStockMerch : setStockFinished;
+  var l = (cat || []).find(function (s) { return String((s || {}).code || '').trim().toUpperCase() === code; });
+  if (!l) return;
+  l.quantite = (parseFloat(l.quantite) || 0) + (sens === 'entree' ? qte : -qte);
+  l.updated_at = new Date().toISOString();
+  setFn(cat);
+}
+
+
+function getReparations() { return getSection('reparations', []); }
+function setReparations(v) { setSection('reparations', v); }
+
+/* Cout d'une piece consommee, lu du stock (comme pour le cout de revient) */
+function reparPieceCout(stockRow, qte) {
+  var pu = 0;
+  try {
+    var defs = defCatalog() || [];
+    var key = String(stockRow.code || '').trim().toUpperCase();
+    for (var i = 0; i < defs.length; i++) {
+      var d = defs[i] || {};
+      if (String(d.code || '').trim().toUpperCase() !== key) continue;
+      if (parseFloat(d.unit_cost) > 0) { pu = parseFloat(d.unit_cost); break; }
+      if (parseFloat(d.prix_carton) > 0) {
+        var cond = parseFloat(d.qty_per_packet) || 150;
+        pu = (parseFloat(d.prix_carton) / 50) / cond;
+        break;
+      }
+    }
+  } catch (e) {}
+  if (!(pu > 0)) pu = parseFloat(stockRow.prix_unitaire) || 0;
+  return Math.round((pu || 0) * (parseFloat(qte) || 0));
+}
+
+/* Liste des pieces sorties de stock, tous stocks confondus */
+function reparPiecesDisponibles() {
+  var out = [];
+  var artsCache = null;
+  function arts() {
+    if (!artsCache) { try { artsCache = getArticles() || []; } catch (e) { artsCache = []; } }
+    return artsCache;
+  }
+  /* Une ligne de stock sans article_id est rattachee a son article par code. */
+  function resoudreArticle(s) {
+    var artId = s.article_id || '';
+    var code = String(s.code || '').trim().toUpperCase();
+    if (!artId && code) {
+      var a = arts().find(function (x) { return String((x && x.code) || '').trim().toUpperCase() === code; });
+      if (a) return a.id;
+    }
+    return artId;
+  }
+  function add(list, categorie, label) {
+    (list || []).forEach(function (s) {
+      if (!s) return;
+      var artId = resoudreArticle(s);
+      var a = null;
+      if (artId) { try { a = getArticles().find(function (x) { return String(x.id) === String(artId); }) || null; } catch (e) {} }
+      var qte = parseFloat(s.quantite) || 0;
+      if (qte <= 0) return;
+      out.push({
+        article_id: artId,
+        code: s.code || (a && a.code) || '',
+        designation: s.designation || (a && a.designation) || '',
+        categorie: categorie,
+        stockLabel: label,
+        stock: qte,
+        unite: categorie === 'stockConsum' ? 'unité' : 'pcs',
+        coutUnite: reparPieceCout(s, 1)
+      });
+    });
+  }
+  try { add(getStockFinished(), 'stockFinished', 'Produits finis'); } catch (e) {}
+  try { add(getStockSemi(), 'stockSemi', 'Semi-produits'); } catch (e) {}
+  try { add(getStockConsum(), 'stockConsum', 'Consommables'); } catch (e) {}
+  try { add(getStockMerch(), 'stockMerch', 'Marchandises'); } catch (e) {}
+  return out;
+}
+
+/* Enregistre la fiche et sort les pieces du stock */
+function enregistrerReparation(d) {
+  if (!d || !d.client) { toast('Indiquez le client', 'error'); return null; }
+  /* Une piece est retenue des qu'elle a un code OU un article_id :
+     certaines lignes de stock n'ont pas d'article_id. */
+  var pieces = (d.pieces || []).filter(function (p) { return p && (p.article_id || p.code) && (parseFloat(p.qte) || 0) > 0; });
+
+  /* Controle de disponibilite AVANT d'ecrire quoi que ce soit.
+     On lit le stock d'origine de la piece (sa categorie), puis on cherche
+     la ligne soit par article_id, soit par code. */
+  var manquants = [];
+  pieces.forEach(function (piece) {
+    var dispo = null;
+    try {
+      var cat = piece.categorie || 'stockConsum';
+      var liste = (cat === 'stockConsum') ? getStockConsum()
+        : (cat === 'stockSemi') ? getStockSemi()
+          : (cat === 'stockMerch') ? getStockMerch()
+            : (cat === 'stockRaw') ? getStockRaw() : getStockFinished();
+      var code = String(piece.code || '').trim().toUpperCase();
+      var l = (liste || []).find(function (s) {
+        if (!s) return false;
+        if (piece.article_id && String(s.article_id) === String(piece.article_id)) return true;
+        return code && String((s.code || '')).trim().toUpperCase() === code;
+      });
+      dispo = l ? (parseFloat(l.quantite) || 0) : 0;
+    } catch (e) { dispo = 0; }
+    if (dispo < (parseFloat(piece.qte) || 0)) {
+      manquants.push((piece.code || piece.designation || 'Piece') + ' : demande ' + fmt(piece.qte) + ', stock ' + fmt(dispo));
+    }
+  });
+  if (manquants.length) {
+    toast('Stock insuffisant — ' + manquants[0], 'error');
+    return { erreur: manquants };
+  }
+
+  var total = 0;
+  var lignes = [];
+  pieces.forEach(function (p) {
+    var cout = reparPieceCout(p, p.qte);
+    total += cout;
+    lignes.push({
+      article_id: p.article_id || '',
+      code: p.code || '', designation: p.designation || '',
+      categorie: p.categorie || 'stockConsum',
+      qte: parseFloat(p.qte) || 0, coutUnite: p.coutUnite || 0, cout: cout
+    });
+  });
+
+  var fiche = {
+    id: genId(),
+    numero: 'REP-' + String(d.date || today()).replace(/-/g, '') + '-' + String(getReparations().length + 1).padStart(3, '0'),
+    date: d.date || today(),
+    heure: d.heure || '',
+    client: d.client,
+    reference: d.reference || '',
+    lieu: d.lieu || '',
+    technician: d.technicien || '',
+    type: d.type || 'Reparation',
+    motif: d.motif || '',
+    travail: d.travail || '',
+    statut: d.statut || 'terminee',
+    pieces: lignes,
+    mainOeuvre: parseFloat(d.mainOeuvre) || 0,
+    fraisDeplacement: parseFloat(d.fraisDeplacement) || 0,
+    totalPieces: total,
+    total: total + (parseFloat(d.mainOeuvre) || 0) + (parseFloat(d.fraisDeplacement) || 0),
+    created_at: new Date().toISOString()
+  };
+
+  var list = getReparations();
+  list.push(fiche);
+  setReparations(list);
+
+  /* Sortie de stock datee, tracee au registre */
+  fiche.pieces.forEach(function (l) {
+    try {
+      reparSortieStock(l, 'sortie', 'Sortie - Reparation ' + fiche.numero + ' (' + fiche.client + ')');
+    } catch (e) { console.warn('sortie stock reparation', e); }
+  });
+
+  toast('Reparation ' + fiche.numero + ' enregistrée — ' + fmt(lignes.length) + ' pièce(s) sortie(s) du stock ✅');
+  renderPage();
+  return { fiche: fiche };
+}
+
+/* Supprime une fiche et remet les pieces en stock */
+function supprimerReparation(id) {
+  var list = getReparations();
+  var f = list.find(function (x) { return x && x.id === id; });
+  if (!f) return;
+  if (!confirm2('Supprimer la reparation ' + (f.numero || '') + ' ? Les pièces sorties du stock seront remises.')) return;
+  (f.pieces || []).forEach(function (l) {
+    try { reparSortieStock(l, 'entree', 'Annulation reparation - remise en stock'); } catch (e) {}
+  });
+  setReparations(list.filter(function (x) { return x.id !== id; }));
+  toast('Reparation supprimee, stock remis');
+  renderPage();
+}
+
+/* =====================================================================
+   PAGE REPARATIONS CLIENTS — fiche journaliere + journal
+   ===================================================================== */
+function render_reparations_clients() {
+  var clients = [];
+  try { clients = (DB.get('mdb_clients') || []); } catch (e) {}
+  var reparations = getReparations().slice().sort(function (a, b) {
+    return String(b.date || '').localeCompare(String(a.date || ''));
+  });
+  var moisSel = getSection('reparationsMois', '') || '';
+
+  var h = '';
+  h += '<div class="card" style="padding:.8rem;margin-bottom:.8rem;background:#ffffff">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem;margin-bottom:.4rem">';
+  h += '<div><h2 style="margin:0;font-size:1.05rem;font-weight:900;color:#0f172a">🔧 Reparations chez les clients</h2>';
+  h += '<div style="font-size:.72rem;color:var(--dim)">Une fiche par intervention. Les pièces consommées sortent du stock automatiquement, en daté.</div></div>';
+  h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
+  h += '<select onchange="setSection(\'reparationsMois\',this.value);renderPage()" style="padding:.3rem .5rem;border:1.5px solid #cbd5e1;border-radius:6px;font-size:.72rem"><option value="">Tous les mois</option>';
+  (function () {
+    var vus = {};
+    reparations.forEach(function (r) { var m = String(r.date || '').slice(0, 7); if (m && !vus[m]) { vus[m] = true; h += '<option value="' + m + '"' + (moisSel === m ? ' selected' : '') + '>' + escH(monthLabel(m)) + '</option>'; } });
+  })();
+  h += '</select>';
+  h += '<button class="btn btn-sm btn-accent" onclick="ouvrirReparation()" style="font-size:.74rem">+ Nouvelle réparation</button>';
+  h += '</div></div>';
+
+  /* --- Journal --- */
+  var affiches = reparations.filter(function (r) { return !moisSel || String(r.date || '').slice(0, 7) === moisSel; });
+  var duMois = affiches.filter(function (r) { return !moisSel || String(r.date || '').slice(0, 7) === moisSel; });
+  var totPieces = 0, totMain = 0, totDepl = 0;
+  duMois.forEach(function (r) { totPieces += parseFloat(r.totalPieces) || 0; totMain += parseFloat(r.mainOeuvre) || 0; totDepl += parseFloat(r.fraisDeplacement) || 0; });
+
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.5rem;margin-bottom:.7rem">';
+  h += '<div style="padding:.5rem .6rem;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc"><div style="font-size:.62rem;font-weight:800;color:#64748b">INTERVENTIONS</div><div style="font-size:1.1rem;font-weight:900;color:#0f172a">' + duMois.length + '</div></div>';
+  h += '<div style="padding:.5rem .6rem;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc"><div style="font-size:.62rem;font-weight:800;color:#64748b">PIÈCES SORTIES</div><div style="font-size:1.1rem;font-weight:900;color:#b45309">' + fmt(totPieces) + ' F</div></div>';
+  h += '<div style="padding:.5rem .6rem;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc"><div style="font-size:.62rem;font-weight:800;color:#64748b">MAIN-D\'ŒUVRE</div><div style="font-size:1.1rem;font-weight:900;color:#1d4ed8">' + fmt(totMain) + ' F</div></div>';
+  h += '<div style="padding:.5rem .6rem;border:1px solid #e2e8f0;border-radius:6px;background:#f8fafc"><div style="font-size:.62rem;font-weight:800;color:#64748b">DÉPLACEMENTS</div><div style="font-size:1.1rem;font-weight:900;color:#7c3aed">' + fmt(totDepl) + ' F</div></div>';
+  h += '</div>';
+
+  if (!affiches.length) {
+    h += '<div class="empty">Aucune réparation enregistrée. Cliquez sur « + Nouvelle réparation » pour saisir l\'intervention du jour.</div>';
+  } else {
+    h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.74rem">';
+    h += '<thead><tr style="background:#0f172a;color:#fff"><th style="padding:6px;text-align:left">Date</th><th style="padding:6px;text-align:left">N° fiche</th><th style="padding:6px;text-align:left">Client</th><th style="padding:6px;text-align:left">Intervention</th><th style="padding:6px;text-align:right">Pièces</th><th style="padding:6px;text-align:right">Coût pièces</th><th style="padding:6px;text-align:right">Total</th><th style="padding:6px;width:34px"></th></tr></thead><tbody>';
+    affiches.forEach(function (r) {
+      var nb = (r.pieces || []).length;
+      h += '<tr style="border-bottom:1px solid #e2e8f0">';
+      h += '<td style="padding:5px 6px;white-space:nowrap">' + escH(fmtD(r.date)) + '</td>';
+      h += '<td style="padding:5px 6px;font-weight:700">' + escH(r.numero || '—') + '</td>';
+      h += '<td style="padding:5px 6px">' + escH(r.client) + (r.lieu ? '<div style="font-size:.66rem;color:var(--dim)">' + escH(r.lieu) + '</div>' : '') + '</td>';
+      h += '<td style="padding:5px 6px">' + escH(r.motif || r.travail || r.type || '—') + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right">' + (nb ? nb + ' l.' : '—') + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right;color:#b45309;font-weight:700">' + fmt(r.totalPieces || 0) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:right;font-weight:900;color:#0f172a">' + fmt(r.total || 0) + '</td>';
+      h += '<td style="padding:5px 6px;text-align:center"><button onclick="voirReparation(\'' + r.id + '\')" title="Détail" style="border:none;background:none;cursor:pointer;font-size:.85rem">👁️</button> <button onclick="supprimerReparation(\'' + r.id + '\')" title="Supprimer" style="border:none;background:none;cursor:pointer;color:#dc2626;font-size:.85rem">🗑️</button></td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '</div>';
+
+  /* --- Formulaire de saisie --- */
+  h += '<div id="repForm" style="display:none">';
+  h += '<div class="card" style="padding:.8rem;margin-bottom:.8rem;border:1.5px solid #f97316;background:#fff7ed">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">';
+  h += '<h3 style="margin:0;font-size:.95rem;font-weight:900;color:#9a3412">Fiche de réparation du jour</h3>';
+  h += '<button class="btn btn-sm" onclick="document.getElementById(\'repForm\').style.display=\'none\'">✕ Fermer</button>';
+  h += '</div>';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.5rem;margin-bottom:.6rem">';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Date *</label><input type="date" id="rep_date" value="' + today() + '" style="width:100%;padding:.35rem .45rem;border:1.5px solid #f97316;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Heure</label><input type="time" id="rep_heure" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Client *</label><input type="text" id="rep_client" list="repClientList" placeholder="Nom du client" style="width:100%;padding:.35rem .45rem;border:1.5px solid #f97316;border-radius:6px;font-size:.8rem"><datalist id="repClientList">';
+  clients.forEach(function (cl) { h += '<option value="' + escH(cl.nom || '') + '">'; });
+  h += '</datalist></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Technicien</label><input type="text" id="rep_tech" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Lieu</label><input type="text" id="rep_lieu" placeholder="Ex: Chantier BTP" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Type</label><select id="rep_type" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"><option>Réparation</option><option>Entretien</option><option>Contrôle</option><option>Reprise</option></select></div>';
+  h += '</div>';
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem">';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Motif de l\'intervention</label><input type="text" id="rep_motif" placeholder="Ex: palette cassée sur chantier" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Travail effectué</label><input type="text" id="rep_travail" placeholder="Ex: remplacement de 12 lattes" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '</div>';
+
+  h += '<div style="background:#fff;border:1.5px solid #cbd5e1;border-radius:8px;padding:.5rem;margin-bottom:.5rem">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem">';
+  h += '<span style="font-size:.72rem;font-weight:800;color:#0f172a">Pièces sorties du stock</span>';
+  h += '<button class="btn btn-sm" onclick="repAjouterLigne()" style="font-size:.7rem;background:#0f172a;color:#fff">+ Ajouter une pièce</button>';
+  h += '</div>';
+  h += '<table style="width:100%;border-collapse:collapse;font-size:.74rem"><thead><tr style="background:#f1f5f9"><th style="padding:4px;text-align:left">Article</th><th style="padding:4px;text-align:right">Stock</th><th style="padding:4px;text-align:right">Quantité sortie</th><th style="padding:4px;text-align:right">Coût</th><th style="padding:4px;width:28px"></th></tr></thead><tbody id="repLignes"></tbody></table>';
+  h += '</div>';
+
+  h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:.5rem;align-items:end">';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Main-d\'œuvre (FCFA)</label><input type="number" id="rep_mo" min="0" step="500" value="0" oninput="repRecalcul()" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Frais de déplacement</label><input type="number" id="rep_depl" min="0" step="500" value="0" oninput="repRecalcul()" style="width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"></div>';
+  h += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Total de la fiche</label><div id="repTotal" style="padding:.35rem .45rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.9rem;font-weight:900;color:#0f172a">0 F</div></div>';
+  h += '<button class="btn btn-accent" onclick="enregistrerReparationForm()" style="padding:.5rem 1rem;background:#f97316;color:#fff;border:none;border-radius:6px;font-weight:800;font-size:.8rem;cursor:pointer">💾 Enregistrer la fiche</button>';
+  h += '</div></div></div>';
+
+  return h;
+}
+
+function ouvrirReparation() {
+  var f = document.getElementById('repForm');
+  if (!f) return;
+  f.style.display = (f.style.display === 'none') ? '' : 'none';
+  if (f.style.display !== 'none') repAjouterLigne();
+}
+
+/* Une ligne de piece a sortir */
+function repAjouterLigne() {
+  var corps = document.getElementById('repLignes');
+  if (!corps) return;
+  var dispo = reparPiecesDisponibles();
+  var opts = '<option value="">— choisir une pièce —</option>';
+  dispo.forEach(function (p) {
+    opts += '<option value="' + escH(p.article_id) + '" data-q="' + p.stock + '" data-c="' + p.coutUnite + '" data-code="' + escH(p.code) + '" data-des="' + escH(p.designation) + '" data-cat="' + escH(p.categorie) + '">' +
+      escH((p.code ? p.code + ' — ' : '') + p.designation) + ' (' + fmt(p.stock) + ' ' + p.unite + ')</option>';
+  });
+  var tr = document.createElement('tr');
+  tr.innerHTML = '<td><select class="repArt" onchange="repLigneChange(this)" style="width:100%;padding:.25rem .3rem;border:1px solid #cbd5e1;border-radius:4px;font-size:.74rem">' + opts + '</select></td>' +
+    '<td class="repStock" style="text-align:right;color:var(--dim)">—</td>' +
+    '<td><input type="number" min="0" step="1" class="repQte" oninput="repRecalcul()" style="width:72px;text-align:right;padding:.25rem .3rem;border:1.5px solid #2563eb;border-radius:4px;font-size:.74rem;font-weight:700"></td>' +
+    '<td class="repCost" style="text-align:right;font-weight:800">0</td>' +
+    '<td style="text-align:center"><button onclick="this.closest(\'tr\').remove();repRecalcul()" style="border:none;background:none;color:#dc2626;cursor:pointer;font-size:.9rem">🗑️</button></td>';
+  corps.appendChild(tr);
+}
+
+function repLigneChange(sel) {
+  var tr = sel.closest('tr');
+  var opt = sel.options[sel.selectedIndex];
+  var qteDispo = parseFloat(opt.getAttribute('data-q')) || 0;
+  var coutU = parseFloat(opt.getAttribute('data-c')) || 0;
+  tr.querySelector('.repStock').textContent = sel.value ? fmt(qteDispo) : '—';
+  tr.querySelector('.repCost').textContent = fmt(coutU * (parseFloat(tr.querySelector('.repQte').value) || 0));
+  repRecalcul();
+}
+
+function repRecalcul() {
+  var lignes = document.querySelectorAll('#repLignes tr');
+  var total = 0;
+  Array.prototype.forEach.call(lignes, function (tr) {
+    var sel = tr.querySelector('.repArt');
+    var qte = parseFloat(tr.querySelector('.repQte').value) || 0;
+    var opt = sel.options[sel.selectedIndex];
+    var coutU = parseFloat(opt.getAttribute('data-c')) || 0;
+    var c = coutU * qte;
+    tr.querySelector('.repCost').textContent = fmt(c);
+    total += c;
+  });
+  var mo = parseFloat((document.getElementById('rep_mo') || {}).value) || 0;
+  var depl = parseFloat((document.getElementById('rep_depl') || {}).value) || 0;
+  var el = document.getElementById('repTotal');
+  if (el) el.textContent = fmt(total + mo + depl) + ' F';
+}
+
+function enregistrerReparationForm() {
+  var client = (document.getElementById('rep_client') || {}).value || '';
+  if (!client.trim()) { toast('Indiquez le client', 'error'); return; }
+  var pieces = [];
+  Array.prototype.forEach.call(document.querySelectorAll('#repLignes tr'), function (tr) {
+    var sel = tr.querySelector('.repArt');
+    if (!sel || !sel.value) return;
+    var qte = parseFloat(tr.querySelector('.repQte').value) || 0;
+    if (!(qte > 0)) return;
+    var opt = sel.options[sel.selectedIndex];
+    pieces.push({
+      article_id: sel.value,
+      code: opt.getAttribute('data-code') || '',
+      designation: opt.getAttribute('data-des') || '',
+      categorie: opt.getAttribute('data-cat') || 'stockConsum',
+      qte: qte,
+      coutUnite: parseFloat(opt.getAttribute('data-c')) || 0
+    });
+  });
+  var res = enregistrerReparation({
+    date: (document.getElementById('rep_date') || {}).value || today(),
+    heure: (document.getElementById('rep_heure') || {}).value || '',
+    client: client.trim(),
+    lieu: (document.getElementById('rep_lieu') || {}).value || '',
+    technicien: (document.getElementById('rep_tech') || {}).value || '',
+    type: (document.getElementById('rep_type') || {}).value || 'Réparation',
+    motif: (document.getElementById('rep_motif') || {}).value || '',
+    travail: (document.getElementById('rep_travail') || {}).value || '',
+    mainOeuvre: parseFloat((document.getElementById('rep_mo') || {}).value) || 0,
+    fraisDeplacement: parseFloat((document.getElementById('rep_depl') || {}).value) || 0,
+    pieces: pieces
+  });
+  if (!res || res.erreur) return;
+  var f = document.getElementById('repForm');
+  if (f) f.style.display = 'none';
+}
+
+function voirReparation(id) {
+  var r = getReparations().find(function (x) { return x && x.id === id; });
+  if (!r) return;
+  var m = '<div id="repViewModal" style="position:fixed;inset:0;background:rgba(15,23,42,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem">';
+  m += '<div style="background:#fff;border-radius:12px;max-width:640px;width:100%;max-height:88vh;overflow:auto;padding:1rem">';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem;border-bottom:2px solid #0f172a;padding-bottom:.4rem">';
+  m += '<h3 style="margin:0;font-size:1rem;font-weight:900;color:#0f172a">Réparation ' + escH(r.numero || '') + '</h3>';
+  m += '<button onclick="document.getElementById(\'repViewModal\').remove()" style="border:none;background:#0f172a;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:700">Fermer</button></div>';
+  m += '<table style="width:100%;font-size:.78rem;margin-bottom:.6rem">';
+  m += '<tr><td style="padding:3px 6px;color:var(--dim)">Date</td><td style="font-weight:700">' + escH(fmtD(r.date)) + (r.heure ? ' à ' + escH(r.heure) : '') + '</td></tr>';
+  m += '<tr><td style="padding:3px 6px;color:var(--dim)">Client</td><td style="font-weight:700">' + escH(r.client) + '</td></tr>';
+  if (r.lieu) m += '<tr><td style="padding:3px 6px;color:var(--dim)">Lieu</td><td>' + escH(r.lieu) + '</td></tr>';
+  if (r.technicien) m += '<tr><td style="padding:3px 6px;color:var(--dim)">Technicien</td><td>' + escH(r.technicien) + '</td></tr>';
+  if (r.motif) m += '<tr><td style="padding:3px 6px;color:var(--dim)">Motif</td><td>' + escH(r.motif) + '</td></tr>';
+  if (r.travail) m += '<tr><td style="padding:3px 6px;color:var(--dim)">Travail effectué</td><td>' + escH(r.travail) + '</td></tr>';
+  m += '</table>';
+  if ((r.pieces || []).length) {
+    m += '<div style="font-size:.76rem;font-weight:800;color:#0f172a;margin-bottom:.3rem">Pièces sorties du stock</div>';
+    m += '<table style="width:100%;font-size:.76rem;border-collapse:collapse"><thead><tr style="background:#f1f5f9"><th style="padding:4px;text-align:left">Article</th><th style="padding:4px;text-align:right">Qté</th><th style="padding:4px;text-align:right">Coût</th></tr></thead><tbody>';
+    r.pieces.forEach(function (p) {
+      m += '<tr style="border-bottom:1px solid #e2e8f0"><td style="padding:4px">' + escH(p.code + ' — ' + p.designation) + '</td><td style="padding:4px;text-align:right">' + fmt(p.qte) + '</td><td style="padding:4px;text-align:right;font-weight:700">' + fmt(p.cout || 0) + ' F</td></tr>';
+    });
+    m += '</tbody></table>';
+  }
+  m += '<div style="margin-top:.6rem;padding:.5rem;background:#f8fafc;border-radius:6px;font-size:.82rem;font-weight:800;color:#0f172a;text-align:right">';
+  m += 'Pièces ' + fmt(r.totalPieces || 0) + ' F + main-d\'œuvre ' + fmt(r.mainOeuvre || 0) + ' F + déplacement ' + fmt(r.fraisDeplacement || 0) + ' F = <span style="color:#f97316">' + fmt(r.total || 0) + ' F</span>';
+  m += '</div></div></div>';
+  var el = document.createElement('div');
+  el.id = 'repViewHolder';
+  el.innerHTML = m;
+  document.body.appendChild(el);
+}
+
 function render_cout_production() {
   var p = acPeriode();
   var prods = getProductions().filter(function (x) {
@@ -4429,7 +4892,7 @@ function render_cout_revient() {
   /* Bandeau supérieur de pilotage */
   h += '<div class="card" style="padding:.7rem;margin-bottom:.8rem;background:#ffffff;border:1px solid #cbd5e1;box-shadow:0 2px 6px rgba(0,0,0,.04)">';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem;margin-bottom:.6rem;padding-bottom:.5rem;border-bottom:1px solid #e2e8f0">';
-  h += '<div><h2 style="font-size:1.15rem;font-weight:900;color:#0f172a;margin:0">Coût de Revient Analytique — Tableau Continu & Rentabilité</h2>' +
+  h += '<div><h2 style="font-size:1.15rem;font-weight:900;color:#0f172a;margin:0">Coût de Production Analytique — Tableau Continu & Rentabilité</h2>' +
        '<div style="font-size:.72rem;color:var(--dim)">Modèle d’exploitation complet (CVAMP · CVPPF · CVD · Structure & Marge nette)</div></div>';
   h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
   h += '<button class="btn btn-sm" onclick="printCoutCampagneTable()" style="background:#0f172a;color:#fff;font-weight:800" title="Imprimer le tableau complet de coût de revient de la campagne">🖨️ Imprimer Tableau Campagne</button>';
@@ -4560,6 +5023,7 @@ function render_cout_revient() {
   h += acOngletsCoutHtml();
   h += acLaborSourceHtml();
   h += acCompositionEditor();
+  h += acBandeauResumeHtml();
   h += acEtapesHtml(cfg.articleId, cArticle, false);
   h += '</div>';
 

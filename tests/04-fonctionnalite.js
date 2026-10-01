@@ -261,6 +261,104 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Reparations clients : fiche journaliere + sortie de stock ---------- */
+  r.push({
+    nom: 'Reparations clients : une fiche sort les pieces du stock et se retrouve au journal',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var pieces = reparPiecesDisponibles();
+      var echec = (!pieces.length) ? 'ECHEC aucune piece en stock' : '';
+      var p = pieces[0];
+      var stockAvant = p.stock;
+      var res = enregistrerReparation({
+        date: '2026-10-01', client: 'BTP CONSTRUCTIONS', lieu: 'Chantier X',
+        technicien: 'Mamadou', motif: 'palettes cassees', travail: 'remplacement de lattes',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 20, coutUnite: p.coutUnite }],
+        mainOeuvre: 5000, fraisDeplacement: 2000
+      });
+      if (!res || res.erreur) echec = 'ECHEC ' + JSON.stringify(res && res.erreur);
+      var f = res.fiche || {};
+      var stockApres = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0];
+      var ok1 = !echec && f.numero && (f.pieces || []).length === 1 && getReparations().length === 1
+        && stockApres && Math.abs(stockApres.stock - (stockAvant - 20)) < 0.001;
+      ok1 ? 'OK : fiche ' + f.numero + ', stock ' + stockAvant + ' -> ' + stockApres.stock
+        : (echec || ('ECHEC avant=' + stockAvant + ' apres=' + (stockApres ? stockApres.stock : '?') + ' pieces=' + ((f.pieces || []).length)))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Reparations clients : le stock insuffisant est refuse, la fiche ne sort pas',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var pieces = reparPiecesDisponibles();
+      var p = pieces[0];
+      var res = enregistrerReparation({
+        date: '2026-10-02', client: 'Client X',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 999999, coutUnite: p.coutUnite }]
+      });
+      (res && res.erreur && res.erreur.length && getReparations().length === 0)
+        ? 'OK : demande refusee (' + res.erreur[0] + ')'
+        : 'ECHEC la demande a ete acceptee alors que le stock est insuffisant'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Reparations clients : annuler une fiche remet les pieces en stock',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var pieces = reparPiecesDisponibles();
+      var p = pieces[0];
+      var stockAvant = p.stock;
+      var res = enregistrerReparation({
+        date: '2026-10-03', client: 'Client Y',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 15, coutUnite: p.coutUnite }]
+      });
+      if (!res || res.erreur) { /* fiche non creee */ }
+      var confirm2 = function () { return true; };
+      supprimerReparation(res.fiche.id);
+      var apres = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0];
+      (getReparations().length === 0 && apres && Math.abs(apres.stock - stockAvant) < 0.001)
+        ? 'OK : stock remis a ' + apres.stock
+        : 'ECHEC stock avant=' + stockAvant + ' apres=' + (apres ? apres.stock : '?')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Reparations clients : la page se rend avec sa fiche de saisie journaliere',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'reparations-clients'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (typeof render_reparations_clients === 'function'
+        && h.indexOf('Nouvelle réparation') !== -1
+        && h.indexOf('rep_date') !== -1 && h.indexOf('rep_client') !== -1
+        && h.indexOf('Pièces sorties du stock') !== -1)
+        ? 'OK : fiche journaliere disponible'
+        : 'ECHEC fiche absente'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de production : le bandeau du haut resume la composition (plus de champ en dur)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      CURRENT_PAGE = 'cout-revient'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var b = acBandeauResumeHtml();
+      (typeof acBandeauResumeHtml === 'function' && b.indexOf('Campagne') !== -1
+        && b.indexOf('palette') !== -1 && b.indexOf('Chiffre') !== -1
+        && h.indexOf('Composition de la campagne') !== -1)
+        ? 'OK : le bandeau derive de la composition'
+        : 'ECHEC bandeau incoherent'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'App principale : le cout de revient est calcule sur place, avec le moteur de Exploitation',
     app: 'index.html', store: storeRealiste,
