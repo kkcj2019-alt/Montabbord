@@ -466,6 +466,48 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Pointes : equivalence paquets/cartons dans les deux sens ---------- */
+  r.push({
+    nom: 'Pointes : taper des paquets affiche l equivalence en cartons',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('definitions', [{ id: 'd1', code: 'P5', designation: 'POINTE5', type: 'POINTE', qty_per_packet: 150 }]);
+      var c = acChampUnite('P5', 34500, 'paquet');
+      var m = c.match(/_eq"[^>]*>([^<]+)</);
+      (m && m[1].indexOf('carton') !== -1 && m[1].indexOf('34') !== -1)
+        ? 'OK : 230 paquets = ' + m[1].trim()
+        : 'ECHEC equivalence absente'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointes : taper des cartons affiche l equivalence en paquets',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('definitions', [{ id: 'd1', code: 'P5', designation: 'POINTE5', type: 'POINTE', qty_per_packet: 150 }]);
+      var c = acChampUnite('P5', 37500, 'carton');
+      var m = c.match(/_eq"[^>]*>([^<]+)</);
+      (m && m[1].indexOf('paquet') !== -1)
+        ? 'OK : 5 cartons = ' + m[1].trim()
+        : 'ECHEC equivalence absente'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointes : l enregistrement convertit vers les unites de stock',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('definitions', [{ id: 'd1', code: 'P5', designation: 'POINTE5', type: 'POINTE', qty_per_packet: 150 }]);
+      var a = acConvertirEnUnites(230, 'paquet', 'P5');
+      var b = acConvertirEnUnites(4.6, 'carton', 'P5');
+      (a === 34500 && b === 34500)
+        ? 'OK : 230 paquets et 4,6 cartons valent 34 500 pointes'
+        : 'ECHEC paquets=' + a + ' cartons=' + b
+    `,
+    attenduPrefixe: 'OK'
+  });
   r.push({
     nom: 'App principale : le cout de revient est calcule sur place, avec le moteur de Exploitation',
     app: 'index.html', store: storeRealiste,
