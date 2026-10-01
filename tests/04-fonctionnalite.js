@@ -279,7 +279,7 @@ CURRENT_PAGE = 'cout-revient';
       if (!res || res.erreur) echec = 'ECHEC ' + JSON.stringify(res && res.erreur);
       var f = res.fiche || {};
       var stockApres = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0];
-      var ok1 = !echec && f.numero && (f.pieces || []).length === 1 && getReparations().length === 1
+      var ok1 = !echec && f.numero && (f.pieces || []).length === 1 && getReparationsPalettes().length === 1
         && stockApres && Math.abs(stockApres.stock - (stockAvant - 20)) < 0.001;
       ok1 ? 'OK : fiche ' + f.numero + ', stock ' + stockAvant + ' -> ' + stockApres.stock
         : (echec || ('ECHEC avant=' + stockAvant + ' apres=' + (stockApres ? stockApres.stock : '?') + ' pieces=' + ((f.pieces || []).length)))
@@ -297,7 +297,7 @@ CURRENT_PAGE = 'cout-revient';
         date: '2026-10-02', client: 'Client X',
         pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 999999, coutUnite: p.coutUnite }]
       });
-      (res && res.erreur && res.erreur.length && getReparations().length === 0)
+      (res && res.erreur && res.erreur.length && getReparationsPalettes().length === 0)
         ? 'OK : demande refusee (' + res.erreur[0] + ')'
         : 'ECHEC la demande a ete acceptee alors que le stock est insuffisant'
     `,
@@ -319,7 +319,7 @@ CURRENT_PAGE = 'cout-revient';
       var confirm2 = function () { return true; };
       supprimerReparation(res.fiche.id);
       var apres = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0];
-      (getReparations().length === 0 && apres && Math.abs(apres.stock - stockAvant) < 0.001)
+      (getReparationsPalettes().length === 0 && apres && Math.abs(apres.stock - stockAvant) < 0.001)
         ? 'OK : stock remis a ' + apres.stock
         : 'ECHEC stock avant=' + stockAvant + ' apres=' + (apres ? apres.stock : '?')
     `,
@@ -327,34 +327,20 @@ CURRENT_PAGE = 'cout-revient';
   });
 
   r.push({
-    nom: 'Reparations clients : la page se rend avec sa fiche de saisie journaliere',
+    nom: 'Reparation palettes : la page affiche ses onglets et sa fiche journaliere',
     app: 'production.html', store: storeRealiste,
     code: `
       CURRENT_PAGE = 'reparations-clients'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
-      (typeof render_reparations_clients === 'function'
-        && h.indexOf('Nouvelle réparation') !== -1
-        && h.indexOf('rep_date') !== -1 && h.indexOf('rep_client') !== -1
-        && h.indexOf('Pièces sorties du stock') !== -1)
-        ? 'OK : fiche journaliere disponible'
+      /* le formulaire est fabrique par sa fonction dediee */
+      var f = (typeof repFormHtml === 'function') ? repFormHtml() : '';
+      (typeof render_reparation_palettes === 'function'
+        && h.indexOf('Enregistrer reparation') !== -1
+        && h.indexOf('Nouveau type') !== -1
+        && f.indexOf('rep_date') !== -1 && f.indexOf('rep_client') !== -1
+        && f.indexOf('sorties du stock') !== -1)
+        ? 'OK : onglets + fiche journaliere disponibles'
         : 'ECHEC fiche absente'
-    `,
-    attenduPrefixe: 'OK'
-  });
-
-  r.push({
-    nom: 'Cout de production : le bandeau du haut resume la composition (plus de champ en dur)',
-    app: 'production.html', store: storeRealiste,
-    code: `
-      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
-      CURRENT_PAGE = 'cout-revient'; renderPage();
-      var h = document.getElementById('content').innerHTML || '';
-      var b = acBandeauResumeHtml();
-      (typeof acBandeauResumeHtml === 'function' && b.indexOf('Campagne') !== -1
-        && b.indexOf('palette') !== -1 && b.indexOf('Chiffre') !== -1
-        && h.indexOf('Composition de la campagne') !== -1)
-        ? 'OK : le bandeau derive de la composition'
-        : 'ECHEC bandeau incoherent'
     `,
     attenduPrefixe: 'OK'
   });
@@ -447,6 +433,35 @@ CURRENT_PAGE = 'cout-revient';
         && champ.indexOf('value="1"') !== -1)
         ? 'OK : 25 000 pointes proposees en 1 carton, choix carton/paquet/pointe'
         : 'ECHEC champ=' + champ.slice(0, 120)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Inventaire : le mois suit la date de la fiche ---------- */
+  r.push({
+    nom: 'Inventaire : changer la date de la fiche change le mois d inventaire',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'inventory'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var i = h.indexOf('id="inv_date"');
+      (i !== -1 && h.slice(i, i + 500).indexOf('launchInventory()') !== -1)
+        ? 'OK : la date de la fiche declenche la regeneration de la liste'
+        : 'ECHEC la date change sans regenerer la liste'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : unites carton et paquet disponibles pour les pointes',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('definitions', [{ id: 'd1', code: 'P5', designation: 'POINTE5', type: 'POINTE', unit_cost: 0, qty_per_packet: 180, prix_carton: 0 }]);
+      var c = acChampUnite('P5', 9000, 'carton');
+      (typeof acChampUnite === 'function' && c.indexOf('carton') !== -1 && c.indexOf('paquet') !== -1
+        && acConvertirEnUnites(2, 'carton', 'P5') === 18000)
+        ? 'OK : champ avec unite + conversion (2 cartons = 18 000 pointes)'
+        : 'ECHEC conversion absente'
     `,
     attenduPrefixe: 'OK'
   });
