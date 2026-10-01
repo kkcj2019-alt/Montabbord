@@ -195,18 +195,53 @@ CURRENT_PAGE = 'cout-revient';
   });
 
   r.push({
-    nom: 'App principale : le cout de revient ouvre le tableau complet de Exploitation',
+    nom: 'App principale : le cout de revient est calcule sur place, avec le moteur de Exploitation',
     app: 'index.html', store: storeRealiste,
     code: `
+      currentPage = 'costPrice';
       renderCostPrice();
       var h = document.getElementById('content').innerHTML || '';
-      var aAcces = canAccess('costPrice', false);
-      var okLiens = h.indexOf('prodCoutRevient') !== -1 && h.indexOf('prodCoutJour') !== -1;
-      var okCadre = h.indexOf('production.html?page=cout-revient') !== -1;
-      var okRefus = h.indexOf('non autoris') !== -1;
-      (okLiens && (aAcces ? okCadre : okRefus))
-        ? 'OK : ' + (aAcces ? 'cadre du module Exploitation affiche' : 'refus affiche, liens conserves')
-        : 'ECHEC acces=' + aAcces + ' cadre=' + okCadre + ' refus=' + okRefus + ' liens=' + okLiens
+      var natif = (typeof render_cout_revient === 'function') && (typeof acCoutArticleAuto === 'function')
+        && (typeof acEtapesHtml === 'function') && (typeof acGetChargesModele === 'function');
+      var pasDeCadre = h.indexOf('production.html?page=') === -1 && h.indexOf('<iframe') === -1;
+      var tableau = h.indexOf('POSTES DE CO') !== -1 || h.indexOf('CVAMP') !== -1;
+      (natif && pasDeCadre && tableau)
+        ? 'OK : moteur complet execute dans l app principale, sans cadre externe'
+        : 'ECHEC natif=' + natif + ' pasDeCadre=' + pasDeCadre + ' tableau=' + tableau
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : le cout se recalcule quand Exploitation bouge',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentPage = 'costPriceJour';
+      renderCostPriceJour();
+      var h1 = document.getElementById('content').innerHTML || '';
+      /* une production de plus dans Exploitation doit se répercuter ici */
+      var prods = getProdSection('productions', []).slice();
+      prods.push({ id: 'pX', numero: 'TEST-SYNC', date: (new Date()).toISOString().slice(0, 10), statut: 'validated', assemblage: [{ code: 'PAL', qte: 7 }] });
+      var db = getProdDB(); db.productions = prods; DB.set('mdb_production', db);
+      crRerender();
+      var h2 = document.getElementById('content').innerHTML || '';
+      (typeof crRerender === 'function' && h2.indexOf('TEST-SYNC') !== -1 && h2 !== h1)
+        ? 'OK : la nouvelle fiche de production apparait dans le cout de l app principale'
+        : 'ECHEC la fiche ajoutee n est pas reprise'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'App principale : la page cout par jour synthétise le mois',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      renderCostPriceJour();
+      var h = document.getElementById('content').innerHTML || '';
+      (typeof render_cout_production === 'function' && h.indexOf('Coût de production par jour') !== -1
+        && h.indexOf('Matières') !== -1)
+        ? 'OK : synthese mensuelle presente'
+        : 'ECHEC page incomplete'
     `,
     attenduPrefixe: 'OK'
   });
