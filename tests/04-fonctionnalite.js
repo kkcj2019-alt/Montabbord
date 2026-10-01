@@ -359,6 +359,98 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Menu Qualite : il ne doit plus rester sur l ecran d attente ---------- */
+  r.push({
+    nom: 'Menu Qualite : la page s affiche au lieu du message de chargement',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'qualite'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('Chargement du module') === -1 && h.length > 500 && h.indexOf('Service Qualit') !== -1)
+        ? 'OK : module Qualite affiche (' + h.length + ' car.)'
+        : 'ECHEC la page reste bloquee sur l ecran de chargement'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Menu Qualite : la page resiste aux donnees corrompues',
+    app: 'production.html', store: storeCorrompu,
+    code: `
+      CURRENT_PAGE = 'qualite'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('Chargement du module') === -1 && h.length > 100)
+        ? 'OK : page rendue meme avec des donnees abimees'
+        : 'ECHEC page bloquee'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Taux de perte par article ---------- */
+  r.push({
+    nom: 'Cout de production : le taux de perte est propre a chaque article',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      var defaut = acTauxPerteArticle('a1');
+      setSection('costComposition', [{ article_id: 'a1', qte: 120, tauxPerte: 12 }]);
+      var saisi = acTauxPerteArticle('a1');
+      setSection('costComposition', []);
+      (typeof acTauxPerteArticle === 'function' && defaut >= 0 && saisi === 12)
+        ? 'OK : defaut ' + defaut + ' %, saisi ' + saisi + ' %'
+        : 'ECHEC defaut=' + defaut + ' saisi=' + saisi
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de production : chaque ligne de composition porte son taux de perte',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      setSection('costComposition', [{ article_id: 'a1', qte: 120, tauxPerte: 12 }]);
+      CURRENT_PAGE = 'cout-revient'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var ok = h.indexOf('Taux perte') !== -1 && h.indexOf('acSetTauxPerteArticle') !== -1;
+      setSection('costComposition', []);
+      ok ? 'OK : colonne taux de perte editable par article' : 'ECHEC colonne absente'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Unite des pointes : carton <-> paquet <-> pointe ---------- */
+  r.push({
+    nom: 'Pointes : la conversion carton / paquet / pointe fonctionne dans les deux sens',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('definitions', [{ id: 'd1', code: 'P1', designation: 'Pointes', type: 'POINTE', unit_cost: 15, qty_per_packet: 500, prix_carton: 45000 }]);
+      var parPaquet = acPointesParPaquet('P1');
+      var carton = acConvertirEnUnites(1, 'carton', 'P1');
+      var paquet = acConvertirEnUnites(1, 'paquet', 'P1');
+      var versPaquets = acConvertirDepuisUnites(25000, 'paquet', 'P1');
+      var versCartons = acConvertirDepuisUnites(25000, 'carton', 'P1');
+      (parPaquet === 500 && carton === 25000 && paquet === 500 && versPaquets === 50 && versCartons === 1)
+        ? 'OK : 1 carton = 50 paquets = ' + carton + ' pointes, et la conversion inverse est exacte'
+        : 'ECHEC paquet=' + parPaquet + ' carton=' + carton + ' paquetEnUnites=' + paquet + ' retourPaquets=' + versPaquets + ' retourCartons=' + versCartons
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointes : l unite saisie est proposee dans l inventaire',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('definitions', [{ id: 'd1', code: 'P1', designation: 'Pointes', type: 'POINTE', unit_cost: 15, qty_per_packet: 500 }]);
+      var champ = acChampUnite('P1', 25000, 'carton');
+      (typeof acChampUnite === 'function'
+        && champ.indexOf('carton') !== -1 && champ.indexOf('paquet') !== -1
+        && champ.indexOf('value="1"') !== -1)
+        ? 'OK : 25 000 pointes proposees en 1 carton, choix carton/paquet/pointe'
+        : 'ECHEC champ=' + champ.slice(0, 120)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'App principale : le cout de revient est calcule sur place, avec le moteur de Exploitation',
     app: 'index.html', store: storeRealiste,
