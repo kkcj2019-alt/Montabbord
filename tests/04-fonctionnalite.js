@@ -922,6 +922,145 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Soldes : pas de melange entre caisses ---------- */
+  r.push({
+    nom: 'Soldes : « Modifier les soldes » ne montre que les pieces de la caisse courante (ABOGOU ne remonte pas dans KM23)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var emps = getEmployes();
+      emps.push({ id: 'e2', nom: 'Abogou', prenoms: 'Wawa', abreviation: 'ABO' });
+      DB.set('mdb_employes', emps);
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opKM', numeroPiece: 'KM-1', date: '2026-09-15', code: 'SOLDE', libelle: 'Solde Septembre 2026', periode: '2026-09', montant: 30000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', remettant: 'Kanga', caisseId: 'c1', apType: 'solde', apMoisDeduction: '2026-09' });
+      ops.push({ id: 'opAB', numeroPiece: 'AB-1', date: '2026-09-16', code: 'SOLDE', libelle: 'Solde Septembre 2026', periode: '2026-09', montant: 30000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e2', beneficiaireNom: 'Abogou Wawa', remettant: 'ABOGOU WAWA RIC', caisseId: 'cABO', apType: 'solde', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      openSoldeGroupeEdit('opKM');
+      /* Le DOM simulé ne remplit pas le innerHTML des enfants : on lit le
+         corps du modal (contenu direct) et on cible les lignes par data-opid. */
+      var mb = document.getElementById('formModalBody');
+      var h = mb ? (mb.innerHTML || '') : '';
+      var nb = (h.match(/sdg-row/g) || []).length;
+      (nb === 1 && h.indexOf('data-opid="opKM"') !== -1 && h.indexOf('data-opid="opAB"') === -1 && h.indexOf('ABOGOU WAWA RIC') === -1)
+        ? 'OK : 1 seule ligne (caisse c1, opKM), la piece ABOGOU exclue'
+        : 'ECHEC lignes=' + nb + ' opKM=' + (h.indexOf('data-opid="opKM"') !== -1) + ' opAB=' + (h.indexOf('data-opid="opAB"') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Soldes : une piece apType solde recree sa ligne dans l\u2019etat des acomptes (avec lien retour)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opS', numeroPiece: 'SLD-9', date: '2026-09-15', code: 'SOLDE', libelle: 'Solde Septembre 2026', periode: '2026-09', montant: 30000, sens: 'sortie', moyenPaiement: 'Wave', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', remettant: 'Kanga', caisseId: 'c1', apType: 'solde', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      _reconcileAcomptesPretsFromCaisse();
+      var list = dbArr('mdb_acomptesPrets');
+      var rec = null;
+      for (var i = 0; i < list.length; i++) { if (list[i] && list[i].caisseOpId === 'opS') rec = list[i]; }
+      var ops2 = getOperationsCaisse();
+      var back = null;
+      for (var j = 0; j < ops2.length; j++) { if (ops2[j] && ops2[j].id === 'opS') back = ops2[j].acomptePretId; }
+      (rec && rec.type === 'acompte' && rec.montant === 30000 && rec.moisDeduction === '2026-09' && rec.date === '2026-09-15' && back === rec.id)
+        ? 'OK : ligne acompte 30000 liee a opS, mois 2026-09, lien retour pose'
+        : 'ECHEC rec=' + (rec ? rec.type + '/' + rec.montant + '/' + rec.moisDeduction : 'null') + ' back=' + back
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Soldes : le nettoyeur de fantomes garde les acomptes lies a une piece solde',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opS2', numeroPiece: 'SLD-8', date: '2026-09-15', code: 'SOLDE', libelle: 'Solde Septembre 2026', periode: '2026-09', montant: 30000, sens: 'sortie', moyenPaiement: 'Wave', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1', apType: 'solde', acomptePretId: 'apS2' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apS2', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 30000, moisDeduction: '2026-09', date: '2026-09-15', statut: 'en_cours', caisseOpId: 'opS2', numeroPiece: 'SLD-8', motif: 'Solde Septembre 2026' });
+      DB.set('mdb_acomptesPrets', list);
+      _cleanGhostAcomptes();
+      var after = dbArr('mdb_acomptesPrets');
+      var kept = false;
+      for (var i = 0; i < after.length; i++) { if (after[i] && after[i].id === 'apS2') kept = true; }
+      kept ? 'OK : ligne apS2 conservee (piece solde + lien bidirectionnel)' : 'ECHEC : ligne apS2 supprimee comme fantome'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : supprimer une piece supprime l\u2019acompte lie meme sans apType (pas d\u2019orphelin)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm = function(){ return true; };
+      currentUser = { id: 'u1', login: 'admin', nom: 'Admin', isAdmin: true, caisseId: 'c1' };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opDel', numeroPiece: 'DEL-1', date: '2026-09-15', code: 'ACOMPTE', libelle: 'Acompte', montant: 10000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apDel', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 10000, moisDeduction: '2026-09', date: '2026-09-15', statut: 'en_cours', caisseOpId: 'opDel', numeroPiece: 'DEL-1' });
+      DB.set('mdb_acomptesPrets', list);
+      try { deleteCaisse('opDel'); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var aps2 = dbArr('mdb_acomptesPrets');
+      var opGone = true, apGone = true;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opDel') opGone = false; }
+      for (var j = 0; j < aps2.length; j++) { if (aps2[j] && aps2[j].id === 'apDel') apGone = false; }
+      (opGone && apGone) ? 'OK : piece et acompte lies supprimes ensemble' : 'ECHEC piece=' + (!opGone) + ' acompte=' + (!apGone)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Soldes : le bouton Orphelins ne supprime que les lignes caisse sans piece (les manuelles restent)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apOrph', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 7000, date: '2026-09-10', moisDeduction: '2026-09', statut: 'en_cours', provenance: 'caisse' });
+      list.push({ id: 'apManuel', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 8000, date: '2026-09-10', moisDeduction: '2026-09', statut: 'en_cours' });
+      DB.set('mdb_acomptesPrets', list);
+      var n = apCompterOrphelins();
+      apNettoyerOrphelins();
+      var after = dbArr('mdb_acomptesPrets');
+      var orphGone = true, manuelKept = false;
+      for (var i = 0; i < after.length; i++) {
+        if (after[i] && after[i].id === 'apOrph') orphGone = false;
+        if (after[i] && after[i].id === 'apManuel') manuelKept = true;
+      }
+      (n === 1 && orphGone && manuelKept)
+        ? 'OK : 1 orphelin detecte et supprime, la saisie manuelle conservee'
+        : 'ECHEC detectes=' + n + ' orphelinSupprime=' + orphGone + ' manuelGarde=' + manuelKept
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Soldes : frais auto = 1 % du montant si moyen autre qu\u2019Espece, 0 sinon',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var a = sdgFraisAutoValeur('Wave', 30000);
+      var b = sdgFraisAutoValeur('Espèce', 30000);
+      var c = sdgFraisAutoValeur('Orange Money', 5000);
+      var d = sdgFraisAutoValeur('', 30000);
+      (a === 300 && b === 0 && c === 50 && d === 0)
+        ? 'OK : Wave 30000->300, Espece->0, OM 5000->50, vide->0'
+        : 'ECHEC a=' + a + ' b=' + b + ' c=' + c + ' d=' + d
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Modal : closeModal masque l\u2019overlay (Annuler / X / fond sur telephone)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      document.getElementById('formOverlay').style.display = 'flex';
+      closeModal();
+      var st = document.getElementById('formOverlay').style.display;
+      (st === 'none') ? 'OK : overlay masque' : 'ECHEC display=' + st
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
