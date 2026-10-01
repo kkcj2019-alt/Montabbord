@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-09-27-112';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-09-27-113';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -1941,6 +1941,173 @@ function acSetFraisArticle(articleId, champ, valeur) {
   setArticles(arts);
   renderPage();
 }
+/* =====================================================================
+   PRIX DU M3 PAR ESSENCE
+   ---------------------------------------------------------------------
+   Le prix du bois n'est pas unique : le rouge ne coute pas ce que coute
+   le blanc. Les achats portent l'essence, donc on peut calculer un prix
+   du m3 PAR ESSENCE. Chaque poste de nomenclature (latte, plot, CP)
+   declare son essence ; l'article recoit alors son prix propre, et un
+   article qui melange deux essences est valorise au prorata du volume.
+
+   Repli : si un poste n'a pas d'essence, on prend le prix moyen general.
+   ===================================================================== */
+
+/* Liste des essences vues dans les achats de la periode, avec leur prix */
+function acEssencesPrix(du, au) {
+  var p = acPeriode();
+  var d = du || p.du, a = au || p.au;
+  var cuma = acCump(d, a);
+  var map = {};
+  (cuma.essences || []).forEach(function (e) {
+    if (e && e.essence) map[String(e.essence).trim().toLowerCase()] = parseFloat(e.prixM3) || 0;
+  });
+  /* les essences declarees dans le module, meme sans achat recent */
+  try {
+    getSpecies().forEach(function (s) {
+      var k = String((s && (s.nom || s.code)) || '').trim().toLowerCase();
+      if (k && map[k] === undefined) map[k] = 0;
+    });
+  } catch (e) {}
+  return { map: map, prixM3General: parseFloat(cuma.prixM3) || 0 };
+}
+
+/* Prix du m3 d'une essence donnee (0 si inconnue) */
+function acPrixM3Essence(essence, du, au) {
+  var e = String(essence || '').trim().toLowerCase();
+  if (!e) return 0;
+  var info = acEssencesPrix(du, au);
+  var v = info.map[e];
+  return (typeof v === 'number') ? v : 0;
+}
+
+/* Essence d'un poste de nomenclature : champ dedie, sinon deduite du code
+   (les codes de lattes commencent souvent par L ou la designation porte
+   le nom de l'essence). */
+function acEssenceComposant(c) {
+  if (!c) return '';
+  if (c.essence) return String(c.essence).trim();
+  /* prefixe explicite dans le code : ROUGE- / R- */
+  try {
+    var sp = getSpecies();
+    var str = String((c.code || '') + ' ' + (c.designation || '')).toUpperCase();
+    for (var i = 0; i < sp.length; i++) {
+      var nom = String(sp[i] && (sp[i].nom || sp[i].code) || '').trim();
+      if (nom.length < 4) continue;
+      if (str.indexOf(nom.toUpperCase()) !== -1) return nom;
+    }
+  } catch (e) {}
+  return '';
+}
+
+/* Prix du m3 applicable a un poste */
+function acPrixM3Composant(c, du, au) {
+  var ese = acEssenceComposant(c);
+  var px = acPrixM3Essence(ese, du, au);
+  if (px > 0) return px;
+  /* pas d'essence, ou essence sans prix : on retombe sur le general */
+  var info = acEssencesPrix(du, au);
+  var cfg = acLaborCfg();
+  return (parseFloat(cfg.prixM3) || 0) || info.prixM3General || 0;
+}
+
+/* Prix du m3 moyen d'un article, pondere par le volume de chaque poste.
+   Un article 100 % rouge vaut le prix du rouge ; un melange 60/40 est
+   pondere. */
+function acPrixM3Article(articleId, du, au) {
+  var comps = (getSection('composants', []) || []).filter(function (c) {
+    return c && String(c.article_id) === String(articleId) && (parseFloat(c.quantity) || 0) > 0;
+  });
+  var volTotal = 0, mtTotal = 0;
+  comps.forEach(function (c) {
+    var t = String(c.type || '').toUpperCase();
+    if (t !== 'LATTE' && t !== 'PLOT' && t !== 'CP') return;
+    var v = 0;
+    try { v = acCompBoisVolume(c).volTot || 0; } catch (e) {}
+    if (!(v > 0)) return;
+    var px = acPrixM3Composant(c, du, au);
+    volTotal += v;
+    mtTotal += v * px;
+  });
+  if (volTotal > 0 && mtTotal > 0) return mtTotal / volTotal;
+
+  /* aucune geometrie exploitable : prix moyen general */
+  var cfg = acLaborCfg();
+  return (parseFloat(cfg.prixM3) || 0) || acEssencesPrix(du, au).prixM3General || 0;
+}
+
+/* Detail des essences d'un article, pour l'affichage et les replis */
+function acEssencesArticle(articleId, du, au) {
+  var comps = (getSection('composants', []) || []).filter(function (c) {
+    return c && String(c.article_id) === String(articleId) && (parseFloat(c.quantity) || 0) > 0;
+  });
+  var parEssence = {};
+  comps.forEach(function (c) {
+    var t = String(c.type || '').toUpperCase();
+    if (t !== 'LATTE' && t !== 'PLOT' && t !== 'CP') return;
+    var v = 0;
+    try { v = acCompBoisVolume(c).volTot || 0; } catch (e) {}
+    if (!(v > 0)) return;
+    var ese = acEssenceComposant(c) || '(essence non renseignée)';
+    var px = acPrixM3Composant(c, du, au);
+    if (!parEssence[ese]) parEssence[ese] = { essence: ese, vol: 0, px: px, postes: 0 };
+    parEssence[ese].vol += v;
+    parEssence[ese].postes++;
+    /* si un poste a un prix propre, il l'impose */
+    if (px > 0) parEssence[ese].px = px;
+  });
+  var liste = [];
+  for (var k in parEssence) if (Object.prototype.hasOwnProperty.call(parEssence, k)) liste.push(parEssence[k]);
+  liste.sort(function (a, b) { return b.vol - a.vol; });
+  return liste;
+}
+
+/* Enregistre l'essence d'un poste de nomenclature */
+function acSetEssenceComposant(composantId, essence) {
+  var comps = getSection('composants', []);
+  if (!Array.isArray(comps)) return;
+  for (var i = 0; i < comps.length; i++) {
+    if (!comps[i]) continue;
+    var id = comps[i].id || (comps[i].article_id + '|' + comps[i].code);
+    if (String(id) === String(composantId)) {
+      if (essence) comps[i].essence = essence;
+      else delete comps[i].essence;
+      setSection('composants', comps);
+      renderPage();
+      return;
+    }
+  }
+  toast('Poste de nomenclature introuvable', 'error');
+}
+
+/* Selecteur d'essence, affiche dans le detail d'un poste */
+function acSelecteurEssence(composantId, essenceActuelle) {
+  var noms = [];
+  try {
+    getSpecies().forEach(function (s) {
+      var n = String((s && (s.nom || s.code)) || '').trim();
+      if (n && noms.indexOf(n) === -1) noms.push(n);
+    });
+  } catch (e) {}
+  /* on ajoute aussi les essences rencontrees dans les achats */
+  try {
+    var info = acEssencesPrix();
+    Object.keys(info.map).forEach(function (k) {
+      var vrai = k.charAt(0).toUpperCase() + k.slice(1);
+      if (noms.indexOf(vrai) === -1) noms.push(vrai);
+    });
+  } catch (e) {}
+  noms.sort();
+  var h = '<select onchange="acSetEssenceComposant(\'' + escH(composantId) + '\',this.value)" title="Essence de ce poste de bois : elle détermine le prix du m\\u00b3" style="font-size:.62rem;padding:1px 3px;border:1px solid #7c3aed;border-radius:3px;background:#faf5ff;color:#5b21b6;font-weight:700;max-width:130px">';
+  h += '<option value=""' + (!essenceActuelle ? ' selected' : '') + '>essence ?</option>';
+  noms.forEach(function (n) {
+    h += '<option value="' + escH(n) + '"' + (String(essenceActuelle) === n ? ' selected' : '') + '>' + escH(n) + '</option>';
+  });
+  h += '</select>';
+  return h;
+}
+
+
 function acCoutArticleAuto(articleId) {
   var arts = getArticles(), art = null, i;
   for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(articleId)) { art = arts[i]; break; }
@@ -1949,7 +2116,10 @@ function acCoutArticleAuto(articleId) {
   });
   var cfg = acLaborCfg();
   var chute = 1 + (Math.max(0, parseFloat(cfg.tauxPerte) || 0) / 100);
-  var pxM3 = acPrixM3Auto();
+  /* Prix du m3 PROPRE a cet article : moyenne ponderee de ses essences.
+     Deux palettes qui n'utilisent pas le meme bois ne sont donc plus
+     valorisees au meme prix. */
+  var pxM3 = acPrixM3Article(articleId);
   var bois = [], conso = [], volNet = 0, coutBois = 0, coutConso = 0, manquants = [];
   comps.forEach(function (c) {
     var type = String(c.type || '').toUpperCase();
@@ -3185,15 +3355,21 @@ function acCoutArticleCampagne(artId, qte) {
 
   var lignes = [];
   var volNet = 0;
-  bois.forEach(function (b) {
+  bois.forEach(function (b, bi) {
+    var comp = (c.comps || [])[bi] || null;
     var qtePieces = Math.round((parseFloat(b.qte) || 0) * Q);
     var volTot = (parseFloat(b.volTot) || 0) * Q;
-    var mt = Math.round(volTot * (parseFloat(c.pxM3) || 0));
+    /* prix du m3 PROPRE au poste : celui de son essence */
+    var pxLigne = comp ? acPrixM3Composant(comp) : (parseFloat(c.pxM3) || 0);
+    if (!(pxLigne > 0)) pxLigne = parseFloat(c.pxM3) || 0;
+    var mt = Math.round(volTot * pxLigne);
     volNet += (parseFloat(b.volTot) || 0);
     lignes.push({
       libelle: b.libelle, type: b.type,
       length: b.length, width: b.width, thickness: b.thickness,
-      qtePal: b.qte, qte: qtePieces, vol: volTot, pu: c.pxM3, mt: mt
+      qtePal: b.qte, qte: qtePieces, vol: volTot, pu: pxLigne, mt: mt,
+      composantId: comp ? (comp.id || (comp.article_id + '|' + comp.code)) : '',
+      essence: comp ? acEssenceComposant(comp) : ''
     });
   });
 
@@ -3240,13 +3416,15 @@ function ligneArticleHtml(o) {
   if (o.lignes && o.lignes.length) {
     var d = '<div style="padding:.25rem 0">';
     o.lignes.forEach(function (l, i) {
+      var selEss = l.composantId ? ' ' + acSelecteurEssence(l.composantId, l.essence || '') : '';
+      var badgeEss = l.essence ? ' <span style="color:#5b21b6;font-weight:800">' + escH(l.essence) + '</span>' : '';
       d += '<div style="display:flex;justify-content:space-between;gap:10px;font-size:.7rem;' +
         (i % 2 ? 'background:#fffbf0' : '') + 'padding:2px 4px;border-bottom:1px dotted #e2e8f0">' +
-        '<span>' + escH(l.libelle || '') + (l.type ? ' <span style="color:#b45309">(' + escH(l.type) + ')</span>' : '') +
+        '<span>' + escH(l.libelle || '') + (l.type ? ' <span style="color:#b45309">(' + escH(l.type) + ')</span>' : '') + badgeEss + selEss +
         (l.qtePal ? ' <span style="color:#64748b">' + fmt(l.qtePal) + '/pal</span>' : '') + '</span>' +
         '<span style="white-space:nowrap;color:#92400e">' + (l.qte ? fmt(l.qte) + ' pcs' : '') +
         (l.vol ? ' · ' + l.vol.toFixed(4) + ' m³' : '') +
-        (l.pu ? ' × ' + fmt(Math.round(l.pu)) + ' F' : (l.pu === 0 ? ' · prix manquant' : '')) +
+        (l.pu ? ' × ' + fmt(Math.round(l.pu)) + ' F/m³' : (l.pu === 0 ? ' · prix manquant' : '')) +
         ' = <strong>' + fmt(l.mt) + ' F</strong></span></div>';
     });
     d += '</div>';
@@ -3443,7 +3621,11 @@ function acEtapesHtml(articleId, cAuto, compact) {
   compCouts.forEach(function (x, i) {
     if (x.qte <= 0) return;
     var lignesDetail = x.bois.map(function (b) {
-      return { libelle: b.libelle, type: b.type, qtePal: b.qtePal, qte: b.qte, vol: b.vol, pu: b.pu, mt: b.mt };
+      return {
+        libelle: b.libelle, type: b.type, qtePal: b.qtePal, qte: b.qte, vol: b.vol,
+        pu: b.pu, mt: b.mt,
+        composantId: b.composantId, essence: b.essence
+      };
     });
     /* la chute s'applique sur l'ensemble du volume de l'article */
     if (lignesDetail.length && x.chute > 1) {

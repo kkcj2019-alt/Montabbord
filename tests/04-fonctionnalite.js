@@ -194,6 +194,73 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Bois : le prix du m3 suit l'essence de chaque poste ---------- */
+  r.push({
+    nom: 'Cout de revient : le prix du m3 depend de l essence de chaque poste de bois',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      var jour = (new Date()).toISOString().slice(0, 10);
+      var db = getDB();
+      db.achats = [
+        { id: 'aR', category: 'raw-materials', date: jour, items: [{ colis_number: 'K1', quantity: 10, volume: 5, essence: 'Rouge', unit_price: 45000, total_price: 225000 }], montant_total: 225000 },
+        { id: 'aB', category: 'raw-materials', date: jour, items: [{ colis_number: 'K2', quantity: 8, volume: 4, essence: 'Blanc', unit_price: 90000, total_price: 360000 }], montant_total: 360000 }
+      ];
+      db.species = [{ id: 's1', nom: 'Rouge' }, { id: 's2', nom: 'Blanc' }];
+      db.composants = [
+        { article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte rouge', quantity: 3, volume: 0.0018, essence: 'Rouge' },
+        { article_id: 'a1', type: 'PLOT', code: 'P2', designation: 'Plot blanc', quantity: 4, volume: 0.0012, essence: 'Blanc' },
+        { article_id: 'a1', type: 'POINTE', code: 'P1', designation: 'Pointes', quantity: 90 }
+      ];
+      setDB(db);
+      var pxRouge = acPrixM3Essence('Rouge');
+      var pxBlanc = acPrixM3Essence('Blanc');
+      var pxArticle = acPrixM3Article('a1');
+      /* moyenne ponderee par le volume : (0,0054*45000 + 0,0048*90000) / 0,0102 */
+      var volR = 3 * 0.0018, volB = 4 * 0.0012;
+      var attendu = Math.round((volR * 45000 + volB * 90000) / (volR + volB));
+      var detail = acEssencesArticle('a1');
+      (pxRouge === 45000 && pxBlanc === 90000 && Math.round(pxArticle) === attendu && detail.length === 2)
+        ? 'OK : rouge ' + pxRouge + ' F/m3, blanc ' + pxBlanc + ' F/m3, article melange ' + Math.round(pxArticle) + ' F/m3'
+        : 'ECHEC rouge=' + pxRouge + ' blanc=' + pxBlanc + ' article=' + Math.round(pxArticle) + ' attendu=' + attendu
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cout de revient : deux articles de bois differents n ont pas le meme cout',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      var jour = (new Date()).toISOString().slice(0, 10);
+      var db = getDB();
+      db.achats = [
+        { id: 'aR', category: 'raw-materials', date: jour, items: [{ colis_number: 'K1', quantity: 10, volume: 5, essence: 'Rouge', unit_price: 45000, total_price: 225000 }], montant_total: 225000 },
+        { id: 'aB', category: 'raw-materials', date: jour, items: [{ colis_number: 'K2', quantity: 8, volume: 4, essence: 'Blanc', unit_price: 90000, total_price: 360000 }], montant_total: 360000 }
+      ];
+      db.species = [{ id: 's1', nom: 'Rouge' }, { id: 's2', nom: 'Blanc' }];
+      db.composants = [
+        { article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte rouge', quantity: 5, volume: 0.0018, essence: 'Rouge' },
+        { article_id: 'a1', type: 'POINTE', code: 'P1', designation: 'Pointes', quantity: 90 }
+      ];
+      var arts = getArticles();
+      arts.push({ id: 'a2', code: 'PAL2', designation: 'Palette blanc', categorie: 'finished', prix_vente: 52000, unite: 'pcs' });
+      setArticles(arts);
+      /* meme volume de bois que a1 (5 x 0,0018 = 0,009 m3 par palette) */
+      db.composants.push({ article_id: 'a2', type: 'LATTE', code: 'L2', designation: 'Latte blanche', quantity: 3, volume: 0.003, essence: 'Blanc' });
+      setDB(db);
+      var x = acCoutArticleCampagne('a1', 100);
+      var y = acCoutArticleCampagne('a2', 100);
+      /* meme quantite de bois en volume, prix double pour le blanc */
+      var volX = x.bois.reduce(function (s, b) { return s + b.vol; }, 0);
+      var volY = y.bois.reduce(function (s, b) { return s + b.vol; }, 0);
+      (Math.abs(volX - volY) < 0.001 && y.coutBois > x.coutBois * 1.9)
+        ? 'OK : a1 ' + x.coutBois + ' F (rouge) contre a2 ' + y.coutBois + ' F (blanc), meme volume'
+        : 'ECHEC volA=' + volX.toFixed(3) + ' volB=' + volY.toFixed(3) + ' coutA=' + x.coutBois + ' coutB=' + y.coutBois
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'App principale : le cout de revient est calcule sur place, avec le moteur de Exploitation',
     app: 'index.html', store: storeRealiste,
