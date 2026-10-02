@@ -1133,6 +1133,118 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Acomptes : une piece d\u2019aout saisie en septembre cree sa ligne sur aout (periode du libelle)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opP', numeroPiece: 'KCJ-44', date: '2026-09-11', code: 'SOLDE_SALAIRE', libelle: 'Solde de salaire/Mois de Août 2026', montant: 200000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      _reconcileAcomptesPretsFromCaisse();
+      var list = dbArr('mdb_acomptesPrets');
+      var rec = null;
+      for (var i = 0; i < list.length; i++) { if (list[i] && list[i].caisseOpId === 'opP') rec = list[i]; }
+      (rec && rec.type === 'acompte' && rec.moisDeduction === '2026-08')
+        ? 'OK : ligne sur 2026-08 (periode), pas sur la date de saisie'
+        : 'ECHEC rec=' + (rec ? rec.type + '/' + rec.moisDeduction : 'null')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : une ligne restee sur le mois de saisie est remise sur la periode (piece synchro aussi)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opP2', numeroPiece: 'KCJ-45', date: '2026-09-11', code: 'SOLDE_SALAIRE', libelle: 'Solde de salaire/Mois de Août 2026', periode: '2026-08', montant: 200000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apP2', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 200000, moisDeduction: '2026-09', date: '2026-09-11', statut: 'en_cours', provenance: 'caisse', caisseOpId: 'opP2', numeroPiece: 'KCJ-45' });
+      DB.set('mdb_acomptesPrets', list);
+      _reconcileAcomptesPretsFromCaisse();
+      var after = dbArr('mdb_acomptesPrets');
+      var lm = null;
+      for (var i = 0; i < after.length; i++) { if (after[i] && after[i].id === 'apP2') lm = after[i].moisDeduction; }
+      var ops2 = getOperationsCaisse();
+      var om = null;
+      for (var j = 0; j < ops2.length; j++) { if (ops2[j] && ops2[j].id === 'opP2') om = ops2[j].apMoisDeduction; }
+      (lm === '2026-08' && om === '2026-08')
+        ? 'OK : ligne et piece remises sur 2026-08'
+        : 'ECHEC ligne=' + lm + ' piece=' + om
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : un mois choisi deliberement (different de la saisie) n\u2019est jamais reecrit',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opP3', numeroPiece: 'KCJ-46', date: '2026-09-11', code: 'SOLDE_SALAIRE', libelle: 'Solde de salaire/Mois de Août 2026', periode: '2026-08', montant: 200000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1', apMoisDeduction: '2026-10' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apP3', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 200000, moisDeduction: '2026-10', date: '2026-09-11', statut: 'en_cours', provenance: 'caisse', caisseOpId: 'opP3', numeroPiece: 'KCJ-46' });
+      DB.set('mdb_acomptesPrets', list);
+      _reconcileAcomptesPretsFromCaisse();
+      var after = dbArr('mdb_acomptesPrets');
+      var lm = null;
+      for (var i = 0; i < after.length; i++) { if (after[i] && after[i].id === 'apP3') lm = after[i].moisDeduction; }
+      (lm === '2026-10') ? 'OK : octobre delibere conserve' : 'ECHEC ligne=' + lm
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : mois lu dans le libelle (noms francais, avec ou sans accent)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var a = _apMoisDepuisLibelle('Solde de salaire/Mois de Août 2026');
+      var b = _apMoisDepuisLibelle('ACOMPTE/SALAIRE/Mois de Septembre 2026');
+      var c = _apMoisDepuisLibelle('Acompte d indemnite/Mois de Fevrier 2026');
+      var d = _apMoisDepuisLibelle('Acompte simple');
+      (a === '2026-08' && b === '2026-09' && c === '2026-02' && d === '')
+        ? 'OK : aout->2026-08, septembre->2026-09, fevrier->2026-02, sans mois->vide'
+        : 'ECHEC ' + [a, b, c, d].join('/')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : le compteur de desalignes compare a la periode de la piece',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opAL', numeroPiece: 'KCJ-47', date: '2026-09-11', code: 'SOLDE_SALAIRE', libelle: 'Solde de salaire/Mois de Août 2026', periode: '2026-08', montant: 200000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apAL', type: 'acompte', employeId: 'e1', montant: 200000, moisDeduction: '2026-09', date: '2026-09-11', caisseOpId: 'opAL' });
+      DB.set('mdb_acomptesPrets', list);
+      var avant = apCompterDesalignes();
+      for (var i = 0; i < list.length; i++) { if (list[i] && list[i].id === 'apAL') list[i].moisDeduction = '2026-08'; }
+      DB.set('mdb_acomptesPrets', list);
+      var apres = apCompterDesalignes();
+      (avant >= 1 && apres === 0) ? 'OK : desaligne compte puis plus rien une fois sur aout' : 'ECHEC avant=' + avant + ' apres=' + apres
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Soldes : le champ MOIS du modal vaut la periode par defaut (pas la date de saisie)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opM', numeroPiece: 'KM-9', date: '2026-09-11', code: 'SOLDE', libelle: 'Solde/Mois de Août 2026', periode: '2026-08', montant: 10000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      openSoldeGroupeEdit('opM');
+      var mb = document.getElementById('formModalBody');
+      var h = mb ? (mb.innerHTML || '') : '';
+      (h.indexOf('class="sdg-mois" value="2026-08"') !== -1)
+        ? 'OK : MOIS propose = 2026-08 (periode)'
+        : 'ECHEC : ' + (h.match(/sdg-mois" value="[^"]*"/g) || ['absent']).join(',')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',

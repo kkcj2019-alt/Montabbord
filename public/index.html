@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-01-122';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-123';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16645,6 +16645,52 @@ function _apEmployePourOp(op) {
   }
   return null;
 }
+/* Mois AAAA-MM lu dans un libellé (« Solde de salaire/Mois de Août 2026 »,
+   « ACOMPTE/SALAIRE/Mois de Septembre 2026 ») : le libellé est généré
+   automatiquement d'après le mois choisi, c'est la vérité du salaire. */
+function _apMoisDepuisLibelle(txt) {
+  var s = String(txt || '');
+  if (!s) return '';
+  var m1 = s.match(/(19|20)\d{2}-(0[1-9]|1[0-2])/);
+  if (m1) return m1[0].substring(0, 7);
+  var m2 = s.match(/(0[1-9]|1[0-2])[\/\-](19|20)\d{2}/);
+  if (m2) return m2[2] + '-' + m2[1];
+  var n = (typeof _apNormNom === 'function') ? _apNormNom(s) : s.toLowerCase();
+  var an = (n.match(/(19|20)\d{2}/) || [''])[0];
+  if (!an) return '';
+  var table = ['janvier|01', 'fevrier|02', 'mars|03', 'avril|04', 'mai|05', 'juin|06', 'juillet|07', 'aout|08', 'septembre|09', 'octobre|10', 'novembre|11', 'decembre|12'];
+  for (var i = 0; i < table.length; i++) {
+    var parts = table[i].split('|');
+    if (n.indexOf(parts[0]) !== -1) return an + '-' + parts[1];
+  }
+  return '';
+}
+/* Le mois « vrai » d'une pièce d'acompte/solde : sa PÉRIODE (mois choisi,
+   repris dans le libellé), jamais sa date de saisie (ex. salaire d'août
+   saisi le 11/09 = août). */
+function _apMoisPiece(op) {
+  if (!op) return '';
+  if (/^\d{4}-\d{2}$/.test(op.periode || '')) return op.periode;
+  var ml = _apMoisDepuisLibelle(op.libelle || '');
+  if (ml) return ml;
+  var mo = _apMoisDepuisLibelle(op.observations || '');
+  if (mo) return mo;
+  return '';
+}
+/* Mois de référence d'un acompte pour l'alignement : la PÉRIODE de sa pièce,
+   repli sur sa date (lignes manuelles sans pièce). */
+function _apMoisReference(a, opsById) {
+  try {
+    if (a && a.caisseOpId && opsById) {
+      var op = opsById[a.caisseOpId];
+      if (op) {
+        var mp = (typeof _apMoisPiece === 'function') ? _apMoisPiece(op) : '';
+        if (mp) return mp;
+      }
+    }
+  } catch (e) {}
+  return String((a && a.date) || '').substring(0, 7);
+}
 function _reconcileAcomptesPretsFromCaisse() {
   var ops = getOperationsCaisse() || [];
   if (!ops.length) return;
@@ -16680,6 +16726,13 @@ function _reconcileAcomptesPretsFromCaisse() {
        La déduplication se fait sur l'ID de l'opération, qui est unique. */
     if (linkedIds[op.id]) continue;
     if (op.acomptePretId && linkedIds['A:' + op.acomptePretId]) continue;
+    /* Mois de déduction = mois SAISI s'il diffère de la saisie (choix délibéré),
+       sinon mois PÉRIODE (vérité du salaire), sinon mois de saisie. Sans ça, un
+       salaire d'août saisi le 11/09 partait en septembre (défaut date). */
+    var moisSaisi = (/^\d{4}-\d{2}$/.test(op.apMoisDeduction || '')) ? op.apMoisDeduction : '';
+    var moisDate = op.date ? String(op.date).substring(0, 7) : '';
+    var moisPeriode = (typeof _apMoisPiece === 'function') ? _apMoisPiece(op) : '';
+    var moisCible = ((moisSaisi && moisSaisi !== moisDate) ? moisSaisi : (moisPeriode || moisSaisi || moisDate));
     var rec = {
       id: op.acomptePretId || DB.genId(),
       type: t,
@@ -16688,7 +16741,8 @@ function _reconcileAcomptesPretsFromCaisse() {
       montant: parseInt(op.montant) || 0,
       dureeMois: parseInt(op.apDureeMois) || 0,
       montantMensuel: parseInt(op.apMontantMensuel) || 0,
-      moisDeduction: op.apMoisDeduction || (op.date ? String(op.date).substring(0, 7) : ''),
+      moisDeduction: moisCible,
+      moisManuel: op.moisManuel === true,
       motif: op.tiers || op.observations || op.libelle || '',
       notes: op.observations || '',
       date: op.date || '',
@@ -16710,20 +16764,44 @@ function _reconcileAcomptesPretsFromCaisse() {
     op.acomptePretId = rec.id; linkedIds['A:' + rec.id] = true;
     created++;
   }
-  if (created > 0) {
+  /* Correction des lignes auto existantes restées sur le mois de SAISIE
+     (défaut historique : MOIS = date au lieu de période). On ne redresse que
+     les lignes qui ressemblent au défaut (mois = mois de saisie ≠ période) :
+     un choix manuel délibéré (moisManuel) n'est jamais écrasé. La pièce est
+     sync aussi, sinon elle ré-afficherait « Prélèvement <mauvais mois> ». */
+  var fixed = 0;
+  try {
+    var opsById = {};
+    for (var oi = 0; oi < ops.length; oi++) { if (ops[oi] && ops[oi].id) opsById[ops[oi].id] = ops[oi]; }
+    for (var li = 0; li < list.length; li++) {
+      var la = list[li];
+      if (!la || la.type !== 'acompte' || la.provenance !== 'caisse' || !la.caisseOpId || la.moisManuel === true) continue;
+      var lop = opsById[la.caisseOpId];
+      if (!lop) continue;
+      var lPeriode = (typeof _apMoisPiece === 'function') ? _apMoisPiece(lop) : '';
+      if (!lPeriode) continue;
+      var lDateMois = lop.date ? String(lop.date).substring(0, 7) : (la.date ? String(la.date).substring(0, 7) : '');
+      var lSaisi = (/^\d{4}-\d{2}$/.test(lop.apMoisDeduction || '')) ? lop.apMoisDeduction : '';
+      var lCible = ((lSaisi && lSaisi !== lDateMois) ? lSaisi : lPeriode);
+      var lMois = (typeof apNormMois === 'function' ? apNormMois(la.moisDeduction || '') : String(la.moisDeduction || '')).substring(0, 7);
+      if (lMois && lMois === lDateMois && lMois !== lCible) { la.moisDeduction = lCible; fixed++; }
+      if (lop.moisManuel !== true && lSaisi && lSaisi === lDateMois && lSaisi !== lCible) { lop.apMoisDeduction = lCible; fixed++; }
+    }
+  } catch (eFix) {}
+  if (created > 0 || fixed > 0) {
     DB.set('mdb_acomptesPrets', list);
     try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e1) {}
     try { DB.set('mdb_operationsCaisse', ops); try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e2) {} } catch (e3) {}
-    console.log('Reconstitution de ' + created + ' acompte(s)/prêt(s) depuis les pièces de caisse');
-    if (typeof toast === 'function') { try { toast(created + ' prêt(s)/acompte(s) restauré(s) depuis la caisse', 'success'); } catch (e4) {} }
+    console.log('Reconstitution de ' + created + ' acompte(s)/prêt(s) depuis les pièces de caisse' + (fixed ? ' + ' + fixed + ' mois remis sur période' : ''));
+    if (typeof toast === 'function') { try { toast(created + ' prêt(s)/acompte(s) restauré(s) depuis la caisse' + (fixed ? ' — ' + fixed + ' mois remis sur période' : ''), 'success'); } catch (e4) {} }
   }
 }
 
-/* Compte les acomptes dont le mois de deduction differe du mois de
-   l'operation. C'est le cas quand l'ancien champ "Mois de deduction"
-   portait un autre mois que la piece : ces acomptes disparaissent du
-   mois affiche alors que l'operation y est. Les prets ne sont jamais
-   touches : eux s'etalent vraiment sur plusieurs mois. */
+/* Compte les acomptes dont le mois de deduction differe de la PERIODE de la
+   piece. C'est le cas quand le mois a été rempli avec la date de saisie au
+   lieu du mois choisi (ex. salaire d'août saisi le 11/09 parti en septembre)
+   : ces acomptes disparaissent du mois affiché alors que la piece y est.
+   Les prets ne sont jamais touches : eux s'etalent vraiment sur plusieurs mois. */
 /* Change le mois de deduction d'un acompte, directement sur la ligne.
    Utile quand l'operation est datee d'un mois mais doit etre prelevee sur
    un autre (ex : saisie d'octobre pour la paie de septembre). */
@@ -16731,14 +16809,28 @@ function apChangerMois(id, valeur) {
   if (!/^\d{4}-\d{2}$/.test(valeur || '')) return;
   var list = [];
   try { list = dbArr('mdb_acomptesPrets') || []; } catch (e) { return; }
+  var opId = '';
   for (var i = 0; i < list.length; i++) {
     if (list[i] && list[i].id === id) {
       if ((list[i].moisDeduction || '') === valeur) return;
       list[i].moisDeduction = valeur;
+      /* Choix manuel : l'auto-correction sur période ne doit jamais l'écraser. */
+      list[i].moisManuel = true;
+      opId = list[i].caisseOpId || '';
       break;
     }
   }
   try { DB.set('mdb_acomptesPrets', list); markDirty('mdb_acomptesPrets'); } catch (e2) {}
+  /* Synchro pièce liée (sinon elle ré-affiche l'ancien mois « Prélèvement ... »). */
+  if (opId) {
+    try {
+      var ops = getOperationsCaisse();
+      for (var o = 0; o < ops.length; o++) {
+        if (ops[o] && ops[o].id === opId) { ops[o].apMoisDeduction = valeur; ops[o].moisManuel = true; break; }
+      }
+      DB.set('mdb_operationsCaisse', ops); markDirty('mdb_operationsCaisse');
+    } catch (eOp) {}
+  }
   try { renderAcomptesPrets(); } catch (e3) {}
 }
 
@@ -16758,11 +16850,17 @@ function apNormMois(m) {
 function apCompterDesalignes() {
   var list = [];
   try { list = dbArr('mdb_acomptesPrets') || []; } catch (e) { return 0; }
+  var opsById = {};
+  try {
+    var _ops = dbArr('mdb_operationsCaisse') || [];
+    for (var _o = 0; _o < _ops.length; _o++) { if (_ops[_o] && _ops[_o].id) opsById[_ops[_o].id] = _ops[_o]; }
+  } catch (eO) {}
   var n = 0;
   for (var i = 0; i < list.length; i++) {
     var a = list[i];
     if (!a || a.type !== 'acompte') continue;
-    var opMois = String(a.date || '').substring(0, 7);
+    /* Référence = PÉRIODE de la pièce (mois choisi), repli sur la date. */
+    var opMois = (typeof _apMoisReference === 'function') ? _apMoisReference(a, opsById) : String(a.date || '').substring(0, 7);
     if (!opMois) continue;
     if (apNormMois(a.moisDeduction || '') !== opMois) n++;
   }
@@ -16808,21 +16906,26 @@ function apNettoyerOrphelins() {
   try { renderAcomptesPrets(); } catch (e2) {}
 }
 
-/* Remet chaque acompte sur le mois de son operation, apres confirmation.
+/* Remet chaque acompte sur le mois (PÉRIODE) de sa pièce, apres confirmation.
    Ne touche ni aux prets, ni aux montants, ni aux validations. */
 function apRealignerMois() {
   var list = [];
   try { list = dbArr('mdb_acomptesPrets') || []; } catch (e) { return; }
+  var opsById = {};
+  try {
+    var _opsR = dbArr('mdb_operationsCaisse') || [];
+    for (var _or = 0; _or < _opsR.length; _or++) { if (_opsR[_or] && _opsR[_or].id) opsById[_opsR[_or].id] = _opsR[_or]; }
+  } catch (eOR) {}
   var cibles = [];
   for (var i = 0; i < list.length; i++) {
     var a = list[i];
     if (!a || a.type !== 'acompte') continue;
-    var opMois = String(a.date || '').substring(0, 7);
+    var opMois = (typeof _apMoisReference === 'function') ? _apMoisReference(a, opsById) : String(a.date || '').substring(0, 7);
     if (!opMois || (a.moisDeduction || '') === opMois) continue;
     cibles.push({ id: a.id, avant: a.moisDeduction || '-', apres: opMois });
   }
   if (!cibles.length) { toast('Aucun acompte \u00e0 r\u00e9aligner', 'success'); return; }
-  if (!confirm2(cibles.length + ' acompte(s) ont un mois de d\u00e9duction diff\u00e9rent de leur mois d\u2019op\u00e9ration. Les remettre sur le mois d\u2019op\u00e9ration ?')) return;
+  if (!confirm2(cibles.length + ' acompte(s) ont un mois de d\u00e9duction diff\u00e9rent de la p\u00e9riode de leur pi\u00e8ce. Les remettre sur le mois de la pi\u00e8ce ?')) return;
   var ops = [];
   try { ops = dbArr('mdb_operationsCaisse') || []; } catch (e2) {}
   for (var j = 0; j < cibles.length; j++) {
@@ -16838,7 +16941,7 @@ function apRealignerMois() {
   }
   try { DB.set('mdb_acomptesPrets', list); markDirty('mdb_acomptesPrets'); } catch (e3) {}
   try { DB.set('mdb_operationsCaisse', ops); markDirty('mdb_operationsCaisse'); } catch (e4) {}
-  toast(cibles.length + ' acompte(s) r\u00e9align\u00e9(s) sur leur mois d\u2019op\u00e9ration', 'success');
+  toast(cibles.length + ' acompte(s) r\u00e9align\u00e9(s) sur le mois de leur pi\u00e8ce', 'success');
   try { renderAcomptesPrets(); } catch (e5) {}
 }
 
@@ -16903,7 +17006,7 @@ function renderAcomptesPrets() {
   html += '<button class="btn btn-sm btn-outline" onclick="window._apFilterMonth=\'\';renderAcomptesPrets()"' + (apFilterMonth ? '' : ' disabled') + '>Tout</button>';
   try {
     var _nbDesal = apCompterDesalignes();
-    if (_nbDesal > 0) html += '<button class="btn btn-sm" onclick="apRealignerMois()" title="Remettre chaque acompte sur le mois de son op\u00e9ration" style="background:#7c3aed;color:#fff;border:none">\u21c4 R\u00e9aligner (' + _nbDesal + ')</button>';
+    if (_nbDesal > 0) html += '<button class="btn btn-sm" onclick="apRealignerMois()" title="Remettre chaque acompte sur le mois (p\u00e9riode) de sa pi\u00e8ce" style="background:#7c3aed;color:#fff;border:none">\u21c4 R\u00e9aligner (' + _nbDesal + ')</button>';
   } catch (eRA) {}
   try {
     var _nbOrph = apCompterOrphelins();
@@ -18951,7 +19054,7 @@ function saveSoldeCollectif(caisseId, fullDate, soldeCode) {
     var exeS = (exeElS ? exeElS.value.trim() : '') || execDef;
     var obsEl = row.querySelector('.cs-coll-obs');
     var obs2 = obsEl ? obsEl.value.trim() : '';
-    ops.push({ id: DB.genId(), numeroPiece: np, date: fullDate, heure: heureDef, codeId: soldeCode.id, code: soldeCode.code, libelle: lib, montant: montant, sens: 'sortie', moyenPaiement: moyen2, numeroTransaction: numTrans, beneficiaireType: 'employe', beneficiaireId: empId, beneficiaireNom: empNom, observations: obs2, remettant: rem2, executant: exeS, imprime: false, montantCharge: 0, caisseId: caisseId, reversed: false, collective: true, groupeId: groupeId, pendingDetail: false, apType: 'solde' });
+    ops.push({ id: DB.genId(), numeroPiece: np, date: fullDate, heure: heureDef, codeId: soldeCode.id, code: soldeCode.code, libelle: lib, montant: montant, sens: 'sortie', moyenPaiement: moyen2, numeroTransaction: numTrans, beneficiaireType: 'employe', beneficiaireId: empId, beneficiaireNom: empNom, observations: obs2, remettant: rem2, executant: exeS, imprime: false, montantCharge: 0, caisseId: caisseId, reversed: false, collective: true, groupeId: groupeId, pendingDetail: false, apType: 'solde', periode: (moisVal || fullDate.substring(0, 7)), apMoisDeduction: (moisVal || fullDate.substring(0, 7)) });
     count++; total += montant;
   });
   if (count === 0) { toast('Cochez au moins un employ\u00e9 avec un montant', 'error'); return; }
@@ -19070,7 +19173,9 @@ function openSoldeGroupeEdit(opId) {
       var _eObj = empMap[r.beneficiaireId];
       eNom = ((_eObj.abreviation ? _eObj.abreviation + ' - ' : '') + (_eObj.nom || '') + ' ' + (_eObj.prenoms || '')).trim();
     }
-    html += sdgBuildRowHTML(r.id, r.beneficiaireId, r.montant, (r.apMoisDeduction || String(r.date || '').substring(0, 7)), (r.frais || 0), r.remettant || defaultRemettant, r.moyenPaiement, r.numeroTransaction, r.observations, eNom);
+    /* MOIS par défaut = la PÉRIODE (mois choisi), jamais la date de saisie :
+       un salaire d'août saisi en septembre reste un acompte d'août. */
+    html += sdgBuildRowHTML(r.id, r.beneficiaireId, r.montant, (r.apMoisDeduction || period || String(r.date || '').substring(0, 7)), (r.frais || 0), r.remettant || defaultRemettant, r.moyenPaiement, r.numeroTransaction, r.observations, eNom);
   }
   html += '</tbody></table></div>';
   html += empDatalistHTML;
@@ -19164,7 +19269,8 @@ function sdgAddRow() {
   var tbody = document.getElementById('sdgTableBody');
   if (!tbody) return;
   var defRem = window._sdgDefaultRemettant || (document.getElementById('sdgGlobalRemettant') ? document.getElementById('sdgGlobalRemettant').value : '') || '';
-  var html = sdgBuildRowHTML('', '', 0, (window._sdgFullDate || getToday()).substring(0, 7), 0, defRem, 'Espèce', '', '', '');
+  var defMois = ((window._sdgPeriod || window._sdgFullDate || getToday()) || '').substring(0, 7);
+  var html = sdgBuildRowHTML('', '', 0, defMois, 0, defRem, 'Espèce', '', '', '');
   tbody.insertAdjacentHTML('beforeend', html);
   var lastRow = tbody.lastElementChild;
   if (lastRow) {
@@ -19348,6 +19454,9 @@ function saveSoldeGroupeEdits() {
           ops[j].numeroTransaction = numTx;
           ops[j].observations = obs;
           if (moisVal) ops[j].apMoisDeduction = moisVal;
+          /* Mois manuel (différent de la période) : l'auto-correction sur
+             période ne doit jamais l'écraser. */
+          ops[j].moisManuel = !!(moisVal && moisVal !== period);
           ops[j].frais = fraisVal;
           ops[j].periode = period;
           updated++;
@@ -19372,7 +19481,8 @@ function saveSoldeGroupeEdits() {
         beneficiaireType: 'employe', beneficiaireId: empId, beneficiaireNom: empNom,
         observations: obs, remettant: rem, executant: '', imprime: false,
         montantCharge: 0, caisseId: caisseId, reversed: false,
-        collective: false, pendingDetail: false, apType: 'solde'
+        collective: false, pendingDetail: false, apType: 'solde',
+        apMoisDeduction: (moisVal || period || ''), moisManuel: !!(moisVal && moisVal !== period)
       });
       created++;
     }
