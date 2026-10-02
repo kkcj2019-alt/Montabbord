@@ -1245,6 +1245,23 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Recherche globale : les dates des pieces s\u2019affichent en JJ/MM/AA',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opR', numeroPiece: 'BR-1', date: '2026-08-05', code: 'DIVERS', libelle: 'DIVERS frais de route', montant: 10000, sens: 'sortie', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      _gsAllQuery = 'ROUTE';
+      renderGlobalSearchAll();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('>05/08/26<') !== -1 && h.indexOf('2026-08-05') === -1)
+        ? 'OK : date affichee 05/08/26, plus de format ISO'
+        : 'ECHEC : ' + h.substr(0, 300).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').substr(0, 160)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
