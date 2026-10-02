@@ -1061,6 +1061,78 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Acomptes : une piece ACOMPTE sans apType ni id employe (nom en texte libre) recree sa ligne',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opC', numeroPiece: 'KC-1', date: '2026-09-19', code: 'ACOMPTE_INDEMNITE', libelle: 'Acompte d indemnite/Mois de Septembre 2026', montant: 5050, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireNom: 'Diallo A', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      _reconcileAcomptesPretsFromCaisse();
+      var list = dbArr('mdb_acomptesPrets');
+      var rec = null;
+      for (var i = 0; i < list.length; i++) { if (list[i] && list[i].caisseOpId === 'opC') rec = list[i]; }
+      (rec && rec.type === 'acompte' && rec.employeId === 'e1' && rec.montant === 5050 && rec.moisDeduction === '2026-09')
+        ? 'OK : ligne 5050 rattachee a Diallo (e1), mois 2026-09'
+        : 'ECHEC rec=' + (rec ? rec.type + '/' + rec.employeId + '/' + rec.montant : 'null')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : sans employe attribuable (nom inconnu) ou sens entree, aucune ligne n\u2019est inventee',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opX1', numeroPiece: 'KC-2', date: '2026-09-19', code: 'ACOMPTE_INDEMNITE', libelle: 'Acompte', montant: 5050, sens: 'sortie', beneficiaireType: 'employe', beneficiaireNom: 'Personne Inconnue', caisseId: 'c1' });
+      ops.push({ id: 'opX2', numeroPiece: 'KC-3', date: '2026-09-19', code: 'ACOMPTE', libelle: 'Acompte', montant: 5050, sens: 'entree', beneficiaireType: 'employe', beneficiaireNom: 'Diallo A', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      _reconcileAcomptesPretsFromCaisse();
+      var list = dbArr('mdb_acomptesPrets');
+      var n = 0;
+      for (var i = 0; i < list.length; i++) { if (list[i] && (list[i].caisseOpId === 'opX1' || list[i].caisseOpId === 'opX2')) n++; }
+      (n === 0) ? 'OK : 0 ligne creee (nom inconnu + entree ignores)' : 'ECHEC lignes=' + n
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : le nettoyeur garde les lignes liees a une piece ACOMPTE sans apType',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opC2', numeroPiece: 'KC-4', date: '2026-09-20', code: 'ACOMPTE_INDEMNITE', libelle: 'Acompte', montant: 5050, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1', acomptePretId: 'apC2' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apC2', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 5050, moisDeduction: '2026-09', date: '2026-09-20', statut: 'en_cours', caisseOpId: 'opC2', numeroPiece: 'KC-4', motif: 'Acompte' });
+      DB.set('mdb_acomptesPrets', list);
+      _cleanGhostAcomptes();
+      var after = dbArr('mdb_acomptesPrets');
+      var kept = false;
+      for (var i = 0; i < after.length; i++) { if (after[i] && after[i].id === 'apC2') kept = true; }
+      kept ? 'OK : ligne apC2 conservee (nature par code + lien retour)' : 'ECHEC : ligne apC2 supprimee'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : nature d\u2019une piece (apType d\u2019abord, sinon code)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var r1 = _apNatureOp({ apType: 'solde', code: 'X' });
+      var r2 = _apNatureOp({ code: 'ACOMPTE_INDEMNITE' });
+      var r3 = _apNatureOp({ code: 'SOLDE_SALAIRE' });
+      var r4 = _apNatureOp({ code: 'PRET' });
+      var r5 = _apNatureOp({ apType: 'pret', code: 'X' });
+      var r6 = _apNatureOp({ code: 'VENTE' });
+      var r7 = _apNatureOp({});
+      (r1 === 'acompte' && r2 === 'acompte' && r3 === 'acompte' && r4 === 'pret' && r5 === 'pret' && r6 === '' && r7 === '')
+        ? 'OK : solde->acompte, ACOMPTE_INDEMNITE->acompte, SOLDE_SALAIRE->acompte, PRET->pret, VENTE->vide'
+        : 'ECHEC ' + [r1, r2, r3, r4, r5, r6, r7].join('/')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',

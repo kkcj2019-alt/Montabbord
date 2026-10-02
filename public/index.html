@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-01-121';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-122';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16446,7 +16446,8 @@ function _purgeOrphanAcomptes(){
     if (!_linkedOp && !_a.numeroPiece && _a.employeId) {
       for (var _ok=0; _ok<_opsAll.length; _ok++) {
         var _cand = _opsAll[_ok];
-        if (_cand && (_cand.apType === _a.type) && _cand.beneficiaireId === _a.employeId
+        var _candNat = (typeof _apNatureOp === 'function') ? _apNatureOp(_cand) : (_cand.apType || '');
+        if (_cand && (_candNat === _a.type) && _cand.beneficiaireId === _a.employeId
             && Math.abs((parseInt(_cand.montant)||0) - (parseInt(_a.montant)||0)) < 1
             && String(_cand.date || '').substring(0,10) === String(_a.date || '').substring(0,10)
             && (!_cand.acomptePretId || _cand.acomptePretId === _a.id)) {
@@ -16478,7 +16479,7 @@ function _purgeOrphanAcomptes(){
 // Nettoyage des "acomptes fantômes" : pièces de caisse (frais, encaissements, autre dépense, dépense)
 // qui avaient été enregistrées par erreur comme acomptes par l'ancienne saisie rapide du tableau de bord.
 // Critère fiable : un acompte legitime (module Trésorerie) a TOUJOURS son opération de caisse liée
-// marquée avec apType='acompte' (ou 'solde') ET un lien bidirectionnel acomptePretId. Les pièces créées par la
+// de nature 'acompte' (apType ou code) ET un lien bidirectionnel acomptePretId. Les pièces créées par la
 // saisie rapide n'avaient jamais ce lien => ce sont des acomptes fantômes à retirer.
 function _cleanGhostAcomptes(){
   var _ghost = dbArr('mdb_acomptesPrets');
@@ -16495,14 +16496,16 @@ function _cleanGhostAcomptes(){
     // Les acomptes/prêts collectifs (groupeId) sont gérés via la répartition collective : jamais des fantômes.
     if(_g.groupeId){ _keep.push(_g); continue; }
     var _isGhost = false;
-    // Règle 1 : un acompte individuel légitime (module Trésorerie) a son op de caisse liée avec
-    // apType='acompte' (ou 'solde') ET un lien bidirectionnel acomptePretId. Les acomptes de l'ancienne saisie
+    // Règle 1 : un acompte individuel légitime (module Trésorerie) a son op de caisse liée de
+    // nature 'acompte' (apType ou code) ET un lien bidirectionnel acomptePretId. Les acomptes de l'ancienne saisie
     // rapide n'avaient jamais ce lien => fantômes.
     if (_g.caisseOpId){
       var _op = _opsById[_g.caisseOpId];
       // op disparue : gérée par _purgeOrphanAcomptes ; op présente mais pas un vrai acompte => fantôme
+      // (la nature vient de apType ou du code : une pièce ACOMPTE* sans apType reste légitime)
       if (_op){
-        if ((_op.apType !== 'acompte' && _op.apType !== 'solde') || !_op.acomptePretId || _op.acomptePretId !== _g.id) _isGhost = true;
+        var _nat = (typeof _apNatureOp === 'function') ? _apNatureOp(_op) : (_op.apType || '');
+        if (_nat !== _g.type || !_op.acomptePretId || _op.acomptePretId !== _g.id) _isGhost = true;
       }
     }
     // Règle 2 : acompte dont le libellé est manifestement une pièce non-acompte (frais/encaissement/dépense).
@@ -16593,6 +16596,55 @@ function _apCalcEcheances(a, moisRef) {
    n'apparaît plus dans « Acompte et Prêt » parce que sa ligne a été purgée
    (le lien interne pointait vers la mauvaise pièce). On la reconstruit à
    partir de la pièce, sans toucher aux pièces collectives déjà réparties. */
+/* Normalisation stricte d'un nom pour comparaison EXACTE (insensible à la
+   casse, aux espaces multiples et aux accents). */
+function _apNormNom(s) {
+  try {
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+  } catch (e) { try { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); } catch (e2) { return ''; } }
+}
+/* Nature acompte/prêt d'une pièce : d'abord apType explicite, sinon CODE
+   (saisie rapide sans apType : ACOMPTE*, codes de règlement salaire...).
+   'solde' vaut 'acompte' (l'état s'appelle « Acomptes & Prêts salaire »). */
+function _apNatureOp(op) {
+  var t = (op && op.apType) || '';
+  if (t === 'pret' || t === 'acompte') return t;
+  if (t === 'solde') return 'acompte';
+  var codeBrut = (op && op.code) || '';
+  var c = String(codeBrut).toUpperCase().trim();
+  if (!c) return '';
+  try {
+    if (typeof CS_PERIOD_CODES !== 'undefined' && CS_PERIOD_CODES && CS_PERIOD_CODES.indexOf(codeBrut) !== -1) return 'acompte';
+  } catch (e) {}
+  if (c === 'ACOMPTE' || c.indexOf('ACOMPTE_') === 0 || c.indexOf('ACOMPTE-') === 0 || /_ACOMPTE(_|$)/.test(c)) return 'acompte';
+  if (/^PRET(_|-|$)/.test(c) || /_PRET(_|$)/.test(c)) return 'pret';
+  return '';
+}
+/* Employé attributaire d'une pièce : par beneficiaireId si connu, sinon par
+   nom EXACT (nom+prénoms, prénoms+nom, abréviation, matricule) — la saisie
+   rapide enregistre souvent le nom en texte libre sans id. Jamais
+   d'approximatif : sans attribut sûr, pas de ligne (mieux qu'un faux employé). */
+function _apEmployePourOp(op) {
+  var emps = [];
+  try { emps = getEmployes() || []; } catch (e) { return null; }
+  if (!emps.length) return null;
+  if (op && op.beneficiaireId) {
+    for (var i = 0; i < emps.length; i++) { if (emps[i] && emps[i].id === op.beneficiaireId) return emps[i]; }
+  }
+  var n = _apNormNom(op && (op.beneficiaireNom || op.beneficiaire));
+  if (!n) return null;
+  for (var j = 0; j < emps.length; j++) {
+    var e = emps[j];
+    if (!e) continue;
+    var fn = _apNormNom(((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim());
+    var inv = _apNormNom(((e.prenoms || e.prenom || '') + ' ' + (e.nom || '')).trim());
+    var abFull = _apNormNom(((e.abreviation ? e.abreviation + ' - ' : '') + ((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim()).trim());
+    var ab = _apNormNom(e.abreviation || '');
+    var mat = _apNormNom(e.matricule || '');
+    if ((fn && n === fn) || (inv && n === inv) || (abFull && n === abFull) || (ab && n === ab) || (mat && n === mat)) return e;
+  }
+  return null;
+}
 function _reconcileAcomptesPretsFromCaisse() {
   var ops = getOperationsCaisse() || [];
   if (!ops.length) return;
@@ -16607,21 +16659,21 @@ function _reconcileAcomptesPretsFromCaisse() {
   for (var o = 0; o < ops.length; o++) {
     var op = ops[o];
     if (!op || op.reversed) continue;
-    var t = op.apType || '';
-    /* Les soldes (apType 'solde', ex. enregistrés depuis « Modifier les
-       soldes ») sont des acomptes : sans cette ligne, ils n'apparaissent ni
-       dans l'état des acomptes et prêts ni dans le module Paie. */
-    if (t !== 'pret' && t !== 'acompte' && t !== 'solde') continue;
+    var t = (typeof _apNatureOp === 'function') ? _apNatureOp(op) : (op.apType || '');
+    /* Nature par apType explicite, sinon par CODE (saisie rapide sans apType :
+       ACOMPTE*, codes de règlement salaire...). Sans nature reconnue, la pièce
+       n'est pas un acompte/prêt et on la laisse tranquille. */
+    if (t !== 'pret' && t !== 'acompte') continue;
+    /* Reconnaissance par code uniquement : on ne requalifie que les sorties
+       de montant > 0, pour ne jamais transformer une entrée en acompte. */
+    if (!op.apType && ((op.sens || '') !== 'sortie' || !(parseInt(op.montant, 10) > 0))) continue;
     /* La pièce maîtresse « à répartir » (pendingDetail) n'est pas un prêt individuel. */
     if (op.pendingDetail) continue;
-    if (!op.beneficiaireId) continue;
-    /* Garde-fou : le bénéficiaire doit être un employé connu de l'entreprise. */
-    var _empOk = false;
-    try {
-      var _emps = getEmployes() || [];
-      for (var _ei = 0; _ei < _emps.length; _ei++) { if (_emps[_ei] && _emps[_ei].id === op.beneficiaireId) { _empOk = true; break; } }
-    } catch (eEmp) { _empOk = false; }
-    if (!_empOk) continue;
+    /* Employé attributaire : par beneficiaireId si connu, sinon par nom EXACT
+       (la saisie rapide enregistre souvent le nom en texte libre sans id).
+       Sans attribut sûr, pas de ligne — jamais d'employé approximatif. */
+    var _emp = (typeof _apEmployePourOp === 'function') ? _apEmployePourOp(op) : null;
+    if (!_emp) continue;
     /* Une remise collective partage le même numeroPiece pour tous ses employés :
        on ne peut donc PAS dédupliquer sur le numeroPiece, sinon une seule ligne
        serait recréée (bug : les autres employés restaient à « 0 op. »).
@@ -16630,9 +16682,9 @@ function _reconcileAcomptesPretsFromCaisse() {
     if (op.acomptePretId && linkedIds['A:' + op.acomptePretId]) continue;
     var rec = {
       id: op.acomptePretId || DB.genId(),
-      type: (t === 'solde' ? 'acompte' : t),
-      employeId: op.beneficiaireId,
-      employeNom: op.beneficiaireNom || '',
+      type: t,
+      employeId: _emp.id,
+      employeNom: op.beneficiaireNom || (((_emp.nom || '') + ' ' + (_emp.prenoms || _emp.prenom || '')).trim() || _emp.nom || ''),
       montant: parseInt(op.montant) || 0,
       dureeMois: parseInt(op.apDureeMois) || 0,
       montantMensuel: parseInt(op.apMontantMensuel) || 0,
@@ -18737,6 +18789,9 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
     } else {
       list.push(data);
     }
+    /* Lien retour pièce -> ligne : sans lui, le nettoyeur de fantômes prend la
+       ligne (même validée) pour un faux acompte et la supprime au rendu suivant. */
+    if (opRow) opRow.acomptePretId = data.id;
   }
   /* Retirer les acomptes du groupe dont la ligne a ete videe.
      Sûr uniquement si au moins un employe a reellement ete enregistre : sinon
