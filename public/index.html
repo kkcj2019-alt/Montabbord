@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-01-130';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-132';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -32596,25 +32596,49 @@ function deleteSelectedCaisse(){
 /* ===== ACOMPTE → SOLDE : convertir des pièces saisies en acompte alors que ce sont des soldes, SANS ressaisie ===== */
 /* Libellé cible d'une pièce convertie : « Acompte employé : X » → « Solde … : X »,
    « Acompte/... » → « Solde/... », sinon libellé conservé tel quel. */
-function csLibelleSolde(o) {
+function csLibelleSolde(o, moisForce) {
   var lib = String((o && o.libelle) || '');
   var code = String((o && o.code) || '').toUpperCase();
   var prefix = 'Solde : ';
   if (code.indexOf('INDEMNITE') !== -1) prefix = 'Solde indemnit\u00e9 : ';
   else if (code.indexOf('SALAIRE') !== -1) prefix = 'Solde salaire : ';
   var m = lib.match(/^\s*Acompte employ\u00e9\s*:\s*(.*)$/i);
-  if (m) return prefix + (m[1] || '').trim();
-  if (/^\s*Acompte/i.test(lib)) return lib.replace(/^\s*Acompte/i, 'Solde');
-  return lib;
+  var base = '';
+  if (m) base = prefix + (m[1] || '').trim();
+  else if (/^\s*Acompte/i.test(lib)) base = lib.replace(/^\s*Acompte/i, 'Solde');
+  else return lib;
+  /* Mois de l'indemnité : même règle que la déduction (mois saisi s'il diffère
+     de la saisie = choix délibéré, sinon période, sinon date). */
+  if (/\/Mois de/i.test(base)) return base;
+  /* Mois imposé par l'utilisateur (conversion) : il gagne toujours. Sinon même
+     règle que la déduction (mois saisi s'il diffère de la saisie = choix
+     délibéré, sinon période, sinon date). */
+  var mois = (/^\d{4}-\d{2}$/.test(moisForce || '')) ? moisForce : '';
+  if (!mois) {
+    var moisSaisi = (/^\d{4}-\d{2}$/.test((o && o.apMoisDeduction) || '')) ? o.apMoisDeduction : '';
+    var moisDate = (o && o.date) ? String(o.date).substring(0, 7) : '';
+    var moisPeriode = '';
+    try { moisPeriode = (typeof _apMoisPiece === 'function') ? _apMoisPiece(o) : ''; } catch (eP) {}
+    mois = ((moisSaisi && moisSaisi !== moisDate) ? moisSaisi : (moisPeriode || moisSaisi || moisDate));
+  }
+  var label = '';
+  if (/^\d{4}-\d{2}$/.test(mois || '')) {
+    try { label = (typeof csPeriodeMonthLabel === 'function') ? csPeriodeMonthLabel(mois) : ''; } catch (eL) {}
+    if (!label && typeof fmtMois === 'function') { try { label = fmtMois(mois); } catch (eF) {} }
+  }
+  return label ? (base + '/Mois de ' + label) : base;
 }
 /* Conversion : la pièce garde date, montant, mois, caisse et N° (aucune perte,
    aucune ressaisie) ; seuls apType + libellé changent. Les lignes d'acompte
    liées gardent type 'acompte' — c'est ce qui permet de les Valider et de les
    déduire en paie : rien n'est à re-valider. */
-function csConvertirAcompteEnSolde(ids) {
+function csConvertirAcompteEnSolde(ids, moisForce) {
   var list = [];
   try { list = Array.isArray(ids) ? ids : []; } catch (e) { return { converties: 0, ignorees: 0 }; }
   if (!list.length) { toast('Cochez au moins une pièce', 'error'); return { converties: 0, ignorees: 0 }; }
+  /* Mois imposé (fenêtre de conversion) : appliqué au libellé, à la pièce et
+     aux lignes liées. Sinon chaque pièce garde son mois auto. */
+  var moisChoisi = (/^\d{4}-\d{2}$/.test(moisForce || '')) ? moisForce : '';
   var ops = getOperationsCaisse();
   var cibles = [];
   for (var i = 0; i < ops.length; i++) {
@@ -32627,23 +32651,40 @@ function csConvertirAcompteEnSolde(ids) {
     aConvertir.push(cibles[j]);
   }
   if (!aConvertir.length) { toast('Déjà en solde', 'info'); return { converties: 0, ignorees: ignores }; }
-  var detail = aConvertir.slice(0, 10).map(function(o) {
-    return '\u2022 ' + (o.numeroPiece || '?') + ' : ' + (o.libelle || '') + '  \u2192  ' + csLibelleSolde(o);
-  }).join('\n');
-  if (!confirm2(aConvertir.length + ' pièce(s) \u00ab acompte \u00bb à passer en SOLDE (date, montant, mois inchangés) :\n' + detail + (aConvertir.length > 10 ? '\n… et ' + (aConvertir.length - 10) + ' autre(s)' : '') + '\n\nConvertir ?')) return { converties: 0, ignorees: ignores };
+  /* Sans mois imposé (appel direct) : confirmation avec aperçu. Via la fenêtre
+     (mois choisi), la fenêtre est déjà la confirmation. */
+  if (!moisChoisi) {
+    var detail = aConvertir.slice(0, 10).map(function(o) {
+      return '\u2022 ' + (o.numeroPiece || '?') + ' : ' + (o.libelle || '') + '  \u2192  ' + csLibelleSolde(o);
+    }).join('\n');
+    if (!confirm2(aConvertir.length + ' pièce(s) \u00ab acompte \u00bb à passer en SOLDE (date, montant, mois inchangés) :\n' + detail + (aConvertir.length > 10 ? '\n… et ' + (aConvertir.length - 10) + ' autre(s)' : '') + '\n\nConvertir ?')) return { converties: 0, ignorees: ignores };
+  }
   for (var k = 0; k < aConvertir.length; k++) {
     aConvertir[k].apType = 'solde';
-    aConvertir[k].libelle = csLibelleSolde(aConvertir[k]);
+    aConvertir[k].libelle = csLibelleSolde(aConvertir[k], moisChoisi);
+    if (moisChoisi) {
+      aConvertir[k].apMoisDeduction = moisChoisi;
+      aConvertir[k].moisManuel = true;
+    }
   }
   /* Lien retour vers les lignes déjà liées : sans lui, le nettoyeur de
-     fantômes mangerait la ligne (et sa validation) avant sa recréation. */
+     fantômes mangerait la ligne (et sa validation) avant sa recréation.
+     Avec un mois imposé, les lignes suivent aussi (choix protégé). */
   try {
     var _apL = dbArr('mdb_acomptesPrets') || [];
+    var _touchL = false;
     for (var q = 0; q < aConvertir.length; q++) {
-      if (aConvertir[q].acomptePretId) continue;
       for (var _ai = 0; _ai < _apL.length; _ai++) {
-        if (_apL[_ai] && _apL[_ai].caisseOpId === aConvertir[q].id) { aConvertir[q].acomptePretId = _apL[_ai].id; break; }
+        if (_apL[_ai] && _apL[_ai].caisseOpId === aConvertir[q].id) {
+          if (!aConvertir[q].acomptePretId) aConvertir[q].acomptePretId = _apL[_ai].id;
+          if (moisChoisi) { _apL[_ai].moisDeduction = moisChoisi; _apL[_ai].moisManuel = true; _touchL = true; }
+          break;
+        }
       }
+    }
+    if (_touchL) {
+      DB.set('mdb_acomptesPrets', _apL);
+      try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (eSL) {}
     }
   } catch (eL) {}
   DB.set('mdb_operationsCaisse', ops);
@@ -32666,7 +32707,67 @@ function convertSelectedToSolde() {
   }
   var ids = [];
   cbs.forEach(function(cb) { ids.push(cb.getAttribute('data-id')); });
-  csConvertirAcompteEnSolde(ids);
+  openConvertirSoldeModal(ids);
+}
+/* Mois candidat d'une pièce pour la conversion (même règle que la déduction :
+   mois saisi s'il diffère de la saisie = choix délibéré, sinon période, sinon date). */
+function csMoisCandidatConversion(o) {
+  var moisSaisi = (/^\d{4}-\d{2}$/.test((o && o.apMoisDeduction) || '')) ? o.apMoisDeduction : '';
+  var moisDate = (o && o.date) ? String(o.date).substring(0, 7) : '';
+  var moisPeriode = '';
+  try { moisPeriode = (typeof _apMoisPiece === 'function') ? _apMoisPiece(o) : ''; } catch (e) {}
+  return ((moisSaisi && moisSaisi !== moisDate) ? moisSaisi : (moisPeriode || moisSaisi || moisDate));
+}
+/* Fenêtre Acompte → Solde : le mois est UN CHOIX (on peut être en octobre et
+   saisir des soldes de septembre). Proposé par défaut = le mois majoritaire
+   des pièces, modifiable. Date, montants et caisse ne changent jamais. */
+function openConvertirSoldeModal(ids) {
+  var ops = getOperationsCaisse();
+  var cibles = [];
+  for (var i = 0; i < ops.length; i++) { if (ops[i] && ids.indexOf(ops[i].id) !== -1) cibles.push(ops[i]); }
+  if (!cibles.length) { toast('Pièces introuvables', 'error'); return; }
+  var votes = {}, best = '', bestN = 0;
+  for (var j = 0; j < cibles.length; j++) {
+    var mc = csMoisCandidatConversion(cibles[j]);
+    if (!/^\d{4}-\d{2}$/.test(mc)) continue;
+    votes[mc] = (votes[mc] || 0) + 1;
+    if (votes[mc] > bestN) { bestN = votes[mc]; best = mc; }
+  }
+  if (!best) { try { best = getToday().substring(0, 7); } catch (eD) { best = ''; } }
+  window._cvsIds = ids.slice();
+  var html = '<div style="background:#f0fdfa;border:1px solid #5eead4;border-radius:8px;padding:10px;margin-bottom:10px;font-size:12px;color:#0f766e"><b>Le mois est un choix</b> : on peut \u00eatre en octobre et saisir des soldes de septembre. Le mois choisi va dans le libell\u00e9, la pi\u00e8ce et la ligne d\u2019acompte. Date, montants et caisse ne changent pas.</div>';
+  html += '<div class="form-group"><label>Mois des soldes (appliqu\u00e9 \u00e0 toutes les pi\u00e8ces)</label><input type="month" id="cvsMois" value="' + best + '" oninput="previewConvertirSolde()" onchange="previewConvertirSolde()" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:8px"></div>';
+  html += '<div id="cvsPreview" style="max-height:220px;overflow:auto;border:1px solid #e5e7eb;border-radius:8px;padding:6px;background:#f9fafb;font-size:11px;margin-top:8px"></div>';
+  html += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button class="btn btn-outline" onclick="closeModal()">Fermer</button><button id="cvsExecBtn" class="btn btn-primary" style="background:#0d9488;border-color:#0d9488" onclick="executerConversionSolde()">Convertir</button></div>';
+  openFormModal('Convertir en soldes (' + cibles.length + ' pi\u00e8ce(s))', html, '');
+  previewConvertirSolde();
+}
+function previewConvertirSolde() {
+  var mEl = document.getElementById('cvsMois');
+  var mois = mEl ? (mEl.value || '') : '';
+  var okMois = /^\d{4}-\d{2}$/.test(mois);
+  var ops = getOperationsCaisse();
+  var ids = window._cvsIds || [];
+  var rows = '', n = 0;
+  for (var i = 0; i < ops.length; i++) {
+    if (ops[i] && ids.indexOf(ops[i].id) !== -1 && ops[i].apType !== 'solde') {
+      n++;
+      if (n <= 12) rows += '<div>\u2022 ' + escH(ops[i].numeroPiece || '?') + ' : ' + escH(ops[i].libelle || '') + ' \u2192 <b>' + escH(csLibelleSolde(ops[i], okMois ? mois : '')) + '</b></div>';
+    }
+  }
+  if (n > 12) rows += '<div style="color:var(--gray-500)">… et ' + (n - 12) + ' autre(s)</div>';
+  var pv = document.getElementById('cvsPreview');
+  if (pv) pv.innerHTML = rows || '<span style="color:var(--gray-400)">Rien à convertir (déjà en solde).</span>';
+  var btn = document.getElementById('cvsExecBtn');
+  if (btn) { btn.textContent = 'Convertir ' + n + ' pièce(s)'; btn.disabled = !(n > 0 && okMois); }
+}
+function executerConversionSolde() {
+  var mEl = document.getElementById('cvsMois');
+  var mois = mEl ? (mEl.value || '') : '';
+  if (!/^\d{4}-\d{2}$/.test(mois)) { toast('Choisissez le mois (ex. 2026-09)', 'error'); return; }
+  var ids = window._cvsIds || [];
+  var r = csConvertirAcompteEnSolde(ids, mois);
+  if (r && r.converties > 0) { try { closeModal(); } catch (e) {} }
 }
 /* ===== CORRIGER PERIODE : déplacer opérations août saisies en juin vers août sans ressaisie ===== */
 function openCorrigerPeriodeModal(){

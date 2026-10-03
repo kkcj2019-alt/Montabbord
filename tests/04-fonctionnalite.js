@@ -1281,8 +1281,8 @@ attenduPrefixe: 'OK'
         if (ops2[i] && ops2[i].id === 'opV2') l2 = ops2[i].libelle;
         if (ops2[i] && ops2[i].id === 'opV3') l3 = ops2[i].libelle;
       }
-      (r && r.converties === 2 && r.ignorees === 1 && t1 === 'solde' && l1 === 'Solde indemnité : KOFFI' && l2 === 'Solde indemnité : RACHIDOU' && l3 === 'Solde indemnité : NOUH' && m1 === 220000)
-        ? 'OK : 2 converties (libelles Solde indemnité), 1 deja solde ignoree, montant garde'
+      (r && r.converties === 2 && r.ignorees === 1 && t1 === 'solde' && l1 === 'Solde indemnité : KOFFI/Mois de Septembre 2026' && l2 === 'Solde indemnité : RACHIDOU/Mois de Octobre 2026' && l3 === 'Solde indemnité : NOUH' && m1 === 220000)
+        ? 'OK : 2 converties (libelles Solde indemnité + mois), 1 deja solde ignoree, montant garde'
         : 'ECHEC r=' + JSON.stringify(r) + ' l1=' + l1 + ' l2=' + l2
     `,
     attenduPrefixe: 'OK'
@@ -1350,9 +1350,92 @@ attenduPrefixe: 'OK'
       var after = dbArr('mdb_acomptesPrets');
       var kept = false, val = false;
       for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apZ1') { kept = true; val = after[j].valide === true; } }
-      (r && r.converties === 1 && back === 'apZ1' && lib === 'Solde indemnité : GAHIE' && kept && val)
+      (r && r.converties === 1 && back === 'apZ1' && lib === 'Solde indemnité : GAHIE/Mois de Octobre 2026' && kept && val)
         ? 'OK : convertie + lien retour, ligne validee gardee (pas mangee)'
         : 'ECHEC back=' + back + ' lib=' + lib + ' gardee=' + kept + ' validee=' + val
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : le mois du libelle converti suit la periode, pas la saisie par defaut',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opY1', numeroPiece: 'KCJ-52', date: '2026-09-11', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : GAHIE', observations: 'Prélèvement Août 2026', montant: 9472, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opY1']); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var l1 = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opY1') l1 = ops2[i].libelle; }
+      (r && r.converties === 1 && l1 === 'Solde indemnité : GAHIE/Mois de Août 2026')
+        ? 'OK : mois de la periode (aout), pas septembre par defaut'
+        : 'ECHEC l1=' + l1
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : conversion avec mois impose (octobre, soldes de septembre)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opF1', numeroPiece: 'KKCJ-97', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : KOFFI', montant: 220000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apF1', type: 'acompte', employeId: 'e1', employeNom: 'Koffi', montant: 220000, moisDeduction: '2026-10', date: '2026-10-02', statut: 'en_cours', provenance: 'caisse', caisseOpId: 'opF1', numeroPiece: 'KKCJ-97' });
+      DB.set('mdb_acomptesPrets', list);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opF1'], '2026-09'); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var lib = null, om = null, oflag = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opF1') { lib = ops2[i].libelle; om = ops2[i].apMoisDeduction; oflag = ops2[i].moisManuel; } }
+      var after = dbArr('mdb_acomptesPrets');
+      var lm = null, lflag = null;
+      for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apF1') { lm = after[j].moisDeduction; lflag = after[j].moisManuel; } }
+      (r && r.converties === 1 && lib === 'Solde indemnité : KOFFI/Mois de Septembre 2026' && om === '2026-09' && oflag === true && lm === '2026-09' && lflag === true)
+        ? 'OK : libelle + piece + ligne sur septembre choisi (proteges)'
+        : 'ECHEC lib=' + lib + ' piece=' + om + '/' + oflag + ' ligne=' + lm + '/' + lflag
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : la fenetre propose le mois majoritaire des pieces (septembre en octobre)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opD1', numeroPiece: 'KKCJ-96', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : KOFFI', montant: 1000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-09' });
+      ops.push({ id: 'opD2', numeroPiece: 'KKCJ-96', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : NOUH', montant: 2000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      openConvertirSoldeModal(['opD1', 'opD2']);
+      var mb = document.getElementById('formModalBody');
+      var h = mb ? (mb.innerHTML || '') : '';
+      var defautOk = h.indexOf('id="cvsMois" value="2026-09"') !== -1;
+      document.getElementById('cvsMois').value = '2026-09';
+      previewConvertirSolde();
+      var pv = document.getElementById('cvsPreview');
+      var ph = pv ? (pv.innerHTML || '') : '';
+      (defautOk && ph.indexOf('Solde indemnité : KOFFI/Mois de Septembre 2026') !== -1)
+        ? 'OK : mois propose septembre + apercu avant/apres'
+        : 'ECHEC defaut=' + defautOk + ' apercu=' + ph.substr(0, 120)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie : le mois pris en compte est la deduction choisie, pas la date de saisie',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var a = apMoisPrisEnCompte({ moisDeduction: '2026-09', date: '2026-10-02' });
+      var b = apMoisPrisEnCompte({ moisDeduction: '', date: '2026-10-02' });
+      var c = apMoisPrisEnCompte({ moisDeduction: 'septembre 2026', date: '2026-09-15' });
+      (a === '2026-09' && b === '2026-10' && c === '2026-09')
+        ? 'OK : deduction septembre (saisie octobre), repli date, ancien libelle -> date'
+        : 'ECHEC ' + [a, b, c].join('/')
     `,
     attenduPrefixe: 'OK'
   });
