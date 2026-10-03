@@ -1522,6 +1522,46 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Caisse : une piece ACOMPTE libellee septembre mais deduite octobre repasse en septembre',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opJ1', numeroPiece: 'KKCJ-75', date: '2026-10-03', code: 'ACOMPTE', libelle: 'ACOMPTE/SALAIRE/Mois de Septembre 2026', montant: 20000, sens: 'sortie', moyenPaiement: 'Wave', beneficiaireType: 'employe', beneficiaireNom: 'Porgo Innoussa', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-10' });
+      DB.set('mdb_operationsCaisse', ops);
+      var n = _corrigerMoisPieces();
+      var ops2 = getOperationsCaisse();
+      var m = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opJ1') m = ops2[i].apMoisDeduction; }
+      (n === 1 && m === '2026-09') ? 'OK : piece remise sur septembre (libelle)' : 'ECHEC n=' + n + ' mois=' + m
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : la correction des mois ne touche ni aux choix manuels ni aux prets ni aux mois coherents',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opJ2', numeroPiece: 'KKCJ-76', date: '2026-10-03', code: 'ACOMPTE', libelle: 'ACOMPTE/SALAIRE/Mois de Septembre 2026', montant: 20000, sens: 'sortie', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-10', moisManuel: true });
+      ops.push({ id: 'opJ3', numeroPiece: 'KKCJ-77', date: '2026-10-03', code: 'PRET', libelle: 'Prêt employé : X', montant: 50000, sens: 'sortie', caisseId: 'c1', apType: 'pret', apMoisDeduction: '2026-10' });
+      ops.push({ id: 'opJ4', numeroPiece: 'KKCJ-78', date: '2026-10-03', code: 'ACOMPTE', libelle: 'ACOMPTE/SALAIRE/Mois de Octobre 2026', montant: 20000, sens: 'sortie', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-10' });
+      DB.set('mdb_operationsCaisse', ops);
+      var n = _corrigerMoisPieces();
+      var ops2 = getOperationsCaisse();
+      var r2 = null, r3 = null, r4 = null;
+      for (var i = 0; i < ops2.length; i++) {
+        if (ops2[i] && ops2[i].id === 'opJ2') r2 = ops2[i].apMoisDeduction;
+        if (ops2[i] && ops2[i].id === 'opJ3') r3 = ops2[i].apMoisDeduction;
+        if (ops2[i] && ops2[i].id === 'opJ4') r4 = ops2[i].apMoisDeduction;
+      }
+      (n === 0 && r2 === '2026-10' && r3 === '2026-10' && r4 === '2026-10')
+        ? 'OK : manuel, pret et coherent intouches'
+        : 'ECHEC n=' + n + ' ' + [r2, r3, r4].join('/')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
