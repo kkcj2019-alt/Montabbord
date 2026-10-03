@@ -1562,6 +1562,42 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'En-tete : la fin de plage endormie a J-2 revient au jour J (debut garde)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var d = new Date(); d.setDate(d.getDate() - 2);
+      var j2 = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      var yr = new Date().getFullYear() + '-01-01';
+      DB.set('mdb_dashRange', { from: yr, to: j2 });
+      var ch = _rafraichirPlageDash();
+      var r = dbObj('mdb_dashRange');
+      var ch2 = _rafraichirPlageDash();
+      (ch === true && r.to === getToday() && r.from === yr && ch2 === false)
+        ? 'OK : fin ' + j2 + ' -> ' + r.to + ', 2e passage sans ecriture'
+        : 'ECHEC ch=' + ch + ' to=' + (r && r.to) + ' ch2=' + ch2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'En-tete : plage absente initialisee, fin future conservee',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var yr = new Date().getFullYear() + '-01-01';
+      DB.set('mdb_dashRange', {});
+      var ch = _rafraichirPlageDash();
+      var r = dbObj('mdb_dashRange');
+      DB.set('mdb_dashRange', { from: yr, to: '2099-12-31' });
+      var ch2 = _rafraichirPlageDash();
+      var r2 = dbObj('mdb_dashRange');
+      (ch === true && r.from === yr && r.to === getToday() && ch2 === false && r2.to === '2099-12-31')
+        ? 'OK : init 01/01->jour J, futur garde'
+        : 'ECHEC ' + JSON.stringify(r) + ' / ' + JSON.stringify(r2)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
