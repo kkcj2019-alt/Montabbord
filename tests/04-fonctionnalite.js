@@ -1262,6 +1262,101 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Caisse : conversion Acompte - Solde en un clic (sans ressaisie, libelles ajustes)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opV1', numeroPiece: 'KKCJ-99', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : KOFFI', montant: 220000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte', apMoisDeduction: '2026-09' });
+      ops.push({ id: 'opV2', numeroPiece: 'KKCJ-99', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : RACHIDOU', montant: 98393, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte' });
+      ops.push({ id: 'opV3', numeroPiece: 'KKCJ-99', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Solde indemnité : NOUH', montant: 10000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'solde' });
+      DB.set('mdb_operationsCaisse', ops);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opV1', 'opV2', 'opV3']); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var l1 = null, t1 = null, l2 = null, l3 = null, m1 = null;
+      for (var i = 0; i < ops2.length; i++) {
+        if (ops2[i] && ops2[i].id === 'opV1') { l1 = ops2[i].libelle; t1 = ops2[i].apType; m1 = ops2[i].montant; }
+        if (ops2[i] && ops2[i].id === 'opV2') l2 = ops2[i].libelle;
+        if (ops2[i] && ops2[i].id === 'opV3') l3 = ops2[i].libelle;
+      }
+      (r && r.converties === 2 && r.ignorees === 1 && t1 === 'solde' && l1 === 'Solde indemnité : KOFFI' && l2 === 'Solde indemnité : RACHIDOU' && l3 === 'Solde indemnité : NOUH' && m1 === 220000)
+        ? 'OK : 2 converties (libelles Solde indemnité), 1 deja solde ignoree, montant garde'
+        : 'ECHEC r=' + JSON.stringify(r) + ' l1=' + l1 + ' l2=' + l2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : conversion garde les libelles libres, bascule Acompte/... en Solde/...',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opW1', numeroPiece: 'KCJ-50', date: '2026-09-18', code: 'ACOMPTE', libelle: 'Acompte/SALAIRE/Mois de Septembre 2026', montant: 5000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte' });
+      ops.push({ id: 'opW2', numeroPiece: 'KCJ-51', date: '2026-09-18', code: 'ACOMPTE', libelle: 'Avance exceptionnelle', montant: 7000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte' });
+      DB.set('mdb_operationsCaisse', ops);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opW1', 'opW2']); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var l1 = null, t1 = null, l2 = null;
+      for (var i = 0; i < ops2.length; i++) {
+        if (ops2[i] && ops2[i].id === 'opW1') { l1 = ops2[i].libelle; t1 = ops2[i].apType; }
+        if (ops2[i] && ops2[i].id === 'opW2') l2 = ops2[i].libelle;
+      }
+      (r && r.converties === 2 && t1 === 'solde' && l1 === 'Solde/SALAIRE/Mois de Septembre 2026' && l2 === 'Avance exceptionnelle')
+        ? 'OK : Acompte/... bascule, libelle libre conserve, apType solde'
+        : 'ECHEC l1=' + l1 + ' l2=' + l2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : a la creation collective, un code SOLDE donne libelle et nature solde (pas Acompte)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var a = csApTypeEtLibelleCreation('acompte', 'SOLDE_INDEMNITE', 'GAHIE');
+      var b = csApTypeEtLibelleCreation('acompte', 'SOLDE_SALAIRE', 'KOFFI');
+      var c = csApTypeEtLibelleCreation('acompte', 'ACOMPTE_INDEMNITE', 'ZOH');
+      var d = csApTypeEtLibelleCreation('pret', 'SOLDE_SALAIRE', 'KOFFI');
+      (a.apType === 'solde' && a.libelle === 'Solde indemnité : GAHIE'
+        && b.apType === 'solde' && b.libelle === 'Solde salaire : KOFFI'
+        && c.apType === 'acompte' && c.libelle === 'Acompte employé : ZOH'
+        && d.apType === 'pret' && d.libelle === 'Prêt employé : KOFFI')
+        ? 'OK : SOLDE_INDEMNITE->Solde indemnité/solde, ACOMPTE_INDEMNITE inchange, pret touche'
+        : 'ECHEC ' + JSON.stringify([a, b, c, d])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : la conversion pose le lien retour vers la ligne existante (validation gardee)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opZ1', numeroPiece: 'KKCJ-98', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Acompte employé : GAHIE', montant: 9472, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apZ1', type: 'acompte', employeId: 'e1', employeNom: 'Gahie', montant: 9472, moisDeduction: '2026-09', date: '2026-10-02', statut: 'en_cours', valide: true, caisseOpId: 'opZ1', numeroPiece: 'KKCJ-98', provenance: 'caisse' });
+      DB.set('mdb_acomptesPrets', list);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opZ1']); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var back = null, lib = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opZ1') { back = ops2[i].acomptePretId; lib = ops2[i].libelle; } }
+      _cleanGhostAcomptes();
+      var after = dbArr('mdb_acomptesPrets');
+      var kept = false, val = false;
+      for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apZ1') { kept = true; val = after[j].valide === true; } }
+      (r && r.converties === 1 && back === 'apZ1' && lib === 'Solde indemnité : GAHIE' && kept && val)
+        ? 'OK : convertie + lien retour, ligne validee gardee (pas mangee)'
+        : 'ECHEC back=' + back + ' lib=' + lib + ' gardee=' + kept + ' validee=' + val
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
