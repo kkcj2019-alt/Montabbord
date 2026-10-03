@@ -1440,6 +1440,88 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Caisse : encadrement, cocher haut+bas coche tout l\u2019intervalle',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var lignes = [{checked:true},{checked:false},{checked:false},{checked:false},{checked:true}];
+      var n = csAppliquerEncadrement(lignes, 0, 4);
+      var tout = true;
+      for (var i = 0; i < lignes.length; i++) { if (!lignes[i].checked) tout = false; }
+      var lignes2 = [{checked:false},{checked:false},{checked:true}];
+      var n2 = csAppliquerEncadrement(lignes2, 2, 0);
+      var gardes = (csAppliquerEncadrement([], 0, 1) === 0 && csAppliquerEncadrement(lignes2, -1, 5) === 0);
+      (n === 3 && tout && n2 === 2 && lignes2[0].checked && lignes2[1].checked && gardes)
+        ? 'OK : intervalle coche dans les 2 sens, cas invalides proteges'
+        : 'ECHEC n=' + n + ' n2=' + n2 + ' gardes=' + gardes
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : conversion inverse Solde vers Acompte',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window.confirm2 = function(){ return true; };
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opR1', numeroPiece: 'KKCJ-95', date: '2026-09-20', code: 'SOLDE_INDEMNITE', libelle: 'Solde indemnité : GAHIE/Mois de Septembre 2026', montant: 9472, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'solde', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opR1'], '', 'vers-acompte'); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var lib = null, tp = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opR1') { lib = ops2[i].libelle; tp = ops2[i].apType; } }
+      (r && r.converties === 1 && tp === 'acompte' && lib === 'Acompte employé : GAHIE/Mois de Septembre 2026')
+        ? 'OK : revenue en acompte, mois garde'
+        : 'ECHEC lib=' + lib + ' type=' + tp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : conversion applique le mois aux pieces deja en solde (sans les ignorer)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opM1', numeroPiece: 'KKCJ-94', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Solde indemnité : KOFFI', montant: 220000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'solde' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apM1', type: 'acompte', employeId: 'e1', employeNom: 'Koffi', montant: 220000, moisDeduction: '2026-10', date: '2026-10-02', statut: 'en_cours', provenance: 'caisse', caisseOpId: 'opM1', numeroPiece: 'KKCJ-94' });
+      DB.set('mdb_acomptesPrets', list);
+      var r = null;
+      try { r = csConvertirAcompteEnSolde(['opM1'], '2026-09', 'vers-solde'); } catch (e) {}
+      var ops2 = getOperationsCaisse();
+      var lib = null, om = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opM1') { lib = ops2[i].libelle; om = ops2[i].apMoisDeduction; } }
+      var after = dbArr('mdb_acomptesPrets');
+      var lm = null;
+      for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apM1') lm = after[j].moisDeduction; }
+      (r && r.converties === 0 && r.moisMaj === 1 && lib === 'Solde indemnité : KOFFI/Mois de Septembre 2026' && om === '2026-09' && lm === '2026-09')
+        ? 'OK : mois ajoute au libelle, piece et ligne (0 conversion, 1 mois)'
+        : 'ECHEC lib=' + lib + ' piece=' + om + ' ligne=' + lm + ' r=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : l\u2019apercu montre les mises a jour de mois seul (pieces deja en solde)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opS1', numeroPiece: 'KKCJ-93', date: '2026-10-02', code: 'SOLDE_INDEMNITE', libelle: 'Solde indemnité : KOFFI', montant: 220000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'solde' });
+      DB.set('mdb_operationsCaisse', ops);
+      openConvertirSoldeModal(['opS1']);
+      document.getElementById('cvsMois').value = '2026-09';
+      previewConvertirSolde();
+      var pv = document.getElementById('cvsPreview');
+      var ph = pv ? (pv.innerHTML || '') : '';
+      (ph.indexOf('Solde indemnité : KOFFI/Mois de Septembre 2026') !== -1 && ph.indexOf('(mois)') !== -1)
+        ? 'OK : apercu mois-seul affiche'
+        : 'ECHEC : ' + ph.substr(0, 140)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
