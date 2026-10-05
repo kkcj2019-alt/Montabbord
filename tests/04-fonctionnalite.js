@@ -1693,6 +1693,108 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Stock MP : l\u2019onglet actif deroule la fiche ordinaire par colis (comme BL/spe)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockRawTab', 'actif');
+      setSection('stockRawEtat', 'tout');
+      CURRENT_PAGE = 'stock-raw'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('mvtColis_') !== -1 && h.indexOf('goToColisOrigin') === -1)
+        ? 'OK : accordéons mouvements sur l\u2019onglet actif, plus de renvoi seul'
+        : 'ECHEC mvt=' + (h.indexOf('mvtColis_') !== -1) + ' origin=' + (h.indexOf('goToColisOrigin') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock MP : le registre d\u2019encours suit lancement, avancement et reste',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('productionOrders', [{ numero: 'OF-9', article_id: 'a1', statut: 'en_cours', quantite_prevue: 100, quantite_realisee: 30, date: '2026-09-01' }]);
+      var h = _wipRegistreHtml('OF-9');
+      var ko = _wipRegistreHtml('XXX');
+      (h.indexOf('Mise en encours') !== -1 && h.indexOf('Stock final') !== -1 && h.indexOf('70') !== -1 && ko.indexOf('introuvable') !== -1)
+        ? 'OK : entree 100, sortie 30, final 70'
+        : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').substr(0, 140)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock MP : la fiche d\u2019inventaire montre rappel, ecart et reel compte',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var h = _invFicheHtml({ code: 'K1', designation: 'Bois rouge', theo_qte: 0, real_qte: 300, categorie: 'Consommable' });
+      (h.indexOf('Stock initial') !== -1 && h.indexOf('Ajustement inventaire') !== -1 && h.indexOf('300') !== -1 && h.indexOf('Stock final') !== -1)
+        ? 'OK : initial 0, ajust +300, final 300'
+        : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').substr(0, 140)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock MP : l\u2019onglet initial propose la fiche par article inventorie',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('inventories', [{ month: '2026-09', items: [{ code: 'K1', designation: 'Bois rouge', theo_qte: 0, real_qte: 300, categorie: 'Consommable' }] }]);
+      setSection('stockRawTab', 'initial');
+      CURRENT_PAGE = 'stock-raw'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('invCat_0_0') !== -1 && h.indexOf('Fiche —') !== -1)
+        ? 'OK : article depliable vers sa fiche'
+        : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').substr(0, 140)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Conso : + Nouveau Consommable ajoute a la fiche existante (coquille non propagee)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 100 }]);
+      document.getElementById('conso_code').value = 'P5';
+      document.getElementById('conso_nom').value = 'POINTE5';
+      document.getElementById('conso_qte').value = '50';
+      document.getElementById('conso_type').value = 'POINTE';
+      CURRENT_PAGE = 'dashboard';
+      addConsumDirect();
+      var items = getStockConsum();
+      var p5 = items.filter(function(s) { return String(s.code || '').toUpperCase() === 'P5'; });
+      (p5.length === 1 && parseFloat(p5[0].quantite) === 150 && p5[0].designation === 'POINTE 5')
+        ? 'OK : 1 seule fiche P5 = 150, designation etablie gardee'
+        : 'ECHEC lignes=' + p5.length + ' qte=' + (p5[0] && p5[0].quantite) + ' des=' + (p5[0] && p5[0].designation)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Conso : code en minuscules/espaces retrouve la fiche (creation normalisee)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [{ id: 'c1', code: 'P6', designation: 'POINTE 6', type: 'POINTE', quantite: 10 }]);
+      document.getElementById('conso_code').value = ' p6 ';
+      document.getElementById('conso_nom').value = 'POINTE 6';
+      document.getElementById('conso_qte').value = '5';
+      document.getElementById('conso_type').value = 'POINTE';
+      CURRENT_PAGE = 'dashboard';
+      addConsumDirect();
+      var items1 = getStockConsum();
+      var p6 = items1.filter(function(s) { return String(s.code || '').toUpperCase() === 'P6'; });
+      document.getElementById('conso_code').value = 'p9';
+      document.getElementById('conso_nom').value = 'Pointe 9';
+      document.getElementById('conso_qte').value = '7';
+      addConsumDirect();
+      var items2 = getStockConsum();
+      var p9 = items2.filter(function(s) { return String(s.code || '') === 'P9'; });
+      (p6.length === 1 && parseFloat(p6[0].quantite) === 15 && p9.length === 1 && parseFloat(p9[0].quantite) === 7)
+        ? 'OK : p6 fusionne malgre casse/espaces, p9 cree en majuscules'
+        : 'ECHEC p6=' + p6.length + '/' + (p6[0] && p6[0].quantite) + ' p9=' + p9.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
