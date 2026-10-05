@@ -1598,6 +1598,101 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Revue : le filtre Valides / Non valides vaut pour acomptes ET prets',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window._apValFilter = 'valides';
+      var vv = apPasseFiltreValide({ type: 'acompte', valide: true });
+      var vn = apPasseFiltreValide({ type: 'acompte', valide: false });
+      var pv = apPasseFiltreValide({ type: 'pret', valide: true });
+      var pn = apPasseFiltreValide({ type: 'pret' });
+      window._apValFilter = 'nonvalides';
+      var nv = apPasseFiltreValide({ type: 'acompte', valide: true });
+      var nn = apPasseFiltreValide({ type: 'acompte' });
+      var npv = apPasseFiltreValide({ type: 'pret', valide: true });
+      var npn = apPasseFiltreValide({ type: 'pret' });
+      window._apValFilter = '';
+      var t = apPasseFiltreValide({ type: 'pret' });
+      (vv && !vn && pv && !pn && !nv && nn && !npv && npn && t)
+        ? 'OK : valides garde valides (2 types), nonvalides l inverse, tous garde tout'
+        : 'ECHEC ' + [vv, vn, pv, pn, nv, nn, npv, npn, t].join('/')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Revue : avec filtre Valides, seuls les valides s\u2019affichent (ni prets ni collectifs en attente)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var moisC = new Date().toISOString().slice(0, 7);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apVA', type: 'acompte', employeId: 'ex1', employeNom: 'ValideAcompte', montant: 10000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', valide: true, motif: 'Test' });
+      list.push({ id: 'apNA', type: 'acompte', employeId: 'ex2', employeNom: 'NonValideAcompte', montant: 10000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', motif: 'Test' });
+      list.push({ id: 'apVP', type: 'pret', employeId: 'ex3', employeNom: 'ValidePret', montant: 100000, dureeMois: 5, montantMensuel: 20000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', valide: true, motif: 'Test' });
+      list.push({ id: 'apNP', type: 'pret', employeId: 'ex4', employeNom: 'NonValidePret', montant: 100000, dureeMois: 5, montantMensuel: 20000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', motif: 'Test' });
+      DB.set('mdb_acomptesPrets', list);
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opPend', numeroPiece: 'PEND-1', date: moisC + '-06', code: 'SOLDE', libelle: 'Solde', montant: 50000, sens: 'sortie', collective: true, pendingDetail: true, groupeId: 'gPend', apType: 'acompte', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      window._apValFilter = 'valides';
+      window._apFilterMonth = moisC;
+      renderAcomptesPrets();
+      var box = document.getElementById('content');
+      var h = box ? (box.innerHTML || '') : '';
+      var ok = h.indexOf('ValideAcompte') !== -1 && h.indexOf('ValidePret') !== -1;
+      var ko = h.indexOf('NonValideAcompte') !== -1 || h.indexOf('NonValidePret') !== -1 || h.indexOf('PEND-1') !== -1;
+      (ok && !ko) ? 'OK : seuls les 2 valides affiches' : 'ECHEC ok=' + ok + ' ko=' + ko
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : le lien retour manquant est repose, en gardant la ligne validee',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opRL', numeroPiece: 'KCJ-40', date: '2026-09-15', code: 'ACOMPTE', libelle: 'Acompte', montant: 10000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'e1', caisseId: 'c1', apType: 'acompte' });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apRL1', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 10000, moisDeduction: '2026-09', date: '2026-09-15', statut: 'en_cours', caisseOpId: 'opRL', numeroPiece: 'KCJ-40' });
+      list.push({ id: 'apRL2', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 10000, moisDeduction: '2026-09', date: '2026-09-15', statut: 'en_cours', valide: true, caisseOpId: 'opRL', numeroPiece: 'KCJ-40' });
+      DB.set('mdb_acomptesPrets', list);
+      var n = _relierAcomptesPrets();
+      var ops2 = getOperationsCaisse();
+      var back = null;
+      for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opRL') back = ops2[i].acomptePretId; }
+      (n === 1 && back === 'apRL2') ? 'OK : lien vers la ligne validee' : 'ECHEC n=' + n + ' back=' + back
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes : une ligne validee survit au rendu (ni mangee ni devalidee)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var moisC = new Date().toISOString().slice(0, 7);
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opRV', numeroPiece: 'KCJ-41', date: moisC + '-10', code: 'ACOMPTE', libelle: 'Acompte', montant: 10000, sens: 'sortie', beneficiaireType: 'employe', beneficiaireId: 'exRV', caisseId: 'c1', apType: 'acompte', apMoisDeduction: moisC });
+      DB.set('mdb_operationsCaisse', ops);
+      var list = dbArr('mdb_acomptesPrets');
+      list.push({ id: 'apRV', type: 'acompte', employeId: 'exRV', employeNom: 'SurvitValide', montant: 10000, moisDeduction: moisC, date: moisC + '-10', statut: 'en_cours', valide: true, provenance: 'caisse', caisseOpId: 'opRV', numeroPiece: 'KCJ-41', motif: 'Test' });
+      DB.set('mdb_acomptesPrets', list);
+      window._apValFilter = '';
+      window._apFilterMonth = moisC;
+      renderAcomptesPrets();
+      renderAcomptesPrets();
+      var after = dbArr('mdb_acomptesPrets');
+      var kept = false, val = false;
+      for (var i = 0; i < after.length; i++) { if (after[i] && after[i].id === 'apRV') { kept = true; val = after[i].valide === true; } }
+      var h = (document.getElementById('content').innerHTML || '');
+      (kept && val && h.indexOf('SurvitValide') !== -1)
+        ? 'OK : ligne validee stable sur 2 rendus, affichee'
+        : 'ECHEC gardee=' + kept + ' validee=' + val
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',

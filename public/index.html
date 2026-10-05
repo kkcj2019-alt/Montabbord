@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-01-135';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-137';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -6432,7 +6432,7 @@ function _memNav() {
       else if (cp === 'tiers') renderTiers();
       else if (cp === 'fournisseurs') renderFournisseurs();
       else if (cp === 'employes') renderEmployesPage();
-      else if (cp === 'acomptesPrets') renderAcomptesPrets();
+      else if (cp === 'acomptesPrets') { try { window._apValFilter = ''; } catch (eVF) {} renderAcomptesPrets(); }
       else if (cp) navigateTo(cp);
     } catch(e) {}
   }};
@@ -16742,6 +16742,37 @@ function _corrigerMoisPieces() {
   }
   return fixed;
 }
+/* Repose les liens retour pièce → ligne manquants (anciennes pièces créées
+   sans acomptePretId, ex. collectifs). Sans eux, le nettoyeur de fantômes
+   mangeait la ligne — MÊME VALIDÉE — qui revenait non validée : la validation
+   « quittait » la page toute seule. En cas de doublons, on garde la validée. */
+function _relierAcomptesPrets() {
+  var ops = [];
+  try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
+  var list = [];
+  try { list = dbArr('mdb_acomptesPrets') || []; } catch (e2) { return 0; }
+  var fixed = 0;
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i];
+    if (!o || !o.id || o.acomptePretId) continue;
+    var nat = (typeof _apNatureOp === 'function') ? _apNatureOp(o) : (o.apType || '');
+    if (nat !== 'acompte' && nat !== 'pret') continue;
+    var choix = null;
+    for (var j = 0; j < list.length; j++) {
+      var a = list[j];
+      if (!a || a.caisseOpId !== o.id) continue;
+      if (a.type !== nat) continue;
+      if (!choix || (a.valide === true && choix.valide !== true)) choix = a;
+      if (choix && choix.valide === true) break;
+    }
+    if (choix && choix.id) { o.acomptePretId = choix.id; fixed++; }
+  }
+  if (fixed > 0) {
+    DB.set('mdb_operationsCaisse', ops);
+    try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e3) {}
+  }
+  return fixed;
+}
 function _reconcileAcomptesPretsFromCaisse() {
   /* D'abord les pièces elles-mêmes (même sans ligne liée), puis les lignes. */
   try { _corrigerMoisPieces(); } catch (eCMP) {}
@@ -17010,9 +17041,22 @@ function apRefocus(id) {
   } catch (e) {}
 }
 
+/* Filtre « Validés / Non validés » de la revue des acomptes : vrai si la ligne
+   passe. Vaut pour acomptes ET prêts (avant, les prêts l'ignoraient et
+   restaient affichés sous « Validés »). */
+function apPasseFiltreValide(a) {
+  var f = '';
+  try { f = window._apValFilter || ''; } catch (e) { f = ''; }
+  if (f === 'valides') return !!(a && a.valide === true);
+  if (f === 'nonvalides') return !(a && a.valide === true);
+  return true;
+}
 function renderAcomptesPrets() {
   // Nettoyage orphelins générique avant chaque rendu du module acomptes.
   try{ _purgeOrphanAcomptes(); }catch(e){}
+  // Repose les liens retour manquants AVANT le nettoyeur : sinon une ligne
+  // validée liée à une pièce sans lien était mangée puis recréée non validée.
+  try{ _relierAcomptesPrets(); }catch(eR){}
   // Nettoyage des acomptes fantômes (frais/encaissements) issus de l'ancienne saisie rapide.
   try{ _cleanGhostAcomptes(); }catch(e){}
   // Recréation des lignes manquantes : une pièce de caisse typed pretrial/acompte
@@ -17094,6 +17138,7 @@ function renderAcomptesPrets() {
   for (var i = 0; i < acomptes.length; i++) {
     var a2 = acomptes[i];
     if (a2.statut === 'rembourse' || a2.type !== 'pret') continue;
+    if (!apPasseFiltreValide(a2)) continue;
     if (a2.moisDeduction && a2.moisDeduction <= currentMonth && (a2.montantRembourse || 0) < (a2.montant || 0)) {
       alertItems.push(a2);
     }
@@ -17219,6 +17264,9 @@ function renderAcomptesPrets() {
     pendingOps.push(poOp);
   }
   for (var pi = 0; pi < pendingOps.length; pi++) {
+    /* Les pièces en attente de répartition ne sont ni validées ni validables :
+       masquées sous le filtre « Validés » (gardées sous Tous / Non validés). */
+    if (!apPasseFiltreValide(null)) continue;
     var po2 = pendingOps[pi];
     var poMois = po2.apMoisDeduction || '';
     /* Ligne « pièce collective à répartir » : même grille de 8 colonnes */
@@ -17248,8 +17296,7 @@ function renderAcomptesPrets() {
       var _c4 = _apCalcEcheances(a4, currentMonth);
       if (_c4.termine || _c4.resteDu <= 0) continue;
     }
-    if (a4.type === 'acompte' && (window._apValFilter || '') === 'nonvalides' && a4.valide === true) continue;
-    if (a4.type === 'acompte' && (window._apValFilter || '') === 'valides' && a4.valide !== true) continue;
+    if (!apPasseFiltreValide(a4)) continue;
     displayedCount++;
     var emp4 = empMap[a4.employeId] || null;
     /* Prêts : le restant dû se calcule sur les échéances RÉELLEMENT prélevées,
