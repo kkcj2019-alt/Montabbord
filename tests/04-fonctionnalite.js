@@ -1795,6 +1795,74 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Import caisse : le code se resout au clavier (exact, INTERNE, inconnu)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var a = impResolveCode('LOYER - Loyer');
+      var b = impResolveCode('loyer');
+      var c = impResolveCode('INTERNE - Transfert');
+      var d = impResolveCode('truc inconnu xyz');
+      var e = impResolveCode('');
+      ((a && a.id === 'cd1') && (b && b.id === 'cd1') && (c && c.id === 'INTERNE') && d === null && e === null)
+        ? 'OK : exact, insensible casse, INTERNE, inconnu->nouveau'
+        : 'ECHEC ' + JSON.stringify([a && a.id, b && b.id, c && c.id, d, e])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import caisse : changer le code ne touche pas au libelle tel que venu (+ Obs gardee)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window._importRows = [{ libelle: 'Achat tel que venu du fichier', observations: 'OLD', montant: 100, sens: 'sortie' }];
+      onImportCodeInput(0, 'LOYER - Loyer');
+      var c1 = window._importRows[0].codeId;
+      var l1 = window._importRows[0].libelle;
+      updateImportRow(0, 'obs', 'NEW');
+      var o2 = window._importRows[0].observations;
+      onImportCodeInput(0, 'zzz inconnu');
+      var c3 = window._importRows[0].codeId;
+      var l3 = window._importRows[0].libelle;
+      (c1 === 'cd1' && l1 === 'Achat tel que venu du fichier' && o2 === 'NEW' && c3 === '' && l3 === 'Achat tel que venu du fichier')
+        ? 'OK : code pose/retire, libelle intouchable, obs sauvee'
+        : 'ECHEC ' + JSON.stringify([c1, l1, o2, c3])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import caisse : on importe les pieces cochees, libelles textuels, sinon tout',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window._importRows = [
+        { libelle: 'Piece une textuelle', libelleOrigine: 'Piece une textuelle', montant: 1000, montantEntree: 0, montantSortie: 1000, sens: 'sortie', date: '2026-10-01', day: '01', caisseId: 'c1', codeId: '', type: 'libre', beneficiaire: '', observations: 'obs1' },
+        { libelle: 'Piece deux textuelle', libelleOrigine: 'Piece deux textuelle', montant: 2000, montantEntree: 0, montantSortie: 2000, sens: 'sortie', date: '2026-10-01', day: '01', caisseId: 'c1', codeId: '', type: 'libre', beneficiaire: '', observations: 'obs2' }
+      ];
+      var avant = getOperationsCaisse().length;
+      try { processCaisseImport(false, [0]); } catch (e) {}
+      var apres1 = getOperationsCaisse().length;
+      var op1 = getOperationsCaisse()[getOperationsCaisse().length - 1];
+      try { processCaisseImport(false); } catch (e2) {}
+      var apres2 = getOperationsCaisse().length;
+      (apres1 - avant === 1 && op1.libelle === 'Piece une textuelle' && op1.observations === 'obs1' && apres2 - apres1 === 2)
+        ? 'OK : 1 cochee puis 2 (sans coche = tout), libelles intacts'
+        : 'ECHEC +1=' + (apres1 - avant) + ' lib=' + (op1 && op1.libelle) + ' +2=' + (apres2 - apres1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import caisse : zone extensible ne casse pas (hauteur auto)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var el = document.createElement('textarea');
+      impAutoGrow(el);
+      (el.style.height === '800px') ? 'OK : hauteur ajustee au contenu' : 'ECHEC h=' + el.style.height
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
