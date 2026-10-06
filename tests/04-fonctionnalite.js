@@ -1863,6 +1863,54 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Import caisse : le beneficiaire se choisit dans la liste (employes, then fournisseurs)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window._importRows = [{ type: 'libre', beneficiaire: '', beneficiaireNom: '', beneficiaireId: '' }];
+      updateImportBenef(0, 'Diallo A');
+      var r1 = { id: window._importRows[0].beneficiaireId, nom: window._importRows[0].beneficiaireNom, type: window._importRows[0].type };
+      updateImportBenef(0, 'zzz inconnu personne');
+      var r2 = { id: window._importRows[0].beneficiaireId, nom: window._importRows[0].beneficiaireNom };
+      (r1.id === 'e1' && r1.nom === 'DIALLO A' && r1.type === 'employe' && r2.id === '' && r2.nom === 'zzz inconnu personne')
+        ? 'OK : Diallo rattache (type adopte), inconnu efface le lien'
+        : 'ECHEC ' + JSON.stringify([r1, r2])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import caisse : la liste des beneficiaires propose travailleurs et fournisseurs',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      renderCaisseImportPreview([{ date: '2026-10-01', day: '01', libelle: 'Test', montant: 100, montantEntree: 0, montantSortie: 100, sens: 'sortie', beneficiaire: '', observations: '', codeId: '', type: 'libre', caisseId: 'c1' }]);
+      var h = document.getElementById('importPreviewArea').innerHTML || '';
+      (h.indexOf('impBenefList') !== -1 && h.indexOf('DIALLO A') !== -1 && h.indexOf('Fournisseur Test') !== -1)
+        ? 'OK : dataliste beneficiaires (employes + fournisseurs)'
+        : 'ECHEC : ' + h.substr(0, 160)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : un seul P5 cumule (fini les lignes en double)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [
+        { id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 100 },
+        { id: 'c2', code: 'P5', designation: 'POINTE5', type: 'POINTE', quantite: 50 },
+        { id: 'c3', code: 'P6', designation: 'POINTE 6', type: 'POINTE', quantite: 10 }
+      ]);
+      var items = calcInventoryItems('2026-09');
+      var conso = items.filter(function(it) { return it && it.store === 'stockConsum'; });
+      var p5 = conso.filter(function(it) { return String(it.code || '').toUpperCase() === 'P5'; });
+      (conso.length === 2 && p5.length === 1 && parseFloat(p5[0].theo_qte) === 150)
+        ? 'OK : P5 une fois (theo 150), P6 une fois'
+        : 'ECHEC conso=' + conso.length + ' p5=' + p5.length + ' theo=' + (p5[0] && p5[0].theo_qte)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',

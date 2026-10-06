@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-01-150';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-01-151';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -33488,6 +33488,7 @@ function handleCaisseImportFile(file) {
   var ext = file.name.split('.').pop().toLowerCase();
   window._importFileName = file.name;
   if (ext === 'csv' || ext === 'xlsx' || ext === 'xls') {
+    if (typeof XLSX === 'undefined') { toast('Librairie Excel non chargée — vérifiez la connexion puis rechargez la page', 'error'); return; }
     var reader = new FileReader();
     reader.onload = function(e) {
       try {
@@ -33711,40 +33712,16 @@ function handleCaisseImportFile(file) {
             }
           }
           if (isTransfertImport) continue;
-          /* Auto-detect beneficiary type from libelle */
+          /* Rattachement bénéficiaire : employé, fournisseur ou client connu
+             (exact d'abord, sinon inclusion ≥ 3 lettres — jamais de joker). */
           var detectedType = 'libre';
           var detectedBenefType = '';
           var detectedBenefId = '';
           var detectedBenefNom = benefCell || '';
-          var searchText = (libelleCell || benefCell || '').toLowerCase();
-          if (searchText) {
-            var emps2 = getEmployes();
-            for (var _ei = 0; _ei < emps2.length; _ei++) {
-              var en = (emps2[_ei].nom || '').toLowerCase();
-              var ea = (emps2[_ei].abreviation || '').toLowerCase();
-              if (searchText.indexOf(en) !== -1 || searchText.indexOf(ea) !== -1 || en.indexOf(searchText) !== -1) {
-                detectedType = 'employe'; detectedBenefType = 'employe'; detectedBenefId = emps2[_ei].id; detectedBenefNom = emps2[_ei].nom; break;
-              }
-            }
-            if (detectedType === 'libre') {
-              var frns2 = getFournisseurs();
-              for (var _fi = 0; _fi < frns2.length; _fi++) {
-                var fn = (frns2[_fi].nom || '').toLowerCase();
-                if (searchText.indexOf(fn) !== -1 || fn.indexOf(searchText) !== -1) {
-                  detectedType = 'fournisseur'; detectedBenefType = 'fournisseur'; detectedBenefId = frns2[_fi].id; detectedBenefNom = frns2[_fi].nom; break;
-                }
-              }
-            }
-            if (detectedType === 'libre') {
-              var clis2 = getClients();
-              for (var _ci = 0; _ci < clis2.length; _ci++) {
-                var cn = (clis2[_ci].nom || '').toLowerCase();
-                if (searchText.indexOf(cn) !== -1 || cn.indexOf(searchText) !== -1) {
-                  detectedType = 'client'; detectedBenefType = 'client'; detectedBenefId = clis2[_ci].id; detectedBenefNom = clis2[_ci].nom; break;
-                }
-              }
-            }
-          }
+          try {
+            var _mp = impMatchPersonne(libelleCell || benefCell);
+            if (_mp) { detectedType = _mp.type; detectedBenefType = _mp.type; detectedBenefId = _mp.id; detectedBenefNom = _mp.nom; }
+          } catch (eMP) {}
           rows.push({
             date: parsedDate, day: parsedDay, libelle: libelleCell, libelleOrigine: libelleCell, montant: montantVal,
             montantEntree: montantEntreeVal, montantSortie: montantSortieVal,
@@ -33763,6 +33740,66 @@ function handleCaisseImportFile(file) {
   } else {
     toast('Format non support\u00e9. Utilisez .xlsx, .xls ou .csv', 'error');
   }
+}
+
+/* Rattache un texte libre à un employé / fournisseur / client connu.
+   Exact d'abord (toujours valable, même court), puis inclusion SEULEMENT si
+   les deux côtés font au moins 3 lettres : fini les noms/abréviations vides
+   ou d'1-2 lettres qui matchaient tout (ex. « KOMENAN » proposé partout).
+   typeSeul limite la recherche ('employe'/'fournisseur'/'client'). */
+function impMatchPersonne(texte, typeSeul) {
+  var t = String(texte || '').trim().toLowerCase();
+  if (!t) return null;
+  var listes = [];
+  try {
+    if (!typeSeul || typeSeul === 'employe') listes.push({ arr: getEmployes() || [], type: 'employe' });
+    if (!typeSeul || typeSeul === 'fournisseur') listes.push({ arr: getFournisseurs() || [], type: 'fournisseur' });
+    if (!typeSeul || typeSeul === 'client') listes.push({ arr: getClients() || [], type: 'client' });
+  } catch (e) { return null; }
+  function nomsDe(p, type) {
+    var ns = [];
+    if (!p) return ns;
+    if (type === 'employe') {
+      var fn = (((p.nom || '') + ' ' + (p.prenoms || p.prenom || '')).trim() || p.nom) || '';
+      if (fn) ns.push(fn);
+      if (p.abreviation) ns.push(p.abreviation);
+      if (p.matricule) ns.push(p.matricule);
+    } else if (p.nom) {
+      ns.push(p.nom);
+    }
+    return ns;
+  }
+  function nomAffiche(p, type) {
+    if (type === 'employe') return (((p.nom || '') + ' ' + (p.prenoms || p.prenom || '')).trim() || p.nom || '');
+    return p.nom || '';
+  }
+  var li, i, k, nl;
+  for (li = 0; li < listes.length; li++) {
+    var arr = listes[li].arr;
+    for (i = 0; i < arr.length; i++) {
+      var ns = nomsDe(arr[i], listes[li].type);
+      for (k = 0; k < ns.length; k++) {
+        if (String(ns[k] || '').trim().toLowerCase() === t) {
+          return { type: listes[li].type, id: arr[i].id, nom: nomAffiche(arr[i], listes[li].type) };
+        }
+      }
+    }
+  }
+  if (t.length >= 3) {
+    for (li = 0; li < listes.length; li++) {
+      var arr2 = listes[li].arr;
+      for (i = 0; i < arr2.length; i++) {
+        var ns2 = nomsDe(arr2[i], listes[li].type);
+        for (k = 0; k < ns2.length; k++) {
+          nl = String(ns2[k] || '').trim().toLowerCase();
+          if (nl.length >= 3 && (t.indexOf(nl) !== -1 || nl.indexOf(t) !== -1)) {
+            return { type: listes[li].type, id: arr2[i].id, nom: nomAffiche(arr2[i], listes[li].type) };
+          }
+        }
+      }
+    }
+  }
+  return null;
 }
 
 function findBestCodeMatch(text, codes) {
@@ -33807,12 +33844,26 @@ function renderCaisseImportPreview(rows) {
   /* Dataliste partagée des codes : saisie + autocomplétion au lieu d'une liste fermée. */
   var impCodesDl = [];
   try { impCodesDl = getCodesCaisse() || []; } catch (eCD) {}
+  if (!Array.isArray(impCodesDl)) impCodesDl = [];
   impCodesDl.sort(function(a,b) { if (a.pinned && !b.pinned) return -1; if (!a.pinned && b.pinned) return 1; return (a.code||'').localeCompare(b.code||''); });
   html += '<datalist id="impCodeList"><option value="INTERNE - Transfert">';
   for (var ciDl = 0; ciDl < impCodesDl.length; ciDl++) {
     html += '<option value="' + escH(impCodesDl[ciDl].code + ' - ' + impCodesDl[ciDl].libelle) + '">';
   }
   html += '</datalist>';
+  /* Dataliste des bénéficiaires : travailleurs, fournisseurs, clients.
+     Saisie libre gardée (placeholder Libre), mais on choisit dans la liste. */
+  var _benSeen = {}, _benOpts = '';
+  try {
+    (getEmployes() || []).forEach(function(e) {
+      var fn = (((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim() || e.nom || '');
+      if (fn) { var k1 = fn.toLowerCase(); if (!_benSeen[k1]) { _benSeen[k1] = 1; _benOpts += '<option value="' + escH(fn) + '">'; } }
+      if (e.abreviation) { var k2 = String(e.abreviation).toLowerCase(); if (!_benSeen[k2]) { _benSeen[k2] = 1; _benOpts += '<option value="' + escH(e.abreviation) + '">'; } }
+    });
+    (getFournisseurs() || []).forEach(function(f) { if (f.nom) { var k3 = String(f.nom).toLowerCase(); if (!_benSeen[k3]) { _benSeen[k3] = 1; _benOpts += '<option value="' + escH(f.nom) + '">'; } } });
+    (getClients() || []).forEach(function(c) { if (c.nom) { var k4 = String(c.nom).toLowerCase(); if (!_benSeen[k4]) { _benSeen[k4] = 1; _benOpts += '<option value="' + escH(c.nom) + '">'; } } });
+  } catch (eBD) {}
+  html += '<datalist id="impBenefList">' + _benOpts + '</datalist>';
   html += '<div class="table-wrap" style="max-height:400px;overflow-y:auto"><div class="table-responsive"><table style="font-size:11px"><thead><tr>';
   html += '<th style="position:sticky;top:0;z-index:1;width:30px"><input type="checkbox" id="selectAllImport" onchange="toggleAllImportRows(this)" style="width:14px;height:14px"></th>';
   html += '<th style="position:sticky;top:0;z-index:1">Date</th>';
@@ -33826,6 +33877,7 @@ function renderCaisseImportPreview(rows) {
   html += '</tr></thead><tbody>';
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
+    try {
     var rowBg = i % 2 === 0 ? '' : 'background:var(--gray-50)';
     var codeFound = r.codeId && r.codeId !== 'INTERNE' ? '<span style="color:var(--green)" title="Code d\u00e9tect\u00e9">\u2713</span>' : (r.codeId === 'INTERNE' ? '<span style="color:var(--purple)" title="Transfert interne">\u21c4</span>' : '<span style="color:var(--danger)" title="Aucun code">\u2717</span>');
     var benefFound = r.beneficiaireId ? '<span style="color:var(--green)" title="B\u00e9n\u00e9ficiaire reconnu">\u2713</span>' : '<span style="color:var(--warning)" title="Texte libre">~</span>';
@@ -33841,11 +33893,11 @@ function renderCaisseImportPreview(rows) {
     html += '<td style="text-align:center"><input type="checkbox" class="imp-check" data-idx="' + i + '" onchange="updateImportSelBtn()" style="width:14px;height:14px"></td>';
     html += '<td style="white-space:nowrap"><input type="date" id="impDate_' + i + '" value="' + escH(r.date || '') + '" style="font-size:11px;padding:2px 4px;width:130px" onchange="updateImportDate(' + i + ',this.value)"></td>';
     html += '<td style="white-space:nowrap"><input type="text" id="impCode_' + i + '" list="impCodeList" value="' + escH(codeTxt) + '" placeholder="(Nouveau — taper pour chercher)" autocomplete="off" style="font-size:11px;padding:2px 4px;width:140px" oninput="onImportCodeInput(' + i + ',this.value)"> <span id="impCodeFlag_' + i + '">' + codeFound + '</span></td>';
-    html += '<td><textarea id="impLibelle_' + i + '" rows="1" style="font-size:11px;padding:2px 4px;width:140px;resize:vertical;overflow:hidden" oninput="impAutoGrow(this);updateImportRow(' + i + ',\'libelle\',this.value)">' + escH(r.libelle) + '</textarea></td>';
+    html += '<td><textarea id="impLibelle_' + i + '" rows="1" style="font-size:11px;padding:2px 4px;width:140px;resize:vertical;overflow:hidden" onfocus="impAutoGrow(this)" oninput="impAutoGrow(this);updateImportRow(' + i + ',\'libelle\',this.value)">' + escH(r.libelle) + '</textarea></td>';
     html += '<td style="text-align:right"><input type="number" id="impEntree_' + i + '" value="' + (r.montantEntree || 0) + '" min="0" step="any" style="font-size:11px;padding:2px 4px;width:90px;text-align:right;color:var(--success)" onchange="updateImportMontant(' + i + ')"></td>';
     html += '<td style="text-align:right"><input type="number" id="impSortie_' + i + '" value="' + (r.montantSortie || 0) + '" min="0" step="any" style="font-size:11px;padding:2px 4px;width:90px;text-align:right;color:var(--danger)" onchange="updateImportMontant(' + i + ')"></td>';
-    html += '<td><input type="text" id="impBenef_' + i + '" value="' + escH(r.beneficiaireNom || r.beneficiaire || '') + '" placeholder="Libre" style="font-size:11px;padding:2px 4px;width:100px" onchange="updateImportBenef(' + i + ',this.value)"> ' + benefFound + '</td>';
-    html += '<td><textarea id="impObs_' + i + '" rows="1" style="font-size:11px;padding:2px 4px;width:80px;resize:vertical;overflow:hidden" oninput="impAutoGrow(this);updateImportRow(' + i + ',\'obs\',this.value)">' + escH(r.observations || '') + '</textarea></td>';
+    html += '<td style="white-space:nowrap"><input type="text" id="impBenef_' + i + '" list="impBenefList" value="' + escH(r.beneficiaireNom || r.beneficiaire || '') + '" placeholder="Libre — taper pour chercher" autocomplete="off" style="font-size:11px;padding:2px 4px;width:100px" oninput="updateImportBenef(' + i + ',this.value)"> <span id="impBenefFlag_' + i + '">' + benefFound + '</span></td>';
+    html += '<td><textarea id="impObs_' + i + '" rows="1" style="font-size:11px;padding:2px 4px;width:80px;resize:vertical;overflow:hidden" onfocus="impAutoGrow(this)" oninput="impAutoGrow(this);updateImportRow(' + i + ',\'obs\',this.value)">' + escH(r.observations || '') + '</textarea></td>';
     /* Editable caisse dropdown */
     html += '<td><select id="impCaisse_' + i + '" onchange="updateImportRow(' + i + ',\'caisseId\',this.value)" style="font-size:11px;padding:2px 4px;max-width:120px">';
     var allCs = getCaisses();
@@ -33854,15 +33906,19 @@ function renderCaisseImportPreview(rows) {
     }
     html += '</select></td>';
     html += '</tr>';
+    } catch (eRow) {
+      /* Une ligne pathologique ne doit jamais faire planter tout l'aperçu. */
+      try {
+        html += '<tr><td colspan="9" style="color:var(--danger);font-size:11px">Ligne ' + (i + 1) + ' illisible : ' + escH(String((r && r.libelle) || '')) + '</td></tr>';
+      } catch (eRow2) {}
+    }
   }
   html += '</tbody></table></div></div>';
   document.getElementById('importPreviewArea').innerHTML = html;
   var dz = document.getElementById('importDropZone');
   if (dz) dz.style.display = 'none';
-  /* Lignes extensibles : chaque zone de texte s'agrandit à son contenu. */
-  try {
-    document.querySelectorAll('#importPreviewArea textarea').forEach(function(t) { impAutoGrow(t); });
-  } catch (eG) {}
+  /* Pas de mesure auto au rendu (coûteux sur gros fichier/téléphone) : chaque
+     zone grandit au focus et à la frappe via impAutoGrow. */
 }
 function impAutoGrow(el) {
   try {
@@ -33953,29 +34009,23 @@ function updateImportBenef(idx, val) {
   var r = window._importRows[idx];
   r.beneficiaire = val;
   r.beneficiaireNom = val;
-  /* Try to match to existing entity */
-  var t = r.type || 'libre';
-  if (t === 'employe') {
-    var emps = getEmployes();
-    for (var ei = 0; ei < emps.length; ei++) {
-      if ((emps[ei].nom || '').toLowerCase().indexOf(val.toLowerCase()) !== -1 || (emps[ei].abreviation || '').toLowerCase() === val.toLowerCase()) {
-        r.beneficiaireId = emps[ei].id; r.beneficiaireNom = (((emps[ei].nom || '') + ' ' + (emps[ei].prenoms || '')).trim() || emps[ei].nom); break;
-      }
-    }
-  } else if (t === 'fournisseur') {
-    var frns = getFournisseurs();
-    for (var fi = 0; fi < frns.length; fi++) {
-      if ((frns[fi].nom || '').toLowerCase().indexOf(val.toLowerCase()) !== -1) {
-        r.beneficiaireId = frns[fi].id; r.beneficiaireNom = frns[fi].nom; break;
-      }
-    }
-  } else if (t === 'client') {
-    var clis = getClients();
-    for (var ci = 0; ci < clis.length; ci++) {
-      if ((clis[ci].nom || '').toLowerCase().indexOf(val.toLowerCase()) !== -1) {
-        r.beneficiaireId = clis[ci].id; r.beneficiaireNom = clis[ci].nom; break;
-      }
-    }
+  /* Choix dans la liste (ou frappe exacte) : on rattache quel que soit le
+     type précédent, et on adopte le type trouvé si la ligne était libre.
+     Un lien périmé est effacé si le nouveau texte ne correspond à personne. */
+  var m = null;
+  try { m = impMatchPersonne(val); } catch (e) {}
+  if (m) {
+    r.beneficiaireId = m.id;
+    r.beneficiaireNom = m.nom;
+    if (!r.type || r.type === 'libre') r.type = m.type;
+  } else {
+    r.beneficiaireId = '';
+  }
+  var fl = document.getElementById('impBenefFlag_' + idx);
+  if (fl) {
+    fl.innerHTML = r.beneficiaireId
+      ? '<span style="color:var(--green)" title="Bénéficiaire reconnu">✓</span>'
+      : '<span style="color:var(--warning)" title="Texte libre">~</span>';
   }
 }
 
@@ -34103,30 +34153,12 @@ function processCaisseImport(asDraft, onlyIdx) {
     var beneficiaireType = r.type || 'libre';
     var beneficiaireId = r.beneficiaireId || '';
     var beneficiaireNom = r.beneficiaireNom || r.beneficiaire || '';
-    /* If beneficiary was typed as free text, try to match */
+    /* If beneficiary was typed as free text, try to match (same guarded rules). */
     if (!beneficiaireId && r.beneficiaire) {
-      if (beneficiaireType === 'employe') {
-        var emps = getEmployes();
-        for (var ei = 0; ei < emps.length; ei++) {
-          if ((emps[ei].nom || '').toLowerCase().indexOf((r.beneficiaire || '').toLowerCase()) !== -1 || (emps[ei].abreviation || '').toLowerCase() === (r.beneficiaire || '').toLowerCase()) {
-            beneficiaireId = emps[ei].id; beneficiaireNom = (((emps[ei].nom || '') + ' ' + (emps[ei].prenoms || '')).trim() || emps[ei].nom); break;
-          }
-        }
-      } else if (beneficiaireType === 'fournisseur') {
-        var frns = getFournisseurs();
-        for (var fi = 0; fi < frns.length; fi++) {
-          if ((frns[fi].nom || '').toLowerCase().indexOf((r.beneficiaire || '').toLowerCase()) !== -1) {
-            beneficiaireId = frns[fi].id; beneficiaireNom = frns[fi].nom; break;
-          }
-        }
-      } else if (beneficiaireType === 'client') {
-        var clis = getClients();
-        for (var cli = 0; cli < clis.length; cli++) {
-          if ((clis[cli].nom || '').toLowerCase().indexOf((r.beneficiaire || '').toLowerCase()) !== -1) {
-            beneficiaireId = clis[cli].id; beneficiaireNom = clis[cli].nom; break;
-          }
-        }
-      }
+      try {
+        var _mb = impMatchPersonne(r.beneficiaire, (beneficiaireType === 'employe' || beneficiaireType === 'fournisseur' || beneficiaireType === 'client') ? beneficiaireType : '');
+        if (_mb) { beneficiaireType = _mb.type; beneficiaireId = _mb.id; beneficiaireNom = _mb.nom; }
+      } catch (eMB) {}
     }
     /* Generate piece number */
     var numeroPiece = generatePieceNumber(caisseId, fullDate);
