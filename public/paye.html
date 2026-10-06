@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-167";
+      window.__APP_VERSION = "2026-10-06-168";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5670,6 +5670,105 @@ function payeProtegeEcrituresFraiches(fusion, locale, sales, delaiMs) {
   } catch (e) {
     return { fusion: fusion, protege: false };
   }
+}
+/* Nature d'une ligne d'acompte/prêt pour l'affichage (état + journal) :
+   'solde' si la pièce est un solde de salaire, sinon 'acompte' ou 'pret'.
+   La déduction paie ne change pas (un solde déjà versé doit toujours réduire
+   le net, sinon double paiement) : seule l'étiquette distingue. */
+function apNatureLigne(ap, op) {
+  var t = (op && op.apType) || "";
+  if (t === "solde" || t === "pret" || t === "acompte") return t;
+  var brut = (op && op.code) || "";
+  var c = String(brut).toUpperCase().trim();
+  if (c) {
+    if (c === "SOLDE_SALAIRE" || c === "SOLDE_INDEMNITE") return "solde";
+    if (c === "ACOMPTE_INDEMNITE") return "acompte";
+    if (
+      c === "ACOMPTE" ||
+      c.indexOf("ACOMPTE_") === 0 ||
+      c.indexOf("ACOMPTE-") === 0 ||
+      /_ACOMPTE(_|$)/.test(c)
+    )
+      return "acompte";
+    if (/^PRET(_|-|$)/.test(c) || /_PRET(_|$)/.test(c)) return "pret";
+  }
+  var lt = ap && ap.type;
+  if (lt === "pret") return "pret";
+  return "acompte";
+}
+/* Moyen de paiement d'une ligne : caisse ou banque + n° de compte auto
+   (5711xx / 5211xx par ordre des caisses/banques). */
+function apCompteAuto(prefixe, idx) {
+  return String(prefixe) + String(100 + (parseInt(idx) || 0)).slice(-3);
+}
+function apMoyenCompte(ap, op, caisses, banques) {
+  var cid = (op && op.caisseId) || (ap && ap.caisseId) || "";
+  var i, c;
+  caisses = caisses || [];
+  banques = banques || [];
+  for (i = 0; i < caisses.length; i++) {
+    c = caisses[i];
+    if (c && c.id && c.id === cid) {
+      var nom = c.nom || c.libelle || "Caisse";
+      return {
+        moyen: "Caisse " + nom,
+        compte: apCompteAuto("571", i),
+        nom: nom,
+      };
+    }
+  }
+  var bid = (op && (op.banqueId || op.caisseDestId)) || (ap && ap.banqueId) || "";
+  for (i = 0; i < banques.length; i++) {
+    var b = banques[i];
+    if (b && b.id && (b.id === bid || b.id === cid)) {
+      var nomB = b.nom || b.libelle || "Banque";
+      return {
+        moyen: "Banque " + nomB,
+        compte: apCompteAuto("521", i),
+        nom: nomB,
+      };
+    }
+  }
+  return { moyen: "—", compte: "", nom: "" };
+}
+/* Détail des retenues acomptes/prêts du mois pour le journal : EXACTEMENT les
+   mêmes règles que getAPForMonth (mêmes montants, même total), + nature +
+   pièce + moyen. Testé avec garde-fous (la somme doit égaler le 422100). */
+function lignesDetailAp(records, opsById, caisses, banques, mois) {
+  var lignes = [];
+  (records || []).forEach(function (ra) {
+    if (!ra) return;
+    var a = typeof normalizeAP === "function" ? normalizeAP(ra) : ra;
+    var op = a.caisseOpId && opsById ? opsById[a.caisseOpId] || null : null;
+    var nature = apNatureLigne(ra, op);
+    var mc = apMoyenCompte(ra, op, caisses || [], banques || []);
+    if (a.type === "acompte") {
+      var md = apMoisPrisEnCompte(a);
+      if (!(a.valide === true && md && md === mois)) return;
+      lignes.push({
+        employe: ra.employeNom || "",
+        nature: nature,
+        piece: a.numeroPiece,
+        moyen: mc.moyen,
+        compte: mc.compte,
+        montant: a.montant,
+      });
+    } else {
+      if (a.statut === "termine") return;
+      var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
+      if (!(moisDed && moisDed <= mois)) return;
+      var rest = a.montant - (a.rembourse || 0);
+      lignes.push({
+        employe: ra.employeNom || "",
+        nature: nature,
+        piece: a.numeroPiece,
+        moyen: mc.moyen,
+        compte: mc.compte,
+        montant: Math.min(a.mensualite || 0, rest),
+      });
+    }
+  });
+  return lignes;
 }
 function payeArr(key) {  var v = DB.getMain(key);
   return Array.isArray(v) ? v : [];
@@ -26496,6 +26595,7 @@ function printCongeIndividuel(empId) {
         });
         var tbody = document.getElementById("ec-tbody"),
           tfoot = document.getElementById("ec-tfoot");
+        if (!tfoot) return;
         tbody.innerHTML = "";
         var t = {
           brut: 0,
@@ -26587,8 +26687,8 @@ function printCongeIndividuel(empId) {
           },
           {
             ac: "422100",
-            label: "Personnel, Avances & Acomptes",
-            desc: "Retenues acomptes/prêts " + mois,
+            label: "Personnel, Avances, Acomptes & Soldes",
+            desc: "Retenues acomptes/prêts/soldes " + mois,
             deb: 0,
             cr: t.ap,
           },
@@ -26629,6 +26729,109 @@ function printCongeIndividuel(empId) {
           '</td><td style="text-align:right;color:var(--danger)">' +
           fmt(tCr) +
           "</td></tr>";
+        /* Détail dépliable des retenues 422100 : nature, N° pièce, moyen et
+           compte, pièce par pièce. Hors export CSV (tableau séparé). */
+        try {
+          renderDetailApEcritures(mois, t.ap);
+        } catch (eDet) {}
+      }
+      /* Détail des lignes qui composent le 422100 : employé, nature (Solde /
+         Avance / Prêt), N° de pièce, moyen (caisse/banque + n° de compte),
+         montant. La somme fait le crédit du 422100. */
+      function renderDetailApEcritures(mois, totalAp) {
+        var ancien = document.getElementById("ec-detail-ap");
+        if (ancien && ancien.parentNode) ancien.parentNode.removeChild(ancien);
+        var opsById = {};
+        try {
+          (payeArr("mdb_operationsCaisse") || []).forEach(function (o) {
+            if (o && o.id) opsById[o.id] = o;
+          });
+        } catch (eO) {}
+        var caisses = [];
+        try {
+          caisses =
+            typeof psalCaisses === "function"
+              ? psalCaisses()
+              : payeArr("mdb_caisses");
+        } catch (eC) {
+          try {
+            caisses = payeArr("mdb_caisses");
+          } catch (eC2) {}
+        }
+        var banques = [];
+        try {
+          banques =
+            typeof psalBanques === "function"
+              ? psalBanques()
+              : payeArr("mdb_banques");
+        } catch (eB) {
+          try {
+            banques = payeArr("mdb_banques");
+          } catch (eB2) {}
+        }
+        var recs = [];
+        try {
+          recs = typeof getAPList === "function" ? getAPList() : [];
+        } catch (eR) {}
+        var lignes =
+          typeof lignesDetailAp === "function"
+            ? lignesDetailAp(recs, opsById, caisses || [], banques || [], mois)
+            : [];
+        var somme = 0;
+        lignes.forEach(function (l) {
+          somme += parseFloat(l.montant) || 0;
+        });
+        var natBadge = function (n) {
+          if (n === "solde")
+            return '<span class="badge badge-success">Solde</span>';
+          if (n === "pret") return '<span class="badge badge-info">Prêt</span>';
+          return '<span class="badge badge-warning">Avance</span>';
+        };
+        var htm =
+          '<div id="ec-detail-ap" style="margin-top:10px"><button class="btn btn-sm btn-outline" onclick="var d=document.getElementById(\'ec-detail-ap-body\');if(d)d.style.display=(d.style.display===\'none\'?\'\':\'none\')" style="font-size:11px">Détail des retenues 422100 (' +
+          lignes.length +
+          ' pièce(s))</button>';
+        htm +=
+          '<div id="ec-detail-ap-body" style="display:none;margin-top:6px;overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="background:#f8fafc"><th style="text-align:left;padding:4px 6px">Employé</th><th style="text-align:left;padding:4px 6px">Nature</th><th style="text-align:left;padding:4px 6px">Pièce N°</th><th style="text-align:left;padding:4px 6px">Moyen</th><th style="text-align:left;padding:4px 6px">Compte</th><th style="text-align:right;padding:4px 6px">Montant</th></tr></thead><tbody>';
+        if (!lignes.length)
+          htm +=
+            '<tr><td colspan="6" style="padding:8px;color:var(--dim)">Aucune retenue ce mois</td></tr>';
+        lignes.forEach(function (l) {
+          htm +=
+            "<tr><td>" +
+            escH(l.employe || "-") +
+            "</td><td>" +
+            natBadge(l.nature) +
+            "</td><td>" +
+            escH(l.piece || "-") +
+            "</td><td>" +
+            escH(l.moyen || "-") +
+            "</td><td style=\"font-family:monospace\">" +
+            escH(l.compte || "-") +
+            '</td><td style="text-align:right;font-weight:700">' +
+            fmt(l.montant) +
+            "</td></tr>";
+        });
+        htm +=
+          '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:800"><td colspan="5" style="text-align:right">Total détail ' +
+          (somme === (parseFloat(totalAp) || 0)
+            ? "✓ = "
+            : "⚠ ≠ ") +
+          '</td><td style="text-align:right">' +
+          fmt(somme) +
+          "</td></tr></tfoot></table></div></div>";
+        var card = null;
+        try {
+          var tb = document.getElementById("ec-tbody");
+          card = tb ? tb.closest("table") : null;
+          if (!card && tb && tb.parentNode) card = tb.parentNode;
+        } catch (eCard) {}
+        if (card && card.parentNode) {
+          var cont = document.createElement("div");
+          cont.innerHTML = htm;
+          var node = cont.firstChild;
+          if (node) card.parentNode.insertBefore(node, card.nextSibling);
+        }
       }
       function exportEcritures() {
         var rows = [["Compte", "Libellé", "Écriture", "Débit", "Crédit"]];

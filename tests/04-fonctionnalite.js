@@ -4679,6 +4679,61 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'État : nature d\u2019une ligne (Solde/Avance/Prêt) + moyen avec compte auto',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var n1 = csNaturePiece({ apType: 'solde' });
+      var n2 = csNaturePiece({ code: 'SOLDE_SALAIRE' });
+      var n3 = csNaturePiece({ code: 'ACOMPTE' });
+      var n4 = csNaturePiece({ code: 'PRET_AUTO' });
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opNatS', numeroPiece: 'NS-1', code: 'SOLDE_SALAIRE', apType: 'solde', caisseId: 'c1', date: '2026-10-01', montant: 1000, sens: 'sortie' });
+      DB.set('mdb_operationsCaisse', ops);
+      var L1 = csNatureLigne({ type: 'acompte', caisseOpId: 'opNatS' });
+      var L2 = csNatureLigne({ type: 'pret' });
+      var L3 = csNatureLigne({ type: 'acompte' });
+      var m = csMoyenPiece({ id: 'opM', caisseId: 'c1' });
+      (n1 === 'solde' && n2 === 'solde' && n3 === 'acompte' && n4 === 'pret' && L1 === 'solde' && L2 === 'pret' && L3 === 'acompte' && m && m.compte === '571100' && m.moyen.indexOf('Caisse') === 0)
+        ? 'OK : ' + [n1, n2, n3, n4].join('/') + ' ligne=' + [L1, L2, L3].join('/') + ' moyen=' + m.moyen + ' (' + m.compte + ')'
+        : 'ECHEC n=' + [n1, n2, n3, n4].join('/') + ' ligne=' + [L1, L2, L3].join('/') + ' m=' + (m ? m.moyen + '/' + m.compte : 'null')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie Nature : solde salaire distinct de l\u2019avance (état + journal 422100)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var opS = { id: 'opSl', numeroPiece: 'KS-1', code: 'SOLDE_SALAIRE', apType: 'solde', caisseId: 'c1', montant: 400000, date: '2026-10-10' };
+      var opA = { id: 'opAc', numeroPiece: 'KC-2', code: 'ACOMPTE', caisseId: 'c1', montant: 50000, date: '2026-10-12' };
+      var opP = { id: 'opPr', numeroPiece: 'KP-3', code: 'PRET_AUTO', caisseId: 'c1', montant: 600000, date: '2026-09-05' };
+      var ops = payeArr('mdb_operationsCaisse'); ops.push(opS, opA, opP); DB.setMain('mdb_operationsCaisse', ops);
+      var list = payeArr('mdb_acomptesPrets');
+      list.push(
+        { id: 'acS', employee_id: 'zzz', employeNom: 'SoldeTest', type: 'acompte', montant: 400000, moisDeduction: '2026-10', date: '2026-10-10', caisseOpId: 'opSl', numeroPiece: 'KS-1', valide: true },
+        { id: 'acA', employee_id: 'zzz', employeNom: 'AcTest', type: 'acompte', montant: 50000, moisDeduction: '2026-10', date: '2026-10-12', caisseOpId: 'opAc', numeroPiece: 'KC-2', valide: true },
+        { id: 'acP', employee_id: 'zzz', employeNom: 'PretTest', type: 'pret', montant: 600000, montantMensuel: 100000, moisDeduction: '2026-09', date: '2026-09-05', caisseOpId: 'opPr', numeroPiece: 'KP-3', rembourse: 300000 }
+      );
+      setAPList(list);
+      var recs = getAPList();
+      var opsById = {}; payeArr('mdb_operationsCaisse').forEach(function (o) { if (o && o.id) opsById[o.id] = o; });
+      var L = lignesDetailAp(recs, opsById, psalCaisses(), psalBanques(), '2026-10');
+      var sum = 0, nat = {};
+      L.forEach(function (ln) { sum += ln.montant; nat[ln.piece] = ln.nature; });
+      var apR = getAPForMonth('zzz', '2026-10');
+      var exp = apR.acomptes + apR.prets;
+      var okNat = nat['KS-1'] === 'solde' && nat['KC-2'] === 'acompte' && nat['KP-3'] === 'pret';
+      var okCompte = L.length > 0 && L[0].compte === '571100';
+      var maligne = L.length === 3;
+      var sumAp = apNatureLigne({}, { apType: 'solde' }) === 'solde';
+      (sum === exp && sum === 550000 && okNat && okCompte && maligne && sumAp)
+        ? 'OK : sum=' + sum + ' (=422100 ' + exp + '), solde->' + nat['KS-1'] + ' avance->' + nat['KC-2'] + ' pret->' + nat['KP-3'] + ' compte=' + L[0].compte
+        : 'ECHEC sum=' + sum + ' exp=' + exp + ' nat=' + JSON.stringify(nat) + ' compte=' + (L.length ? L[0].compte : 'vide') + ' maligne=' + maligne + ' sumAp=' + sumAp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

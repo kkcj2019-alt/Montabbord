@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-06-163';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-06-164';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16986,6 +16986,64 @@ function apChangerMois(id, valeur) {
   try { renderAcomptesPrets(); } catch (e3) {}
 }
 
+/* Nature affichée d'une pièce (état + journal) : 'solde' si la pièce est un
+   solde de salaire, sinon 'acompte' ou 'pret'. La déduction paie ne change
+   pas (un solde déjà versé doit toujours réduire le net, sinon double
+   paiement) : seule l'étiquette distingue. */
+function csNaturePiece(op) {
+  var t = (op && op.apType) || '';
+  if (t === 'solde' || t === 'pret' || t === 'acompte') return t;
+  var brut = (op && op.code) || '';
+  var c = String(brut).trim().toUpperCase();
+  if (!c) return '';
+  try {
+    if (typeof CS_PERIOD_CODES !== 'undefined' && CS_PERIOD_CODES && CS_PERIOD_CODES.indexOf(brut) !== -1)
+      return brut === 'ACOMPTE_INDEMNITE' ? 'acompte' : 'solde';
+  } catch (e) {}
+  if (c === 'SOLDE_SALAIRE' || c === 'SOLDE_INDEMNITE') return 'solde';
+  if (c === 'ACOMPTE' || c.indexOf('ACOMPTE_') === 0 || c.indexOf('ACOMPTE-') === 0 || /_ACOMPTE(_|$)/.test(c)) return 'acompte';
+  if (/^PRET(_|-|$)/.test(c) || /_PRET(_|$)/.test(c)) return 'pret';
+  return '';
+}
+/* Compte caisse/banque auto (même règle que le fichier Salaire) : 5711xx pour
+   les caisses, 5211xx pour les banques, numérotées par ordre d'apparition. */
+function csCompteAuto(prefixe, idx) {
+  return String(prefixe) + String(100 + (parseInt(idx) || 0)).slice(-3);
+}
+/* Moyen de paiement d'une pièce : caisse ou banque + n° de compte auto.
+   Renvoie { moyen, compte } ou null (pièce non retrouvée). */
+function csMoyenPiece(op) {
+  if (!op) return null;
+  var cs = [], bq = [];
+  try { cs = getCaisses() || []; } catch (e) {}
+  try { bq = getBanques() || []; } catch (e2) {}
+  var cid = op.caisseDestId || op.caisseId || '';
+  for (var i = 0; i < cs.length; i++) {
+    var c = cs[i];
+    if (c && c.id && c.id === cid) {
+      return { moyen: 'Caisse ' + (c.nom || c.libelle || ''), compte: csCompteAuto('571', i) };
+    }
+  }
+  var bid = op.clientBankId || op.banqueId || op.caisseDestId || '';
+  for (var j = 0; j < bq.length; j++) {
+    var b = bq[j];
+    if (b && b.id && b.id === bid) {
+      return { moyen: 'Banque ' + (b.nom || b.libelle || ''), compte: csCompteAuto('521', j) };
+    }
+  }
+  return null;
+}
+/* Nature affichée d'une ligne de l'état : 'pret', 'solde' ou 'acompte'.
+   Le type de la ligne compte d'abord (un prêt reste un prêt), sinon on lit la
+   pièce de caisse liée (Solde_Salaire → Solde, sinon Avance). */
+function csNatureLigne(a) {
+  if (a && a.type === 'pret') return 'pret';
+  if (!a) return 'acompte';
+  var op = null;
+  if (a.caisseOpId) { try { var ops = getOperationsCaisse() || []; for (var i = 0; i < ops.length; i++) { if (ops[i] && ops[i].id === a.caisseOpId) { op = ops[i]; break; } } } catch (e) {} }
+  if (!op && a.numeroPiece) { try { var ops2 = getOperationsCaisse() || []; for (var j = 0; j < ops2.length; j++) { if (ops2[j] && ops2[j].numeroPiece === a.numeroPiece) { op = ops2[j]; break; } } } catch (e2) {} }
+  return csNaturePiece(op) === 'solde' ? 'solde' : 'acompte';
+}
 /* Normalise un mois sous toutes ses formes vers AAAA-MM. */
 function apNormMois(m) {
   var t = String(m || "").trim();
@@ -17132,6 +17190,22 @@ function renderAcomptesPrets() {
   // est rétablie automatiquement pour qu'elle réapparaisse ici ET dans le module Salaire.
   try{ _reconcileAcomptesPretsFromCaisse(); }catch(eRec){}
   var acomptes = dbArr('mdb_acomptesPrets');
+  /* Cache des pi\u00e8ces de caisse pour les colonnes Nature / Moyen (N° compte). */
+  var _apOpsRows = [];
+  try { _apOpsRows = getOperationsCaisse() || []; } catch (eOps) {}
+  var _apOpsByIdRows = {}, _apOpsByPieceRows = {};
+  for (var _oir = 0; _oir < _apOpsRows.length; _oir++) {
+    var _opR = _apOpsRows[_oir];
+    if (!_opR) continue;
+    if (_opR.id && !_apOpsByIdRows[_opR.id]) _apOpsByIdRows[_opR.id] = _opR;
+    if (_opR.numeroPiece && !_apOpsByPieceRows[_opR.numeroPiece]) _apOpsByPieceRows[_opR.numeroPiece] = _opR;
+  }
+  function _apRowOpCached(a) {
+    if (!a) return null;
+    if (a.caisseOpId) return _apOpsByIdRows[a.caisseOpId] || null;
+    if (a.numeroPiece) return _apOpsByPieceRows[a.numeroPiece] || null;
+    return null;
+  }
   var employes = getEmployes();
   var empMap = {};
   for (var i = 0; i < employes.length; i++) empMap[employes[i].id] = employes[i];
@@ -17317,7 +17391,7 @@ function renderAcomptesPrets() {
     html += '</select>';
     html += '<span style="font-size:11px;color:var(--gray-400)">Seuls les acomptes valid\u00e9s sont d\u00e9duits sur les bulletins.</span>';
     html += '</div>';
-    html += '<div class="apl"><div class="table-wrap"><div class="table-responsive"><table><thead><tr><th style="width:34px"><input type="checkbox" id="apValAll" onchange="apValToggleAll(this)" title="Tout sélectionner"></th><th>Employé</th><th>Pièce</th><th style="text-align:right">Montant</th>' + (activeTab !== 'acompte' ? '<th style="text-align:right">Mensualité</th>' : '') + '<th>Mois déduction</th><th style="text-align:right">Reste dû</th><th>Statut</th><th style="text-align:right">Validé</th></tr></thead><tbody>';
+    html += '<div class="apl"><div class="table-wrap"><div class="table-responsive"><table><thead><tr><th style="width:34px"><input type="checkbox" id="apValAll" onchange="apValToggleAll(this)" title="Tout sélectionner"></th><th>Employé</th><th>Nature</th><th>Pièce</th><th>Moyen (N° compte)</th><th style="text-align:right">Montant</th>' + (activeTab !== 'acompte' ? '<th style="text-align:right">Mensualité</th>' : '') + '<th>Mois déduction</th><th style="text-align:right">Reste dû</th><th>Statut</th><th style="text-align:right">Validé</th></tr></thead><tbody>';
   var apSearchVal = (window._apSearch || '').toLowerCase();
   var apMonthVal = '';   /* le filtre du bas a ete supprime : le mois est gere en haut de la page */
   var displayedCount = 0;
@@ -17341,6 +17415,10 @@ function renderAcomptesPrets() {
     html += '<tr class="apl-due">';
     html += '<td></td>';
     html += '<td><div class="who" style="color:#c2410c">' + escH(po2.beneficiaireNom || 'Ensemble des employés') + '<small>pièce collective</small></div></td>';
+    var _poNat = csNaturePiece(po2);
+    html += '<td>' + (_poNat === 'solde' ? '<span class="b" style="color:#16a34a;border-color:#16a34a">Solde</span>' : (_poNat === 'pret' ? '<span class="b" style="color:#6366f1;border-color:#6366f1">Prêt</span>' : '<span class="b" style="color:#d97706;border-color:#d97706">Avance</span>')) + '</td>';
+    var _poMoy = csMoyenPiece(po2);
+    html += _poMoy ? '<td style="white-space:nowrap"><span style="font-size:11px">' + escH(_poMoy.moyen) + '</span><br><span style="font-family:monospace;font-size:10px;color:var(--gray-500)">' + escH(_poMoy.compte) + '</span></td>' : '<td style="color:var(--gray-400)">—</td>';
     html += '<td><span class="piece">' + escH(po2.numeroPiece || '—') + '</span></td>';
     html += '<td class="num"><span class="gros">' + fmtMoney(po2.montant || 0) + '</span><br><span class="muted">' + (po2.apType === 'pret' ? 'Prêt' : 'Acompte') + '</span></td>';
     if (activeTab !== 'acompte') { html += '<td class="num"><span class="muted">—</span></td>'; }
@@ -17413,7 +17491,7 @@ function renderAcomptesPrets() {
     /* Séparateur de groupe de contrat (CDI+CDD, puis Externe+Journalier) */
     if (_prevGrp !== null && _grp4 !== _prevGrp) {
       var _grpLabel = _grp4 === 0 ? 'Titulaires — CDI & CDD' : (_grp4 === 1 ? 'Non titulaires — Externe & Journalier' : 'Autres contrats');
-      html += '<tr class="apl-grp"><td colspan="' + (activeTab !== 'acompte' ? 9 : 8) + '" style="padding:9px 12px;background:#f8fafc;border-top:2px solid #e2e8f0;font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#64748b">' + _grpLabel + '</td></tr>';
+      html += '<tr class="apl-grp"><td colspan="' + (activeTab !== 'acompte' ? 11 : 10) + '" style="padding:9px 12px;background:#f8fafc;border-top:2px solid #e2e8f0;font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#64748b">' + _grpLabel + '</td></tr>';
     }
     _prevGrp = _grp4;
     /* Type de contrat affiché sous le nom (aide à la lecture du groupe) */
@@ -17421,6 +17499,11 @@ function renderAcomptesPrets() {
     html += '<tr class="' + _trCls + '">';
     html += '<td style="text-align:center">' + (a4.type === 'acompte' ? '<input type="checkbox" class="apValCheck" data-ap-id="' + escH(a4.id) + '" onchange="apValCountFn()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary)">' : '') + '</td>';
     html += '<td><div class="who">' + escH(_empNom) + '<small>' + (a4.dureeMois && a4.type === 'pret' ? a4.dureeMois + ' mois · ' : '') + fmtDate(a4.date) + (_tc4 ? ' · ' + escH(_tc4) : '') + '</small></div></td>';
+    /* Colonnes Nature + Moyen (N° compte) : d\u00e9duites de la pi\u00e8ce de caisse li\u00e9e. */
+    var _natL4 = csNatureLigne(a4);
+    html += '<td>' + (_natL4 === 'solde' ? '<span class="b" style="color:#16a34a;border-color:#16a34a">Solde</span>' : (_natL4 === 'pret' ? '<span class="b" style="color:#6366f1;border-color:#6366f1">Prêt</span>' : '<span class="b" style="color:#d97706;border-color:#d97706">Avance</span>')) + '</td>';
+    var _moyL4 = csMoyenPiece(_apRowOpCached(a4));
+    html += _moyL4 ? '<td style="white-space:nowrap"><span style="font-size:11px">' + escH(_moyL4.moyen) + '</span><br><span style="font-family:monospace;font-size:10px;color:var(--gray-500)">' + escH(_moyL4.compte) + '</span></td>' : '<td style="color:var(--gray-400)">—</td>';
     html += '<td>' + (a4.numeroPiece ? '<span class="piece">' + escH(a4.numeroPiece) + '</span>' : '<span class="muted">—</span>') + '</td>';
     html += '<td class="num"><span class="gros">' + fmtMoney(a4.montant || 0) + '</span><br><span class="muted">' + _typeB + '</span></td>';
     if (activeTab !== 'acompte') {
@@ -17455,7 +17538,7 @@ function renderAcomptesPrets() {
         ? ' — dû ce mois : ' + fmtMoney(calc4.totalDu) + ' (' + calc4.echeancesDues + ' échéance(s)'
           + (calc4.echeancesEnRetard > 0 ? ', dont ' + calc4.echeancesEnRetard + ' en retard' : '') + ')'
         : (calc4.termine ? ' — soldé' : ' — rien à verser ce mois');
-      html += '<tr><td colspan="' + (activeTab !== 'acompte' ? 9 : 8) + '" style="padding:0"><details class="amort"><summary>📅 Échéancier — ' + echs.length + ' mensualités · reste ' + fmtMoney(resteEch) + _dueTxt + '</summary>';
+      html += '<tr><td colspan="' + (activeTab !== 'acompte' ? 11 : 10) + '" style="padding:0"><details class="amort"><summary>📅 Échéancier — ' + echs.length + ' mensualités · reste ' + fmtMoney(resteEch) + _dueTxt + '</summary>';
       var lotN4 = 0;
       if (a4.groupeId) { for (var li4 = 0; li4 < acomptes.length; li4++) { if (acomptes[li4].groupeId === a4.groupeId && acomptes[li4].type === 'pret') lotN4++; } }
       var lotBtn4 = lotN4 > 1 ? '<button class="btn btn-xs btn-outline" onclick="askPrintPretLot(\''+a4.groupeId+'\')" style="font-size:10px;padding:3px 8px;border-color:var(--success);color:var(--success)" title="Imprimer tous les prêts du lot ensemble">👥 Imprimer le lot ('+lotN4+')</button>' : '';
@@ -17484,7 +17567,7 @@ function renderAcomptesPrets() {
       html += '</details></td></tr>';
     }
   }
-  if (displayedCount === 0 && pendingOps.length === 0) html += '<tr><td colspan="' + (activeTab !== 'acompte' ? 9 : 8) + '" class="text-center text-muted" style="padding:22px">Aucun ' + (activeTab === 'acompte' ? 'acompte' : 'pr\u00eat') + ' enregistr\u00e9</td></tr>';
+  if (displayedCount === 0 && pendingOps.length === 0) html += '<tr><td colspan="' + (activeTab !== 'acompte' ? 11 : 10) + '" class="text-center text-muted" style="padding:22px">Aucun ' + (activeTab === 'acompte' ? 'acompte' : 'pr\u00eat') + ' enregistr\u00e9</td></tr>';
   html += '</tbody></table></div></div></div>';
   }
   html += '</div></div>';
@@ -19742,9 +19825,12 @@ function deleteAcomptePret(id) {
   DB.set('mdb_acomptesPrets', r); toast('Supprim\u00e9'); renderAcomptesPrets();
 }
 function printAcomptesPrets() {
-  var acomptes = dbArr('mdb_acomptesPrets');
-  var filterMonth = window._apFilterMonth || '';
-  if (filterMonth) acomptes = acomptes.filter(function(a) { return apNormMois(a.moisDeduction).substring(0, 7) === apNormMois(filterMonth); });
+var acomptes = dbArr('mdb_acomptesPrets');
+var filterMonth = window._apFilterMonth || '';
+if (filterMonth) acomptes = acomptes.filter(function(a) { return apNormMois(a.moisDeduction).substring(0, 7) === apNormMois(filterMonth); });
+var _pOpsPrint = [], _pOpsByIdPrint = {}, _pOpsByPiecePrint = {};
+try { _pOpsPrint = getOperationsCaisse() || []; } catch (eP) {}
+for (var _piP = 0; _piP < _pOpsPrint.length; _piP++) { var _opP = _pOpsPrint[_piP]; if (!_opP) continue; if (_opP.id && !_pOpsByIdPrint[_opP.id]) _pOpsByIdPrint[_opP.id] = _opP; if (_opP.numeroPiece && !_pOpsByPiecePrint[_opP.numeroPiece]) _pOpsByPiecePrint[_opP.numeroPiece] = _opP; }
   var employes = getEmployes();
   var empMap = {};
   for (var i = 0; i < employes.length; i++) empMap[employes[i].id] = employes[i];
@@ -19754,7 +19840,7 @@ function printAcomptesPrets() {
   html += '.total-row td{font-weight:bold;border-top:2px solid #333}</style></head><body>';
   html += header;
   html += '<h2 style="text-align:center;margin:8px 0;font-size:13px">Acomptes & Pr\u00eats' + (filterMonth ? ' - ' + filterMonth : '') + '</h2>';
-  html += '<table><thead><tr><th>Employ\u00e9</th><th>Type</th><th>Date</th><th>Pi\u00e8ce</th><th style="text-align:right">Montant</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste</th><th>Mois d\u00e9duction</th><th>Pr\u00e9lev\u00e9</th><th>Motif</th></tr></thead><tbody>';
+  html += '<table><thead><tr><th>Employ\u00e9</th><th>Nature · Moyen</th><th>Date</th><th>Pi\u00e8ce</th><th style="text-align:right">Montant</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste</th><th>Mois d\u00e9duction</th><th>Pr\u00e9lev\u00e9</th><th>Motif</th></tr></thead><tbody>';
   acomptes.sort(function(a, b) { return (a.employeNom || '').localeCompare(b.employeNom || ''); });
   var totalM = 0, totalR = 0;
   for (var j = 0; j < acomptes.length; j++) {
@@ -19763,7 +19849,11 @@ function printAcomptesPrets() {
     totalM += a.montant || 0; totalR += a.montantRembourse || 0;
     html += '<tr>';
     html += '<td>' + escH(a.employeNom || '-') + '</td>';
-    html += '<td>' + escH(a.type) + '</td>';
+    var _pOpR = a.caisseOpId ? _pOpsByIdPrint[a.caisseOpId] : (a.numeroPiece ? _pOpsByPiecePrint[a.numeroPiece] : null);
+    var _pNatR = csNaturePiece(_pOpR);
+    var _pNatLabel = _pNatR === 'solde' ? 'Solde' : (a.type === 'pret' ? 'Prêt' : 'Avance');
+    var _pMoyR = _pOpR ? csMoyenPiece(_pOpR) : null;
+    html += '<td>' + escH(_pNatLabel) + (_pMoyR ? ' · ' + escH(_pMoyR.moyen) + ' (' + escH(_pMoyR.compte) + ')' : '') + '</td>';
     html += '<td>' + fmtDateShort(a.date) + '</td>';
     html += '<td>' + escH(a.numeroPiece || '-') + '</td>';
     html += '<td class="text-right">' + fmtMoney(a.montant || 0) + '</td>';
