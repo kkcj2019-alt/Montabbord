@@ -4413,7 +4413,7 @@ r.push({
       var num = html.match(/id="cgNum" value="([^"]*)"/);
       var hasNum = num && /^CONG-\\d{4}-\\d{3}$/.test(num[1]);
       var hasDuree = html.indexOf('id="cgDuree" min="1"') !== -1;
-      var hasRetourAuto = html.indexOf('id="cgRetour"') !== -1 && html.indexOf('readonly') !== -1;
+      var hasRetourAuto = html.indexOf('id="cgRetour"') !== -1 && html.indexOf('readonly') === -1 && html.indexOf('onchange="cgCalcDuree()"') !== -1;
       document.getElementById('cgDepart').value = '2026-10-01';
       document.getElementById('cgDuree').value = '5';
       cgCalcRetour();
@@ -4465,6 +4465,59 @@ r.push({
       (okTitre && okCols && okLigne)
         ? 'OK : colonnes acquis/d\u00e9j\u00e0 pris/reste + fiche, ' + rhEmpLabel(ex) + ' -> ' + rest + ' j'
         : 'ECHEC titre=' + okTitre + ' cols=' + okCols + ' ligne=' + okLigne
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cong\u00e9s : le champ de recherche filtre le tableau par N\u00b0 / employ\u00e9 / type',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var saved = getRhConges();
+      var e1 = rhActifs().filter(function(x){ return x.type_contrat !== 'Externe'; })[0];
+      if (e1) { saved.push({ id: 'cgz1', numero: 'CONG-2026-999', employee_id: e1.id, type: 'annual', date_depart: '2026-11-10', date_retour: '2026-11-14', date_reprise: '', duree: 5, remplacant_id: '', notes: '' }); }
+      setRhConges(saved);
+      renderCongesPage();
+      var hasInput = document.getElementById('content').innerHTML.indexOf('placeholder="Rechercher (N\\u00b0, employ\\u00e9, type, rempla\\u00e7ant...)"') !== -1;
+      window._cgFilterQ = 'CONG-2026-999';
+      renderCongesPage();
+      var hF = document.getElementById('content').innerHTML || '';
+      var okFiltre = hF.indexOf('CONG-2026-999') !== -1 && hF.indexOf('Aucun cong\\u00e9 enregistr\\u00e9') === -1;
+      window._cgFilterQ = 'ZZZ-INTROUVABLE';
+      renderCongesPage();
+      var hV = document.getElementById('content').innerHTML || '';
+      var okVide = hV.indexOf('Aucun cong\\u00e9 enregistr\\u00e9') !== -1;
+      window._cgFilterQ = '';
+      setRhConges(saved.filter(function(x){ return x.id !== 'cgz1'; }));
+      renderCongesPage();
+      (hasInput && okFiltre && okVide)
+        ? 'OK : champ present, filtre CONG-2026-999 -> 1 ligne, ZZZ-INTROUVABLE -> vide'
+        : 'ECHEC input=' + hasInput + ' filtre=' + okFiltre + ' vide=' + okVide
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cong\u00e9s : saisir la date de retour calcule la dur\u00e9e, et l\u2019enregistrement la garde',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var before = getRhConges();
+      openCongeModal();
+      document.getElementById('cgEmp').value = 'e1';
+      document.getElementById('cgType').value = 'annual';
+      document.getElementById('cgDepart').value = '2026-10-01';
+      document.getElementById('cgDuree').value = '1';
+      document.getElementById('cgRetour').value = '2026-10-05';
+      cgCalcDuree();
+      var durAuto = parseInt(document.getElementById('cgDuree').value, 10);
+      document.getElementById('cgNum').value = 'CONG-2026-888';
+      saveConge();
+      var lst = getRhConges();
+      var c = lst[lst.length - 1];
+      var ok = (durAuto === 5) && (c.duree === 5) && (c.date_retour === '2026-10-05');
+      setRhConges(before);
+      ok ? 'OK : retour 2026-10-05 -> dur\u00e9e ' + durAuto + ' j, enregistre duree=' + c.duree
+         : 'ECHEC durAuto=' + durAuto + ' duree=' + c.duree + ' (typeof ' + typeof c.duree + ') retour=' + c.date_retour + ' num=' + c.numero
     `,
     attenduPrefixe: 'OK'
   });
