@@ -4404,6 +4404,51 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Cong\u00e9s : le modal montre un n\u00b0 modifiable, une dur\u00e9e, et le retour se calcule tout seul',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      openCongeModal();
+      var html = document.getElementById('formModalBody').innerHTML || '';
+      var num = html.match(/id="cgNum" value="([^"]*)"/);
+      var hasNum = num && /^CONG-\\d{4}-\\d{3}$/.test(num[1]);
+      var hasDuree = html.indexOf('id="cgDuree" min="1"') !== -1;
+      var hasRetourAuto = html.indexOf('id="cgRetour"') !== -1 && html.indexOf('readonly') !== -1;
+      document.getElementById('cgDepart').value = '2026-10-01';
+      document.getElementById('cgDuree').value = '5';
+      cgCalcRetour();
+      var ret = document.getElementById('cgRetour').value;
+      var apercu = document.getElementById('cgRetourTxt').textContent;
+      (hasNum && hasDuree && hasRetourAuto && ret === '2026-10-05' && /^[a-z]{3} 05 oct$/.test(apercu))
+        ? 'OK : numero=' + (num ? num[1] : '?') + ' retourAuto=' + ret + ' via duree, apercu=' + apercu
+        : 'ECHEC num=' + hasNum + '(' + (num ? num[1] : '?') + ') duree=' + hasDuree + ' auto=' + hasRetourAuto + ' ret=' + ret
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cong\u00e9s : l\u2019enregistrement garde le n\u00b0 saisi et la dur\u00e9e, retour recalcul\u00e9',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      openCongeModal();
+      document.getElementById('cgNum').value = 'CONG-2026-777';
+      document.getElementById('cgEmp').value = 'e1';
+      document.getElementById('cgType').value = 'annual';
+      document.getElementById('cgDepart').value = '2026-10-01';
+      document.getElementById('cgDuree').value = '5';
+      document.getElementById('cgRemp').value = '';
+      document.getElementById('cgReprise').value = '';
+      document.getElementById('cgNotes').value = 'garde-fou';
+      saveConge();
+      var list = getRhConges();
+      var c = list[list.length - 1];
+      (c.numero === 'CONG-2026-777' && c.duree === 5 && c.date_retour === '2026-10-05' && c.date_depart === '2026-10-01')
+        ? 'OK : ' + c.numero + ' duree=' + c.duree + ' retour=' + c.date_retour
+        : 'ECHEC numero=' + c.numero + ' duree=' + c.duree + ' retour=' + c.date_retour
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
