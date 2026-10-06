@@ -171,6 +171,20 @@ function run(rapport) {
     doubles.slice(0, 8).forEach(x => rapport.info('   ' + x));
   }
 
+  /* ---------- E. saisie au bulletin (paie) : base editable, gain calcule ----------
+     Sur le bulletin standard, on tape la BASE ; le GAIN (= base x taux) est un
+     calcul affiché, pas un champ. La sauvegarde accuse réception (toast), pour
+     ne jamais laisser croire à une perte de saisie. */
+  const payeApp = loadApp('paye.html');
+  const payeJs = payeApp.js;
+  const manquesE = [];
+  if (payeJs.indexOf('function bulUpdateBase(') === -1) manquesE.push('bulUpdateBase non défini');
+  if (payeJs.indexOf('onchange="bulUpdateBase(') === -1) manquesE.push('base non branchée au rendu');
+  if (payeJs.indexOf('onchange="bulUpdateGain(') !== -1) manquesE.push('ancien champ gain encore branché');
+  if (payeJs.indexOf("toast('Valeur enregistrée'") === -1) manquesE.push('pas d\u2019accusé de sauvegarde');
+  if (!manquesE.length) rapport.ok('bulletin paie : base saisissable, gain calculé, sauvegarde accusée');
+  else rapport.ko('bulletin paie : ' + manquesE.join(' ; '));
+
   return { sansConfirm: sansConfirm.length, sansTitre: nSans, doubles: doubles.length };
 }
 
