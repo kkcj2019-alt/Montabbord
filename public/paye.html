@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-166";
+      window.__APP_VERSION = "2026-10-06-167";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5594,6 +5594,83 @@ function primesFonctionDefautFusion(catalogue, tombstones) {
   });
   return { liste: liste, ajoute: ajoute };
 }
+/* Montant tapé façon française : "500 000", "500.000", "500,000" = 500000 ;
+   "0,5"/"0.5" = 0,5 ; "12,50" = 12,50. Sans ça, parseFloat("500.000") = 500.
+   Testable et utilisé par toute saisie de montant au bulletin. */
+function parseMontantSaisi(v) {
+  var s = String(v == null ? "" : v).trim();
+  if (!s) return 0;
+  s = s.replace(/[\s  ']/g, "");
+  var hasDot = s.indexOf(".") !== -1,
+    hasComma = s.indexOf(",") !== -1;
+  if (hasDot && hasComma) {
+    if (s.lastIndexOf(".") > s.lastIndexOf(",")) s = s.replace(/,/g, "");
+    else s = s.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma) {
+    var ap = s.split(",");
+    if (ap.length === 2 && ap[1].length === 3 && ap[0].length > 0 && ap[0] !== "0" && ap[0] !== "-0") s = ap[0] + ap[1];
+    else s = s.replace(",", ".");
+  } else if (hasDot) {
+    var bp = s.split(".");
+    if (
+      bp.length === 2 &&
+      bp[1].length === 3 &&
+      bp[0].length > 0 &&
+      bp[0] !== "0" &&
+      bp[0] !== "-0"
+    )
+      s = bp[0] + bp[1];
+  }
+  var n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+/* Vrai si l'utilisateur est en train de taper (champ texte/nombre) : un
+   re-rendu maintenant détruirait sa frappe. Cases, boutons, mois : non. */
+function _payeSaisieEnCours() {
+  try {
+    var ae = document.activeElement;
+    if (!ae || !ae.tagName) return false;
+    if (!/^(INPUT|TEXTAREA)$/.test(String(ae.tagName).toUpperCase()))
+      return false;
+    var tp = String(ae.type || "").toLowerCase();
+    if (
+      tp === "checkbox" ||
+      tp === "radio" ||
+      tp === "button" ||
+      tp === "submit" ||
+      tp === "month" ||
+      tp === "color" ||
+      tp === "range" ||
+      tp === "file"
+    )
+      return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+/* Protège les écritures locales toutes fraîches quand le cloud répond : les
+   sections modifiées il y a moins de delaiMs gardent la version locale (le
+   cloud n'a pas encore pu recevoir le push). Pur, testable. */
+function payeProtegeEcrituresFraiches(fusion, locale, sales, delaiMs) {
+  try {
+    var delai = parseFloat(delaiMs) > 0 ? parseFloat(delaiMs) : 30000;
+    var maintenant = Date.now();
+    var protege = false;
+    for (var k in fusion) {
+      if (!fusion.hasOwnProperty(k)) continue;
+      if (!locale || !locale.hasOwnProperty(k)) continue;
+      var t = sales && sales[k];
+      if (t && maintenant - t < delai) {
+        fusion[k] = locale[k];
+        protege = true;
+      }
+    }
+    return { fusion: fusion, protege: protege };
+  } catch (e) {
+    return { fusion: fusion, protege: false };
+  }
+}
 function payeArr(key) {  var v = DB.getMain(key);
   return Array.isArray(v) ? v : [];
 }
@@ -5677,6 +5754,13 @@ function payeObj(key) {
         var p = getPayeData();
         p[section] = val;
         setPayeData(p);
+        /* Horodate les écritures locales : une réponse cloud plus vieille
+           qu'une saisie de moins de 30 s ne doit pas l'écraser. */
+        try {
+          if (!payeBootstrapping)
+            (window._payeEcritLocal = window._payeEcritLocal || {})[section] =
+              Date.now();
+        } catch (eS) {}
       }
       function getFormatHeures() {
         var f = getPayeSection("format_heures", null);
@@ -6180,6 +6264,9 @@ function payeObj(key) {
             var ae2 = document.activeElement;
             var ptc2 = document.getElementById("pt-container");
             if (ptc2 && ae2 && ptc2.contains(ae2)) { _payeDeferredRealtime(sec); return; }
+            try {
+              if (typeof _payeSaisieEnCours === "function" && _payeSaisieEnCours()) { _payeDeferredRealtime(sec); return; }
+            } catch (eS) {}
             var cur = localStorage.getItem("paye_currentSection") || sec;
             showSection(cur);
           } catch (e2) {}
@@ -6202,6 +6289,23 @@ function payeObj(key) {
             ? data[PAYE_KEY]
             : {};
         DB.setMain(PAYE_KEY, _payeMergeObj(_cur, _inc, false));
+        /* Écritures locales toutes fraîches (< 30 s) : le cloud n'a pas encore
+           pu recevoir le push — on garde le local et on repousse pour que le
+           cloud converge aussi. Sinon la saisie « saute » et revient à l'ancien. */
+        try {
+          var _prot = payeProtegeEcrituresFraiches(
+            DB.getMain(PAYE_KEY) || {},
+            _cur,
+            window._payeEcritLocal,
+            30000,
+          );
+          if (_prot.protege) {
+            DB.setMain(PAYE_KEY, _prot.fusion);
+            try {
+              pushPayeCloud();
+            } catch (ePP) {}
+          }
+        } catch (eP2) {}
         syncFromMain();
         try {
           _purgeOrphanAcomptesP();
@@ -6230,6 +6334,17 @@ function payeObj(key) {
           _payeDeferredRealtime(sec);
           return;
         }
+        /* Idem pour toute frappe en cours (bulletin...) : re-rendre maintenant
+           détruirait le champ et la valeur non validée. */
+        try {
+          if (
+            typeof _payeSaisieEnCours === "function" &&
+            _payeSaisieEnCours()
+          ) {
+            _payeDeferredRealtime(sec);
+            return;
+          }
+        } catch (eAE) {}
         showSection(sec);
       }
 
@@ -7558,7 +7673,11 @@ function payeObj(key) {
         generateBulletin();
       }
       function bulUpdateGain(empId, mois, itemId, type, val) {
-        var v = parseFloat(val) || 0;
+        /* Saisie façon française acceptée ("500 000", "500.000" = 500000). */
+        var v =
+          typeof parseMontantSaisi === "function"
+            ? parseMontantSaisi(val)
+            : parseFloat(val) || 0;
         if (type === 'catalogue') {
           /* Montant MENSUEL : n'écrase plus le montant global du catalogue */
           var primes = getPrimesSpec();
@@ -7580,7 +7699,9 @@ function payeObj(key) {
           }
           setManualLines(all);
         }
-        toast('Valeur enregistrée', 'success');
+        try {
+          toast("Valeur enregistrée : " + fmt(v), "success");
+        } catch (eT) {}
         generateBulletin();
       }
       /* Saisie au niveau BASE (tableau standard) : la base devient le montant

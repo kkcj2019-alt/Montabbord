@@ -2088,7 +2088,60 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
-  /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
+  r.push({
+    nom: 'Paie : montants francais bien lus (500.000 et 500 000 = 500000)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cas = [
+        ['500.000', 500000], ['500 000', 500000], ['500,000', 500000],
+        ['1 234 567', 1234567], ['0,5', 0.5], ['0.5', 0.5], ['12,50', 12.5],
+        ['45000', 45000], ['', 0], ['1.234', 1234]
+      ];
+      var faux = [];
+      for (var i = 0; i < cas.length; i++) {
+        if (parseMontantSaisi(cas[i][0]) !== cas[i][1]) faux.push(cas[i][0]);
+      }
+      (faux.length === 0) ? 'OK : 10 formats bien lus' : 'ECHEC ' + faux.join(',')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie : le cloud n\u2019ecrase pas une ecriture de moins de 30 s',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var maintenant = Date.now();
+      function copieFrais() { return { empIndivPrimes: { e1: 'CLOUD-ancien' }, autre: 'cloud' }; }
+      function copieLocale() { return { empIndivPrimes: { e1: 'LOCAL-frais' }, autre: 'local' }; }
+      var base = payeProtegeEcrituresFraiches({ a: 1 }, { a: 1 }, { a: maintenant }, 30000);
+      var vieux = payeProtegeEcrituresFraiches(copieFrais(), copieLocale(), { empIndivPrimes: maintenant - 60000 }, 30000);
+      var sans = payeProtegeEcrituresFraiches(copieFrais(), copieLocale(), {}, 30000);
+      var frais = payeProtegeEcrituresFraiches(copieFrais(), copieLocale(), { empIndivPrimes: maintenant }, 30000);
+      (base.protege === true && vieux.fusion.empIndivPrimes['e1'] === 'CLOUD-ancien' && sans.fusion.empIndivPrimes['e1'] === 'CLOUD-ancien' && frais.fusion.empIndivPrimes['e1'] === 'LOCAL-frais' && frais.protege === true)
+        ? 'OK : frais garde, vieux/sans-sceau suivent le cloud'
+        : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie : frappe en cours detectee (texte/nombre oui, case/div non)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var a = _payeSaisieEnCours();
+      document.activeElement = { tagName: 'INPUT', type: 'text' };
+      var b = _payeSaisieEnCours();
+      document.activeElement = { tagName: 'INPUT', type: 'checkbox' };
+      var c = _payeSaisieEnCours();
+      document.activeElement = { tagName: 'DIV' };
+      var d = _payeSaisieEnCours();
+      document.activeElement = null;
+      (a === false && b === true && c === false && d === false)
+        ? 'OK : texte oui, case/div/non-focus non'
+        : 'ECHEC ' + [a, b, c, d].join('/')
+    `,
+    attenduPrefixe: 'OK'
+  });
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
     app: 'production.html', store: storeRealiste,

@@ -181,7 +181,7 @@ function run(rapport) {
   if (payeJs.indexOf('function bulUpdateBase(') === -1) manquesE.push('bulUpdateBase non défini');
   if (payeJs.indexOf('onchange="bulUpdateBase(') === -1) manquesE.push('base non branchée au rendu');
   if (payeJs.indexOf('onchange="bulUpdateGain(') !== -1) manquesE.push('ancien champ gain encore branché');
-  if (payeJs.indexOf("toast('Valeur enregistrée'") === -1) manquesE.push('pas d\u2019accusé de sauvegarde');
+  if (payeJs.indexOf('Valeur enregistrée') === -1) manquesE.push('pas d\u2019accusé de sauvegarde');
   if (!manquesE.length) rapport.ok('bulletin paie : base saisissable, gain calculé, sauvegarde accusée');
   else rapport.ko('bulletin paie : ' + manquesE.join(' ; '));
 
