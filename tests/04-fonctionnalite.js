@@ -4734,6 +4734,33 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie : sous-lignes 422100 s\u00e9par\u00e9es (Acomptes/Pr\u00eats vs Soldes) = cr\u00e9dit total',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var opS = { id: 'opSl2', numeroPiece: 'KS-11', code: 'SOLDE_SALAIRE', apType: 'solde', caisseId: 'c1', montant: 200000, date: '2026-10-10' };
+      var opA = { id: 'opAc2', numeroPiece: 'KC-12', code: 'ACOMPTE', caisseId: 'c1', montant: 50000, date: '2026-10-12' };
+      var ops = payeArr('mdb_operationsCaisse'); ops.push(opS, opA); DB.setMain('mdb_operationsCaisse', ops);
+      var list = payeArr('mdb_acomptesPrets');
+      list.push(
+        { id: 'acS2', employee_id: 'zzz', employeNom: 'Solde2', type: 'acompte', montant: 200000, moisDeduction: '2026-10', date: '2026-10-10', caisseOpId: 'opSl2', numeroPiece: 'KS-11', valide: true },
+        { id: 'acA2', employee_id: 'zzz', employeNom: 'Ac2', type: 'acompte', montant: 50000, moisDeduction: '2026-10', date: '2026-10-12', caisseOpId: 'opAc2', numeroPiece: 'KC-12', valide: true }
+      );
+      setAPList(list);
+      var recs = getAPList();
+      var opsById = {}; payeArr('mdb_operationsCaisse').forEach(function (o) { if (o && o.id) opsById[o.id] = o; });
+      var L = lignesDetailAp(recs, opsById, psalCaisses(), psalBanques(), '2026-10');
+      var apR = getAPForMonth('zzz', '2026-10');
+      var totalAp = apR.acomptes + apR.prets;
+      var soldes = 0, autres = 0;
+      L.forEach(function (ln) { if (ln.nature === 'solde') soldes += ln.montant; else autres += ln.montant; });
+      (soldes + autres === totalAp && soldes === 200000 && autres === 50000)
+        ? 'OK : total=' + totalAp + ' => 422100 "Avances & Acomptes (+pr\\u00eats)"=' + autres + ', 422100 "Soldes"=' + soldes
+        : 'ECHEC total=' + totalAp + ' soldes=' + soldes + ' autres=' + autres
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
