@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-01-132";
+      window.__APP_VERSION = "2026-10-06-164";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -2874,6 +2874,26 @@
                     onchange="saveTaxRates()"
                   />%
                 </div>
+                <div class="form-group">
+                  <label>Taxe Apprentissage (% patronal)</label
+                  ><input
+                    type="number"
+                    id="config-taxe-app"
+                    step="0.01"
+                    value="1.2"
+                    onchange="saveTaxRates()"
+                  />%
+                </div>
+                <div class="form-group">
+                  <label>Contribution Employeur (% patronal, local)</label
+                  ><input
+                    type="number"
+                    id="config-ce-pat"
+                    step="0.01"
+                    value="2.8"
+                    onchange="saveTaxRates()"
+                  />%
+                </div>
               </div>
               <div
                 style="
@@ -5495,8 +5515,35 @@ function apMoisPrisEnCompte(a) {
   if (/^\d{4}-\d{2}/.test(m)) return m.substring(0, 7);
   return String((a && a.date) || '').substring(0, 7);
 }
-function payeArr(key) {
-  var v = DB.getMain(key);
+/* Exonération art.116 CGI : seules les allocations SPÉCIALES liées à la fonction
+   (représentation, déplacement, salissure, tenue, caisse, responsabilité,
+   fonction) ouvrent droit, plafonnées à 10 % du numéraire. Le sursalaire et
+   les primes personnalisées sont des éléments de salaire -> imposables,
+   jamais exonérés (doctrine DGI n°0054 : suppléments de salaire imposables).
+   lignesPayees = [{type, montant}] en montants PAYÉS ; basePlafond déjà hors
+   transport exonéré. */
+function calcIndSpecExo(lignesPayees, basePlafond) {
+  var QUALIFIANTS = {
+    ind_representation: 1,
+    ind_deplacement: 1,
+    ind_salissure: 1,
+    ind_tenue: 1,
+    ind_caisse: 1,
+    ind_responsabilite: 1,
+    ind_fonction: 1,
+  };
+  var tot = 0;
+  (lignesPayees || []).forEach(function (p) {
+    if (p && QUALIFIANTS[p.type]) tot += parseFloat(p.montant) || 0;
+  });
+  var plafond = Math.floor(
+    (parseFloat(basePlafond) || 0) *
+      ((typeof TAX_RULES !== "undefined" && TAX_RULES.indemnites_spec_pct) ||
+        0.1),
+  );
+  return { total: tot, plafond: plafond, exo: Math.min(tot, plafond) };
+}
+function payeArr(key) {  var v = DB.getMain(key);
   return Array.isArray(v) ? v : [];
 }
 function payeObj(key) {
@@ -21040,6 +21087,8 @@ function ptMontPrintEtat(mois, tab) {
         cnps_pat_at: 0.02,
         fdfp_app: 0.004,
         fdfp_form: 0.006,
+        taxe_app: 0.012,
+        ce_pat_local: 0.028,
         transport_max_exo: 30000,
         indemnites_spec_pct: 0.1,
               panier_montant: 3 * Math.round(75000 / 173.33),
@@ -21078,6 +21127,8 @@ function ptMontPrintEtat(mois, tab) {
         if (!TAX_RULES.cnps_pat_at) TAX_RULES.cnps_pat_at = 0.02;
         if (!TAX_RULES.fdfp_app) TAX_RULES.fdfp_app = 0.004;
         if (!TAX_RULES.fdfp_form) TAX_RULES.fdfp_form = 0.006;
+        if (!TAX_RULES.taxe_app) TAX_RULES.taxe_app = 0.012;
+        if (!TAX_RULES.ce_pat_local) TAX_RULES.ce_pat_local = 0.028;
       }
       function saveTaxRates() {
         var t = {};
@@ -21089,6 +21140,8 @@ function ptMontPrintEtat(mois, tab) {
           "config-cnps-at-pat": "cnps_pat_at",
           "config-cnps-fdfp-app": "fdfp_app",
           "config-cnps-fdfp-form": "fdfp_form",
+          "config-taxe-app": "taxe_app",
+          "config-ce-pat": "ce_pat_local",
         };
         for (var idName in pctFields) {
           var el = document.getElementById(idName);
@@ -21141,6 +21194,8 @@ function ptMontPrintEtat(mois, tab) {
           "config-cnps-at-pat": "cnps_pat_at",
           "config-cnps-fdfp-app": "fdfp_app",
           "config-cnps-fdfp-form": "fdfp_form",
+          "config-taxe-app": "taxe_app",
+          "config-ce-pat": "ce_pat_local",
         };
         for (var idName in pctFields) {
           var el = document.getElementById(idName);
@@ -21881,6 +21936,7 @@ function ptMontPrintEtat(mois, tab) {
             _editable: true,
             _type: 'catalogue',
             _id: p.id,
+            _primeType: p.type,
           });
         });
         /* Prime de panier — exonéré fiscalement et socialement */
@@ -22046,15 +22102,23 @@ function ptMontPrintEtat(mois, tab) {
           stats.transport,
           TAX_RULES.transport_max_exo,
         );
-        /* ===== Calcul exonération 10% indemnités spéciales (Art.116 CGI) ===== */
-        var remuNumeraire = totalBrut - totalAvantages;
-        var totalIndSpec = primesSpecActives.reduce(function (s, p) {
-          return s + (parseFloat(p.montant) || 0);
-        }, 0);
-        var plafond10pct = Math.floor(
-          remuNumeraire * (TAX_RULES.indemnites_spec_pct || 0.1),
-        );
-        var indSpecExo = Math.min(totalIndSpec, plafond10pct);
+        /* ===== Calcul exonération 10% indemnités spéciales (Art.116 CGI) =====
+           Plafond sur le numéraire HORS transport exonéré (le transport a déjà
+           sa propre exonération). Seules les allocations spéciales ouvrent
+           droit : sursalaire et primes perso exclus (imposables). Montants
+           PAYÉS (proratisés), pas catalogue. */
+        var remuNumeraire = totalBrut - totalAvantages - transportExo;
+        var _lignesIndPayees = items
+          .filter(function (it) {
+            return it && it._type === "catalogue";
+          })
+          .map(function (it) {
+            return { type: it._primeType, montant: it.gain };
+          });
+        var _exo116 = calcIndSpecExo(_lignesIndPayees, remuNumeraire);
+        var totalIndSpec = _exo116.total;
+        var plafond10pct = _exo116.plafond;
+        var indSpecExo = _exo116.exo;
         /* Brut fiscal = base ITS (hors transport exo + avantages non taxables + indemnités spéciales exonérées) */
         var brutFiscal =
           totalBrut - transportExo - totalNonTaxable - indSpecExo;
@@ -22118,7 +22182,7 @@ function ptMontPrintEtat(mois, tab) {
           tauxPat: "",
           retPat: 0,
         });
-        var tauxAppRate = 0.012;
+        var tauxAppRate = TAX_RULES.taxe_app || 0.012;
         items.push({
           n: "66",
           label: "Taxe d'Apprentissage",
@@ -22126,30 +22190,43 @@ function ptMontPrintEtat(mois, tab) {
           taux: "",
           gain: 0,
           ret: 0,
-          tauxPat: "1,20",
+          tauxPat: (tauxAppRate * 100).toFixed(2).replace(".", ","),
           retPat: Math.floor(brutFiscal * tauxAppRate),
         });
         var fdfpAppRate = TAX_RULES.fdfp_app || 0.004;
         items.push({
           n: "67",
           label: "FDFP Apprentissage",
-          base: brutSocial,
+          base: brutFiscal,
           taux: "",
           gain: 0,
           ret: 0,
           tauxPat: (fdfpAppRate * 100).toFixed(1).replace(".", ","),
-          retPat: Math.floor(brutSocial * fdfpAppRate),
+          retPat: Math.floor(brutFiscal * fdfpAppRate),
         });
         var fdfpFormRate = TAX_RULES.fdfp_form || 0.006;
         items.push({
           n: "68",
           label: "FDFP Form. Prof.",
-          base: brutSocial,
+          base: brutFiscal,
           taux: "",
           gain: 0,
           ret: 0,
           tauxPat: (fdfpFormRate * 100).toFixed(1).replace(".", ","),
-          retPat: Math.floor(brutSocial * fdfpFormRate),
+          retPat: Math.floor(brutFiscal * fdfpFormRate),
+        });
+        /* Contribution à la charge de l'employeur, personnel local : 2,8 % du
+           brut imposable (doctrine DGI n°00026, art.146 CGI). Patronale seule. */
+        var cePatRate = TAX_RULES.ce_pat_local || 0.028;
+        items.push({
+          n: "69",
+          label: "Contribution Employeur",
+          base: brutFiscal,
+          taux: "",
+          gain: 0,
+          ret: 0,
+          tauxPat: (cePatRate * 100).toFixed(2).replace(".", ","),
+          retPat: Math.floor(brutFiscal * cePatRate),
         });
         var parts = parseFloat(emp.nb_parts) || 1;
         var ricf = Math.min(itsBrut, getRICF(parts));

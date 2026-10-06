@@ -2027,6 +2027,33 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie : exoneration art.116 du cas Kanga (sursalaire exclu, plafond hors transport)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var r = calcIndSpecExo([{ type: 'sursalaire', montant: 128500 }, { type: 'ind_responsabilite', montant: 45000 }], 635478);
+      var brutFiscal = 665478 - 30000 - r.exo;
+      (r.total === 45000 && r.plafond === 63547 && r.exo === 45000 && brutFiscal === 590478)
+        ? 'OK : qualifiantes 45000, plafond 63547, brut fiscal 590478 (Excel)'
+        : 'ECHEC ' + JSON.stringify(r) + ' fiscal=' + brutFiscal
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie : exoneration plafonnee, custom exclu, vide neutre',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var a = calcIndSpecExo([{ type: 'ind_fonction', montant: 100000 }], 635478);
+      var b = calcIndSpecExo([{ type: 'custom', montant: 50000 }], 635478);
+      var c = calcIndSpecExo([], 0);
+      (a.total === 100000 && a.exo === 63547 && b.total === 0 && b.exo === 0 && c.exo === 0)
+        ? 'OK : plafond 63547, custom imposable, vide 0'
+        : 'ECHEC ' + JSON.stringify([a, b, c])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
