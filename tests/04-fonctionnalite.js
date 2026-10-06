@@ -1911,6 +1911,67 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Inventaire : unites pointe/paquet seulement pour POINTE, defaut paquet, quantite seule sinon',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [
+        { id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180 },
+        { id: 'c2', code: 'COL', designation: 'COLLE A BOIS', type: 'DIVERS', quantite: 3 }
+      ]);
+      window._invType = 'consum';
+      launchInventory();
+      var h = document.getElementById('invContent').innerHTML || '';
+      var pointeWidget = h.indexOf('u_P5') !== -1 && h.indexOf('<option value="paquet" selected>') !== -1;
+      var colleSimple = h.indexOf('u_COL') === -1;
+      (pointeWidget && colleSimple)
+        ? 'OK : P5 en paquet par defaut, COL sans selecteur'
+        : 'ECHEC widget=' + (h.indexOf('u_P5') !== -1) + ' paquet=' + (h.indexOf('<option value="paquet" selected>') !== -1) + ' u_COL=' + (h.indexOf('u_COL') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : l\u2019ecart bouge a la frappe sur une ligne pointe',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180 }]);
+      window._invItems = [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 1600, type: 'POINTE' }];
+      var _origGet = document.getElementById;
+      document.getElementById = function(id) { if (id && id.indexOf('inv_real_') === 0) return null; return _origGet(id); };
+      document.getElementById('u_P5').value = '89';
+      document.getElementById('u_P5').parentNode = { querySelector: function() { return { value: 'paquet' }; } };
+      calcInvEcart();
+      var modele = window._invItems[0].real_qte;
+      var total = document.getElementById('inv_ecart_total').textContent;
+      document.getElementById = _origGet;
+      (modele === 16020 && total === '14420.0')
+        ? 'OK : 89 paquets = 16020, ecart 14420.0 affiche'
+        : 'ECHEC modele=' + modele + ' total=' + total
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : la sauvegarde garde les valeurs saisies (pas le theo)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180 }]);
+      window._invItems = [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 1600, type: 'POINTE' }];
+      var _origGet = document.getElementById;
+      document.getElementById = function(id) { if (id && id.indexOf('inv_real_') === 0) return null; return _origGet(id); };
+      document.getElementById('u_P5').value = '89';
+      document.getElementById('u_P5').parentNode = { querySelector: function() { return { value: 'paquet' }; } };
+      window.confirm2 = function() { return true; };
+      try { saveInventory('2026-09'); } catch (e) {}
+      document.getElementById = _origGet;
+      var invs = getInventories().filter(function(x) { return x && x.month === '2026-09'; });
+      var rq = invs.length && invs[invs.length - 1].items && invs[invs.length - 1].items[0] ? invs[invs.length - 1].items[0].real_qte : null;
+      (rq === 16020) ? 'OK : sauvegarde 16020 (pas 1600)' : 'ECHEC real_qte=' + rq
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
