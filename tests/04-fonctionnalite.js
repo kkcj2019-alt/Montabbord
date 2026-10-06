@@ -4449,6 +4449,69 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Cong\u00e9s : le tableau de suivi en jours (acquis / d\u00e9j\u00e0 pris / reste) est sur la page principale',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      renderCongesPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var okTitre = h.indexOf('Suivi des cong\u00e9s en jours') !== -1;
+      var okCols = ['Entr\u00e9e','\u00c9ligible','Acquis (j)','D\u00e9j\u00e0 pris (j)','Reste (j)','Planifier','\u00c9tat g\u00e9n\u00e9ral']
+        .every(function(c){ return h.indexOf(c) !== -1; });
+      var ex = rhActifs().filter(function(x){ return x.type_contrat !== 'Externe'; })[0];
+      var sA = _rhSoldeAnnuel(ex);
+      var rest = sA.acquis - sA.pris;
+      var okLigne = h.indexOf(rhEmpLabel(ex)) !== -1 && h.indexOf('>' + rest + '</td>') !== -1;
+      (okTitre && okCols && okLigne)
+        ? 'OK : colonnes acquis/d\u00e9j\u00e0 pris/reste + fiche, ' + rhEmpLabel(ex) + ' -> ' + rest + ' j'
+        : 'ECHEC titre=' + okTitre + ' cols=' + okCols + ' ligne=' + okLigne
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie Cong\u00e9s : le module ne garde que la partie paiement (suivi en jours retir\u00e9)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      try { renderCongeTable(false); } catch (e) {}
+      var host = document.getElementById('conge-records-list');
+      var h = host ? host.innerHTML : '';
+      var okPaiement = h.indexOf('addCongePaiementsMulti') !== -1 && h.indexOf('conge-q-emp') !== -1;
+      var noSuivi = h.indexOf('Suivi des cong\u00e9s en jours') === -1 && h.indexOf('conge-suivi-jours') === -1 && h.indexOf('Planifier') === -1 && h.indexOf('Imprimer \u00e9tat') === -1;
+      (okPaiement && noSuivi)
+        ? 'OK : formulaire allocation pay\u00e9e present, suivi en jours retir\u00e9'
+        : 'ECHEC paiement=' + okPaiement + ' suiviEncore=' + !noSuivi
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie Acomptes : validation persistante (survit au pull cloud) et impact sur la d\u00e9duction',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var mois = '2026-11';
+      var list = getAPList();
+      list.push({ id: 'apPers', type: 'acompte', employee_id: 'zzz', employeId: 'zzz', employeNom: 'Persist', montant: 5000, moisDeduction: mois, date: mois + '-05', statut: 'en_cours' });
+      setAPList(list);
+      var av0 = getAPForMonth('zzz', mois).acomptes;
+      _payeSetAcomptesValide(['apPers']);
+      var av1 = getAPForMonth('zzz', mois).acomptes;
+      var clean = getAPList().map(function(a){ var x = {}; for (var k in a) { if (a.hasOwnProperty(k) && k !== 'valide' && k !== 'valideLe') x[k] = a[k]; } return x; });
+      DB.setMain('mdb_acomptesPrets', clean);
+      var av2 = getAPForMonth('zzz', mois).acomptes;
+      var okPers = false, okRaw = false;
+      getAPList().forEach(function(a){ if (a.id === 'apPers') okPers = a.valide === true; });
+      var raw = payeArr('mdb_acomptesPrets').filter(function(a){ return a && a.id === 'apPers'; })[0];
+      okRaw = raw && raw.valide === true;
+      _payeSetNonValide(['apPers']);
+      var av3 = getAPForMonth('zzz', mois).acomptes;
+      (av0 === 0 && av1 === 5000 && av2 === 5000 && okPers && av3 === 0)
+        ? 'OK : 0 avant, ' + av1 + ' apres validation, ' + av2 + ' apres pull cloud (re-applique), devalide -> ' + av3 + ' (cloud sans valide : ' + okRaw + ')'
+        : 'ECHEC avant=' + av0 + ' valide=' + av1 + ' apresPull=' + av2 + ' persiste=' + okPers + ' devalide=' + av3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
