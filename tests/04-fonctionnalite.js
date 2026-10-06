@@ -2054,6 +2054,40 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie : rubriques kilometrique et outillage pre-creees (0, non affectees, sans doublon ni resurrection)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var r1 = primesFonctionDefautFusion([], []);
+      var r2 = primesFonctionDefautFusion(r1.liste, []);
+      var existant = [{ id: 'x1', type: 'ind_kilometrique', label: 'Deplacement', num: '38', montant: 5000, employes: ['e1'] }];
+      var r3 = primesFonctionDefautFusion(existant, []);
+      var r4 = primesFonctionDefautFusion([], ['prime_kilometrique_def']);
+      var km1 = null, ou1 = null;
+      r1.liste.forEach(function(s) { if (s.type === 'ind_kilometrique') km1 = s; if (s.type === 'ind_outillage') ou1 = s; });
+      var ok1 = r1.ajoute === 2 && km1 && ou1 && km1.montant === 0 && (km1.employes || []).length === 0 && km1.num === '38' && ou1.num === '39';
+      var ok2 = r2.ajoute === 0 && r2.liste.length === 2;
+      var ok3 = r3.ajoute === 1 && r3.liste.length === 2 && r3.liste[0].montant === 5000;
+      var kif = true;
+      r4.liste.forEach(function(s) { if (s.type === 'ind_kilometrique') kif = false; });
+      var ok4 = r4.ajoute === 1 && kif;
+      (ok1 && ok2 && ok3 && ok4) ? 'OK : creation, idempotence, existant garde, supprime non ressuscite' : 'ECHEC ' + JSON.stringify([r1.ajoute, r2.ajoute, r3.ajoute, r4.ajoute])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie : kilometrique et outillage ouvrent droit aux 10 pourcent',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var r = calcIndSpecExo([{ type: 'ind_kilometrique', montant: 20000 }, { type: 'ind_outillage', montant: 15000 }], 635478);
+      (r.total === 35000 && r.exo === 35000)
+        ? 'OK : 35000 qualifies sous plafond'
+        : 'ECHEC ' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
