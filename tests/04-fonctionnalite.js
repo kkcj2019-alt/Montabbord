@@ -1972,6 +1972,61 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Inventaire : le theorique des pointes decline paquets et cartons',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180 }]);
+      var eq = acEquivTexte(1600, 'P5', '');
+      var eqOk = eq.indexOf('paquet') !== -1 && eq.indexOf('carton') !== -1 && eq.indexOf('pointes') !== -1;
+      window._invType = 'consum';
+      launchInventory();
+      var h = document.getElementById('invContent').innerHTML || '';
+      (eqOk && h.indexOf(eq) !== -1)
+        ? 'OK : theorique avec equivalence (' + eq + ')'
+        : 'ECHEC eq=' + eq + ' present=' + (h.indexOf(eq) !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : le compte saisit devient le solde (fiches en double comprises)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [
+        { id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 100, cond: 180 },
+        { id: 'c2', code: 'P5', designation: 'POINTE5', type: 'POINTE', quantite: 1500, cond: 180 }
+      ]);
+      window._invItems = [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 1600, type: 'POINTE' }];
+      var _origGet = document.getElementById;
+      document.getElementById = function(id) { if (id && id.indexOf('inv_real_') === 0) return null; return _origGet(id); };
+      document.getElementById('u_P5').value = '89';
+      document.getElementById('u_P5').parentNode = { querySelector: function() { return { value: 'paquet' }; } };
+      window.confirm2 = function() { return true; };
+      try { saveInventory('2026-09'); } catch (e) {}
+      document.getElementById = _origGet;
+      var total = 0;
+      getStockConsum().forEach(function(s) { if (String(s.code || '').toUpperCase() === 'P5') total += parseFloat(s.quantite) || 0; });
+      (total === 16020) ? 'OK : 2 fiches (100+1500) + compte 16020 -> solde 16020' : 'ECHEC solde=' + total
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : le tableau de comptage a son bouton Imprimer',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180 }]);
+      window._invType = 'consum';
+      launchInventory();
+      var h = document.getElementById('invContent').innerHTML || '';
+      (h.indexOf('printInventory()') !== -1 && h.indexOf('Enregistrer') !== -1)
+        ? 'OK : Imprimer + Enregistrer sur le comptage'
+        : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat de pointes : on saisit un PRIX PAR CARTON ---------- */
   r.push({
     nom: 'Achat pointes : 2 cartons a 45 000 F donnent bien 90 000 F',
