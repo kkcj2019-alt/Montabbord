@@ -24707,6 +24707,30 @@ function congeEligible(emp, refDate) {
   return { ok: true, motif: "éligible" };
 }
 
+/* Numero unique du conge : CONG-AAAA-NNN en sequence annuelle. */
+function congeNumero(dateRef) {
+  var an = String(dateRef || today()).slice(0, 4) || new Date().getFullYear();
+  var max = 0;
+  getCongesJours().forEach(function (c) {
+    var m = String((c && c.numero) || '').match(new RegExp('^CONG-' + an + '-(\\d+)$'));
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  var seq = String(max + 1);
+  while (seq.length < 3) seq = '0' + seq;
+  return 'CONG-' + an + '-' + seq;
+}
+
+/* Nom lisible d'un employe par son id */
+function congeNomEmploye(id) {
+  var pers = getPersonnel() || [];
+  for (var i = 0; i < pers.length; i++) {
+    if (String(pers[i].id) === String(id)) {
+      return (((pers[i].nom || '') + ' ' + (pers[i].prenoms || '')).trim() || pers[i].matricule || id);
+    }
+  }
+  return String(id || '-');
+}
+
 /* Ajoute N jours calendaires a une date ISO */
 function congeAjouterJours(iso, n) {
   try {
@@ -24794,7 +24818,14 @@ function congePlanRendreListe() {
     h += '<label style="display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-bottom:1px solid #f1f5f9;cursor:pointer;font-size:.82rem">';
     h += '<input type="checkbox" class="congePlanCb" value="' + p.id + '" onchange="congePlanCompter()">';
     h += '<span style="flex:1">' + escH(nom) + (elig.ok ? '' : ' <span style="font-size:.62rem;color:#b91c1c">(' + elig.motif + ')</span>') + '</span>';
-    h += '<select class="congePlanType" data-id="' + p.id + '" style="font-size:.72rem;padding:2px 4px;border:1px solid #cbd5e1;border-radius:5px"><option value="">Aucun</option><option value="Annuel">Annuel</option><option value="Maladie">Maladie</option><option value="Maternité">Maternité</option><option value="Sans solde">Sans solde</option></select>';
+    h += '<select class="congePlanType" data-id="' + p.id + '" title="Type de congé" style="font-size:.72rem;padding:2px 4px;border:1px solid #cbd5e1;border-radius:5px;max-width:92px"><option value="">Aucun</option><option value="Annuel">Annuel</option><option value="Maladie">Maladie</option><option value="Maternité">Maternité</option><option value="Sans solde">Sans solde</option></select>';
+    h += '<select class="congePlanRemp" data-id="' + p.id + '" title="Remplaçant pendant le congé (celui qui remplace X quand X s\u2019en va)" style="font-size:.72rem;padding:2px 4px;border:1px solid #7c3aed;border-radius:5px;max-width:120px;background:#faf5ff"><option value="">Remplaçant…</option>';
+    (window._congePlanPers || []).forEach(function (q) {
+      if (String(q.id) === String(p.id)) return;
+      var qn = (((q.nom || '') + ' ' + (q.prenoms || '')).trim() || q.matricule || q.id);
+      h += '<option value="' + q.id + '">' + escH(qn) + '</option>';
+    });
+    h += '</select>';
     h += '</label>';
   });
   box.innerHTML = h || '<div style="padding:.6rem;font-size:.78rem;color:#94a3b8">Aucun employé dans cet onglet.</div>';
@@ -24842,12 +24873,18 @@ function confirmerPlanificationConge() {
   var pro = congeAjouterMois(ret, 12);
   var types = {};
   document.querySelectorAll('.congePlanType').forEach(function (s) { types[s.getAttribute('data-id')] = s.value; });
+  var remps = {};
+  document.querySelectorAll('.congePlanRemp').forEach(function (s) { remps[s.getAttribute('data-id')] = s.value; });
   var list = getCongesJours();
   var n = 0;
   for (var i = 0; i < cbs.length; i++) {
+    var _rid = remps[cbs[i].value] || '';
     list.push({
       id: 'cj' + Date.now() + '_' + i,
+      numero: congeNumero(dep),
       employee_id: cbs[i].value,
+      remplacant_id: _rid,
+      remplacant_nom: _rid ? congeNomEmploye(_rid) : '',
       dateDepart: dep,
       duree: dur,
       dateRetour: ret,
@@ -24911,8 +24948,48 @@ function renderCongeSuivi() {
     h += '<td style="text-align:center;white-space:nowrap"><button onclick="printCongeIndividuel(\'' + l.emp.id + '\')" title="État individuel à montrer au travailleur" style="border:1px solid #cbd5e1;background:#fff;border-radius:5px;font-size:.66rem;padding:2px 7px;cursor:pointer">🧾 Fiche</button></td>';
     h += '</tr>';
   });
-  h += '</tbody></table></div></div>';
+  h += '</tbody></table></div>';
+  /* Conges planifies : chacun son numero, son remplacant, son annulation */
+  var plans = getCongesJours().slice().sort(function (a, b) { return String(a.dateDepart || '').localeCompare(String(b.dateDepart || '')); });
+  h += '<div style="font-size:.8rem;font-weight:800;margin:.7rem 0 .3rem">Congés planifiés (' + plans.length + ')</div>';
+  if (!plans.length) {
+    h += '<div style="font-size:.74rem;color:var(--dim)">Aucun congé planifié. Utilisez « 📅 Planifier » pour planifier seul ou en groupe.</div>';
+  } else {
+    h += '<div style="overflow-x:auto"><table style="font-size:.72rem;width:100%"><thead><tr><th>N°</th><th>Employé</th><th>Type</th><th>Départ</th><th>Durée (j)</th><th>Retour prévu</th><th>Remplaçant</th><th>Statut</th><th></th></tr></thead><tbody>';
+    plans.forEach(function (c) {
+      var ann = String(c.statut || '') === 'annulé';
+      h += '<tr style="border-bottom:1px solid #f1f5f9;' + (ann ? 'opacity:.55' : '') + '">';
+      h += '<td style="font-weight:800">' + escH(c.numero || '-') + '</td>';
+      h += '<td>' + escH(congeNomEmploye(c.employee_id)) + '</td>';
+      h += '<td>' + escH(c.type || 'Annuel') + '</td>';
+      h += '<td>' + escH(c.dateDepart ? fmtDate(c.dateDepart) : '-') + '</td>';
+      h += '<td style="text-align:right">' + (c.duree || 0) + '</td>';
+      h += '<td>' + escH(c.dateRetour ? fmtDate(c.dateRetour) : '-') + '</td>';
+      h += '<td>' + (c.remplacant_nom ? escH(c.remplacant_nom) : '<span style="color:#94a3b8">—</span>') + '</td>';
+      h += '<td>' + escH(c.statut || '') + '</td>';
+      h += '<td style="text-align:center;white-space:nowrap">' +
+        '<button onclick="printCongeIndividuel(\'' + c.employee_id + '\')" title="Fiche individuelle" style="border:1px solid #cbd5e1;background:#fff;border-radius:5px;font-size:.66rem;padding:2px 7px;cursor:pointer">🧾</button> ' +
+        (ann ? '' : '<button onclick="annulerCongePlanifie(\'' + c.id + '\')" title="Annuler ce congé" style="border:1px solid #fecaca;background:#fff;border-radius:5px;font-size:.66rem;padding:2px 7px;cursor:pointer;color:#b91c1c">✕</button>') + '</td>';
+      h += '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '</div>';
   host.innerHTML = h;
+}
+
+/* Annule un conge planifie : il ne compte plus dans les jours pris. */
+function annulerCongePlanifie(id) {
+  var list = getCongesJours();
+  var c = null;
+  for (var i = 0; i < list.length; i++) { if (String(list[i].id) === String(id)) { c = list[i]; break; } }
+  if (!c) return;
+  if (!confirm2('Annuler le congé ' + (c.numero || '') + ' de ' + congeNomEmploye(c.employee_id) + ' ?')) return;
+  c.statut = 'annulé';
+  setCongesJours(list);
+  toast('Congé annulé');
+  try { renderCongeSuivi(); } catch (e) {}
+  try { renderCongeTable(sessionStorage.getItem('congeShowAll') === '1'); } catch (e2) {}
 }
 
 /* =====================================================================
@@ -24960,9 +25037,9 @@ function printCongeIndividuel(empId) {
   if (!lignes.length) {
     w.document.write('<p>Aucun congé planifié pour ce travailleur.</p>');
   } else {
-    w.document.write('<table><thead><tr><th>N°</th><th>Type</th><th>Départ</th><th>Durée (j)</th><th>Retour prévu</th><th>Prochain congé</th><th>Statut</th></tr></thead><tbody>');
+    w.document.write('<table><thead><tr><th>N° congé</th><th>Type</th><th>Départ</th><th>Durée (j)</th><th>Retour prévu</th><th>Remplaçant</th><th>Statut</th></tr></thead><tbody>');
     lignes.forEach(function (c, i) {
-      w.document.write('<tr><td>' + (i + 1) + '</td><td>' + escH(c.type || 'Annuel') + '</td><td>' + escH(c.dateDepart ? fmtDate(c.dateDepart) : '-') + '</td><td class="num">' + (c.duree || 0) + '</td><td>' + escH(c.dateRetour ? fmtDate(c.dateRetour) : '-') + '</td><td>' + escH(c.prochainConge ? fmtDate(c.prochainConge) : '-') + '</td><td>' + escH(c.statut || '') + '</td></tr>');
+      w.document.write('<tr><td><strong>' + escH(c.numero || ('#' + (i + 1))) + '</strong></td><td>' + escH(c.type || 'Annuel') + '</td><td>' + escH(c.dateDepart ? fmtDate(c.dateDepart) : '-') + '</td><td class="num">' + (c.duree || 0) + '</td><td>' + escH(c.dateRetour ? fmtDate(c.dateRetour) : '-') + '</td><td>' + escH(c.remplacant_nom || '-') + '</td><td>' + escH(c.statut || '') + '</td></tr>');
     });
     w.document.write('</tbody></table>');
   }
