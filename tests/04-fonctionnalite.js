@@ -4702,7 +4702,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Paie Nature : solde salaire distinct de l\u2019avance (état + journal 422100)',
+    nom: 'Paie Nature : solde salaire distinct de l\u2019avance (état + journal 421)',
     app: 'paye.html', store: storeRealiste,
     code: `
       var opS = { id: 'opSl', numeroPiece: 'KS-1', code: 'SOLDE_SALAIRE', apType: 'solde', caisseId: 'c1', montant: 400000, date: '2026-10-10' };
@@ -4728,14 +4728,14 @@ r.push({
       var maligne = L.length === 3;
       var sumAp = apNatureLigne({}, { apType: 'solde' }) === 'solde';
       (sum === exp && sum === 550000 && okNat && okCompte && maligne && sumAp)
-        ? 'OK : sum=' + sum + ' (=422100 ' + exp + '), solde->' + nat['KS-1'] + ' avance->' + nat['KC-2'] + ' pret->' + nat['KP-3'] + ' compte=' + L[0].compte
+        ? 'OK : sum=' + sum + ' (=421 ' + exp + '), solde->' + nat['KS-1'] + ' avance->' + nat['KC-2'] + ' pret->' + nat['KP-3'] + ' compte=' + L[0].compte
         : 'ECHEC sum=' + sum + ' exp=' + exp + ' nat=' + JSON.stringify(nat) + ' compte=' + (L.length ? L[0].compte : 'vide') + ' maligne=' + maligne + ' sumAp=' + sumAp
     `,
     attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Paie : sous-lignes 422100 s\u00e9par\u00e9es (Acomptes/Pr\u00eats vs Soldes) = cr\u00e9dit total',
+    nom: 'Paie : sous-lignes 421 s\u00e9par\u00e9es (421100/421200/421300) = cr\u00e9dit total',
     app: 'paye.html', store: storeRealiste,
     code: `
       var opS = { id: 'opSl2', numeroPiece: 'KS-11', code: 'SOLDE_SALAIRE', apType: 'solde', caisseId: 'c1', montant: 200000, date: '2026-10-10' };
@@ -4755,8 +4755,40 @@ r.push({
       var soldes = 0, autres = 0;
       L.forEach(function (ln) { if (ln.nature === 'solde') soldes += ln.montant; else autres += ln.montant; });
       (soldes + autres === totalAp && soldes === 200000 && autres === 50000)
-        ? 'OK : total=' + totalAp + ' => 422100 "Avances & Acomptes (+pr\\u00eats)"=' + autres + ', 422100 "Soldes"=' + soldes
+        ? 'OK : total=' + totalAp + ' => 421200 Acomptes/Pr\u00eats=' + autres + ', 421300 Soldes=' + soldes
         : 'ECHEC total=' + totalAp + ' soldes=' + soldes + ' autres=' + autres
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie Ventilation : squelette comptable \u00e9quilibr\u00e9 au franc (661100/421xxx/422001 + patronal)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ops = payeArr('mdb_operationsCaisse');
+      ops.push({ id: 'opV1', numeroPiece: 'KV-1', code: 'ACOMPTE', caisseId: 'c1', montant: 30000, date: '2026-10-05' });
+      DB.setMain('mdb_operationsCaisse', ops);
+      var list = payeArr('mdb_acomptesPrets');
+      list.push({ id: 'acV1', employee_id: 'e1', employeNom: 'Diallo', type: 'acompte', montant: 30000, moisDeduction: '2026-10', date: '2026-10-05', caisseOpId: 'opV1', numeroPiece: 'KV-1', valide: true });
+      setAPList(list);
+      var v = ventilationPaie('2026-10');
+      var okEq = (v.totD1 === v.totC1) && (v.totD2 === v.totC2);
+      var okVent = (v.salNat + v.transp + v.avant === v.brut);
+      var l421 = v.l421.pr + v.l421.acNet + v.l421.soldes;
+      var ok421 = (l421 === v.apTotal);
+      var apChk = -1;
+      try {
+        var r1 = getAPForMonth('e1', '2026-10');
+        apChk = (r1.acomptes || 0) + (r1.prets || 0);
+      } catch (eX) {}
+      var okX = (v.apTotal === apChk && v.apTotal > 0);
+      var cpte1 = {}, cpte2 = {};
+      v.t1.forEach(function (e) { cpte1[e.ac] = true; });
+      v.t2.forEach(function (e) { cpte2[e.ac] = true; });
+      var okCptes = cpte1['661100'] && cpte1['663400'] && cpte1['431300'] && cpte1['431400'] && cpte1['447200'] && cpte1['421100'] && cpte1['421200'] && cpte1['421300'] && cpte1['422001'] && cpte2['664110'] && cpte2['664120'] && cpte2['664130'] && cpte2['641300'] && cpte2['664300'] && cpte2['431300'] && cpte2['431400'] && cpte2['447200'] && cpte2['447210'];
+      (okEq && okVent && ok421 && okX && okCptes)
+        ? 'OK : T1 ' + v.totD1 + '=' + v.totC1 + ', T2 ' + v.totD2 + '=' + v.totC2 + ', brut=' + v.brut + ' (661100 ' + v.salNat + ' + transp ' + v.transp + '), 421=' + l421 + ' (=paie ' + apChk + ')'
+        : 'ECHEC eq=' + okEq + ' vent=' + okVent + ' 421=' + ok421 + ' (' + l421 + ' vs apTotal ' + v.apTotal + ') x=' + okX + ' (paie ' + apChk + ') D1=' + v.totD1 + ' C1=' + v.totC1 + ' D2=' + v.totD2 + ' C2=' + v.totC2 + ' cptes=' + okCptes
     `,
     attenduPrefixe: 'OK'
   });

@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-169";
+      window.__APP_VERSION = "2026-10-06-170";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -4499,20 +4499,54 @@
             </button>
           </div>
           <div class="card" style="padding: 0; overflow-x: auto">
+            <h3
+              style="
+                padding: 12px 14px 0;
+                font-size: 0.85rem;
+                letter-spacing: 0.04em;
+              "
+            >
+              VENTILATION DES SALAIRES
+            </h3>
             <table>
               <thead>
                 <tr>
-                  <th>Compte</th>
-                  <th>Libellé Compte</th>
-                  <th>Libellé Écriture</th>
-                  <th style="text-align: right">Débit</th>
-                  <th style="text-align: right">Crédit</th>
+                  <th>N° CPTE</th>
+                  <th>INTITULES</th>
+                  <th>Écriture</th>
+                  <th style="text-align: right">DEBIT</th>
+                  <th style="text-align: right">CREDIT</th>
                 </tr>
               </thead>
               <tbody id="ec-tbody"></tbody>
               <tfoot id="ec-tfoot"></tfoot>
             </table>
           </div>
+          <div class="card" style="padding: 0; overflow-x: auto">
+            <h3
+              style="
+                padding: 12px 14px 0;
+                font-size: 0.85rem;
+                letter-spacing: 0.04em;
+              "
+            >
+              VENTILATION DES CHARGES SOCIALES (PATRONALES)
+            </h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>N° CPTE</th>
+                  <th>INTITULES</th>
+                  <th>Écriture</th>
+                  <th style="text-align: right">DEBIT</th>
+                  <th style="text-align: right">CREDIT</th>
+                </tr>
+              </thead>
+              <tbody id="ec2-tbody"></tbody>
+              <tfoot id="ec2-tfoot"></tfoot>
+            </table>
+          </div>
+          <div id="ec-note-ventilation" style="margin-top: 8px"></div>
         </section>
 
         <!-- ============ STC & DEPARTS ============ -->
@@ -5733,7 +5767,7 @@ function apMoyenCompte(ap, op, caisses, banques) {
 }
 /* Détail des retenues acomptes/prêts du mois pour le journal : EXACTEMENT les
    mêmes règles que getAPForMonth (mêmes montants, même total), + nature +
-   pièce + moyen. Testé avec garde-fous (la somme doit égaler le 422100). */
+   pièce + moyen. Testé avec garde-fous (la somme doit égaler le 421). */
 function lignesDetailAp(records, opsById, caisses, banques, mois) {
   var lignes = [];
   (records || []).forEach(function (ra) {
@@ -22669,6 +22703,12 @@ function ptMontPrintEtat(mois, tab) {
             ricf: ricf,
             conge: congeT,
             gratif: gratifT,
+            /* Champs memo pour la ventilation comptable (squelette) : les
+               avantages en nature gonflent le brut mais ne sont pas une
+               dette (pas de credit) ; l'arrondi non plus. Le journal les
+               neutralise pour rester equilibre au franc pres. */
+            avantages: totalAvantages,
+            arrondi: arrondi,
             congeRec: {
               periode: getCongeRecord(emp.id, mois).periode || "",
               commentaire: getCongeRecord(emp.id, mois).commentaire || "",
@@ -26584,158 +26624,248 @@ function printCongeIndividuel(empId) {
       }
 
       /* ==================== ECRITURES COMPTABLES (OHADA) ==================== */
+      /* Ventilation comptable au squelette du comptable (2 tableaux) :
+         Tableau 1 « VENTILATION DES SALAIRES » : brut hors transport en
+         661100, transport en 663400, retenues en 431300/431400/447200,
+         421100 (prêts) / 421200 (acomptes) / 421300 (soldes), net en 422001.
+         Tableau 2 « CHARGES PATRONALES » : 664110 (AF = Prest.Fam. +
+         Maternité, même branche CNPS) / 664120 (AT) / 664130 (retraite) /
+         641300 (= CE + taxe apprentissage + FDFP 0,4 % + FDFP 0,6 %) /
+         664300 CMU, contreparties 431300/431400/447200/447210.
+         Le patronal est repris LIGNE PAR LIGNE des bulletins (retPat des
+         items 61/62/63/64/66/67/68/69/72) : le journal égale la somme des
+         bulletins (l'ancien 645100 utilisait une formule figée différente).
+         Équilibre garanti au franc près : 661100 et 422001 sont calculés en
+         résiduel (comme sur l'Excel : net = total débit − autres crédits).
+         Les avantages en nature gonflent le brut mais ne sont une dette pour
+         personne : neutralisés des deux côtés (mémo hors balance). */
+      function ventilationPaie(mois) {
+        var R = function (x) {
+          return Math.round(parseFloat(x) || 0);
+        };
+        var acc = {
+          brut: 0, transp: 0, avant: 0, cnpsS: 0, its: 0, cmuS: 0,
+          ac: 0, pr: 0, assur: 0, arr: 0, repPos: 0, repNeg: 0, net: 0,
+          retraite: 0, at: 0, pf: 0, mat: 0, ce: 0, taxApp: 0,
+          fdfpApp: 0, fdfpForm: 0, cmuP: 0,
+        };
+        var personnel = [];
+        try {
+          personnel = getPersonnel().filter(function (p) {
+            return empVisibleMois(p, mois) && p.en_paie !== false;
+          });
+        } catch (eP) {}
+        personnel.forEach(function (emp) {
+          var c = null;
+          try {
+            c = calculatePayroll(emp, mois);
+          } catch (eC) {}
+          if (!c || !c.totals) return;
+          var tt = c.totals;
+          acc.brut += tt.brut || 0;
+          acc.transp += tt.transport || 0;
+          acc.avant += tt.avantages || 0;
+          acc.cnpsS += tt.cnps || 0;
+          acc.its += tt.its || 0;
+          acc.cmuS += tt.cmu || 0;
+          acc.ac += tt.acomptes || 0;
+          acc.pr += tt.prets || 0;
+          try {
+            acc.assur += parseFloat(emp.assurance_mensuelle) || 0;
+          } catch (eA) {}
+          acc.arr += tt.arrondi || 0;
+          var ru = tt.report || 0;
+          if (ru > 0) acc.repPos += ru;
+          else acc.repNeg += -ru;
+          acc.net += tt.net || 0;
+          (c.items || []).forEach(function (it) {
+            if (!it || !it.n) return;
+            var v = it.retPat || 0;
+            if (it.n === "61") acc.retraite += v;
+            else if (it.n === "62") acc.at += v;
+            else if (it.n === "63") acc.pf += v;
+            else if (it.n === "64") acc.mat += v;
+            else if (it.n === "66") acc.taxApp += v;
+            else if (it.n === "67") acc.fdfpApp += v;
+            else if (it.n === "68") acc.fdfpForm += v;
+            else if (it.n === "69") acc.ce += v;
+            else if (it.n === "72") acc.cmuP += v;
+          });
+        });
+        /* Part des SOLDES dans les retenues (mêmes règles que
+           getAPForMonth) : 421300 à part, 421200 = acomptes hors soldes. */
+        var soldesRaw = 0;
+        try {
+          var _vRecs = getAPList();
+          var _vOpsById = {};
+          (payeArr("mdb_operationsCaisse") || []).forEach(function (_o) {
+            if (_o && _o.id) _vOpsById[_o.id] = _o;
+          });
+          var _vCaisses =
+            typeof psalCaisses === "function" ? psalCaisses() : [];
+          var _vBanques =
+            typeof psalBanques === "function" ? psalBanques() : [];
+          lignesDetailAp(
+            _vRecs,
+            _vOpsById,
+            _vCaisses,
+            _vBanques,
+            mois,
+          ).forEach(function (_ln) {
+            if (_ln && _ln.nature === "solde") soldesRaw += _ln.montant || 0;
+          });
+        } catch (eV) {}
+        var brut = R(acc.brut),
+          transp = R(acc.transp),
+          avant = R(acc.avant);
+        var salNat = brut - transp - avant;
+        var cnpsS = R(acc.cnpsS),
+          its = R(acc.its),
+          cmuS = R(acc.cmuS);
+        var ac = R(acc.ac),
+          pr = R(acc.pr),
+          assur = R(acc.assur);
+        var arr = R(acc.arr),
+          repPos = R(acc.repPos),
+          repNeg = R(acc.repNeg);
+        var retraite = R(acc.retraite),
+          at = R(acc.at),
+          af = R(acc.pf) + R(acc.mat);
+        var ce = R(acc.ce),
+          taxApp = R(acc.taxApp),
+          fdfpApp = R(acc.fdfpApp),
+          fdfpForm = R(acc.fdfpForm),
+          cmuP = R(acc.cmuP);
+        var soldes = Math.min(R(soldesRaw), ac);
+        var acNet = ac - soldes;
+        var impots = ce + taxApp + fdfpApp + fdfpForm;
+        var cnpsPat = retraite + at + af;
+        var D = function (cpte, lib, m) {
+          return { ac: cpte, label: lib, desc: "Paie " + mois, deb: m, cr: 0 };
+        };
+        var C = function (cpte, lib, m) {
+          return { ac: cpte, label: lib, desc: "Paie " + mois, deb: 0, cr: m };
+        };
+        var t1 = [
+          D("661100", "Salaires personnel national", salNat),
+          D("661200", "Gratifications personnel national", 0),
+          D("661300", "Congés payés personnel national", 0),
+          D("661400", "Indemnités préavis licenciement pers. national", 0),
+          D("662100", "Salaires personnel non national Africains", 0),
+          D("662200", "Gratifications personnel non national", 0),
+          D("663400", "Transports du personnel", transp),
+          D("663800", "Autres indemnités et avantages divers", 0),
+          D("664300", "CMU/PART SALARIAL", cmuS),
+          D("658800", "Arrondis", arr < 0 ? -arr : 0),
+          D("421100", "Prêt au personnel", 0),
+          D("421200", "Acomptes au personnel", 0),
+        ];
+        if (repPos > 0)
+          t1.push(D("471100", "Report mois précédent (dû au personnel)", repPos));
+        t1.push(C("758800", "Arrondis", arr > 0 ? arr : 0));
+        t1.push(C("431300", "CNPS", cnpsS));
+        t1.push(C("431400", "CMU", cmuS));
+        t1.push(C("447200", "Impôts sur salaires", its));
+        if (assur > 0)
+          t1.push(C("438100", "Organismes Sociaux, Assurances", assur));
+        t1.push(C("421100", "Prêt au personnel", pr));
+        t1.push(C("421200", "Acomptes au personnel", acNet));
+        t1.push(C("421300", "Soldes de salaire", soldes));
+        if (repNeg > 0)
+          t1.push(C("471100", "Report mois précédent (dû par le personnel)", repNeg));
+        var totD1 = 0,
+          totC1sansNet = 0;
+        t1.forEach(function (e) {
+          totD1 += e.deb;
+          totC1sansNet += e.cr;
+        });
+        /* 422001 en résiduel, comme sur l'Excel (net = débit − crédits). */
+        t1.push(C("422001", "Rémunérations dues", totD1 - totC1sansNet));
+        var t2 = [
+          D("664110", "AF personnel", af),
+          D("664120", "AT personnel", at),
+          D("664130", "Retraite personnel", retraite),
+          D("641300", "Impôts sur salaires pers.", impots),
+          D("664300", "CMU/PART PATRONAL", cmuP),
+          C("431300", "CNPS PATRONAL", cnpsPat),
+          C("431400", "CMU", cmuP),
+          C("447200", "Impôts sur salaires", ce + taxApp + fdfpApp),
+          C("447210", "FDFP 0,6% annuels", fdfpForm),
+        ];
+        var totD2 = 0,
+          totC2 = 0;
+        t2.forEach(function (e) {
+          totD2 += e.deb;
+          totC2 += e.cr;
+        });
+        return {
+          mois: mois,
+          t1: t1,
+          t2: t2,
+          totD1: totD1,
+          totC1: totD1,
+          totD2: totD2,
+          totC2: totC2,
+          brut: brut,
+          transp: transp,
+          avant: avant,
+          salNat: salNat,
+          apTotal: ac + pr,
+          l421: { pr: pr, acNet: acNet, soldes: soldes },
+          netCalcule: R(acc.net),
+        };
+      }
       function loadEcritures() {
         var mois = document.getElementById("ec-mois").value;
         if (!mois) {
           mois = new Date().toISOString().slice(0, 7);
           document.getElementById("ec-mois").value = mois;
         }
-        var personnel = getPersonnel().filter(function (p) {
-          return empVisibleMois(p, mois) && p.en_paie !== false;
-        });
         var tbody = document.getElementById("ec-tbody"),
-          tfoot = document.getElementById("ec-tfoot");
+          tfoot = document.getElementById("ec-tfoot"),
+          tbody2 = document.getElementById("ec2-tbody"),
+          tfoot2 = document.getElementById("ec2-tfoot"),
+          noteBox = document.getElementById("ec-note-ventilation");
         if (!tfoot) return;
         tbody.innerHTML = "";
-        var t = {
-          brut: 0,
-          cnps_p: 0,
-          cmu_p: 0,
-          its: 0,
-          cnps_s: 0,
-          cmu_s: 0,
-          assur: 0,
-          ap: 0,
-          net: 0,
-        };
-        personnel.forEach(function (emp) {
-          var c = calculatePayroll(emp, mois);
-          var lim = getLimits();
-          var bRet = Math.min(c.totals.brutSocial, lim.retraite),
-            bAt = Math.min(c.totals.brutSocial, lim.atpf);
-          var cnpsPat =
-            Math.floor(bRet * 0.077) +
-            Math.floor(bAt * 0.0575) +
-            Math.floor(bAt * 0.03);
-          var cmuCount =
-            1 +
-            (emp.situation_matrimoniale === "marie" ? 1 : 0) +
-            ((parseInt(emp.enfants) || 0) +
-              (parseInt(emp.enfants_infirmes) || 0));
-          var cmuS = cmuCount * 500,
-            cmuP = cmuCount * 500;
-          var assur = parseFloat(emp.assurance_mensuelle) || 0;
-          t.brut += c.totals.brut;
-          t.cnps_p += cnpsPat;
-          t.cmu_p += cmuP;
-          t.its += c.totals.its;
-          t.cnps_s += c.totals.cnps;
-          t.cmu_s += cmuS;
-          t.assur += assur;
-          t.ap += c.totals.acomptes + c.totals.prets;
-          t.net += c.totals.net;
-        });
-        /* Séparation comptable : les SOLDES de salaire (pièces apType solde /
-           codes SOLDE_*) sont présentés à part des avances & prêts. Le détail
-           passe par les mêmes règles que getAPForMonth, donc la somme des deux
-           sous-lignes 422100 reste EXACTEMENT le total des retenues (t.ap). */
-        var tApSoldes = 0;
+        /* Ventilation au squelette du comptable (fonction pure testée). */
+        var v = ventilationPaie(mois);
+        ecRendreTableau(tbody, tfoot, v.t1, v.totD1, v.totC1);
+        if (tbody2 && tfoot2)
+          ecRendreTableau(tbody2, tfoot2, v.t2, v.totD2, v.totC2);
+        if (noteBox) {
+          var _notes = [];
+          if (v.avant > 0)
+            _notes.push(
+              "Brut monétaire ventilé (hors avantages en nature non monétaires : " +
+                fmt(v.avant) +
+                " — rappel bulletin, hors balance).",
+            );
+          var _a471 = false;
+          try {
+            _a471 = v.t1.some(function (e) {
+              return e.ac === "471100";
+            });
+          } catch (e471) {}
+          if (_a471)
+            _notes.push(
+              "Report mois précédent isolé en 471100 (ni salaire ni retenue).",
+            );
+          noteBox.innerHTML = _notes.length
+            ? '<div style="font-size:.75rem;color:var(--dim)">' +
+              _notes.join("<br>") +
+              "</div>"
+            : "";
+        }
+        /* Détail dépliable des retenues 421 (prêts/acomptes/soldes) : nature,
+           N° pièce, moyen et compte, pièce par pièce. Hors export CSV. */
         try {
-          var _detRecs = getAPList();
-          var _detOpsById = {};
-          (payeArr("mdb_operationsCaisse") || []).forEach(function (_o) {
-            if (_o && _o.id) _detOpsById[_o.id] = _o;
-          });
-          var _detCaisses =
-            typeof psalCaisses === "function" ? psalCaisses() : [];
-          var _detBanques =
-            typeof psalBanques === "function" ? psalBanques() : [];
-          var _detLignes = lignesDetailAp(
-            _detRecs,
-            _detOpsById,
-            _detCaisses,
-            _detBanques,
-            mois,
-          );
-          _detLignes.forEach(function (_ln) {
-            if (_ln && _ln.nature === "solde") tApSoldes += _ln.montant || 0;
-          });
+          renderDetailApEcritures(mois, v.apTotal);
         } catch (eDet) {}
-        tApSoldes = Math.min(tApSoldes, t.ap);
-        var tApAutres = t.ap - tApSoldes;
-        var entries = [
-          {
-            ac: "641100",
-            label: "Rémunérations du personnel",
-            desc: "Salaires + Primes " + mois,
-            deb: t.brut,
-            cr: 0,
-          },
-          {
-            ac: "645100",
-            label: "Charges sociales patronales (CNPS)",
-            desc: "Part Patronale CNPS " + mois,
-            deb: t.cnps_p,
-            cr: 0,
-          },
-          {
-            ac: "645800",
-            label: "Charges sociales patronales (CMU)",
-            desc: "Part Patronale CMU " + mois,
-            deb: t.cmu_p,
-            cr: 0,
-          },
-          {
-            ac: "447110",
-            label: "État, Impôts sur salaires",
-            desc: "ITS retenus " + mois,
-            deb: 0,
-            cr: t.its,
-          },
-          {
-            ac: "431100",
-            label: "CNPS, Organismes Sociaux",
-            desc: "Cotisations CNPS (S+P) " + mois,
-            deb: 0,
-            cr: t.cnps_s + t.cnps_p,
-          },
-          {
-            ac: "431200",
-            label: "CMU, Organisme CMU",
-            desc: "Cotisations CMU (S+P) " + mois,
-            deb: 0,
-            cr: t.cmu_s + t.cmu_p,
-          },
-          {
-            ac: "438100",
-            label: "Organismes Sociaux, Assurances",
-            desc: "Retenues Assurances " + mois,
-            deb: 0,
-            cr: t.assur,
-          },
-          {
-            ac: "422100",
-            label: "Personnel, Avances & Acomptes (+ prêts)",
-            desc: "Acomptes & prêts " + mois,
-            deb: 0,
-            cr: tApAutres,
-          },
-          {
-            ac: "422100",
-            label: "Personnel, Soldes de salaire",
-            desc: "Soldes de salaire " + mois,
-            deb: 0,
-            cr: tApSoldes,
-          },
-          {
-            ac: "421100",
-            label: "Personnel, Rémunérations dues",
-            desc: "Net à payer " + mois,
-            deb: 0,
-            cr: t.net,
-          },
-        ];
-        tbody.innerHTML = entries
+      }
+      /* Rendu d'un tableau de ventilation (lignes + totaux équilibrés). */
+      function ecRendreTableau(tbody, tfoot, lignes, totD, totC) {
+        tbody.innerHTML = lignes
           .map(function (e) {
             return (
               '<tr><td style="font-family:monospace;font-weight:700;color:var(--green)">' +
@@ -26745,34 +26875,27 @@ function printCongeIndividuel(empId) {
               '</td><td style="font-size:.72rem;color:var(--dim)">' +
               e.desc +
               '</td><td style="text-align:right;font-weight:700">' +
-              (e.deb > 0 ? fmt(e.deb) : "") +
+              (e.deb > 0 ? fmt(e.deb) : "-") +
               '</td><td style="text-align:right;font-weight:700;color:var(--danger)">' +
-              (e.cr > 0 ? fmt(e.cr) : "") +
+              (e.cr > 0 ? fmt(e.cr) : "-") +
               "</td></tr>"
             );
           })
           .join("");
-        var tDeb = entries.reduce(function (s, e) {
-          return s + e.deb;
-        }, 0);
-        var tCr = entries.reduce(function (s, e) {
-          return s + e.cr;
-        }, 0);
+        var ok = totD === totC;
         tfoot.innerHTML =
-          '<tr style="background:#f1f5f9;font-weight:800"><td colspan="3" style="text-align:right">TOTAUX ÉQUILIBRÉS</td><td style="text-align:right;color:var(--green)">' +
-          fmt(tDeb) +
+          '<tr style="background:#f1f5f9;font-weight:800"><td colspan="3" style="text-align:right">TOTAUX ' +
+          (ok ? "ÉQUILIBRÉS ✓" : "⚠ ÉCART " + fmt(totD - totC)) +
+          '</td><td style="text-align:right;color:var(--green)">' +
+          fmt(totD) +
           '</td><td style="text-align:right;color:var(--danger)">' +
-          fmt(tCr) +
+          fmt(totC) +
           "</td></tr>";
-        /* Détail dépliable des retenues 422100 : nature, N° pièce, moyen et
-           compte, pièce par pièce. Hors export CSV (tableau séparé). */
-        try {
-          renderDetailApEcritures(mois, t.ap);
-        } catch (eDet) {}
       }
-      /* Détail des lignes qui composent le 422100 : employé, nature (Solde /
-         Avance / Prêt), N° de pièce, moyen (caisse/banque + n° de compte),
-         montant. La somme fait le crédit du 422100. */
+      /* Détail des lignes qui composent les retenues 421 (421100 prêts,
+         421200 acomptes, 421300 soldes) : employé, nature (Solde / Avance /
+         Prêt), N° de pièce, moyen (caisse/banque + n° de compte), montant.
+         La somme fait le crédit 421100 + 421200 + 421300. */
       function renderDetailApEcritures(mois, totalAp) {
         var ancien = document.getElementById("ec-detail-ap");
         if (ancien && ancien.parentNode) ancien.parentNode.removeChild(ancien);
@@ -26823,7 +26946,7 @@ function printCongeIndividuel(empId) {
           return '<span class="badge badge-warning">Avance</span>';
         };
         var htm =
-          '<div id="ec-detail-ap" style="margin-top:10px"><button class="btn btn-sm btn-outline" onclick="var d=document.getElementById(\'ec-detail-ap-body\');if(d)d.style.display=(d.style.display===\'none\'?\'\':\'none\')" style="font-size:11px">Détail des retenues 422100 (' +
+          '<div id="ec-detail-ap" style="margin-top:10px"><button class="btn btn-sm btn-outline" onclick="var d=document.getElementById(\'ec-detail-ap-body\');if(d)d.style.display=(d.style.display===\'none\'?\'\':\'none\')" style="font-size:11px">Détail des retenues 421 (421100/421200/421300) (' +
           lignes.length +
           ' pièce(s))</button>';
         htm +=
@@ -26870,15 +26993,24 @@ function printCongeIndividuel(empId) {
       }
       function exportEcritures() {
         var rows = [["Compte", "Libellé", "Écriture", "Débit", "Crédit"]];
-        document
-          .querySelectorAll("#ec-tbody tr, #ec-tfoot tr")
-          .forEach(function (tr) {
+        var pushTable = function (tbSel, tfSel, titre) {
+          var lignes = document.querySelectorAll(tbSel + " tr, " + tfSel + " tr");
+          if (!lignes.length) return;
+          rows.push([titre]);
+          lignes.forEach(function (tr) {
             var row = [];
             tr.querySelectorAll("td").forEach(function (td) {
               row.push(td.innerText);
             });
             if (row.length) rows.push(row);
           });
+        };
+        pushTable("#ec-tbody", "#ec-tfoot", "VENTILATION DES SALAIRES");
+        pushTable(
+          "#ec2-tbody",
+          "#ec2-tfoot",
+          "VENTILATION DES CHARGES SOCIALES (PATRONALES)",
+        );
         var csv = rows
           .map(function (r) {
             return r.join(";");
