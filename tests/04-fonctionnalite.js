@@ -4637,6 +4637,32 @@ r.push({
   });
 
   r.push({
+    nom: 'Employ\u00e9s : le champ dur\u00e9e est propos\u00e9 pour un prestataire externe (masqu\u00e9 en CDI)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      openEmployeModal();
+      var hNew = document.getElementById('formModalBody').innerHTML || '';
+      var okCdi = hNew.indexOf('id="empDureeGroup" style="display:none"') !== -1;
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'extz1', matricule: 'EXT-001', nom: 'PRESTA', prenoms: 'Test', sexe: 'M', date_naissance: '', telephone: '', date_entree: '2026-01-05', type_contrat: 'Externe', duree_contrat: 0, service: '', fonction: '', categorie_id: '', salaire_base: 0, situation_matrimoniale: 'celibataire', enfants: 0, enfants_infirmes: 0, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      openEmployeModal('extz1');
+      var hExt = document.getElementById('formModalBody').innerHTML || '';
+      var okExt = hExt.indexOf('id="empDureeGroup" style="display:"') !== -1;
+      var sel = document.getElementById('empTypeContrat');
+      sel.value = 'Externe'; updateEmpTypeFields();
+      var okTogExt = document.getElementById('empDureeGroup').style.display !== 'none';
+      sel.value = 'CDI'; updateEmpTypeFields();
+      var okTogCdi = document.getElementById('empDureeGroup').style.display === 'none';
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'extz1'; }));
+      (okCdi && okExt && okTogExt && okTogCdi)
+        ? 'OK : dur\u00e9e masqu\u00e9e en CDI, visible en Externe (rendu + bascule)'
+        : 'ECHEC cdi=' + okCdi + ' ext=' + okExt + ' togExt=' + okTogExt + ' togCdi=' + okTogCdi
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Paie Cong\u00e9s : le module ne garde que la partie paiement (suivi en jours retir\u00e9)',
     app: 'paye.html', store: storeRealiste,
     code: `
