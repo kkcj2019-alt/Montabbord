@@ -5066,6 +5066,63 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Dettes : un solde vers\u00e9 n\u2019est pas une dette, le reste est net de la d\u00e9duction du mois',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var savedAP = payeArr('mdb_acomptesPrets').slice();
+      var savedOps = payeArr('mdb_operationsCaisse').slice();
+      var list = savedAP.slice();
+      list.push({ id: 'apS9', employee_id: 'e9det', type: 'acompte', montant: 335400, moisDeduction: '2026-09', date: '2026-10-02', valide: true, caisseOpId: 'opS9' });
+      list.push({ id: 'apA9', employee_id: 'e9det', type: 'acompte', montant: 200000, moisDeduction: '2026-09', date: '2026-09-22', valide: true });
+      DB.setMain('mdb_acomptesPrets', list);
+      var ops = savedOps.slice();
+      ops.push({ id: 'opS9', apType: 'solde', code: 'SOLDE_SALAIRE' });
+      DB.setMain('mdb_operationsCaisse', ops);
+      function norm(id) { return normalizeAP(getAPList().filter(function(x){ return x.id === id; })[0]); }
+      var n1 = apNetImpression(norm('apS9'), '2026-09');
+      var n2 = apNetImpression(norm('apA9'), '2026-09');
+      var n3 = apNetImpression(norm('apA9'), '2026-08');
+      DB.setMain('mdb_acomptesPrets', savedAP);
+      DB.setMain('mdb_operationsCaisse', savedOps);
+      var ok = n1.nature === 'solde' && n1.restNet === 0 && n2.nature === 'acompte' && n2.deduit === 200000 && n2.restNet === 0 && n3.deduit === 0 && n3.restNet === 200000;
+      ok ? 'OK : solde exclu (reste 0), acompte sold\u00e9 ce mois (reste 0), mois pr\u00e9c\u00e9dent intact (200000)'
+         : 'ECHEC n1=' + n1.nature + '/' + n1.restNet + ' n2=' + n2.deduit + '/' + n2.restNet + ' n3=' + n3.restNet
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Contrats : le bouton Historique est propos\u00e9 m\u00eame sans pass\u00e9 (pour ajouter)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'cdh1', matricule: 'CDD-H', nom: 'HISTO', prenoms: 'Test', sexe: 'M', date_entree: '2025-06-01', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      renderContratsPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var okH = h.indexOf("historiqueContratsModal('cdh1')") !== -1;
+      var okR = h.indexOf("renouvelerContratModal('cdh1')") !== -1;
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdh1'; }));
+      (okH && okR) ? 'OK : boutons Historique + Renouveler pr\u00e9sents'
+        : 'ECHEC hist=' + okH + ' renouv=' + okR
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Bulletin : la ligne contrat rappelle le N\u00b0 en cours et la 1re embauche',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var l1 = contratLigneB({ type_contrat: 'CDD', date_entree: '2025-01-10', duree_contrat: 6, date_premiere_entree: '2024-01-10', historique_contrats: [{ n: 1, type_contrat: 'CDD', date_debut: '2024-01-10', duree_mois: 12, date_fin: '2025-01-10' }] });
+      var l2 = contratLigneB({ type_contrat: 'CDI', date_entree: '2020-05-01' });
+      var ok = l1.indexOf('n°2') !== -1 && l1.indexOf('1re embauche') !== -1 && l2 === '';
+      ok ? 'OK : ' + l1 + ' | CDI sans historique = rien'
+         : 'ECHEC l1=' + l1 + ' l2=' + l2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

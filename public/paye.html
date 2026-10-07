@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-179";
+      window.__APP_VERSION = "2026-10-06-180";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5830,6 +5830,55 @@ function lignesDetailAp(records, opsById, caisses, banques, mois) {
     }
   });
   return lignes;
+}
+/* Nature d'une ligne AP normalisée (solde/acompte/pret) via l'opération
+   caisse liée. Sans lien retrouvé : type normalisé. */
+function apNatureDe(a) {
+  try {
+    var raws = getAPList() || [];
+    var raw = null;
+    for (var i = 0; i < raws.length; i++) if (raws[i] && raws[i].id === a.id) { raw = raws[i]; break; }
+    var lk = (raw && raw.caisseOpId) || a.caisseOpId || "";
+    var op = null;
+    if (lk) {
+      var ops = payeArr("mdb_operationsCaisse") || [];
+      for (var j = 0; j < ops.length; j++) if (ops[j] && ops[j].id === lk) { op = ops[j]; break; }
+    }
+    var n = apNatureLigne(raw || a, op);
+    if (n === "solde" || n === "pret" || n === "acompte") return n;
+  } catch (e) {}
+  return a.type === "pret" ? "pret" : "acompte";
+}
+/* Restes NETS pour l'impression : un SOLDE déjà versé n'est PAS une dette
+   (jamais en SUIVI ni au TOTAL) ; ce que le bulletin du mois retient déjà
+   ne "reste" plus à rembourser. Mêmes règles que la déduction (ligne 81). */
+function apNetImpression(a, mois) {
+  var nat = "acompte", rest = 0, deduit = 0;
+  try { nat = apNatureDe(a); } catch (eN) {}
+  if (nat !== "solde" && nat !== "pret" && nat !== "acompte") nat = (a.type === "pret" ? "pret" : "acompte");
+  rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+  try {
+    if (a.type === "acompte") {
+      var _md = apMoisPrisEnCompte(a);
+      if (a.valide === true && _md && _md === mois) deduit = a.montant || 0;
+    } else if (a.type === "pret" && a.statut !== "termine") {
+      var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
+      if (moisDed && moisDed <= mois && rest > 0) deduit = Math.min(a.mensualite || 0, rest);
+    }
+  } catch (eD) {}
+  return { nature: nat, rest: rest, deduit: deduit, restNet: Math.max(0, rest - deduit) };
+}
+/* Rappel contrat sur le bulletin : N° du contrat en cours + 1re embauche. */
+function contratLigneB(emp) {
+  try {
+    var hist = emp && Array.isArray(emp.historique_contrats) ? emp.historique_contrats : [];
+    var prem = (emp && emp.date_premiere_entree) || "";
+    if (!hist.length && !prem) return "";
+    var txt = (emp.type_contrat || "-") + " n°" + (hist.length + 1) + " depuis le " + fmtDate(emp.date_entree) + " (" + (parseInt(emp.duree_contrat) || 0) + " mois)";
+    if (prem && prem !== emp.date_entree) txt += " — 1re embauche le " + fmtDate(prem);
+    if (hist.length) txt += " — " + hist.length + " contrat(s) précédent(s)";
+    return txt;
+  } catch (e) { return ""; }
 }
 function payeArr(key) {  var v = DB.getMain(key);
   return Array.isArray(v) ? v : [];
@@ -29192,44 +29241,42 @@ function printCongeIndividuel(empId) {
               h += '<div class="section-title">D\u00c9TAIL DES ACOMPTES & PR\u00caTS</div>';
               h += '<table><thead><tr><th>Date</th><th>Type</th><th>Observation</th><th style="text-align:right">Montant</th><th style="text-align:right">D\u00e9duit ce mois</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th></tr></thead><tbody>';
               apListB.forEach(function (a) {
-                var rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
-                var deduit = 0;
-                if (a.type === "acompte") {
-                  var _mdB = apMoisPrisEnCompte(a);
-                  if (a.valide === true && _mdB && _mdB === mois) deduit = a.montant || 0;
-                } else if (a.type === "pret" && a.statut !== "termine") {
-                  var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
-                  if (moisDed && moisDed <= mois && rest > 0) deduit = Math.min(a.mensualite || 0, rest);
-                }
-                h += "<tr><td>" + escH(a.date || "-") + "</td><td>" + escH(a.type === "pret" ? "Pr\u00eat" : "Acompte") + "</td><td>" + escH(a.notes || a.motif || "-") + '</td><td style="text-align:right;font-weight:700">' + fmt(a.montant) + '</td><td style="text-align:right;font-weight:700;color:#dc2626">' + (deduit > 0 ? fmt(deduit) : "-") + '</td><td style="text-align:right">' + fmt(a.rembourse || 0) + '</td><td style="text-align:right;font-weight:700">' + fmt(rest) + "</td></tr>";
+                var _niB = apNetImpression(a, mois);
+                var natB = _niB.nature;
+                var rest = _niB.rest;
+                var deduit = _niB.deduit;
+                var restNet = _niB.restNet;
+                h += "<tr><td>" + escH(a.date || "-") + "</td><td>" + escH(natB === "pret" ? "Pr\u00eat" : (natB === "solde" ? "Solde" : "Acompte")) + "</td><td>" + escH(a.notes || a.motif || "-") + '</td><td style="text-align:right;font-weight:700">' + fmt(a.montant) + '</td><td style="text-align:right;font-weight:700;color:#dc2626">' + (deduit > 0 ? fmt(deduit) : "-") + '</td><td style="text-align:right">' + fmt(a.rembourse || 0) + '</td><td style="text-align:right;font-weight:700">' + fmt(restNet) + "</td></tr>";
               });
               h += "</tbody></table>";
               var futursPretsB = apListB.filter(function (a) {
-                return a.type === "pret" && a.statut !== "termine" && (a.montant || 0) - (a.rembourse || 0) > 0;
+                return a.type === "pret" && a.statut !== "termine" && apNetImpression(a, mois).restNet > 0;
               });
               var accNonRembB = apListB.filter(function (a) {
-                return a.type === "acompte" && (a.montant || 0) - (a.rembourse || 0) > 0;
+                var _nAB = apNetImpression(a, mois);
+                return a.type === "acompte" && _nAB.nature !== "solde" && _nAB.restNet > 0;
               });
               var totalDettesB = 0;
-              futursPretsB.forEach(function (a) { totalDettesB += Math.max(0, (a.montant || 0) - (a.rembourse || 0)); });
-              accNonRembB.forEach(function (a) { totalDettesB += Math.max(0, (a.montant || 0) - (a.rembourse || 0)); });
+              futursPretsB.forEach(function (a) { totalDettesB += apNetImpression(a, mois).restNet; });
+              accNonRembB.forEach(function (a) { totalDettesB += apNetImpression(a, mois).restNet; });
               if (futursPretsB.length > 0 || accNonRembB.length > 0) {
                 h += '<div style="margin-top:8px;padding:8px;background:#fffbeb;border:1px solid #fde68a;font-size:10px">';
                 h += '<strong>SUIVI \u00c0 VENIR :</strong>';
                 if (futursPretsB.length > 0) {
                   h += '<ul style="margin:4px 0 0 18px">';
                   futursPretsB.forEach(function (a, idx) {
-                    var rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+                    var _nPB = apNetImpression(a, mois);
+                    var rest = _nPB.restNet;
                     var mens = Math.min(a.mensualite || 0, rest);
                     var nb = mens > 0 ? Math.ceil(rest / mens) : 0;
-                    h += "<li><strong>Pr\u00eat " + (futursPretsB.length > 1 ? (idx + 1) : "") + "</strong> (" + escH(a.notes || a.motif || a.date || "-") + ") : " + fmt(a.montant || 0) + " F, " + fmt(a.rembourse || 0) + " F rembours\u00e9, <strong>reste " + fmt(rest) + " F</strong>" + (mens > 0 ? " — mensualit\u00e9 " + fmt(mens) + " F/mois, ~" + nb + " mois restants" : "") + "</li>";
+                    h += "<li><strong>Pr\u00eat " + (futursPretsB.length > 1 ? (idx + 1) : "") + "</strong> (" + escH(a.notes || a.motif || a.date || "-") + ") : " + fmt(a.montant || 0) + " F, " + fmt((a.rembourse || 0) + _nPB.deduit) + " F rembours\u00e9, <strong>reste " + fmt(rest) + " F</strong>" + (mens > 0 ? " — mensualit\u00e9 " + fmt(mens) + " F/mois, ~" + nb + " mois restants" : "") + (_nPB.deduit > 0 ? " (dont " + fmt(_nPB.deduit) + " F sur ce bulletin)" : "") + "</li>";
                   });
                   h += "</ul>";
                 }
                 if (accNonRembB.length > 0) {
                   h += '<ul style="margin:4px 0 0 18px">';
                   accNonRembB.forEach(function (a) {
-                    var rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+                    var rest = apNetImpression(a, mois).restNet;
                     h += "<li><strong>Acompte</strong> (" + escH(a.date || "-") + ") : " + fmt(a.montant || 0) + " F, <strong>reste " + fmt(rest) + " F</strong></li>";
                   });
                   h += "</ul>";
@@ -29284,7 +29331,7 @@ function printCongeIndividuel(empId) {
           ".section-title{margin:18px 0 8px;padding:6px 10px;background:#f1f5f9;font-weight:800;text-transform:uppercase;font-size:12px}";
         h += ".tot{background:#f1f5f9;font-weight:800}";
         h +=
-          "@media print{@page{size:A4 portrait!important;margin:10mm}body{padding:10px;font-size:13px}.page-break{page-break-before:always}table{width:100%;table-layout:fixed;word-break:break-word}th,td{font-size:12px;padding:7px 8px}}";
+          "@media print{@page{size:A4 portrait!important;margin:10mm}body{padding:10px;font-size:13px}.page-break{page-break-before:always}table{width:100%;table-layout:fixed;word-break:break-word}tr{page-break-inside:avoid}.section-title{page-break-after:avoid}th,td{font-size:11px;padding:5px 6px}}";
         h += "</style></head><body>";
 
         /* ===== BULLETIN ===== */
@@ -29366,6 +29413,13 @@ function printCongeIndividuel(empId) {
             '</div><div style="flex:1;padding:4px 6px"><strong>Date d’entrée:</strong> ' +
             dateEntreeB(emp) +
             "</div></div>";
+          var _clB = "";
+          try { _clB = contratLigneB(emp); } catch (eCL) { _clB = ""; }
+          if (_clB)
+            h +=
+              '<div style="display:flex;border-bottom:1px solid #000"><div style="flex:1;padding:4px 6px"><strong>Contrat :</strong> ' +
+              escH(_clB) +
+              "</div></div>";
           if (empCategorie(emp) === "journalier") {
             /* Détails (taux, heures, primes) affichés dans le tableau : pas de récap dupliqué */
             h += "</div>";
@@ -29538,14 +29592,14 @@ function printCongeIndividuel(empId) {
             '<div style="text-align:right;font-size:9px;color:#666">Arrondi : ' +
             fmt(arrondiValP) +
             " FCFA</div>";
-        /* Y a-t-il une suite après le bulletin ? (sinon pas de page 2 vide) */
-        var hasSuite = false;
+        /* Pages d'impression : 1 bulletin, 2 pointage (+montage), 3 acomptes+reste.
+           La coupure 1->2 n'a lieu que si la page 2 a du contenu, et la
+           coupure 2->3 seulement si la page 2 en a (sinon page blanche). */
+        var _hasPTprint = false, _hasMontPrint = false;
         try {
           var _m0 = mois;
-          hasSuite =
-            (showPT && getPointageData().some(function(p){ return p.employee_id === emp.id && p && p.date && p.date.indexOf(_m0) === 0; })) ||
-            (showAP && (getAPList() || []).some(function(a){ var na = a; try { na = normalizeAP(a); } catch(eN){} return na && na.employee_id === emp.id; })) ||
-            (getArticlesMontage().length > 0 && getPointageMontage().some(function(p){ return p.employee_id === emp.id && p && p.date && p.date.indexOf(_m0) === 0; }));
+          _hasPTprint = showPT && getPointageData().some(function(p){ return p.employee_id === emp.id && p && p.date && p.date.indexOf(_m0) === 0; });
+          _hasMontPrint = getArticlesMontage().length > 0 && getPointageMontage().some(function(p){ return p.employee_id === emp.id && p && p.date && p.date.indexOf(_m0) === 0; });
         } catch(eSuite){}
         h +=
           '<div class="net">NET \u00c0 PAYER : ' +
@@ -29555,7 +29609,7 @@ function printCongeIndividuel(empId) {
           '<div style="text-align:right;font-size:9px;color:#777;margin-top:4px">Document g\u00e9n\u00e9r\u00e9 le ' +
           new Date().toLocaleString("fr-FR") +
           "</div>";
-        if (hasSuite) h += '<div class="page-break"></div>';
+        if (_hasPTprint || _hasMontPrint) h += '<div class="page-break"></div>';
 
         /* ===== DÉTAIL ACOMPTES & PRÊTS (dernière page, après pointage) ===== */
         var hAP = "";
@@ -29567,28 +29621,22 @@ function printCongeIndividuel(empId) {
               return a.employee_id === emp.id;
             });
           if (apListEmp.length > 0) {
-            h += '<div class="page-break"></div>';
+            h += ((_hasPTprint || _hasMontPrint) ? '<div class="page-break"></div>' : '');
             h +=
               '<div class="section-title">D\u00c9TAIL DES ACOMPTES & PR\u00caTS</div>';
             h +=
               '<table><thead><tr><th>Date</th><th>Type</th><th>Provenance</th><th>Moyen</th><th>Par qui</th><th>Observation</th><th style="text-align:right">Montant</th><th style="text-align:right">D\u00e9duit ce mois</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th></tr></thead><tbody>';
             apListEmp.forEach(function (a) {
-              var rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
-              var deduit = 0;
-              if (a.type === "acompte") {
-                var _mdP = apMoisPrisEnCompte(a);
-                if (a.valide === true && _mdP && _mdP === mois)
-                  deduit = a.montant || 0;
-              } else if (a.type === "pret" && a.statut !== "termine") {
-                var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
-                if (moisDed && moisDed <= mois && rest > 0)
-                  deduit = Math.min(a.mensualite || 0, rest);
-              }
+              var _ni = apNetImpression(a, mois);
+              var natD = _ni.nature;
+              var rest = _ni.rest;
+              var deduit = _ni.deduit;
+              var restNet = _ni.restNet;
               h +=
                 "<tr><td>" +
                 escH(a.date || "-") +
                 "</td><td>" +
-                escH(a.type === "pret" ? "Pr\u00eat" : "Acompte") +
+                escH(natD === "pret" ? "Pr\u00eat" : (natD === "solde" ? "Solde" : "Acompte")) +
                 "</td><td>" +
                 escH(
                   a.provenance === "banque"
@@ -29610,7 +29658,7 @@ function printCongeIndividuel(empId) {
                 '</td><td style="text-align:right">' +
                 fmt(a.rembourse || 0) +
                 '</td><td style="text-align:right;font-weight:700">' +
-                fmt(rest) +
+                fmt(restNet) +
                 "</td></tr>";
             });
             h += "</tbody></table>";
@@ -29619,21 +29667,23 @@ function printCongeIndividuel(empId) {
               return (
                 a.type === "pret" &&
                 a.statut !== "termine" &&
-                (a.montant || 0) - (a.rembourse || 0) > 0
+                apNetImpression(a, mois).restNet > 0
               );
             });
             var acomptesNonRembourses = apListEmp.filter(function (a) {
+              var _nA = apNetImpression(a, mois);
               return (
                 a.type === "acompte" &&
-                (a.montant || 0) - (a.rembourse || 0) > 0
+                _nA.nature !== "solde" &&
+                _nA.restNet > 0
               );
             });
             var totalDettes = 0;
             futursPrets.forEach(function (a) {
-              totalDettes += Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+              totalDettes += apNetImpression(a, mois).restNet;
             });
             acomptesNonRembourses.forEach(function (a) {
-              totalDettes += Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+              totalDettes += apNetImpression(a, mois).restNet;
             });
             if (futursPrets.length > 0 || acomptesNonRembourses.length > 0) {
               h +=
@@ -29642,7 +29692,8 @@ function printCongeIndividuel(empId) {
               if (futursPrets.length > 0) {
                 h += '<ul style="margin:4px 0 0 18px">';
                 futursPrets.forEach(function (a, idx) {
-                  var rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+                  var _nP = apNetImpression(a, mois);
+                  var rest = _nP.restNet;
                   var mens = Math.min(a.mensualite || 0, rest);
                   var nb = mens > 0 ? Math.ceil(rest / mens) : 0;
                   h +=
@@ -29650,9 +29701,10 @@ function printCongeIndividuel(empId) {
                     escH(a.notes || a.motif || a.date || "-") +
                     ") : " +
                     fmt(a.montant || 0) + " F contract\u00e9, " +
-                    fmt(a.rembourse || 0) + " F rembours\u00e9, " +
+                    fmt((a.rembourse || 0) + _nP.deduit) + " F rembours\u00e9, " +
                     "<strong>reste " + fmt(rest) + " F</strong>" +
                     (mens > 0 ? " — mensualit\u00e9 " + fmt(mens) + " F/mois, ~" + nb + " mois restants" : "") +
+                    (_nP.deduit > 0 ? " (dont " + fmt(_nP.deduit) + " F sur ce bulletin)" : "") +
                     " — d\u00e9but " + escH(a.moisDeduction || (a.date || "").substring(0, 7) || "-") +
                     "</li>";
                 });
@@ -29661,7 +29713,7 @@ function printCongeIndividuel(empId) {
               if (acomptesNonRembourses.length > 0) {
                 h += '<ul style="margin:4px 0 0 18px">';
                 acomptesNonRembourses.forEach(function (a) {
-                  var rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
+                  var rest = apNetImpression(a, mois).restNet;
                   h +=
                     "<li><strong>Acompte</strong> (" +
                     escH(a.date || "-") +
