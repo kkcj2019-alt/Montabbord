@@ -5451,6 +5451,33 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Pointage paie : saisie rapide filtre la liste par fonction',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'e9', nom: 'Sow', prenoms: 'B', matricule: 'M009', fonction: 'Chauffeur', service: 'Prod', type_contrat: 'CDI', categorie: 'B', status: 'actif', date_embauche: '2024-06-01' });
+      DB.setMain('mdb_employes', emps);
+      window._srFonction = 'Chauffeur';
+      showSaisieRapide();
+      var h = document.getElementById('pt-modal-content').innerHTML;
+      var dl = h.slice(h.indexOf('sr-emp-list">') + 15, h.indexOf('</datalist>'));
+      var nomSow = _dispNamePp(getPersonnel().filter(function (p) { return p.id === 'e9'; })[0]);
+      var nomE1 = _dispNamePp(getPersonnel().filter(function (p) { return p.id === 'e1'; })[0]);
+      var okF = dl.indexOf(nomSow) !== -1 && dl.indexOf(nomE1) === -1 && h.indexOf('id="sr-fonction"') !== -1;
+      window._srFonction = 'Toutes les fonctions';
+      showSaisieRapide();
+      var h2 = document.getElementById('pt-modal-content').innerHTML;
+      var dl2 = h2.slice(h2.indexOf('sr-emp-list">') + 15, h2.indexOf('</datalist>'));
+      var okT = dl2.indexOf(nomSow) !== -1 && dl2.indexOf(nomE1) !== -1;
+      (okF && okT) ? 'OK : filtre Chauffeur = Sow seul, Tout = les deux'
+                   : 'ECHEC filtre=' + okF + ' tout=' + okT
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
