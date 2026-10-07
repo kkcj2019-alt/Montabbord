@@ -5512,6 +5512,27 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Pointage collectif : colonne JOUR remplac\u00e9e par normales',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-mois').value = '2026-10';
+      var recs = [];
+      for (var d = 1; d <= 10; d++) recs.push({ id: 'cc' + d, employee_id: 'e1', date: '2026-10-' + (d < 10 ? '0' : '') + d, h_j_manual: '8' });
+      setPointageData(recs);
+      renderPtRecap();
+      var h = document.getElementById('pt-recap-container').innerHTML;
+      var okH = h.indexOf('NORM.') !== -1 && h.indexOf('>JOUR</th>') === -1;
+      var iE1 = h.indexOf('M001');
+      var iEnd = iE1 !== -1 ? h.indexOf('</tr>', iE1) : -1;
+      var rowE1 = (iE1 !== -1 && iEnd !== -1) ? h.slice(iE1, iEnd) : '';
+      var okV = rowE1.indexOf('64.0h') !== -1 && rowE1.indexOf('64.0h') < rowE1.lastIndexOf('80.0h');
+      (okH && okV) ? 'OK : collectif NORM. (64.0h normales avant le TOTAL 80.0h)'
+                   : 'ECHEC header=' + okH + ' valeurs=' + okV
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
