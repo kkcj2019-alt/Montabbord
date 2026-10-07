@@ -5059,7 +5059,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Pointage paie : saisie rapide = calendrier 1er->31, select employe, H. Jour / H. Nuit repliee / Obs',
+    nom: 'Pointage paie : saisie rapide = calendrier 1er->31, employe autocompletion, H. Jour / H. Nuit repliee / Absent / Obs',
     app: 'paye.html', store: storeRealiste,
     code: `
       document.getElementById('pt-select-emp').value = 'e1';
@@ -5069,12 +5069,48 @@ r.push({
       var nbHr = (h.match(/data-field="hr"/g) || []).length;
       var nbHrN = (h.match(/data-field="hrN"/g) || []).length;
       var nbNit = (h.match(/data-field="nuit"/g) || []).length;
+      var nbAbs = (h.match(/data-field="abs"/g) || []).length;
       var nbObs = (h.match(/data-field="obs"/g) || []).length;
-      var selEmp = h.indexOf('id="sr-emp"') !== -1 && h.indexOf('value="e1" selected') !== -1;
+      var autoEmp = h.indexOf('id="sr-emp"') !== -1 && h.indexOf('id="sr-emp-list"') !== -1;
       var nuitReplie = h.indexOf('id="pt-r-nuit-1" style="display:none"') !== -1;
-      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && selEmp && nuitReplie;
-      ok ? 'OK : 31 lignes (hr/hrn/nuit/obs), select employe, nuit repliee'
-         : 'ECHEC hr=' + nbHr + ' hrn=' + nbHrN + ' nuit=' + nbNit + ' obs=' + nbObs + ' emp=' + (selEmp ? 1 : 0) + ' replie=' + (nuitReplie ? 1 : 0)
+      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbAbs === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && autoEmp && nuitReplie;
+      ok ? 'OK : 31 lignes (hr/hrn/nuit/abs/obs), employe autocompletion, nuit repliee'
+         : 'ECHEC hr=' + nbHr + ' hrn=' + nbHrN + ' nuit=' + nbNit + ' abs=' + nbAbs + ' obs=' + nbObs + ' emp=' + (autoEmp ? 1 : 0) + ' replie=' + (nuitReplie ? 1 : 0)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage paie : saisie rapide enregistre un jour Absent (present=false, heures videes)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      setPointageData(getPointageData().filter(function (p) { return p.employee_id !== 'e1' || (p.date || '').indexOf('2026-10') !== 0; }));
+      var seed = getPointageData().slice();
+      seed.push({ id: 'abs0', employee_id: 'e1', date: '2026-10-05', h_j_manual: '8' });
+      setPointageData(seed);
+      function F2(d, f, v, chk) {
+        var e = { value: v, checked: !!chk, type: (f === 'nuit' || f === 'abs') ? 'checkbox' : 'text' };
+        e.getAttribute = function (k) {
+          if (k === 'data-r') return String(d);
+          if (k === 'data-field') return f;
+          return null;
+        };
+        return e;
+      }
+      document.querySelectorAll = function (sel) { return (sel && sel.indexOf('data-r') !== -1) ? [F2(5, 'abs', '', true)] : []; };
+      saveSaisieRapide();
+      var pts = getPointageData();
+      var r5 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-05'; });
+      var okA = r5 && r5.present === false && !r5.h_j_manual && !r5.h_n_manual;
+      document.querySelectorAll = function (sel) { return (sel && sel.indexOf('data-r') !== -1) ? [F2(5, 'abs', '', false)] : []; };
+      saveSaisieRapide();
+      var pts2 = getPointageData();
+      var r5b = pts2.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-05'; });
+      var okB = !r5b || r5b.present !== false;
+      (okA && okB) ? 'OK : absent coche -> present=false sans heures, decoche -> leve'
+                   : 'ECHEC A=' + (okA ? 1 : 0) + ' B=' + (okB ? 1 : 0)
     `,
     attenduPrefixe: 'OK'
   });
@@ -5299,6 +5335,32 @@ r.push({
       var ok = (!rSame.ok) && (!rP0.ok) && rP1.ok && (!rP2.ok) && okProm && okPast && okSt && okNet;
       ok ? 'OK : doublons refus\u00e9s/nettoy\u00e9s, p\u00e9riode actuelle promue, pass\u00e9 en historique'
          : 'ECHEC same=' + rSame.ok + ' p0=' + rP0.ok + ' p1=' + rP1.ok + ' p2=' + rP2.ok + ' prom=' + okProm + ' past=' + okPast + ' st=' + okSt + ' net=' + okNet
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Bulletin journalier : la nuit n\u2019est pas compt\u00e9e 2 fois (ligne 1 = jour seul)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'ej', nom: 'Jour', prenoms: 'T', matricule: 'MJ01', fonction: 'Manoeuvre', service: 'Prod', type_contrat: 'Journalier', categorie: 'A', status: 'actif', date_embauche: '2024-06-01', salaire_base: 4000 });
+      DB.setMain('mdb_employes', emps);
+      setPointageData([
+        { id: 'pt1', employee_id: 'ej', date: '2026-10-01', h_j_manual: '5.5', h_n_manual: '8' },
+        { id: 'pt2', employee_id: 'ej', date: '2026-10-02', h_j_manual: '7.1' },
+        { id: 'pt3', employee_id: 'ej', date: '2026-10-03', h_j_manual: '7.3' },
+        { id: 'pt4', employee_id: 'ej', date: '2026-10-08', h_j_manual: '8.5' }
+      ]);
+      var emp = getPersonnel().filter(function (p) { return p.id === 'ej'; })[0];
+      var calc = calculatePayroll(emp, '2026-10');
+      var rows = getSimpleBulletinRows(emp, '2026-10', calc);
+      var L1 = rows[0], L2 = rows[1];
+      var ok1 = L1 && L1.label === 'Base horaire' && L1.taux === '28,4h' && L1.gain === 14200;
+      var ok2 = L2 && L2.label === 'Heures Suppl.' && L2.gain === 7000 && L2.taux.indexOf('8') === 0;
+      (ok1 && ok2)
+        ? 'OK : ligne 1 = 28,4h jour x 500 = 14200 (nuit 8h exclue), HS = 8h x 875 = 7000, total 21200'
+        : 'ECHEC L1=' + (L1 ? L1.taux + '/' + L1.gain : '?') + ' L2=' + (L2 ? L2.taux + '/' + L2.gain : '?')
     `,
     attenduPrefixe: 'OK'
   });
