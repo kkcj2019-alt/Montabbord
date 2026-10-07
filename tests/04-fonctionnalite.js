@@ -4954,6 +4954,20 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Co\u00fbt de revient (index) : artUnitVol/calcVolume d\u00e9finis, volume unitaire correct',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var v1 = artUnitVol({ dimensions: '1000x200x50' });
+      var v2 = artUnitVol({ length: 1000, width: 200, thickness: 50 });
+      var v0 = artUnitVol(null);
+      (v1 === 10 && v2 === 10 && v0 === 0)
+        ? 'OK : 1000x200x50 -> 10 m3, L/l/t -> 10 m3, null -> 0'
+        : 'ECHEC v1=' + v1 + ' v2=' + v2 + ' v0=' + v0
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
