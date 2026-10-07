@@ -5059,7 +5059,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Pointage paie : saisie rapide = calendrier 1er->31, employe autocompletion, H. Jour / H. Nuit repliee / Absent / Obs',
+    nom: 'Pointage paie : saisie rapide = calendrier 1er->31, employe autocompletion, H. Jour / H. Nuit / Absent / Obs, auto-save cable',
     app: 'paye.html', store: storeRealiste,
     code: `
       document.getElementById('pt-select-emp').value = 'e1';
@@ -5072,10 +5072,12 @@ r.push({
       var nbAbs = (h.match(/data-field="abs"/g) || []).length;
       var nbObs = (h.match(/data-field="obs"/g) || []).length;
       var autoEmp = h.indexOf('id="sr-emp"') !== -1 && h.indexOf('id="sr-emp-list"') !== -1;
-      var nuitReplie = h.indexOf('id="pt-r-nuit-1" style="display:none"') !== -1;
-      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbAbs === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && autoEmp && nuitReplie;
-      ok ? 'OK : 31 lignes (hr/hrn/nuit/abs/obs), employe autocompletion, nuit repliee'
-         : 'ECHEC hr=' + nbHr + ' hrn=' + nbHrN + ' nuit=' + nbNit + ' abs=' + nbAbs + ' obs=' + nbObs + ' emp=' + (autoEmp ? 1 : 0) + ' replie=' + (nuitReplie ? 1 : 0)
+      var nuitCelluleVisible = h.indexOf('id="pt-r-nuit-1"') !== -1 && h.indexOf('id="pt-r-nuit-1" style="display:none"') === -1;
+      var pasGuillemet = h.indexOf('data-field="abs""') === -1;
+      var autoSave = h.indexOf('ptRapideAutoSave(') !== -1;
+      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbAbs === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && autoEmp && nuitCelluleVisible && pasGuillemet && autoSave;
+      ok ? 'OK : 31 lignes (hr/hrn/nuit/abs/obs), employe autocompletion, cellule nuit visible, auto-save cable'
+         : 'ECHEC hr=' + nbHr + ' hrn=' + nbHrN + ' nuit=' + nbNit + ' abs=' + nbAbs + ' obs=' + nbObs + ' emp=' + (autoEmp ? 1 : 0) + ' cellule=' + (nuitCelluleVisible ? 1 : 0) + ' guillemet=' + (pasGuillemet ? 0 : 1) + ' autosave=' + (autoSave ? 1 : 0)
     `,
     attenduPrefixe: 'OK'
   });
@@ -5398,6 +5400,53 @@ r.push({
       (okLec && okT && okC)
         ? 'OK : 07/08 f\u00e9ri\u00e9 lu, travaill\u00e9 8h -> HS75 (normales 0), ch\u00f4m\u00e9 -> ferieDays=1'
         : 'ECHEC lec=' + okLec + ' trav=(hs75=' + st.hs75 + ' norm=' + st.normalHours + ') chome=' + st2.ferieDays
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage paie : saisie rapide auto-save a la sortie de case (sans bouton)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      setPointageData(getPointageData().filter(function (p) { return p.employee_id !== 'e1' || (p.date || '').indexOf('2026-10') !== 0; }));
+      function INP(f, v, chk) {
+        var e = { value: v, checked: !!chk, type: (f === 'nuit' || f === 'abs') ? 'checkbox' : 'text', innerHTML: '' };
+        e.getAttribute = function (k) {
+          if (k === 'data-r') return '5';
+          if (k === 'data-field') return f;
+          return null;
+        };
+        return e;
+      }
+      var rang = { hr: INP('hr', '8'), hrN: INP('hrN', ''), nuit: INP('nuit', '', false), abs: INP('abs', '', false), obs: INP('obs', '') };
+      var totSpans = { 'pt-r-totJ': { innerHTML: '' }, 'pt-r-totN': { innerHTML: '' }, 'pt-r-totG': { innerHTML: '' }, 'pt-r-jrs': { innerHTML: '' } };
+      var vraieGet = document.getElementById;
+      document.getElementById = function (id) {
+        if (id === 'pt-modal-content') return {
+          querySelector: function (sel) {
+            var m = /data-field="(\\w+)"/.exec(sel || '');
+            return (m && rang[m[1]]) ? rang[m[1]] : null;
+          },
+          querySelectorAll: function (sel) {
+            return sel === 'input[data-field="hr"]' ? [rang.hr] : [];
+          }
+        };
+        if (totSpans[id]) return totSpans[id];
+        return vraieGet(id);
+      };
+      ptRapideAutoSave(5);
+      var pts = getPointageData();
+      var r5 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-05'; });
+      var okA = r5 && r5.h_j_manual === '8' && totSpans['pt-r-totJ'].innerHTML === '8.0h';
+      rang.hr.value = '';
+      ptRapideAutoSave(5);
+      var pts2 = getPointageData();
+      var gone = !pts2.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-05'; });
+      var okB = gone && totSpans['pt-r-totJ'].innerHTML === '0.0h';
+      (okA && okB) ? 'OK : case remplie -> ligne sauvee + total 8.0h, case videe -> ligne supprimee + total 0.0h'
+                   : 'ECHEC A=' + (okA ? 1 : 0) + ' B=' + (okB ? 1 : 0)
     `,
     attenduPrefixe: 'OK'
   });
