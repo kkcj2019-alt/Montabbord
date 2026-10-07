@@ -5059,7 +5059,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Pointage paie : saisie rapide = calendrier 1er->31 avec cases Heures/Nuit/Obs',
+    nom: 'Pointage paie : saisie rapide = calendrier 1er->31, select employe, H. Jour / H. Nuit repliee / Obs',
     app: 'paye.html', store: storeRealiste,
     code: `
       document.getElementById('pt-select-emp').value = 'e1';
@@ -5067,17 +5067,20 @@ r.push({
       showSaisieRapide();
       var h = document.getElementById('pt-modal-content').innerHTML;
       var nbHr = (h.match(/data-field="hr"/g) || []).length;
+      var nbHrN = (h.match(/data-field="hrN"/g) || []).length;
       var nbNit = (h.match(/data-field="nuit"/g) || []).length;
       var nbObs = (h.match(/data-field="obs"/g) || []).length;
-      var ok = nbHr === 31 && nbNit === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1;
-      ok ? 'OK : 31 lignes (hr/nuit/obs), total du 31 present'
-         : 'ECHEC hr=' + nbHr + ' nuit=' + nbNit + ' obs=' + nbObs
+      var selEmp = h.indexOf('id="sr-emp"') !== -1 && h.indexOf('value="e1" selected') !== -1;
+      var nuitReplie = h.indexOf('id="pt-r-nuit-1" style="display:none"') !== -1;
+      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && selEmp && nuitReplie;
+      ok ? 'OK : 31 lignes (hr/hrn/nuit/obs), select employe, nuit repliee'
+         : 'ECHEC hr=' + nbHr + ' hrn=' + nbHrN + ' nuit=' + nbNit + ' obs=' + nbObs + ' emp=' + (selEmp ? 1 : 0) + ' replie=' + (nuitReplie ? 1 : 0)
     `,
     attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Pointage paie : saisie rapide persiste heures (jour/nuit) + observation, efface si vide',
+    nom: 'Pointage paie : saisie rapide persiste heures jour + heures nuit independantes + observation, efface si vide',
     app: 'paye.html', store: storeRealiste,
     code: `
       document.getElementById('pt-select-emp').value = 'e1';
@@ -5094,9 +5097,10 @@ r.push({
         return e;
       }
       fakes = fakes.concat(
-        F(1, 'hr', '8', false), F(1, 'nuit', '', false), F(1, 'obs', 'Maladie', false),
-        F(2, 'hr', '6', false), F(2, 'nuit', 'x', true), F(2, 'obs', '', false),
-        F(3, 'hr', '', false), F(3, 'nuit', '', false), F(3, 'obs', 'Conge', false)
+        F(1, 'hr', '8', false), F(1, 'hrN', '', false), F(1, 'nuit', '', false), F(1, 'obs', 'Maladie', false),
+        F(2, 'hr', '', false), F(2, 'hrN', '6', false), F(2, 'nuit', 'x', true), F(2, 'obs', '', false),
+        F(3, 'hr', '', false), F(3, 'hrN', '', false), F(3, 'nuit', '', false), F(3, 'obs', 'Conge', false),
+        F(4, 'hr', '8', false), F(4, 'hrN', '6', false), F(4, 'nuit', 'x', true), F(4, 'obs', '', false)
       );
       document.querySelectorAll = function (sel) { return (sel && sel.indexOf('data-r') !== -1) ? fakes : []; };
       saveSaisieRapide();
@@ -5104,15 +5108,17 @@ r.push({
       var r1 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-01'; });
       var r2 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-02'; });
       var r3 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-03'; });
+      var r4 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-04'; });
       var okA = r1 && r1.h_j_manual === '8' && !r1.h_n_manual && r1.observation === 'Maladie'
              && r2 && r2.h_n_manual === '6' && !r2.h_j_manual
-             && r3 && r3.observation === 'Conge' && !r3.h_j_manual && !r3.h_n_manual;
-      fakes = [F(1, 'hr', '', false), F(1, 'nuit', '', false), F(1, 'obs', '', false)];
+             && r3 && r3.observation === 'Conge' && !r3.h_j_manual && !r3.h_n_manual
+             && r4 && r4.h_j_manual === '8' && r4.h_n_manual === '6';
+      fakes = [F(1, 'hr', '', false), F(1, 'hrN', '', false), F(1, 'nuit', '', false), F(1, 'obs', '', false)];
       saveSaisieRapide();
       var pts2 = getPointageData();
       var gone = !pts2.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-01'; });
       var okB = gone && pts2.some(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-02'; });
-      (okA && okB) ? 'OK : jour=8 h_j, nuit=6 h_n, obs stockee, effacement propre'
+      (okA && okB) ? 'OK : jour=8 h_j, nuit=6 h_n, jour+nuit memes jour, obs stockee, effacement propre'
                    : 'ECHEC A=' + (okA ? 1 : 0) + ' B=' + (okB ? 1 : 0)
     `,
     attenduPrefixe: 'OK'
