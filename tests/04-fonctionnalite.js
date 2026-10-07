@@ -5123,6 +5123,33 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Employ\u00e9s : l\u2019historique des contrats est visible et modifiable dans la modale',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'cdhm1', matricule: 'CDD-HM', nom: 'HISTOMOD', prenoms: 'Test', sexe: 'M', date_entree: '2024-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      renouvelerContratEmp('cdhm1', '2025-01-10', 6, 'CDD');
+      openEmployeModal('cdhm1');
+      var hb = document.getElementById('emp-hist-contrats');
+      var h0 = (hb && hb.innerHTML) || '';
+      var okList = h0.indexOf('N\u00b01') !== -1 && h0.indexOf('En cours') !== -1;
+      document.getElementById('hmOp').value = 'passe';
+      document.getElementById('hmType').value = 'CDD';
+      document.getElementById('hmDebut').value = '2023-01-10';
+      document.getElementById('hmDuree').value = '12';
+      saveHistContratFromModal('cdhm1');
+      var h1 = document.getElementById('emp-hist-contrats').innerHTML || '';
+      var e = dbArr('mdb_employes').filter(function(x){ return x.id === 'cdhm1'; })[0];
+      var okAdd = h1.indexOf('N\u00b02') !== -1 && e.historique_contrats.length === 2;
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdhm1'; }));
+      (okList && okAdd) ? 'OK : N\u00b01 + En cours affich\u00e9s, contrat pass\u00e9 ajout\u00e9 (N\u00b02)'
+        : 'ECHEC liste=' + okList + ' ajout=' + okAdd
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
