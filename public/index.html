@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-06-169';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-06-170';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2376,7 +2376,7 @@ window.addEventListener('storage', function(e) {
       if (currentPage === 'production' && (e.key === 'mdb_production' || e.key === 'mdb_employes')) {
         if (typeof renderProduction === 'function') renderProduction();
       }
-      if ((currentPage === 'costPrice' || currentPage === 'costPriceJour') && (e.key === 'mdb_production' || e.key === 'mdb_employes' || e.key === 'mdb_paye')) {
+      if ((currentPage === 'costPrice' || currentPage === 'costPriceJour' || currentPage === 'coutRevient') && (e.key === 'mdb_production' || e.key === 'mdb_employes' || e.key === 'mdb_paye')) {
         try { crRerender(); } catch (errCR) {}
       }
     }
@@ -2402,6 +2402,7 @@ var pageNames = {
   typeElementsAchats: 'Types d\u2019\u00e9l\u00e9ments d\u2019achat', elementsAchats: 'Base \u00e9l\u00e9ments d\u2019achat', bonsCommandeFournisseurs: 'Bons de commande fournisseurs', achatsProduction: 'Achats (stocks production)',
   costPrice: 'Coût de Production',
   costPriceJour: 'Coût de production par jour',
+  coutRevient: 'Co\u00fbt de revient',
   prodDashboard: 'Tableau de bord Production', prodSaisie: 'Saisie & Historique', prodStock: 'Stocks', prodThermal: 'Traitement thermique', prodArticles: 'Articles & Nomenclature', prodAchats: 'Achats', prodLivraisons: 'Livraisons', prodMaintenance: 'Maintenance', prodRapports: 'Rapports', prodRH: 'RH & Présence',
   prodCoutRevient: 'Coût de production palette', prodCoutJour: 'Coût de production par jour',
   bcFournisseurs: 'BC Fournisseurs', blFournisseurs: 'BL Fournisseurs', facturesFournisseurs: 'Factures Fournisseurs',
@@ -2474,6 +2475,7 @@ var navGroups = [
   ]},
   {title:'Pilotage', items:[
     {key:'costPrice',label:'Coût de Production'},
+    {key:'coutRevient',label:'Co\u00fbt de revient', icon:'\ud83e\uddee'},
     {key:'costPriceJour',label:'Coût par jour', icon:'\ud83d\udcb0'},
     {key:'qualite',label:'Qualité & ISO 9001'}
   ]},
@@ -6593,6 +6595,7 @@ function navigateTo(page) {
     dashCommercial: renderDashCommercial,
     costPrice: renderCostPrice,
     costPriceJour: renderCostPriceJour,
+    coutRevient: renderCoutRevient,
     stock: renderStock,
     suiviLivraisons: renderSuiviLivraisons,
     creancesDettes: renderCreancesDettes,
@@ -36176,6 +36179,183 @@ function getProdSection(key, def) {
   var dbP = getProdDB();
   return dbP[key] !== undefined ? dbP[key] : def;
 }
+/* ===== COUT DE REVIENT : simulation AVANT production (devis / prix de vente) =====
+   A ne pas confondre avec le Cout de Production (renderCostPrice) qui constate
+   A POSTERIORI ce qui a deja ete produit (campagnes, pointages, CUMP).
+   Ici : nomenclature + prix d'achat ACTUELS -> cout previsionnel unitaire ->
+   prix de vente suggere selon la marge cible. */
+function crPrixSuggere(coutRevient, margePct) {
+  var cr = parseFloat(coutRevient) || 0;
+  var m = parseFloat(margePct) || 0;
+  if (!(cr > 0) || m >= 100) return 0;
+  if (m <= 0) return Math.round(cr);
+  return Math.round(cr / (1 - m / 100));
+}
+function crVerdictMarge(pv, coutRevient, ciblePct) {
+  var p = parseFloat(pv) || 0, cr = parseFloat(coutRevient) || 0, c = parseFloat(ciblePct) || 0;
+  if (!(cr > 0) || !(p > 0)) return { code: 'noprix', marge: 0 };
+  var m = (p - cr) / p * 100;
+  if (p < cr) return { code: 'perte', marge: m };
+  return { code: (m >= c ? 'ok' : 'insuffisante'), marge: m };
+}
+function renderCoutRevient() {
+  window._crArt = window._crArt || '';
+  var _q0 = parseFloat(window._crQte);
+  window._crQte = (_q0 > 0) ? _q0 : 1;
+  if (window._crMarge === undefined || window._crMarge === null || window._crMarge === '') window._crMarge = 20;
+  var arts = [];
+  try { arts = getArticles() || []; } catch (eA) { arts = []; }
+  var artOK = false, i;
+  for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(window._crArt)) { artOK = true; break; }
+  if (!artOK) window._crArt = '';
+  var h = '';
+  h += '<div class="card" style="padding:12px 14px;margin-bottom:10px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+  h += '<div><h2 style="margin:0;font-size:15px;font-weight:800">Co\u00fbt de revient \u2014 simulation AVANT production</h2>';
+  h += '<div style="font-size:12px;color:var(--gray-500);margin-top:3px">Estime le co\u00fbt d\u2019un article AVANT de produire (nomenclature + prix d\u2019achat actuels) pour fixer le prix de vente. \u2260 Co\u00fbt de Production, qui constate APR\u00c8S coup ce qui a \u00e9t\u00e9 produit.</div></div>';
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+  h += '<button class="btn btn-outline btn-sm" onclick="renderCoutRevient()">\ud83d\udd04 Actualiser</button>';
+  h += '<button class="btn btn-outline btn-sm" onclick="navigateTo(\'costPrice\')">Voir le Co\u00fbt de Production (constat\u00e9) \u2192</button>';
+  h += '</div></div></div>';
+  h += '<div class="card" style="padding:12px 14px;margin-bottom:10px"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">';
+  h += '<div><label style="display:block;font-size:11px;font-weight:700;color:var(--gray-500);margin-bottom:3px">Article</label><select id="crArt" onchange="window._crArt=this.value;renderCoutRevient()" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:12px;outline:none;min-width:220px"><option value="">-- Choisir --</option>';
+  for (i = 0; i < arts.length; i++) { var _a = arts[i] || {}; h += '<option value="' + escH(_a.id) + '"' + (String(_a.id) === String(window._crArt) ? ' selected' : '') + '>' + escH((_a.code ? _a.code + ' \u00b7 ' : '') + (_a.designation || 'Article')) + '</option>'; }
+  h += '</select></div>';
+  h += '<div><label style="display:block;font-size:11px;font-weight:700;color:var(--gray-500);margin-bottom:3px">Quantit\u00e9 (lot)</label><input type="number" id="crQte" min="1" value="' + window._crQte + '" onchange="window._crQte=this.value;renderCoutRevient()" style="width:110px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:12px;outline:none"></div>';
+  h += '<div><label style="display:block;font-size:11px;font-weight:700;color:var(--gray-500);margin-bottom:3px">Marge cible (% du prix de vente)</label><input type="number" id="crMarge" min="0" max="95" value="' + escH(window._crMarge) + '" onchange="window._crMarge=this.value;renderCoutRevient()" style="width:110px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:12px;outline:none"></div>';
+  h += '</div></div>';
+  if (!window._crArt) {
+    h += '<div class="empty-state"><p>Choisis un article pour simuler son co\u00fbt de revient.</p><p style="font-size:12px">Sans nomenclature (composants), aucun co\u00fbt ne peut \u00eatre simul\u00e9.</p></div>';
+    document.getElementById('content').innerHTML = h;
+    return;
+  }
+  var c = null;
+  try { c = acCoutArticleAuto(window._crArt); } catch (eC) { c = null; }
+  if (!c || !c.comps || !c.comps.length) {
+    h += '<div class="empty-state"><p>Aucune nomenclature pour cet article : sans composants, aucun co\u00fbt ne peut \u00eatre simul\u00e9.</p><p style="font-size:12px">Renseigne ses composants (Exploitation \u2192 Articles), puis reviens ici.</p></div>';
+    document.getElementById('content').innerHTML = h;
+    return;
+  }
+  var Q = (parseFloat(window._crQte) > 0) ? parseFloat(window._crQte) : 1;
+  var camp = null;
+  try { camp = acCoutArticleCampagne(window._crArt, Q); } catch (eC2) { camp = null; }
+  var fraisUnit = (c.frais && c.frais.sousTotal) || 0;
+  var crUnit = c.total || 0;
+  var matLot = (camp && camp.matiere) || 0;
+  var crLot = matLot + fraisUnit * Q;
+  var pv = c.pv || 0;
+  var marge = parseFloat(window._crMarge) || 0;
+  var sugg = crPrixSuggere(crUnit, marge);
+  var v = crVerdictMarge(pv, crUnit, marge);
+  var boisL = (camp && camp.bois) || [];
+  var consoL = (camp && camp.conso) || [];
+  h += '<div class="card" style="padding:12px 14px;margin-bottom:10px"><h4 style="margin:0 0 8px;font-size:13px;font-weight:800">D\u00e9tail pr\u00e9visionnel du lot (' + Q + ' unit\u00e9' + (Q > 1 ? 's' : '') + ')</h4><div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>Composant</th><th style="text-align:right">Qté / unité</th><th style="text-align:right">Qté lot</th><th style="text-align:right">Montant lot</th></tr></thead><tbody>';
+  boisL.forEach(function(b) {
+    h += '<tr><td>' + escH(b.libelle) + ' <span style="font-size:10px;color:var(--gray-500)">' + escH(b.type) + '</span></td><td style="text-align:right">' + fmt(b.qtePal) + '</td><td style="text-align:right">' + fmt(b.qte) + '</td><td style="text-align:right">' + fmtF(b.mt) + '</td></tr>';
+  });
+  consoL.forEach(function(x) {
+    h += '<tr><td>' + escH(x.libelle) + ' <span style="font-size:10px;color:var(--gray-500)">' + escH(x.type) + '</span></td><td style="text-align:right">' + fmt(x.qtePal) + '</td><td style="text-align:right">' + fmt(x.qte) + '</td><td style="text-align:right">' + fmtF(x.mt) + '</td></tr>';
+  });
+  h += '<tr style="font-weight:800"><td>Mati\u00e8re premi\u00e8re (lot)</td><td></td><td></td><td style="text-align:right">' + fmtF(Math.round(matLot)) + '</td></tr>';
+  h += '<tr style="font-weight:800"><td>Frais fixes (lot)</td><td></td><td></td><td style="text-align:right">' + fmtF(Math.round(fraisUnit * Q)) + '</td></tr>';
+  h += '</tbody></table></div></div></div>';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.5rem;margin-bottom:10px">';
+  h += acLigneAc(1, 'Co\u00fbt mati\u00e8re (lot)', fmtF(Math.round(matLot)), 'bois + consommables', 'var(--text)');
+  h += acLigneAc(1, 'Frais fixes (lot)', fmtF(Math.round(fraisUnit * Q)), 'MO indirecte + autres', 'var(--text)');
+  h += acLigneAc(1, 'CO\u00dbT DE REVIENT / unit\u00e9', crUnit > 0 ? fmtF(Math.round(crUnit)) : '\u2014', 'pr\u00e9visionnel, tout compris', 'var(--accent)');
+  h += acLigneAc(1, 'Total pr\u00e9visionnel (lot)', crLot > 0 ? fmtF(Math.round(crLot)) : '\u2014', Q + ' unit\u00e9(s)', 'var(--accent)');
+  h += acLigneAc(1, 'Prix de vente actuel', pv > 0 ? fmtF(Math.round(pv)) : '\u2014', pv > 0 ? 'par unit\u00e9' : 'non renseign\u00e9', pv > 0 ? 'var(--text)' : 'var(--dim)');
+  h += acLigneAc(1, 'Prix sugg\u00e9r\u00e9 (marge ' + marge + ' %)', sugg > 0 ? fmtF(sugg) : '\u2014', 'par unit\u00e9', '#16a34a');
+  h += '</div>';
+  var vStyle = 'background:#f8fafc;border:1px solid var(--border);color:var(--gray-500)';
+  var vTxt = 'Renseigne le prix de vente dans la fiche article pour comparer (co\u00fbt simul\u00e9 : ' + fmtF(Math.round(crUnit)) + ' / unit\u00e9).';
+  if (v.code === 'ok') { vStyle = 'background:#f0fdf4;border:1px solid #bbf7d0;color:#15803d'; vTxt = '\u2705 Prix OK : marge ' + v.marge.toFixed(1) + ' % \u2265 cible ' + marge + ' %. \u00c9cart : +' + fmtF(Math.round(pv - crUnit)) + ' / unit\u00e9.'; }
+  else if (v.code === 'insuffisante') { vStyle = 'background:#fffbeb;border:1px solid #fde68a;color:#92400e'; vTxt = '\u26a0\ufe0f Marge insuffisante : ' + v.marge.toFixed(1) + ' % < cible ' + marge + ' %. Prix sugg\u00e9r\u00e9 : ' + fmtF(sugg) + ' / unit\u00e9.'; }
+  else if (v.code === 'perte') { vStyle = 'background:#fef2f2;border:1px solid #fecaca;color:#b91c1c'; vTxt = '\u274c Vente \u00e0 perte : ' + fmtF(Math.round(crUnit - pv)) + ' de perte / unit\u00e9. Prix sugg\u00e9r\u00e9 : ' + fmtF(sugg) + ' / unit\u00e9.'; }
+  h += '<div style="padding:10px 14px;border-radius:10px;margin-bottom:10px;font-size:13px;font-weight:700;' + vStyle + '">' + vTxt + '</div>';
+  var ancien = parseFloat((c.art || {}).prix_revient) || 0;
+  if (ancien > 0 && crUnit > 0 && ancien !== crUnit) {
+    var ec = crUnit - ancien;
+    h += '<div style="font-size:12px;color:var(--gray-600);margin-bottom:10px">Dernier co\u00fbt enregistr\u00e9 : ' + fmtF(ancien) + ' \u2192 simul\u00e9 aujourd\u2019hui : ' + fmtF(Math.round(crUnit)) + ' (\u0394 ' + (ec > 0 ? '+' : '') + fmtF(Math.round(ec)) + ', ' + (ec / ancien * 100).toFixed(1) + ' %) : les prix d\u2019achat ont boug\u00e9 depuis.</div>';
+  } else if (ancien > 0 && crUnit > 0) {
+    h += '<div style="font-size:12px;color:var(--gray-600);margin-bottom:10px">Stable depuis le dernier enregistrement (' + fmtF(ancien) + ' / unit\u00e9).</div>';
+  }
+  if (c.manquants && c.manquants.length) h += '<div style="font-size:12px;color:#b45309;margin-bottom:10px">Il manque : ' + escH(c.manquants.join(', ')) + '. Renseigne ces prix pour un co\u00fbt complet.</div>';
+  h += '<div style="font-size:11px;color:var(--gray-500);margin-bottom:10px">Frais fixes par unit\u00e9 (MO indirecte + autres) : montants saisis une fois (bouton D\u00e9tail). Ils ne sortent pas de la nomenclature.</div>';
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">';
+  h += '<button class="btn btn-outline btn-sm" onclick="printCoutRevientSim()">\ud83d\udda8\ufe0f Imprimer (devis)</button>';
+  h += '<button class="btn btn-accent btn-sm" onclick="crEnregistrerCout()"' + (crUnit > 0 ? '' : ' disabled') + '>\ud83d\udcbe Enregistrer comme prix de revient</button>';
+  h += '<button class="btn btn-outline btn-sm" onclick="showCoutArticleAuto(\'' + escH(window._crArt) + '\')">\ud83e\uddfe D\u00e9tail + frais fixes</button>';
+  h += '</div>';
+  document.getElementById('content').innerHTML = h;
+}
+function crEnregistrerCout() {
+  var id = window._crArt;
+  var arts = [];
+  try { arts = getArticles() || []; } catch (eG) {}
+  var idx = -1, i;
+  for (i = 0; i < arts.length; i++) if (String((arts[i] || {}).id) === String(id)) { idx = i; break; }
+  if (idx < 0) return;
+  var c = null;
+  try { c = acCoutArticleAuto(id); } catch (eC) { c = null; }
+  if (!c || !(c.total > 0)) { toast('Aucun co\u00fbt calculable pour cet article', 'error'); return; }
+  var ancien = parseFloat(arts[idx].prix_revient) || 0;
+  arts[idx].prix_revient = Math.round(c.total);
+  arts[idx]._cout_auto = 1;
+  try { setArticles(arts); } catch (eS) { toast('Sauvegarde impossible', 'error'); return; }
+  toast('Co\u00fbt de revient : ' + fmt(Math.round(c.total)) + ' FCFA' + (ancien > 0 ? ' \u2014 remplace ' + fmt(ancien) : ''), 'success');
+  renderCoutRevient();
+}
+function printCoutRevientSim() {
+  var artId = window._crArt;
+  if (!artId) { toast('Choisis d\u2019abord un article', 'error'); return; }
+  var c = null;
+  try { c = acCoutArticleAuto(artId); } catch (e) { c = null; }
+  if (!c || !c.comps || !c.comps.length) { toast('Aucune nomenclature : rien \u00e0 imprimer', 'error'); return; }
+  var Q = (parseFloat(window._crQte) > 0) ? parseFloat(window._crQte) : 1;
+  var marge = parseFloat(window._crMarge) || 0;
+  var camp = null;
+  try { camp = acCoutArticleCampagne(artId, Q); } catch (e2) { camp = null; }
+  var fraisUnit = (c.frais && c.frais.sousTotal) || 0;
+  var crUnit = c.total || 0;
+  var matLot = (camp && camp.matiere) || 0;
+  var crLot = matLot + fraisUnit * Q;
+  var pv = c.pv || 0;
+  var sugg = crPrixSuggere(crUnit, marge);
+  var v = crVerdictMarge(pv, crUnit, marge);
+  var a = c.art || {};
+  var nomArt = (a.code ? a.code + ' \u2014 ' : '') + (a.designation || 'Article');
+  var h = acCssImpression('Cout de revient previsionnel ' + nomArt);
+  h += '<div class="header"><h1>Co\u00fbt de revient PR\u00c9VISIONNEL \u2014 ' + escH(nomArt) + '</h1>' +
+    '<div style="text-align:right;font-size:9.5px">Simulation AVANT production<br>' + crToday() + ' \u00b7 Lot : ' + Q + ' unit\u00e9(s) \u00b7 Marge cible : ' + marge + ' %</div></div>';
+  h += '<div class="grid">';
+  h += acCarteImpression('Co\u00fbt de revient / unit\u00e9', crUnit > 0 ? fmtF(Math.round(crUnit)) : '\u2014', 'pr\u00e9visionnel, tout compris', '#ea580c');
+  h += acCarteImpression('Total pr\u00e9visionnel (lot)', crLot > 0 ? fmtF(Math.round(crLot)) : '\u2014', Q + ' unit\u00e9(s)', '#ea580c');
+  h += acCarteImpression('Prix sugg\u00e9r\u00e9', sugg > 0 ? fmtF(sugg) : '\u2014', 'marge ' + marge + ' %', '#16a34a');
+  h += acCarteImpression('Prix de vente actuel', pv > 0 ? fmtF(Math.round(pv)) : '\u2014', pv > 0 ? 'par unit\u00e9' : 'non renseign\u00e9', '#64748b');
+  h += '</div>';
+  h += '<div class="section">1 \u00b7 MATI\u00c8RE PREMI\u00c8RE DU LOT (nomenclature \u00d7 prix actuels)</div>';
+  h += '<table><tr><th>Composant</th><th>Type</th><th style="text-align:right">Qté lot</th><th style="text-align:right">Montant lot</th></tr>';
+  ((camp && camp.bois) || []).forEach(function(b) {
+    h += '<tr class="avoid"><td>' + escH(b.libelle) + '</td><td>' + escH(b.type) + '</td><td style="text-align:right">' + fmt(b.qte) + '</td><td style="text-align:right">' + fmtF(b.mt) + '</td></tr>';
+  });
+  ((camp && camp.conso) || []).forEach(function(x) {
+    h += '<tr class="avoid"><td>' + escH(x.libelle) + '</td><td>' + escH(x.type) + '</td><td style="text-align:right">' + fmt(x.qte) + '</td><td style="text-align:right">' + fmtF(x.mt) + '</td></tr>';
+  });
+  h += '<tr class="total"><td colspan="3">Mati\u00e8re premi\u00e8re (lot)</td><td style="text-align:right">' + fmtF(Math.round(matLot)) + '</td></tr>';
+  h += '<tr><td colspan="3">Frais fixes (lot)</td><td style="text-align:right">' + fmtF(Math.round(fraisUnit * Q)) + '</td></tr>';
+  h += '<tr class="total"><td colspan="3">TOTAL PR\u00c9VISIONNEL (lot)</td><td style="text-align:right">' + fmtF(Math.round(crLot)) + '</td></tr>';
+  h += '</table>';
+  h += '<div class="section">2 \u00b7 PRIX DE VENTE</div>';
+  h += '<table><tr><th>Poste</th><th style="text-align:right">Par unit\u00e9</th><th>Verdict</th></tr>';
+  h += '<tr><td>Prix de vente actuel</td><td style="text-align:right">' + (pv > 0 ? fmtF(Math.round(pv)) : '\u2014') + '</td><td>' + (v.code === 'perte' ? 'VENTE A PERTE' : (v.code === 'ok' ? 'marge ' + v.marge.toFixed(1) + ' % OK' : (v.code === 'insuffisante' ? 'marge ' + v.marge.toFixed(1) + ' % insuffisante' : '\u2014'))) + '</td></tr>';
+  h += '<tr class="total"><td>Prix sugg\u00e9r\u00e9 (marge ' + marge + ' %)</td><td style="text-align:right">' + (sugg > 0 ? fmtF(sugg) : '\u2014') + '</td><td>devis</td></tr>';
+  h += '</table>';
+  if (c.manquants && c.manquants.length) h += '<div class="warn">Simulation incompl\u00e8te \u2014 il manque : ' + escH(c.manquants.join(', ')) + '.</div>';
+  h += '<div class="note">Simulation AVANT production : nomenclature \u00d7 prix d\u2019achat du jour. A comparer au Co\u00fbt de Production constat\u00e9 apr\u00e8s fabrication.</div>';
+  h += acPiedImpression();
+  acOuvre(h, 'Cout de revient previsionnel ' + nomArt);
+}
 function renderCostPrice() {
   var h = '';
   h += '<div class="card" style="padding:12px 14px;margin-bottom:10px">';
@@ -36184,6 +36364,7 @@ function renderCostPrice() {
   h += '<div style="font-size:12px;color:var(--gray-500);margin-top:3px">Calcul complet identique à Exploitation : matières, main-d’œuvre au pointage Paye ou en simulation, clouage, structure au prorata, marge. Les mouvements d’Exploitation se reflètent ici en temps réel.</div>';
   h += '</div><div style="display:flex;gap:6px;flex-wrap:wrap">';
   h += '<button class="btn btn-outline btn-sm" onclick="crRerender()">\ud83d\udd04 Actualiser</button>';
+  h += '<button class="btn btn-outline btn-sm" onclick="navigateTo(\'coutRevient\')">\ud83e\uddee Simuler le co\u00fbt de revient (avant production)</button>';
   h += '</div></div>';
   try { h += render_cout_revient(); }
   catch (e) { h += '<div class="empty-state"><p>Calcul indisponible</p><p style="font-size:13px">' + escH(e.message) + '</p></div>'; }
@@ -36278,6 +36459,7 @@ function crRerender() {
   crRerender._enCours = true;
   try {
     if (typeof currentPage !== 'undefined' && currentPage === 'costPriceJour' && typeof renderCostPriceJour === 'function') renderCostPriceJour();
+    else if (typeof currentPage !== 'undefined' && currentPage === 'coutRevient' && typeof renderCoutRevient === 'function') renderCoutRevient();
     else if (typeof renderCostPrice === 'function') renderCostPrice();
   } catch (e) {} finally { crRerender._enCours = false; }
 }
@@ -36327,7 +36509,7 @@ function closeModalCR() {
    simplement la page coût de l'application principale. */
 function renderPage() {
   try {
-    var p = (window.currentPage === 'costPriceJour') ? renderCostPriceJour : renderCostPrice;
+    var p = (window.currentPage === 'costPriceJour') ? renderCostPriceJour : ((window.currentPage === 'coutRevient') ? renderCoutRevient : renderCostPrice);
     if (typeof p === 'function') p();
   } catch (e) { crRerender(); }
 }

@@ -4968,6 +4968,26 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Co\u00fbt de revient : prix sugg\u00e9r\u00e9 et verdict marge (simulation avant production)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var pv1 = crPrixSuggere(10000, 20);
+      var pv0 = crPrixSuggere(10000, 0);
+      var vPerte = crVerdictMarge(9000, 10000, 20);
+      var vOk = crVerdictMarge(12500, 10000, 20);
+      var vIns = crVerdictMarge(11000, 10000, 20);
+      var vNo = crVerdictMarge(0, 10000, 20);
+      renderCoutRevient();
+      var h = document.getElementById('content').innerHTML || '';
+      var okPage = h.indexOf('simulation AVANT production') !== -1;
+      (pv1 === 12500 && pv0 === 10000 && vPerte.code === 'perte' && vOk.code === 'ok' && vIns.code === 'insuffisante' && vNo.code === 'noprix' && okPage)
+        ? 'OK : PV 10000+20% -> 12500, verdicts perte/ok/insuffisante/noprix, page rendue'
+        : 'ECHEC pv1=' + pv1 + ' perte=' + vPerte.code + ' ok=' + vOk.code + ' ins=' + vIns.code + ' page=' + okPage
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
