@@ -5492,6 +5492,26 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Pointage r\u00e9cap : colonne H. Normales (40h/sem, pas le jour brut)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      var recs = [];
+      for (var d = 1; d <= 10; d++) recs.push({ id: 'tn' + d, employee_id: 'e1', date: '2026-10-' + (d < 10 ? '0' : '') + d, h_j_manual: '8' });
+      setPointageData(recs);
+      loadPointage();
+      var h = document.getElementById('pt-container').innerHTML;
+      var rc = h.slice(h.indexOf('pt-week-recap'));
+      var okH = h.indexOf('H. Normales') !== -1;
+      var okW = rc.indexOf('24.0h') !== -1 && rc.indexOf('40.0h') !== -1 && rc.indexOf('64.0h') !== -1;
+      (okH && okW) ? 'OK : colonne H. Normales, semaines 24.0h + 40.0h (8h sup hors normales), total 64.0h'
+                   : 'ECHEC header=' + okH + ' valeurs=' + okW
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
