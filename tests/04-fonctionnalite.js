@@ -4822,6 +4822,38 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie Journaliers : exclus de la ventilation, m\u00e9mo \u00e0 part',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'e2', nom: 'Koffi', prenoms: 'J', matricule: 'M002', type_contrat: 'Journalier', categorie: 'B', status: 'actif', date_embauche: '2024-06-01' });
+      DB.setMain('mdb_employes', emps);
+      var ops = payeArr('mdb_operationsCaisse');
+      ops.push({ id: 'opJ1', numeroPiece: 'KJ-1', code: 'ACOMPTE', caisseId: 'c1', montant: 15000, date: '2026-10-07' });
+      DB.setMain('mdb_operationsCaisse', ops);
+      var list = payeArr('mdb_acomptesPrets');
+      list.push({ id: 'acJ1', employee_id: 'e2', employeNom: 'Koffi', type: 'acompte', montant: 15000, moisDeduction: '2026-10', date: '2026-10-07', caisseOpId: 'opJ1', numeroPiece: 'KJ-1', valide: true });
+      setAPList(list);
+      var v = ventilationPaie('2026-10');
+      var okEq = (v.totD1 === v.totC1) && (v.totD2 === v.totC2);
+      var estK = function (g) { return ((g && g.employe) || '').toUpperCase().indexOf('KOFFI') >= 0; };
+      var jK = v.j.lignes.filter(estK);
+      var okJ = jK.length === 1 && jK[0].ap === 15000;
+      var det4212 = null, det422001 = null;
+      v.t1.forEach(function (e) {
+        if (e.ac === '421200' && e.detail) det4212 = e.detail.lignes;
+        if (e.ac === '422001' && e.detail) det422001 = e.detail.lignes;
+      });
+      var okExclu = det4212 && det4212.every(function (g) { return !estK(g); });
+      var okNet = det422001 && det422001.every(function (g) { return !estK(g); });
+      (okEq && okJ && okExclu && okNet)
+        ? 'OK : Koffi (journalier) en m\u00e9mo seul (15000), absent du 421200 et du 422001, T1 ' + v.totD1 + '=' + v.totC1
+        : 'ECHEC eq=' + okEq + ' memo=' + okJ + ' (' + JSON.stringify(jK) + ') exclu4212=' + okExclu + ' exclu422001=' + okNet
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

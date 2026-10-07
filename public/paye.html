@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-171";
+      window.__APP_VERSION = "2026-10-06-172";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -4547,6 +4547,29 @@
               </thead>
               <tbody id="ec2-tbody"></tbody>
               <tfoot id="ec2-tfoot"></tfoot>
+            </table>
+          </div>
+          <div class="card" style="padding: 0; overflow-x: auto">
+            <h3
+              style="
+                padding: 12px 14px 0;
+                font-size: 0.85rem;
+                letter-spacing: 0.04em;
+              "
+            >
+              JOURNALIERS — MÉMO (hors comptabilité, non déclaré)
+            </h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Employé</th>
+                  <th style="text-align: right">Brut</th>
+                  <th style="text-align: right">Acomptes &amp; Prêts</th>
+                  <th style="text-align: right">Net payé</th>
+                </tr>
+              </thead>
+              <tbody id="ec3-tbody"></tbody>
+              <tfoot id="ec3-tfoot"></tfoot>
             </table>
           </div>
           <div id="ec-note-ventilation" style="margin-top: 8px"></div>
@@ -26628,6 +26651,8 @@ function printCongeIndividuel(empId) {
 
       /* ==================== ECRITURES COMPTABLES (OHADA) ==================== */
       /* Ventilation comptable au squelette du comptable (2 tableaux) :
+         Journaliers (type_contrat « Journalier ») EXCLUS des 2 tableaux
+         (ni enregistrés ni déclarés) : simple mémo à part (v.j).
          Tableau 1 « VENTILATION DES SALAIRES » : brut hors transport en
          661100, transport en 663400, retenues en 431300/431400/447200,
          421100 (prêts) / 421200 (acomptes) / 421300 (soldes), net en 422001.
@@ -26655,6 +26680,10 @@ function printCongeIndividuel(empId) {
         /* Détail par employé pour le "clic-compte" (421100/421200/421300
            par pièces, 422001 par nets) et pour l'impression détaillée. */
         var detNet = [];
+        var jLignes = [],
+          jTotB = 0,
+          jTotAp = 0,
+          jTotN = 0;
         var personnel = [];
         try {
           personnel = getPersonnel().filter(function (p) {
@@ -26667,6 +26696,25 @@ function printCongeIndividuel(empId) {
             c = calculatePayroll(emp, mois);
           } catch (eC) {}
           if (!c || !c.totals) return;
+          /* Journaliers EXCLUS de la comptabilité déclarée (ni CNPS ni
+             ventilation) : simple mémo des montants payés, tableau à part. */
+          if ((emp.type_contrat || "") === "Journalier") {
+            var jb = R(c.totals.brut || 0);
+            var jap = R((c.totals.acomptes || 0) + (c.totals.prets || 0));
+            var jn = R(c.totals.net || 0);
+            if (jb !== 0 || jap !== 0 || jn !== 0) {
+              var jnm =
+                ((emp.nom || "") + " " + (emp.prenoms || "")).trim() ||
+                emp.matricule ||
+                emp.id ||
+                "-";
+              jLignes.push({ employe: jnm, brut: jb, ap: jap, net: jn });
+              jTotB += jb;
+              jTotAp += jap;
+              jTotN += jn;
+            }
+            return;
+          }
           var tt = c.totals;
           acc.brut += tt.brut || 0;
           acc.transp += tt.transport || 0;
@@ -26709,7 +26757,30 @@ function printCongeIndividuel(empId) {
            Les lignes servent aussi au détail par employé de chaque compte. */
         var _detFull = [];
         try {
-          var _vRecs = getAPList();
+          /* Journaliers exclus aussi du détail 421 (sinon leurs pièces
+             apparaîtraient sous un crédit à 0) : filtre par id employé
+             et par nom normalisé (les lignes ne portent que le nom). */
+          var _jIds = {},
+            _jNoms = {};
+          (personnel || []).forEach(function (_p) {
+            if (!_p || (_p.type_contrat || "") !== "Journalier") return;
+            if (_p.id) _jIds[_p.id] = true;
+            var _nn = ((_p.nom || "") + " " + (_p.prenoms || ""))
+              .trim()
+              .toUpperCase();
+            if (_nn) _jNoms[_nn] = true;
+            var _n2 = (_p.nom || "").trim().toUpperCase();
+            if (_n2) _jNoms[_n2] = true;
+          });
+          var _vRecs = getAPList().filter(function (_ra) {
+            if (!_ra) return false;
+            var _eid =
+              _ra.employee_id || _ra.employeId || _ra.employe_id || null;
+            if (_eid && _jIds[_eid]) return false;
+            var _enm = String(_ra.employeNom || "").trim().toUpperCase();
+            if (_enm && _jNoms[_enm]) return false;
+            return true;
+          });
           var _vOpsById = {};
           (payeArr("mdb_operationsCaisse") || []).forEach(function (_o) {
             if (_o && _o.id) _vOpsById[_o.id] = _o;
@@ -26893,6 +26964,8 @@ function printCongeIndividuel(empId) {
           apTotal: ac + pr,
           l421: { pr: pr, acNet: acNet, soldes: soldes },
           netCalcule: R(acc.net),
+          /* Journaliers : mémo hors comptabilité (non déclaré). */
+          j: { lignes: jLignes, totB: jTotB, totAp: jTotAp, totN: jTotN },
         };
       }
       function loadEcritures() {
@@ -26905,6 +26978,8 @@ function printCongeIndividuel(empId) {
           tfoot = document.getElementById("ec-tfoot"),
           tbody2 = document.getElementById("ec2-tbody"),
           tfoot2 = document.getElementById("ec2-tfoot"),
+          tbody3 = document.getElementById("ec3-tbody"),
+          tfoot3 = document.getElementById("ec3-tfoot"),
           noteBox = document.getElementById("ec-note-ventilation");
         if (!tfoot) return;
         tbody.innerHTML = "";
@@ -26913,6 +26988,7 @@ function printCongeIndividuel(empId) {
         ecRendreTableau(tbody, tfoot, v.t1, v.totD1, v.totC1);
         if (tbody2 && tfoot2)
           ecRendreTableau(tbody2, tfoot2, v.t2, v.totD2, v.totC2);
+        if (tbody3 && tfoot3) ecRendreJournaliers(tbody3, tfoot3, v.j);
         if (noteBox) {
           var _notes = [];
           if (v.avant > 0)
@@ -27019,6 +27095,38 @@ function printCongeIndividuel(empId) {
           var mk = el.querySelector ? el.querySelector(".ec-mk") : null;
           if (mk) mk.innerText = open ? "−" : "+";
         } catch (eMk) {}
+      }
+      /* Mémo journaliers : simple liste des montants payés, hors balance
+         (ni débit ni crédit, non déclaré). */
+      function ecRendreJournaliers(tbody, tfoot, j) {
+        var lignes = (j && j.lignes) || [];
+        if (!lignes.length)
+          tbody.innerHTML =
+            '<tr><td colspan="4" style="padding:8px;color:var(--dim)">Aucun journalier payé ce mois</td></tr>';
+        else
+          tbody.innerHTML = lignes
+            .map(function (g) {
+              return (
+                "<tr><td>" +
+                escH(g.employe || "-") +
+                '</td><td style="text-align:right;font-weight:700">' +
+                (g.brut !== 0 ? fmt(g.brut) : "-") +
+                '</td><td style="text-align:right;font-weight:700">' +
+                (g.ap !== 0 ? fmt(g.ap) : "-") +
+                '</td><td style="text-align:right;font-weight:700">' +
+                (g.net !== 0 ? fmt(g.net) : "-") +
+                "</td></tr>"
+              );
+            })
+            .join("");
+        tfoot.innerHTML =
+          '<tr style="background:#f1f5f9;font-weight:800"><td style="text-align:right">TOTAL (mémo)</td><td style="text-align:right">' +
+          fmt((j && j.totB) || 0) +
+          '</td><td style="text-align:right">' +
+          fmt((j && j.totAp) || 0) +
+          '</td><td style="text-align:right">' +
+          fmt((j && j.totN) || 0) +
+          "</td></tr>";
       }
       /* Rendu d'un tableau de ventilation : les comptes avec détail
          (421100/421200/421300/422001) sont cliquables (déplié employé). */
@@ -27183,6 +27291,7 @@ function printCongeIndividuel(empId) {
           "#ec2-tfoot",
           "VENTILATION DES CHARGES SOCIALES (PATRONALES)",
         );
+        pushTable("#ec3-tbody", "#ec3-tfoot", "JOURNALIERS (MEMO, NON DECLARE)");
         var csv = rows
           .map(function (r) {
             return r.join(";");
@@ -27310,6 +27419,31 @@ function printCongeIndividuel(empId) {
         });
         h += "<h3>VENTILATION DES CHARGES SOCIALES (PATRONALES)</h3>";
         h += _prt(v.t2, v.totD2, v.totC2);
+        if (v.j && v.j.lignes && v.j.lignes.length) {
+          h += "<h3>JOURNALIERS — MÉMO (hors comptabilité, non déclaré)</h3>";
+          h +=
+            '<table><thead><tr><th class="l">Employé</th><th>Brut</th><th>Acomptes &amp; Prêts</th><th>Net payé</th></tr></thead><tbody>';
+          v.j.lignes.forEach(function (g) {
+            h +=
+              '<tr><td class="l">' +
+              escH(g.employe) +
+              "</td><td>" +
+              (g.brut !== 0 ? fmt(g.brut) : "-") +
+              "</td><td>" +
+              (g.ap !== 0 ? fmt(g.ap) : "-") +
+              '</td><td><strong>' +
+              (g.net !== 0 ? fmt(g.net) : "-") +
+              "</strong></td></tr>";
+          });
+          h +=
+            '<tr class="total"><td class="l">TOTAL (mémo)</td><td>' +
+            fmt(v.j.totB) +
+            "</td><td>" +
+            fmt(v.j.totAp) +
+            "</td><td>" +
+            fmt(v.j.totN) +
+            "</td></tr></tbody></table>";
+        }
         if (v.avant > 0)
           h +=
             '<div style="font-size:9px;color:#555;margin-top:8px">Brut monétaire ventilé (hors avantages en nature non monétaires : ' +
