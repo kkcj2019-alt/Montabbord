@@ -5051,6 +5051,21 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie sync : les \u00e9critures fra\u00eeches (<2min) survivent au pull cloud, les anciennes suivent le cloud',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var now = Date.now();
+      var r1 = payeProtegeEcrituresFraiches({ empIndivPrimes: { e1: [{ primeId: 'p1', montant: 1 }] } }, { empIndivPrimes: { e1: [{ primeId: 'p1', montant: 999 }] } }, { empIndivPrimes: now - 5000 }, 120000);
+      var r2 = payeProtegeEcrituresFraiches({ empIndivPrimes: { e1: [] } }, { empIndivPrimes: { e1: [{ primeId: 'p1', montant: 999 }] } }, { empIndivPrimes: now - 300000 }, 120000);
+      var r3 = payeProtegeEcrituresFraiches({ empIndivPrimes: { e1: [] } }, { empIndivPrimes: { e1: [{ primeId: 'p1', montant: 999 }] } }, {}, 120000);
+      var ok = r1.protege === true && r1.fusion.empIndivPrimes.e1[0].montant === 999 && r2.protege === false && r3.protege === false;
+      ok ? 'OK : saisie fraiche gardee + repoussee, ancienne/non horodatee suit le cloud'
+         : 'ECHEC r1=' + r1.protege + ' r2=' + r2.protege + ' r3=' + r3.protege
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

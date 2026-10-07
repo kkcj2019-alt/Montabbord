@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-178";
+      window.__APP_VERSION = "2026-10-06-179";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5915,7 +5915,7 @@ function payeObj(key) {
         p[section] = val;
         setPayeData(p);
         /* Horodate les écritures locales : une réponse cloud plus vieille
-           qu'une saisie de moins de 30 s ne doit pas l'écraser. */
+           qu'une saisie de moins de 2 min ne doit pas l'écraser. */
         try {
           if (!payeBootstrapping)
             (window._payeEcritLocal = window._payeEcritLocal || {})[section] =
@@ -6352,6 +6352,30 @@ function payeObj(key) {
 
       var payePushBusy = false,
         payePushQueued = false;
+      /* Badge synchro : visible seulement quand un push a échoué et n'est pas encore
+         rattrapé. Évite les "saisies qui reviennent" silencieuses. */
+      function _payeSyncAfficher() {
+        try {
+          var b = document.getElementById("payeSyncBadge");
+          if (!b) {
+            b = document.createElement("div");
+            b.id = "payeSyncBadge";
+            b.style.cssText = "position:fixed;right:12px;bottom:12px;z-index:99999;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:700;display:none;box-shadow:0 2px 8px rgba(0,0,0,.2)";
+            document.body.appendChild(b);
+          }
+          var st = window._payeSyncEtat || {};
+          if (st.echec && (!st.lastOk || st.echec > st.lastOk)) {
+            b.style.display = "";
+            b.style.background = "#fef2f2";
+            b.style.color = "#b91c1c";
+            b.style.border = "1px solid #fecaca";
+            b.textContent = "⚠️ Synchro en attente — vérifiez la connexion, vos saisies repartiront toutes seules";
+            b.title = String(st.erreur || "");
+          } else {
+            b.style.display = "none";
+          }
+        } catch (e) {}
+      }
       function pushPayeCloud() {
         var uid = getEnterpriseUid();
         if (!uid || !firebaseDbP) return;
@@ -6436,6 +6460,13 @@ function payeObj(key) {
           .then(function () {
             payePushBusy = false;
             console.log("[Paye] Sync cloud OK");
+            try {
+              window._payePushEssais = 0;
+              window._payeSyncEtat = window._payeSyncEtat || {};
+              window._payeSyncEtat.lastOk = Date.now();
+              window._payeSyncEtat.echec = 0;
+              if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
+            } catch (eS) {}
             if (payePushQueued) {
               payePushQueued = false;
               pushPayeCloud();
@@ -6445,9 +6476,26 @@ function payeObj(key) {
             console.warn("[Paye] Sync cloud error:", e);
             payePushBusy = false;
             var is402 = e && (e.status === 402 || e.statusCode === 402 || (e.message && e.message.indexOf("402") >= 0));
-            if (payePushQueued && !is402) {
+            /* Échec audible + réessais : sans ça, une coupure/quota fait diverger
+               le cloud en silence, puis le pull suivant écrase les saisies
+               (l'utilisateur voit ses montants "revenir" en arrière). */
+            var nEssai = window._payePushEssais || 0;
+            try {
+              window._payeSyncEtat = window._payeSyncEtat || {};
+              window._payeSyncEtat.echec = Date.now();
+              window._payeSyncEtat.erreur = String((e && e.message) || e || "réseau");
+              if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
+            } catch (eI) {}
+            if (!is402) {
               payePushQueued = false;
-              setTimeout(pushPayeCloud, 10000);
+              if (nEssai === 0) {
+                try { toast("Synchro cloud en échec — nouvel essai automatique, vos saisies sont gardées", "error"); } catch (eT) {}
+              }
+              if (nEssai < 5) {
+                window._payePushEssais = nEssai + 1;
+                var _delais = [5000, 15000, 30000, 60000, 120000];
+                setTimeout(pushPayeCloud, _delais[nEssai] || 60000);
+              }
             } else {
               payePushQueued = false;
             }
@@ -6541,7 +6589,7 @@ function payeObj(key) {
             ? data[PAYE_KEY]
             : {};
         DB.setMain(PAYE_KEY, _payeMergeObj(_cur, _inc, false));
-        /* Écritures locales toutes fraîches (< 30 s) : le cloud n'a pas encore
+        /* Écritures locales toutes fraîches (< 2 min) : le cloud n'a pas encore
            pu recevoir le push — on garde le local et on repousse pour que le
            cloud converge aussi. Sinon la saisie « saute » et revient à l'ancien. */
         try {
@@ -6549,7 +6597,7 @@ function payeObj(key) {
             DB.getMain(PAYE_KEY) || {},
             _cur,
             window._payeEcritLocal,
-            30000,
+            120000,
           );
           if (_prot.protege) {
             DB.setMain(PAYE_KEY, _prot.fusion);
