@@ -5365,6 +5365,43 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'F\u00e9ri\u00e9s CI : base officielle g\u00e9n\u00e9r\u00e9e (fixes + P\u00e2ques + musulmanes + report dimanche)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var g26 = ptGenererFeriesCI(2026);
+      var has26 = function (d) { return g26.some(function (f) { return f.date === d; }); };
+      var ok26 = has26('2026-01-01') && has26('2026-04-06') && has26('2026-05-14') && has26('2026-05-25') && has26('2026-03-20') && has26('2026-05-27') && has26('2026-08-07') && has26('2026-11-15') && has26('2026-12-25');
+      var g22 = ptGenererFeriesCI(2022);
+      var has22 = function (d) { return g22.some(function (f) { return f.date === d; }); };
+      var ok22 = has22('2022-05-02') && has22('2022-04-18');
+      (ok26 && ok22)
+        ? 'OK : 2026 complet (Ramadan 20/03, Tabaski 27/05, P\u00e2ques 06/04), 2022 : report 02/05 + P\u00e2ques 18/04'
+        : 'ECHEC 2026=' + ok26 + ' 2022=' + ok22
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'F\u00e9ri\u00e9s : travaill\u00e9 = dimanche (+75/+100), ch\u00f4m\u00e9 = pay\u00e9',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      DB.setMain('mdb_feries', [{ id: 'f1', date: '2026-08-07', libelle: 'Ind\u00e9pendance' }]);
+      var okLec = ptEstFerie(2026, 7, 7) === true && ptEstFerie(2026, 7, 8) === false;
+      var e1 = getPersonnel().filter(function (p) { return p.id === 'e1'; })[0];
+      setPointageData([{ id: 'pf1', employee_id: 'e1', date: '2026-08-07', h_j_manual: '8' }]);
+      var st = getMonthStats(e1, '2026-08');
+      var okT = st.hs75 === 8 && st.normalHours === 0;
+      setPointageData([]);
+      var st2 = getMonthStats(e1, '2026-08');
+      var okC = st2.ferieDays === 1;
+      (okLec && okT && okC)
+        ? 'OK : 07/08 f\u00e9ri\u00e9 lu, travaill\u00e9 8h -> HS75 (normales 0), ch\u00f4m\u00e9 -> ferieDays=1'
+        : 'ECHEC lec=' + okLec + ' trav=(hs75=' + st.hs75 + ' norm=' + st.normalHours + ') chome=' + st2.ferieDays
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
