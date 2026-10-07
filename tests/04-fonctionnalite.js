@@ -4666,22 +4666,27 @@ r.push({
     nom: 'Contrats : le renouvellement garde l\u2019historique (1er puis 2e) et l\u2019anciennet\u00e9 d\u2019origine',
     app: 'index.html', store: storeRealiste,
     code: `
+      function _ipm(iso, n) { var d = new Date(iso + 'T00:00:00'); d.setMonth(d.getMonth() + n); return d.getFullYear() + '-' + (d.getMonth() < 9 ? '0' : '') + (d.getMonth() + 1) + '-' + (d.getDate() < 10 ? '0' : '') + d.getDate(); }
+      var _t0 = getToday();
+      var _e0 = _ipm(_t0, -8);
+      var _d1 = _ipm(_t0, -2);
+      var _d2 = _ipm(_t0, 4);
       var arr = dbArr('mdb_employes');
-      arr.push({ id: 'cddz1', matricule: 'CDD-001', nom: 'RENOUV', prenoms: 'Test', sexe: 'M', date_entree: '2024-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      arr.push({ id: 'cddz1', matricule: 'CDD-001', nom: 'RENOUV', prenoms: 'Test', sexe: 'M', date_entree: _e0, type_contrat: 'CDD', duree_contrat: 6, statut: 'actif' });
       arr.push({ id: 'cdiz1', matricule: 'CDI-001', nom: 'FIXE', prenoms: 'Test', sexe: 'M', date_entree: '2020-05-01', type_contrat: 'CDI', duree_contrat: 0, statut: 'actif' });
       DB.set('mdb_employes', arr);
-      var r1 = renouvelerContratEmp('cddz1', '2025-01-10', 6, 'CDD');
+      var r1 = renouvelerContratEmp('cddz1', _d1, 6, 'CDD');
       var e1 = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz1'; })[0];
-      var ok1 = r1.ok && e1.historique_contrats.length === 1 && e1.historique_contrats[0].n === 1 && e1.historique_contrats[0].date_debut === '2024-01-10' && e1.historique_contrats[0].duree_mois === 12 && e1.date_entree === '2025-01-10' && e1.duree_contrat === 6 && e1.date_premiere_entree === '2024-01-10' && datePremiereEntree(e1) === '2024-01-10';
-      var r2 = renouvelerContratEmp('cddz1', '2025-07-10', 12, 'CDD');
+      var ok1 = r1.ok && e1.historique_contrats.length === 1 && e1.historique_contrats[0].n === 1 && e1.historique_contrats[0].date_debut === _e0 && e1.historique_contrats[0].duree_mois === 6 && e1.date_entree === _d1 && e1.duree_contrat === 6 && e1.date_premiere_entree === _e0 && datePremiereEntree(e1) === _e0;
+      var r2 = renouvelerContratEmp('cddz1', _d2, 12, 'CDD');
       var e2 = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz1'; })[0];
-      var ok2 = r2.ok && e2.historique_contrats.length === 2 && e2.historique_contrats[1].n === 2 && e2.historique_contrats[1].date_debut === '2025-01-10' && e2.date_entree === '2025-07-10' && e2.date_premiere_entree === '2024-01-10';
+      var ok2 = r2.ok && e2.historique_contrats.length === 2 && e2.historique_contrats[1].n === 2 && e2.historique_contrats[1].date_debut === _d1 && e2.date_entree === _d2 && e2.date_premiere_entree === _e0;
       var rCdi = renouvelerContratEmp('cdiz1', '2026-01-01', 12, 'CDI');
       var rVide = renouvelerContratEmp('cddz1', '', 6, 'CDD');
       var okRefus = (!rCdi.ok) && (!rVide.ok);
       DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz1' && x.id !== 'cdiz1'; }));
       (ok1 && ok2 && okRefus)
-        ? 'OK : 1er->2e->3e en historique, entree 2024-01-10 gardee, CDI refuse'
+        ? 'OK : 1er->2e->3e en historique, entree ' + _e0 + ' gardee, CDI refuse'
         : 'ECHEC r1=' + ok1 + ' r2=' + ok2 + ' refus=' + okRefus
     `,
     attenduPrefixe: 'OK'
@@ -5146,6 +5151,71 @@ r.push({
       DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdhm1'; }));
       (okList && okAdd) ? 'OK : N\u00b01 + En cours affich\u00e9s, contrat pass\u00e9 ajout\u00e9 (N\u00b02)'
         : 'ECHEC liste=' + okList + ' ajout=' + okAdd
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Recherche : les lignes Contrats et Cong\u00e9s portent un data-search (filtrage sans re-rendu)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'flt1', matricule: 'FLT-001', nom: 'FILTRENOM', prenoms: 'Test', sexe: 'M', date_entree: '2025-03-01', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      renderContratsPage();
+      var hC = document.getElementById('content').innerHTML || '';
+      var okCtr = hC.indexOf('data-search=') !== -1 && hC.indexOf('filtrenom') !== -1 && typeof filterContrats === 'function';
+      var saved = getRhConges();
+      saved.push({ id: 'cgf1', numero: 'CONG-FILTRE-1', employee_id: 'flt1', type: 'annual', date_depart: '2026-11-10', date_retour: '2026-11-14', date_reprise: '', duree: 5, remplacant_id: '', notes: '' });
+      setRhConges(saved);
+      renderCongesPage();
+      var hG = document.getElementById('content').innerHTML || '';
+      var okCg = hG.indexOf('data-search=') !== -1 && hG.indexOf('cong-filtre-1') !== -1 && typeof filterConges === 'function';
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'flt1'; }));
+      setRhConges(saved.filter(function(x){ return x.id !== 'cgf1'; }));
+      renderCongesPage();
+      (okCtr && okCg) ? 'OK : data-search Contrats + Cong\u00e9s, filtres locaux pr\u00e9sents'
+        : 'ECHEC contrats=' + okCtr + ' conges=' + okCg
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Contrats : doublons refus\u00e9s/nettoy\u00e9s, p\u00e9riode actuelle = contrat en cours',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      function _isoPlusMois(iso, n) { var d = new Date(iso + 'T00:00:00'); d.setMonth(d.getMonth() + n); return d.getFullYear() + '-' + (d.getMonth() < 9 ? '0' : '') + (d.getMonth() + 1) + '-' + (d.getDate() < 10 ? '0' : '') + d.getDate(); }
+      var _t = getToday();
+      var _deb = _isoPlusMois(_t, -1);
+      var _fin = contratDateFin(_deb, 3);
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'cddz4', matricule: 'CDD-004', nom: 'DOUBLON', prenoms: 'Test', sexe: 'M', date_entree: '2025-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      var rSame = renouvelerContratEmp('cddz4', '2025-01-10', 12, 'CDD');
+      var rP0 = ajouterContratPasse('cddz4', 'CDD', '2025-01-10', 12);
+      var rP1 = ajouterContratPasse('cddz4', 'CDD', '2024-01-10', 12);
+      var rP2 = ajouterContratPasse('cddz4', 'CDD', '2024-01-10', 12);
+      var rProm = ajouterContratPasse('cddz4', 'CDD', _deb, 3);
+      var eP = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz4'; })[0];
+      var okProm = rProm.ok && eP.date_entree === _deb && eP.duree_contrat === 3 && eP.historique_contrats.length === 2;
+      var rPast = renouvelerContratEmp('cddz4', '2022-01-10', 12, 'CDD');
+      var eF = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz4'; })[0];
+      var okPast = rPast.ok && eF.date_entree === _deb && eF.historique_contrats.length === 3 && eF.date_premiere_entree === '2022-01-10';
+      var stT = contratStatut('2022-01-10', contratDateFin('2022-01-10', 12));
+      var stE = contratStatut(_deb, _fin);
+      var stF = contratStatut(_isoPlusMois(_t, 2), _isoPlusMois(_t, 5));
+      var okSt = (stT === 'termine') && (stE === 'encours') && (stF === 'futur');
+      var arr2 = dbArr('mdb_employes');
+      var ex2 = arr2.filter(function(x){ return x.id === 'cddz4'; })[0];
+      ex2.historique_contrats.push({ n: 99, type_contrat: 'CDD', date_debut: _deb, duree_mois: 3, date_fin: _fin });
+      DB.set('mdb_employes', arr2);
+      var rN = nettoyerDoublonsContrats('cddz4');
+      var eN = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz4'; })[0];
+      var okNet = (rN.supprimes === 1) && (eN.historique_contrats.length === 3);
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz4'; }));
+      var ok = (!rSame.ok) && (!rP0.ok) && rP1.ok && (!rP2.ok) && okProm && okPast && okSt && okNet;
+      ok ? 'OK : doublons refus\u00e9s/nettoy\u00e9s, p\u00e9riode actuelle promue, pass\u00e9 en historique'
+         : 'ECHEC same=' + rSame.ok + ' p0=' + rP0.ok + ' p1=' + rP1.ok + ' p2=' + rP2.ok + ' prom=' + okProm + ' past=' + okPast + ' st=' + okSt + ' net=' + okNet
     `,
     attenduPrefixe: 'OK'
   });
