@@ -5481,6 +5481,17 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie : pas de ReferenceError currentUser (idle timer 30 s)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      (_payeCU() === null)
+        ? 'OK : _payeCU() sans currentUser global -> null, plus d\u2019erreur en boucle'
+        : 'ECHEC _payeCU=' + _payeCU()
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
