@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-173";
+      window.__APP_VERSION = "2026-10-06-174";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5942,6 +5942,70 @@ function payeObj(key) {
         }
         return typeof r === "string" ? "value:" + r : String(r || "");
       }
+      /* Fusion employés : par id, la version la PLUS RÉCENTE gagne
+         (updatedAt, posé à chaque enregistrement). Sans horodatage des
+         deux côtés, on garde le local (comportement historique). À
+         égalité stricte, choix déterministe (plus grand JSON) pour que
+         tous les appareils convergent vers la même version. */
+      function _payeEmpTime(r) {
+        var t = r && r.updatedAt;
+        if (typeof t === "number") return t;
+        var p = Date.parse(t);
+        return isFinite(p) ? p : 0;
+      }
+      function _payeEmpPickRecent(a, b) {
+        var ta = _payeEmpTime(a),
+          tb = _payeEmpTime(b);
+        if (ta !== tb) return ta > tb ? a : b;
+        var sa = "",
+          sb = "";
+        try {
+          sa = JSON.stringify(a);
+        } catch (e1) {}
+        try {
+          sb = JSON.stringify(b);
+        } catch (e2) {}
+        return sa >= sb ? a : b;
+      }
+      function _payeMergeEmployes(cur, inc) {
+        var mapL = {},
+          mapC = {},
+          order = [],
+          seen = {},
+          out = [];
+        (Array.isArray(cur) ? cur : []).forEach(function (r) {
+          if (r && r.id) {
+            if (!seen[r.id]) {
+              seen[r.id] = true;
+              order.push(r.id);
+            }
+            mapL[r.id] = r;
+          }
+        });
+        (Array.isArray(inc) ? inc : []).forEach(function (r) {
+          if (r && r.id) {
+            if (!seen[r.id]) {
+              seen[r.id] = true;
+              order.push(r.id);
+            }
+            mapC[r.id] = r;
+          }
+        });
+        order.forEach(function (id) {
+          var a = mapL[id],
+            b = mapC[id];
+          if (a && !b) out.push(a);
+          else if (b && !a) out.push(b);
+          else out.push(_payeEmpPickRecent(a, b));
+        });
+        (Array.isArray(cur) ? cur : []).forEach(function (r) {
+          if (!r || !r.id) out.push(r);
+        });
+        (Array.isArray(inc) ? inc : []).forEach(function (r) {
+          if (!r || !r.id) out.push(r);
+        });
+        return out;
+      }
       function _payeUnion(prim, sec) {
         var a = Array.isArray(prim) ? prim : [];
         var b = Array.isArray(sec) ? sec : [];
@@ -6249,8 +6313,31 @@ function payeObj(key) {
               kX === "mdb_operationsCaisse" ||
               kX === "mdb_employes"
             ) {
-              // Le cloud fait foi (suppressions via tombstones) - pas d'union qui ressuscite les supprimés
-              DB.setMain(kX, _payeStripTombstoned(kX, inc));
+              if (kX === "mdb_employes") {
+                /* Employés : le cloud N'écrase plus le local. Fusion par id,
+                   la version la plus récente gagne (une modif locale, ex.
+                   changement de contrat, survit à un snapshot périmé). Si
+                   le local a gagné, on repousse pour refermer la boucle. */
+                var _cuE = Array.isArray(cur) ? cur : [];
+                var _incE = Array.isArray(inc) ? inc : [];
+                var _mergedE = _payeStripTombstoned(
+                  kX,
+                  _payeMergeEmployes(_cuE, _incE),
+                );
+                var _incStripped = _payeStripTombstoned(kX, _incE);
+                if (JSON.stringify(_mergedE) !== JSON.stringify(_cuE))
+                  DB.setMain(kX, _mergedE);
+                if (
+                  JSON.stringify(_mergedE) !== JSON.stringify(_incStripped)
+                ) {
+                  try {
+                    pushPayeCloud();
+                  } catch (ePPC) {}
+                }
+              } else {
+                // Le cloud fait foi (suppressions via tombstones) - pas d'union qui ressuscite les supprimés
+                DB.setMain(kX, _payeStripTombstoned(kX, inc));
+              }
             } else {
               DB.setMain(kX, _payeUnion(inc, cu));
             }
@@ -6316,6 +6403,11 @@ function payeObj(key) {
                     payload[kX] = _payeUnion(lvClean, cvClean);
                   else if (cvClean.length > 0) payload[kX] = cvClean;
                   else payload[kX] = [];
+                } else if (kX === "mdb_employes") {
+                  /* Employés : fusion latest-wins (pas d'union local-first
+                     qui réimposerait une fiche périmée au cloud). */
+                  if (lv.length > 0 || cv.length > 0)
+                    payload[kX] = _payeMergeEmployes(lv, cv);
                 } else {
                   if (lv.length > 0) payload[kX] = _payeUnion(lv, cv);
                   else if (cv.length === 0)
@@ -13136,6 +13228,7 @@ function addArticleMontageFromPt(e) {
             if (emp.telephone) target.telephone = emp.telephone;
             if (emp.email) target.email = emp.email;
             if (emp.etat_civil) target.etat_civil = emp.etat_civil;
+            target.updatedAt = Date.now();
             updateCount++;
           } else {
             var newEmp = {
@@ -13164,6 +13257,7 @@ function addArticleMontageFromPt(e) {
               email: emp.email || "",
               etat_civil: emp.etat_civil || "",
               en_paie: true,
+              updatedAt: Date.now(),
               type_employe: emp.salaire_base > 0 ? "titulaire" : "journalier",
               status: "actif",
               created_at: new Date().toISOString(),
@@ -13625,6 +13719,10 @@ function addArticleMontageFromPt(e) {
         var salBase = parseFloat(f.elements["salaire_base"].value) || 0;
         var d = {
           id: f.elements["id"].value || DB.id(),
+          /* Horodatage anti-écrasement : la fusion cloud garde par id la
+             version la plus récente (sinon une copie périmée annule la
+             modification, ex. changement de type de contrat). */
+          updatedAt: Date.now(),
           matricule: f.elements["matricule"].value,
           nom: _upperWorkerNameP(f.elements["nom"].value),
           prenoms: _upperWorkerNameP(f.elements["prenoms"].value),

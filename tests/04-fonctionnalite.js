@@ -4860,6 +4860,49 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Sync Employ\u00e9s : une modif locale (ex. contrat) survit \u00e0 un snapshot cloud p\u00e9rim\u00e9',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var now = Date.now();
+      DB.setMain('mdb_employes', [{ id: 'e9', nom: 'TEST', type_contrat: 'Journalier', updatedAt: now }]);
+      _payeRecvSharedKeys({ mdb_employes: [{ id: 'e9', nom: 'TEST', type_contrat: 'CDI', updatedAt: 1 }] });
+      var after = payeArr('mdb_employes');
+      var okGarde = after.length === 1 && after[0].type_contrat === 'Journalier';
+      DB.setMain('mdb_employes', [{ id: 'e9', nom: 'TEST', type_contrat: 'Journalier', updatedAt: 1 }]);
+      _payeRecvSharedKeys({ mdb_employes: [{ id: 'e9', nom: 'TEST', type_contrat: 'CDI', updatedAt: now }] });
+      var after2 = payeArr('mdb_employes');
+      var okPrend = after2.length === 1 && after2[0].type_contrat === 'CDI';
+      (okGarde && okPrend)
+        ? 'OK : snapshot p\u00e9rim\u00e9 ignor\u00e9 (Journalier gard\u00e9), snapshot r\u00e9cent appliqu\u00e9 (CDI pris)'
+        : 'ECHEC garde=' + okGarde + ' (' + JSON.stringify(after) + ') prend=' + okPrend + ' (' + JSON.stringify(after2) + ')'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Sync Employ\u00e9s (app principale) : latest-wins par updatedAt',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var m1 = mergeEmployesPreferRecent(
+        [{ id: 'a', type_contrat: 'Journalier', updatedAt: 200 }],
+        [{ id: 'a', type_contrat: 'CDI', updatedAt: 100 }]);
+      var m2 = mergeEmployesPreferRecent(
+        [{ id: 'a', type_contrat: 'Journalier', updatedAt: 100 }],
+        [{ id: 'a', type_contrat: 'CDI', updatedAt: 200 }]);
+      var m3 = mergeEmployesPreferRecent(
+        [{ id: 'b', type_contrat: 'CDI' }],
+        [{ id: 'a', type_contrat: 'CDI', updatedAt: 50 }]);
+      var ok1 = m1.length === 1 && m1[0].type_contrat === 'Journalier';
+      var ok2 = m2.length === 1 && m2[0].type_contrat === 'CDI';
+      var ok3 = m3.length === 2;
+      (ok1 && ok2 && ok3)
+        ? 'OK : le plus r\u00e9cent gagne des deux c\u00f4t\u00e9s, pr\u00e9sents des 2 c\u00f4t\u00e9s conserv\u00e9s'
+        : 'ECHEC ok1=' + ok1 + ' ok2=' + ok2 + ' ok3=' + ok3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
