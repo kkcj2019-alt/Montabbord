@@ -5075,8 +5075,8 @@ r.push({
       var nuitCelluleVisible = h.indexOf('id="pt-r-nuit-1"') !== -1 && h.indexOf('id="pt-r-nuit-1" style="display:none"') === -1;
       var pasGuillemet = h.indexOf('data-field="abs""') === -1;
       var autoSave = h.indexOf('ptRapideAutoSave(') !== -1;
-      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbAbs === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && autoEmp && nuitCelluleVisible && pasGuillemet && autoSave;
-      ok ? 'OK : 31 lignes (hr/hrn/nuit/abs/obs), employe autocompletion, cellule nuit visible, auto-save cable'
+      var ok = nbHr === 31 && nbHrN === 31 && nbNit === 31 && nbAbs === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1 && autoEmp && nuitCelluleVisible && pasGuillemet && autoSave && h.indexOf('Sous-total') !== -1 && h.indexOf('id="pt-r-totG"') !== -1;
+      ok ? 'OK : 31 lignes en 2 blocs (hr/hrn/nuit/abs/obs), employe autocompletion, cellule nuit visible, sous-totaux + grand total, auto-save cable'
          : 'ECHEC hr=' + nbHr + ' hrn=' + nbHrN + ' nuit=' + nbNit + ' abs=' + nbAbs + ' obs=' + nbObs + ' emp=' + (autoEmp ? 1 : 0) + ' cellule=' + (nuitCelluleVisible ? 1 : 0) + ' guillemet=' + (pasGuillemet ? 0 : 1) + ' autosave=' + (autoSave ? 1 : 0)
     `,
     attenduPrefixe: 'OK'
