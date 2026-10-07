@@ -5362,10 +5362,10 @@ r.push({
       var rows = getSimpleBulletinRows(emp, '2026-10', calc);
       var L1 = rows[0], L2 = rows[1];
       var ok1 = L1 && L1.label === 'Base horaire' && L1.taux === '28,4h' && L1.gain === 14200;
-      var ok2 = L2 && L2.label === 'Heures Suppl.' && L2.gain === 7000 && L2.taux.indexOf('8') === 0;
+      var ok2 = L2 && L2.label.indexOf('Heures Suppl.') === 0 && L2.taux === '1' && L2.gain === 7000 && L2.label.indexOf('75%') !== -1 && L2.label.indexOf('8h') !== -1;
       (ok1 && ok2)
-        ? 'OK : ligne 1 = 28,4h jour x 500 = 14200 (nuit 8h exclue), HS = 8h x 875 = 7000, total 21200'
-        : 'ECHEC L1=' + (L1 ? L1.taux + '/' + L1.gain : '?') + ' L2=' + (L2 ? L2.taux + '/' + L2.gain : '?')
+        ? 'OK : ligne 1 = 28,4h jour x 500 = 14200 (nuit 8h exclue), HS taux 1 = 7000 avec d\u00e9tail (75% : 8h), total 21200'
+        : 'ECHEC L1=' + (L1 ? L1.taux + '/' + L1.gain : '?') + ' L2=' + (L2 ? L2.label + '/' + L2.taux + '/' + L2.gain : '?')
     `,
     attenduPrefixe: 'OK'
   });
