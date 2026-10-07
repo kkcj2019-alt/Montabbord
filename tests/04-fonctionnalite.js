@@ -4663,6 +4663,31 @@ r.push({
   });
 
   r.push({
+    nom: 'Contrats : le renouvellement garde l\u2019historique (1er puis 2e) et l\u2019anciennet\u00e9 d\u2019origine',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'cddz1', matricule: 'CDD-001', nom: 'RENOUV', prenoms: 'Test', sexe: 'M', date_entree: '2024-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      arr.push({ id: 'cdiz1', matricule: 'CDI-001', nom: 'FIXE', prenoms: 'Test', sexe: 'M', date_entree: '2020-05-01', type_contrat: 'CDI', duree_contrat: 0, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      var r1 = renouvelerContratEmp('cddz1', '2025-01-10', 6, 'CDD');
+      var e1 = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz1'; })[0];
+      var ok1 = r1.ok && e1.historique_contrats.length === 1 && e1.historique_contrats[0].n === 1 && e1.historique_contrats[0].date_debut === '2024-01-10' && e1.historique_contrats[0].duree_mois === 12 && e1.date_entree === '2025-01-10' && e1.duree_contrat === 6 && e1.date_premiere_entree === '2024-01-10' && datePremiereEntree(e1) === '2024-01-10';
+      var r2 = renouvelerContratEmp('cddz1', '2025-07-10', 12, 'CDD');
+      var e2 = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz1'; })[0];
+      var ok2 = r2.ok && e2.historique_contrats.length === 2 && e2.historique_contrats[1].n === 2 && e2.historique_contrats[1].date_debut === '2025-01-10' && e2.date_entree === '2025-07-10' && e2.date_premiere_entree === '2024-01-10';
+      var rCdi = renouvelerContratEmp('cdiz1', '2026-01-01', 12, 'CDI');
+      var rVide = renouvelerContratEmp('cddz1', '', 6, 'CDD');
+      var okRefus = (!rCdi.ok) && (!rVide.ok);
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz1' && x.id !== 'cdiz1'; }));
+      (ok1 && ok2 && okRefus)
+        ? 'OK : 1er->2e->3e en historique, entree 2024-01-10 gardee, CDI refuse'
+        : 'ECHEC r1=' + ok1 + ' r2=' + ok2 + ' refus=' + okRefus
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Paie Cong\u00e9s : le module ne garde que la partie paiement (suivi en jours retir\u00e9)',
     app: 'paye.html', store: storeRealiste,
     code: `
