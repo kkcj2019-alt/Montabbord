@@ -5065,7 +5065,7 @@ r.push({
       document.getElementById('pt-select-emp').value = 'e1';
       document.getElementById('pt-mois').value = '2026-10';
       showSaisieRapide();
-      var h = document.getElementById('pt-container').innerHTML;
+      var h = document.getElementById('pt-modal-content').innerHTML;
       var nbHr = (h.match(/data-field="hr"/g) || []).length;
       var nbNit = (h.match(/data-field="nuit"/g) || []).length;
       var nbObs = (h.match(/data-field="obs"/g) || []).length;
