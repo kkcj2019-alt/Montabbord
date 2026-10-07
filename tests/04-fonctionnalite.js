@@ -4988,6 +4988,69 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Contrats : ajout d\u2019un contrat pass\u00e9 (historique chrono, 1re embauche ajust\u00e9e)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var arr = dbArr('mdb_employes');
+      arr.push({ id: 'cddz2', matricule: 'CDD-002', nom: 'TRACE', prenoms: 'Test', sexe: 'M', date_entree: '2025-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
+      DB.set('mdb_employes', arr);
+      var r1 = ajouterContratPasse('cddz2', 'CDD', '2024-01-10', 12);
+      var r2 = ajouterContratPasse('cddz2', 'CDD', '2023-01-10', 12);
+      var e = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz2'; })[0];
+      var h = e.historique_contrats || [];
+      var ok = r1.ok && r2.ok && h.length === 2 && h[0].n === 1 && h[0].date_debut === '2023-01-10' && h[1].n === 2 && h[1].date_debut === '2024-01-10' && e.date_entree === '2025-01-10' && e.date_premiere_entree === '2023-01-10';
+      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz2'; }));
+      ok ? 'OK : 2 pass\u00e9s renum\u00e9rot\u00e9s chrono, en cours intact, 1re embauche 2023-01-10'
+         : 'ECHEC r1=' + r1.ok + ' r2=' + r2.ok + ' n=' + h.length + ' prem=' + e.date_premiere_entree
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage paie : plage 1er->20 = 14 jours ouvr\u00e9s, bornes clamp\u00e9es au mois',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var js = genPlageJours('2026-10', '2026-10-01', '2026-10-20');
+      var clamp = genPlageJours('2026-10', '2026-09-25', '2026-11-05');
+      var inv = genPlageJours('2026-10', '2026-10-20', '2026-10-01');
+      var ok = js.length === 14 && js[0] === '2026-10-01' && js[js.length-1] === '2026-10-20' && js.indexOf('2026-10-03') === -1 && js.indexOf('2026-10-04') === -1 && clamp.length === 22 && clamp[0] === '2026-10-01' && clamp[clamp.length-1] === '2026-10-30' && inv.length === 0;
+      ok ? 'OK : 1er->20 = 14 j ouvr\u00e9s, mois clamp\u00e9 = 22 j, invers\u00e9 = vide'
+         : 'ECHEC plage=' + js.length + ' clamp=' + clamp.length + ' inv=' + inv.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage production : plage 1er->20 = 14 jours ouvr\u00e9s, bornes clamp\u00e9es au mois',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var js = genPlageJours('2026-10', '2026-10-01', '2026-10-20');
+      var clamp = genPlageJours('2026-10', '2026-09-25', '2026-11-05');
+      var inv = genPlageJours('2026-10', '2026-10-20', '2026-10-01');
+      var ok = js.length === 14 && js[0] === '2026-10-01' && js[js.length-1] === '2026-10-20' && js.indexOf('2026-10-03') === -1 && clamp.length === 22 && inv.length === 0;
+      ok ? 'OK : 1er->20 = 14 j ouvr\u00e9s, mois clamp\u00e9 = 22 j, invers\u00e9 = vide'
+         : 'ECHEC plage=' + js.length + ' clamp=' + clamp.length + ' inv=' + inv.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Essences : le co\u00fbt retombe sur l\u2019essence de la d\u00e9finition (m\u00eame code)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var savedDefs = getSection('definitions', []);
+      setSection('definitions', [{ id: 'dz1', code: 'LAT-99', designation: 'Latte test', type: 'LATTE', essence: 'Iroko' }]);
+      var e1 = acEssenceComposant({ code: 'LAT-99', designation: 'Latte test' });
+      var e2 = acEssenceComposant({ code: 'LAT-99', designation: 'Latte test', essence: 'Bosse' });
+      setSection('definitions', savedDefs);
+      (e1 === 'Iroko' && e2 === 'Bosse')
+        ? 'OK : d\u00e9finition Iroko utilis\u00e9e, champ direct prioritaire'
+        : 'ECHEC e1=' + e1 + ' e2=' + e2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
