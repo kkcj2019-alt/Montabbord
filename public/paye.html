@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-06-170";
+      window.__APP_VERSION = "2026-10-06-171";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -4496,6 +4496,9 @@
             <button class="btn" onclick="loadEcritures()">Générer</button>
             <button class="btn btn-sec" onclick="exportEcritures()">
               Export CSV
+            </button>
+            <button class="btn btn-sec" onclick="printEcritures()">
+              Imprimer (avec détail)
             </button>
           </div>
           <div class="card" style="padding: 0; overflow-x: auto">
@@ -26649,6 +26652,9 @@ function printCongeIndividuel(empId) {
           retraite: 0, at: 0, pf: 0, mat: 0, ce: 0, taxApp: 0,
           fdfpApp: 0, fdfpForm: 0, cmuP: 0,
         };
+        /* Détail par employé pour le "clic-compte" (421100/421200/421300
+           par pièces, 422001 par nets) et pour l'impression détaillée. */
+        var detNet = [];
         var personnel = [];
         try {
           personnel = getPersonnel().filter(function (p) {
@@ -26678,6 +26684,12 @@ function printCongeIndividuel(empId) {
           if (ru > 0) acc.repPos += ru;
           else acc.repNeg += -ru;
           acc.net += tt.net || 0;
+          var _nm =
+            ((emp.nom || "") + " " + (emp.prenoms || "")).trim() ||
+            emp.matricule ||
+            emp.id ||
+            "-";
+          detNet.push({ employe: _nm, montant: tt.net || 0 });
           (c.items || []).forEach(function (it) {
             if (!it || !it.n) return;
             var v = it.retPat || 0;
@@ -26693,8 +26705,9 @@ function printCongeIndividuel(empId) {
           });
         });
         /* Part des SOLDES dans les retenues (mêmes règles que
-           getAPForMonth) : 421300 à part, 421200 = acomptes hors soldes. */
-        var soldesRaw = 0;
+           getAPForMonth) : 421300 à part, 421200 = acomptes hors soldes.
+           Les lignes servent aussi au détail par employé de chaque compte. */
+        var _detFull = [];
         try {
           var _vRecs = getAPList();
           var _vOpsById = {};
@@ -26705,16 +26718,59 @@ function printCongeIndividuel(empId) {
             typeof psalCaisses === "function" ? psalCaisses() : [];
           var _vBanques =
             typeof psalBanques === "function" ? psalBanques() : [];
-          lignesDetailAp(
-            _vRecs,
-            _vOpsById,
-            _vCaisses,
-            _vBanques,
-            mois,
-          ).forEach(function (_ln) {
-            if (_ln && _ln.nature === "solde") soldesRaw += _ln.montant || 0;
-          });
+          _detFull =
+            lignesDetailAp(
+              _vRecs,
+              _vOpsById,
+              _vCaisses,
+              _vBanques,
+              mois,
+            ) || [];
         } catch (eV) {}
+        var soldesRaw = 0;
+        var _detGrp = {};
+        _detFull.forEach(function (_ln) {
+          if (!_ln) return;
+          if (_ln.nature === "solde") soldesRaw += _ln.montant || 0;
+          var _cp =
+            _ln.nature === "pret"
+              ? "421100"
+              : _ln.nature === "solde"
+                ? "421300"
+                : "421200";
+          var _k = _cp + "||" + (_ln.employe || "-");
+          if (!_detGrp[_k])
+            _detGrp[_k] = {
+              compte: _cp,
+              employe: _ln.employe || "-",
+              montant: 0,
+              pieces: [],
+            };
+          _detGrp[_k].montant += _ln.montant || 0;
+          _detGrp[_k].pieces.push({
+            piece: _ln.piece || "-",
+            montant: _ln.montant || 0,
+            moyen: _ln.moyen || "-",
+            compte: _ln.compte || "-",
+          });
+        });
+        var det421 = { 421100: [], 421200: [], 421300: [] };
+        Object.keys(_detGrp).forEach(function (_k) {
+          var g = _detGrp[_k];
+          det421[g.compte].push(g);
+        });
+        Object.keys(det421).forEach(function (_cp) {
+          det421[_cp].sort(function (a, b) {
+            return String(a.employe).localeCompare(String(b.employe));
+          });
+        });
+        var _detSum = function (arr) {
+          var s = 0;
+          (arr || []).forEach(function (g) {
+            s += g.montant || 0;
+          });
+          return s;
+        };
         var brut = R(acc.brut),
           transp = R(acc.transp),
           avant = R(acc.avant);
@@ -26755,7 +26811,11 @@ function printCongeIndividuel(empId) {
           D("662200", "Gratifications personnel non national", 0),
           D("663400", "Transports du personnel", transp),
           D("663800", "Autres indemnités et avantages divers", 0),
-          D("664300", "CMU/PART SALARIAL", cmuS),
+          /* Pas de débit 664300 : la part salariale CMU est déjà déduite
+             du net sur chaque bulletin (retenue comme CNPS/ITS) ; la
+             débiter ici ferait dépasser le 422001 de la CMU. Si la
+             société prenait la CMU à sa charge, le dire : on réactivera
+             le débit ET on retirera la retenue des bulletins. */
           D("658800", "Arrondis", arr < 0 ? -arr : 0),
           D("421100", "Prêt au personnel", 0),
           D("421200", "Acomptes au personnel", 0),
@@ -26768,9 +26828,24 @@ function printCongeIndividuel(empId) {
         t1.push(C("447200", "Impôts sur salaires", its));
         if (assur > 0)
           t1.push(C("438100", "Organismes Sociaux, Assurances", assur));
-        t1.push(C("421100", "Prêt au personnel", pr));
-        t1.push(C("421200", "Acomptes au personnel", acNet));
-        t1.push(C("421300", "Soldes de salaire", soldes));
+        var _e421100 = C("421100", "Prêt au personnel", pr);
+        _e421100.detail = {
+          lignes: det421["421100"],
+          total: _detSum(det421["421100"]),
+        };
+        t1.push(_e421100);
+        var _e421200 = C("421200", "Acomptes au personnel", acNet);
+        _e421200.detail = {
+          lignes: det421["421200"],
+          total: _detSum(det421["421200"]),
+        };
+        t1.push(_e421200);
+        var _e421300 = C("421300", "Soldes de salaire", soldes);
+        _e421300.detail = {
+          lignes: det421["421300"],
+          total: _detSum(det421["421300"]),
+        };
+        t1.push(_e421300);
         if (repNeg > 0)
           t1.push(C("471100", "Report mois précédent (dû par le personnel)", repNeg));
         var totD1 = 0,
@@ -26780,7 +26855,12 @@ function printCongeIndividuel(empId) {
           totC1sansNet += e.cr;
         });
         /* 422001 en résiduel, comme sur l'Excel (net = débit − crédits). */
-        t1.push(C("422001", "Rémunérations dues", totD1 - totC1sansNet));
+        var _e422001 = C("422001", "Rémunérations dues", totD1 - totC1sansNet);
+        var _detNetNN = detNet.filter(function (g) {
+          return (g.montant || 0) !== 0;
+        });
+        _e422001.detail = { lignes: _detNetNN, total: _detSum(_detNetNN) };
+        t1.push(_e422001);
         var t2 = [
           D("664110", "AF personnel", af),
           D("664120", "AT personnel", at),
@@ -26863,23 +26943,111 @@ function printCongeIndividuel(empId) {
           renderDetailApEcritures(mois, v.apTotal);
         } catch (eDet) {}
       }
-      /* Rendu d'un tableau de ventilation (lignes + totaux équilibrés). */
+      /* Ligne détail d'un compte (employés + pièces), repliée par défaut.
+         Classe ec-det : exclue de l'export CSV (détail = affichage seul). */
+      function ecLigneDetail421(e) {
+        var lignes = (e.detail && e.detail.lignes) || [];
+        var sub = 0;
+        lignes.forEach(function (dl) {
+          sub += dl.montant || 0;
+        });
+        var ref = (e.deb || 0) + (e.cr || 0);
+        var hasPieces = lignes.some(function (dl) {
+          return dl.pieces && dl.pieces.length;
+        });
+        var h =
+          '<tr class="ec-det" style="display:none"><td colspan="5" style="background:#f8fafc;padding:4px 8px 8px 30px">';
+        h +=
+          '<div style="font-size:10.5px;font-weight:800;color:var(--primary);margin-bottom:4px">Détail ' +
+          e.ac +
+          " — " +
+          escH(e.label) +
+          "</div>";
+        h +=
+          '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr><th style="text-align:left;padding:3px 6px">Employé</th>';
+        if (hasPieces)
+          h +=
+            '<th style="text-align:left;padding:3px 6px">Pièces (N° · montant · moyen · compte)</th>';
+        h +=
+          '<th style="text-align:right;padding:3px 6px">Montant</th></tr></thead><tbody>';
+        if (!lignes.length)
+          h +=
+            '<tr><td colspan="3" style="padding:6px;color:var(--dim)">Aucun employé ce mois</td></tr>';
+        lignes.forEach(function (dl) {
+          h +=
+            '<tr><td style="padding:3px 6px">' +
+            escH(dl.employe || "-") +
+            "</td>";
+          if (hasPieces) {
+            var ph = ((dl.pieces || []).map(function (pc) {
+              return (
+                escH(pc.piece) +
+                " · " +
+                fmt(pc.montant) +
+                " · " +
+                escH(pc.moyen) +
+                " (" +
+                escH(pc.compte) +
+                ")"
+              );
+            })).join("<br>");
+            h +=
+              '<td style="padding:3px 6px;font-size:10px">' + ph + "</td>";
+          }
+          h +=
+            '<td style="text-align:right;padding:3px 6px;font-weight:700">' +
+            fmt(dl.montant) +
+            "</td></tr>";
+        });
+        h +=
+          '</tbody></table><div style="text-align:right;font-size:11px;font-weight:800;margin-top:4px">Total détail ' +
+          (sub === ref ? "✓ = " : "⚠ ≠ ") +
+          fmt(sub) +
+          "</div></td></tr>";
+        return h;
+      }
+      function ecToggleDetail(el) {
+        var tr = el;
+        while (tr && tr.tagName !== "TR") tr = tr.parentNode;
+        if (!tr) return;
+        var nx = tr.nextSibling;
+        while (nx && nx.nodeType !== 1) nx = nx.nextSibling;
+        if (!nx || (nx.className || "").indexOf("ec-det") === -1) return;
+        var open = nx.style.display === "none";
+        nx.style.display = open ? "" : "none";
+        try {
+          var mk = el.querySelector ? el.querySelector(".ec-mk") : null;
+          if (mk) mk.innerText = open ? "−" : "+";
+        } catch (eMk) {}
+      }
+      /* Rendu d'un tableau de ventilation : les comptes avec détail
+         (421100/421200/421300/422001) sont cliquables (déplié employé). */
       function ecRendreTableau(tbody, tfoot, lignes, totD, totC) {
         tbody.innerHTML = lignes
           .map(function (e) {
-            return (
-              '<tr><td style="font-family:monospace;font-weight:700;color:var(--green)">' +
+            var hasDet =
+              e.detail && e.detail.lignes && e.detail.lignes.length;
+            var row =
+              '<tr' +
+              (hasDet
+                ? ' onclick="ecToggleDetail(this)" style="cursor:pointer" title="Cliquer pour voir les employés"'
+                : "") +
+              '><td style="font-family:monospace;font-weight:700;color:var(--green)">' +
+              (hasDet
+                ? '<span class="ec-mk" style="display:inline-block;min-width:16px;font-weight:800;color:var(--primary)">+</span> '
+                : "") +
               e.ac +
               "</td><td>" +
               e.label +
               '</td><td style="font-size:.72rem;color:var(--dim)">' +
               e.desc +
               '</td><td style="text-align:right;font-weight:700">' +
-              (e.deb > 0 ? fmt(e.deb) : "-") +
+              (e.deb !== 0 ? fmt(e.deb) : "-") +
               '</td><td style="text-align:right;font-weight:700;color:var(--danger)">' +
-              (e.cr > 0 ? fmt(e.cr) : "-") +
-              "</td></tr>"
-            );
+              (e.cr !== 0 ? fmt(e.cr) : "-") +
+              "</td></tr>";
+            if (hasDet) row += ecLigneDetail421(e);
+            return row;
           })
           .join("");
         var ok = totD === totC;
@@ -26994,7 +27162,11 @@ function printCongeIndividuel(empId) {
       function exportEcritures() {
         var rows = [["Compte", "Libellé", "Écriture", "Débit", "Crédit"]];
         var pushTable = function (tbSel, tfSel, titre) {
-          var lignes = document.querySelectorAll(tbSel + " tr, " + tfSel + " tr");
+          /* Lignes ec-det exclues : le détail employé est affichage seul
+             (il a sa propre impression détaillée). */
+          var lignes = document.querySelectorAll(
+            tbSel + " tr:not(.ec-det), " + tfSel + " tr",
+          );
           if (!lignes.length) return;
           rows.push([titre]);
           lignes.forEach(function (tr) {
@@ -27026,6 +27198,135 @@ function printCongeIndividuel(empId) {
           document.getElementById("ec-mois").value +
           ".csv";
         a.click();
+      }
+      /* Impression du journal AVEC le détail employé de chaque compte
+         (421100/421200/421300/422001) : le comptable voit qui compose
+         chaque montant, pièce par pièce. */
+      function printEcritures() {
+        var mois = "";
+        try {
+          mois = document.getElementById("ec-mois").value || "";
+        } catch (eM) {}
+        if (!mois) mois = new Date().toISOString().slice(0, 7);
+        var v = ventilationPaie(mois);
+        var w = window.open("", "_blank", "width=1000,height=800");
+        var h =
+          '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Écritures comptables — Paie ' +
+          mois +
+          "</title>";
+        h +=
+          "<style>body{font-family:sans-serif;padding:25px;font-size:11px;color:#1e293b}";
+        h +=
+          "h2{margin:0 0 4px 0;font-size:16px}h3{margin:16px 0 8px;font-size:13px;border-bottom:1px solid #ccc;padding-bottom:4px}";
+        h +=
+          "h4{margin:12px 0 6px;font-size:11px}table{width:100%;border-collapse:collapse;margin-top:8px;font-size:10px}";
+        h += "th,td{border:1px solid #000;padding:4px 6px;text-align:right}";
+        h += "th{background:#f1f5f9;text-align:center;font-size:9px}";
+        h += "td.l{text-align:left}th.l{text-align:left}";
+        h += ".total{font-weight:800;background:#f1f5f9}";
+        h += ".det td,.det th{border-color:#888;font-size:9px}";
+        h +=
+          "@media print{@page{size:A4 portrait;margin:12mm}body{padding:10px}.noprint{display:none}}</style></head><body>";
+        h += "<h2>ÉCRITURES COMPTABLES — PAIE " + mois + "</h2>";
+        var _prt = function (lignes, totD, totC) {
+          var s =
+            '<table><thead><tr><th class="l">N° CPTE</th><th class="l">INTITULÉS</th><th>DEBIT</th><th>CREDIT</th></tr></thead><tbody>';
+          lignes.forEach(function (e) {
+            s +=
+              "<tr><td class=\"l\"><strong>" +
+              e.ac +
+              "</strong></td><td class=\"l\">" +
+              escH(e.label) +
+              "</td><td>" +
+              (e.deb !== 0 ? fmt(e.deb) : "-") +
+              "</td><td>" +
+              (e.cr !== 0 ? fmt(e.cr) : "-") +
+              "</td></tr>";
+          });
+          s +=
+            '<tr class="total"><td class="l" colspan="2">TOTAUX ÉQUILIBRÉS ✓</td><td>' +
+            fmt(totD) +
+            "</td><td>" +
+            fmt(totC) +
+            "</td></tr></tbody></table>";
+          return s;
+        };
+        var _prtDet = function (e) {
+          var lignes = (e.detail && e.detail.lignes) || [];
+          if (!lignes.length) return "";
+          var hasPieces = lignes.some(function (dl) {
+            return dl.pieces && dl.pieces.length;
+          });
+          var s =
+            "<h4>Détail " +
+            e.ac +
+            " — " +
+            escH(e.label) +
+            " : " +
+            fmt((e.deb || 0) + (e.cr || 0)) +
+            "</h4>";
+          s +=
+            '<table class="det"><thead><tr><th class="l">Employé</th>' +
+            (hasPieces ? '<th class="l">Pièces (N° · montant · moyen · compte)</th>' : "") +
+            "<th>Montant</th></tr></thead><tbody>";
+          var sub = 0;
+          lignes.forEach(function (dl) {
+            sub += dl.montant || 0;
+            var ph = "";
+            if (hasPieces)
+              ph = ((dl.pieces || []).map(function (pc) {
+                return (
+                  escH(pc.piece) +
+                  " · " +
+                  fmt(pc.montant) +
+                  " · " +
+                  escH(pc.moyen) +
+                  " (" +
+                  escH(pc.compte) +
+                  ")"
+                );
+              })).join("<br>");
+            s +=
+              '<tr><td class="l">' +
+              escH(dl.employe) +
+              '</td>' +
+              (hasPieces ? '<td class="l">' + ph + "</td>" : "") +
+              "<td><strong>" +
+              fmt(dl.montant) +
+              "</strong></td></tr>";
+          });
+          s +=
+            '<tr class="total"><td class="l" colspan="' +
+            (hasPieces ? 2 : 1) +
+            '">Total détail</td><td>' +
+            fmt(sub) +
+            "</td></tr></tbody></table>";
+          return s;
+        };
+        h += "<h3>VENTILATION DES SALAIRES</h3>";
+        h += _prt(v.t1, v.totD1, v.totC1);
+        v.t1.forEach(function (e) {
+          if (e.detail) h += _prtDet(e);
+        });
+        h += "<h3>VENTILATION DES CHARGES SOCIALES (PATRONALES)</h3>";
+        h += _prt(v.t2, v.totD2, v.totC2);
+        if (v.avant > 0)
+          h +=
+            '<div style="font-size:9px;color:#555;margin-top:8px">Brut monétaire ventilé (hors avantages en nature non monétaires : ' +
+            fmt(v.avant) +
+            " — rappel bulletin, hors balance).</div>";
+        var _jj = new Date().toISOString().slice(0, 10);
+        h +=
+          '<div style="margin-top:16px;font-size:10px">Édité le ' +
+          _jj +
+          "</div>";
+        h +=
+          '<table style="margin-top:24px"><tr><td class="l" style="border:none;height:60px;vertical-align:bottom">Préparé par :<br><br>__________________</td><td class="l" style="border:none;vertical-align:bottom">Vérifié par :<br><br>__________________</td></tr></table>';
+        h +=
+          '<div class="noprint" style="margin-top:20px;text-align:center"><button onclick="window.print()" style="padding:8px 22px;font-size:14px">Imprimer</button></div>';
+        h += "</body></html>";
+        w.document.write(h);
+        w.document.close();
       }
 
       /* ==================== STC & DEPARTS ==================== */

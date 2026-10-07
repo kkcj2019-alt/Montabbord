@@ -4793,6 +4793,35 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Paie Clic-compte : chaque 421xxx/422001 d\u00e9plie ses employ\u00e9s (sommes = lignes)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ops = payeArr('mdb_operationsCaisse');
+      ops.push({ id: 'opW1', numeroPiece: 'KV-1', code: 'ACOMPTE', caisseId: 'c1', montant: 30000, date: '2026-10-05' });
+      ops.push({ id: 'opW2', numeroPiece: 'KP-V', code: 'PRET_AUTO', caisseId: 'c1', montant: 60000, date: '2026-10-06' });
+      DB.setMain('mdb_operationsCaisse', ops);
+      var list = payeArr('mdb_acomptesPrets');
+      list.push({ id: 'acW1', employee_id: 'e1', employeNom: 'Diallo', type: 'acompte', montant: 30000, moisDeduction: '2026-10', date: '2026-10-05', caisseOpId: 'opW1', numeroPiece: 'KV-1', valide: true });
+      list.push({ id: 'acW2', employee_id: 'e1', employeNom: 'Diallo', type: 'pret', montant: 60000, montantMensuel: 60000, moisDeduction: '2026-10', date: '2026-10-06', caisseOpId: 'opW2', numeroPiece: 'KP-V', valide: true });
+      setAPList(list);
+      var v = ventilationPaie('2026-10');
+      var ligne = function (cpte) {
+        var f = v.t1.filter(function (e) { return e.ac === cpte && (e.cr || 0) > 0; });
+        return f.length ? f[0] : null;
+      };
+      var f4 = v.t1.filter(function (e) { return e.ac === '422001'; });
+      var L1 = ligne('421100'), L2 = ligne('421200'), L4 = f4.length ? f4[0] : null;
+      var ok1 = L1 && L1.detail && L1.detail.lignes.length === 1 && L1.detail.lignes[0].employe.indexOf('Diallo') >= 0 && L1.detail.lignes[0].montant === 60000 && L1.detail.lignes[0].pieces.length === 1 && L1.detail.lignes[0].pieces[0].piece === 'KP-V' && L1.detail.total === 60000 && L1.detail.total === v.l421.pr;
+      var ok2 = L2 && L2.detail && L2.detail.lignes.length === 1 && L2.detail.lignes[0].montant === 30000 && L2.detail.lignes[0].pieces[0].piece === 'KV-1' && L2.detail.total === 30000 && L2.detail.total === v.l421.acNet;
+      var ok4 = L4 && L4.detail && L4.detail.lignes.length >= 1 && L4.detail.total === L4.cr;
+      (ok1 && ok2 && ok4)
+        ? 'OK : 421100 Diallo 60000 (KP-V), 421200 Diallo 30000 (KV-1), 422001 d\u00e9tail=' + L4.detail.total + ' (=ligne ' + L4.cr + ')'
+        : 'ECHEC ok1=' + ok1 + ' ok2=' + ok2 + ' ok4=' + ok4 + ' L4det=' + (L4 && L4.detail ? L4.detail.total : '?') + ' L4cr=' + (L4 ? L4.cr : '?')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
