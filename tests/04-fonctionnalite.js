@@ -5041,7 +5041,84 @@ r.push({
   });
 
   r.push({
-    nom: 'Essences : le co\u00fbt retombe sur l\u2019essence de la d\u00e9finition (m\u00eame code)',
+    nom: 'Pointage paie : ptHImpr = manuel jour/nuit, creneaux, repli si mal pointe, vide=0',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var rJ = ptHImpr({ h_j_manual: '8:30' }, false);
+      var rN = ptHImpr({ h_n_manual: '6' }, true);
+      var rCre = ptHImpr({ j_arrivee: '08:00', j_pause: '12:00', j_reprise: '13:00', j_fin: '17:00' }, false);
+      var rMix = ptHImpr({ j_arrivee: '08:00', j_pause: '12:00', j_reprise: '13:00', j_fin: '17:00', h_j_manual: '9' }, false);
+      var rRepli = ptHImpr({ j_fin: '01:00', h_j_manual: '7.5' }, false);
+      var rVide = ptHImpr({}, false);
+      var rNull = ptHImpr(null, true);
+      var ok = rJ === 8.5 && rN === 6 && rCre === 8 && rMix === 8 && rRepli === 7.5 && rVide === 0 && rNull === 0;
+      ok ? 'OK : manuel 8h30=8.5, nuit=6, creneaux=8, priorite=8, repli=7.5, vide=0'
+         : 'ECHEC J=' + rJ + ' N=' + rN + ' cre=' + rCre + ' mix=' + rMix + ' repli=' + rRepli + ' vide=' + rVide
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage paie : saisie rapide = calendrier 1er->31 avec cases Heures/Nuit/Obs',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      showSaisieRapide();
+      var h = document.getElementById('pt-container').innerHTML;
+      var nbHr = (h.match(/data-field="hr"/g) || []).length;
+      var nbNit = (h.match(/data-field="nuit"/g) || []).length;
+      var nbObs = (h.match(/data-field="obs"/g) || []).length;
+      var ok = nbHr === 31 && nbNit === 31 && nbObs === 31 && h.indexOf('pt-r-total-31') !== -1 && h.indexOf('Saisie rapide') !== -1;
+      ok ? 'OK : 31 lignes (hr/nuit/obs), total du 31 present'
+         : 'ECHEC hr=' + nbHr + ' nuit=' + nbNit + ' obs=' + nbObs
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage paie : saisie rapide persiste heures (jour/nuit) + observation, efface si vide',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      setPointageData(getPointageData().filter(function (p) { return p.employee_id !== 'e1' || (p.date || '').indexOf('2026-10') !== 0; }));
+      var fakes = [];
+      function F(d, f, v, chk) {
+        var e = { value: v, checked: !!chk, type: f === 'nuit' ? 'checkbox' : 'text' };
+        e.getAttribute = function (k) {
+          if (k === 'data-r') return String(d);
+          if (k === 'data-field') return f;
+          return null;
+        };
+        return e;
+      }
+      fakes = fakes.concat(
+        F(1, 'hr', '8', false), F(1, 'nuit', '', false), F(1, 'obs', 'Maladie', false),
+        F(2, 'hr', '6', false), F(2, 'nuit', 'x', true), F(2, 'obs', '', false),
+        F(3, 'hr', '', false), F(3, 'nuit', '', false), F(3, 'obs', 'Conge', false)
+      );
+      document.querySelectorAll = function (sel) { return (sel && sel.indexOf('data-r') !== -1) ? fakes : []; };
+      saveSaisieRapide();
+      var pts = getPointageData();
+      var r1 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-01'; });
+      var r2 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-02'; });
+      var r3 = pts.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-03'; });
+      var okA = r1 && r1.h_j_manual === '8' && !r1.h_n_manual && r1.observation === 'Maladie'
+             && r2 && r2.h_n_manual === '6' && !r2.h_j_manual
+             && r3 && r3.observation === 'Conge' && !r3.h_j_manual && !r3.h_n_manual;
+      fakes = [F(1, 'hr', '', false), F(1, 'nuit', '', false), F(1, 'obs', '', false)];
+      saveSaisieRapide();
+      var pts2 = getPointageData();
+      var gone = !pts2.find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-01'; });
+      var okB = gone && pts2.some(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-02'; });
+      (okA && okB) ? 'OK : jour=8 h_j, nuit=6 h_n, obs stockee, effacement propre'
+                   : 'ECHEC A=' + (okA ? 1 : 0) + ' B=' + (okB ? 1 : 0)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     app: 'production.html', store: storeRealiste,
     code: `
       var savedDefs = getSection('definitions', []);
