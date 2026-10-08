@@ -5724,6 +5724,47 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Saisie rapide : absence pay\u00e9e (faute entreprise) porte motif + observation',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-select-emp').value = 'e1';
+      document.getElementById('pt-mois').value = '2026-10';
+      setPointageData(getPointageData().filter(function (p) { return p.employee_id !== 'e1' || (p.date || '').indexOf('2026-10') !== 0; }));
+      function INP2(f, v, chk, type) {
+        var e = { value: v, checked: !!chk, type: type || 'text', innerHTML: '' };
+        e.getAttribute = function (k) { if (k === 'data-r') return '9'; if (k === 'data-field') return f; return null; };
+        return e;
+      }
+      var rang = {
+        hr: INP2('hr', ''), hrN: INP2('hrN', ''), nuit: INP2('nuit', '', false, 'checkbox'),
+        abs: INP2('abs', '', true, 'checkbox'), obs: INP2('obs', ''),
+        motif: INP2('motif', 'Panne machine', false, 'select-one'), faute: INP2('faute', '', true, 'checkbox')
+      };
+      var totSpans = { 'pt-r-totJ': { innerHTML: '' }, 'pt-r-totN': { innerHTML: '' }, 'pt-r-totG': { innerHTML: '' }, 'pt-r-jrs': { innerHTML: '' } };
+      var vraieGet = document.getElementById;
+      document.getElementById = function (id) {
+        if (id === 'pt-modal-content') return {
+          querySelector: function (sel) { var m = /data-field="(\\w+)"/.exec(sel || ''); return (m && rang[m[1]]) ? rang[m[1]] : null; },
+          querySelectorAll: function () { return []; }
+        };
+        if (totSpans[id]) return totSpans[id];
+        return vraieGet(id);
+      };
+      ptRapideAutoSave(9);
+      document.getElementById = vraieGet;
+      var r9 = getPointageData().find(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-09'; });
+      var ok = r9 && r9.present === false && r9.absent_paye === true &&
+        r9.motif === 'Panne machine' && String(r9.h_j_manual) === '8' && r9.rattrap_gagnees === 8;
+      rang.faute.checked = false; rang.abs.checked = false;
+      rang.hr.value = '8'; rang.motif.value = ''; rang.obs.value = '';
+      (ok)
+        ? 'OK : present=false, absent_paye=true, motif=' + (r9 ? r9.motif : '?') + ', 8h pay\u00e9es + rattrapage'
+        : 'ECHEC ' + JSON.stringify(r9)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
