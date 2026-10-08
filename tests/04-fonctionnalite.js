@@ -5825,6 +5825,40 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Assiduit\u00e9 : une absence non justifi\u00e9e fait baisser le taux, une justifi\u00e9e non',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      var now = new Date(); var mz = now.toISOString().slice(0,7);
+      var an = parseInt(mz.substring(0,4),10), mo = parseInt(mz.substring(5,7),10) - 1;
+      var ndays = new Date(an, mo + 1, 0).getDate();
+      var today = now.getDate();
+      /* Pointage tous les jours ouvr\u00e9s, SAUF : J (absence injustifi\u00e9e)
+         et le jour 1 (absence maladie, justifi\u00e9e) */
+      var recs = [], nTrav = 0;
+      for (var d = 1; d <= ndays; d++) {
+        if (d > today) break;
+        var dow = new Date(an, mo, d).getDay();
+        if (dow === 0 || dow === 6) continue;
+        var dk = mz + '-' + (d < 10 ? '0' : '') + d;
+        if (d === 1) recs.push({ id: 's2', employee_id: 'e1', date: dk, present: false, motif: 'Maladie' });
+        else if (d === today) recs.push({ id: 's1', employee_id: 'e1', date: dk, present: false });
+        else { recs.push({ id: 'p' + d, employee_id: 'e1', date: dk, present: true }); nTrav++; }
+      }
+      var cur = getPointageData().filter(function (p) { return p.employee_id !== 'e1'; });
+      setPointageData(cur.concat(recs));
+      var res = ptAssiduiteData(mz);
+      var it = res.items.filter(function (x) { return x.emp.id === 'e1'; })[0];
+      var ok = it && it.pres === nTrav && it.abs === 1 && it.absJust === 1 && it.taux === Math.round(100 * nTrav / (nTrav + 1));
+      setPointageData(cur);
+      (ok)
+        ? 'OK : ' + nTrav + ' j point\u00e9s, 1 absence injustifi\u00e9e, 1 maladie exclue => taux ' + (it ? it.taux : '?') + '%'
+        : 'ECHEC pres=' + (it ? it.pres : '?') + '/' + nTrav + ' abs=' + (it ? it.abs : '?') + ' just=' + (it ? it.absJust : '?') + ' taux=' + (it ? it.taux : '?')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
