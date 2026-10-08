@@ -5630,6 +5630,47 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Synchro cloud : hash payload stable et distinct (skip des push identiques)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var h1 = _payeStrHash('{"a":1}');
+      var h2 = _payeStrHash('{"a":1}');
+      var h3 = _payeStrHash('{"a":2}');
+      var h4 = _payeStrHash('');
+      (h1 && h1 === h2 && h1 !== h3)
+        ? 'OK : hash stable (' + h1 + '), distinct (' + h3 + ')'
+        : 'ECHEC h1=' + h1 + ' h2=' + h2 + ' h3=' + h3 + ' h4=' + h4
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro cloud : 3 sauvegardes rapproch\u00e9es = 1 seul push coalesc\u00e9 (anti-mart\u00e8lement)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var feux = [];
+      var _ost = setTimeout, _oct = clearTimeout, _seq = 0;
+      setTimeout = function (fn, d) { _seq++; feux.push({ id: _seq, fn: fn, d: d }); return _seq; };
+      clearTimeout = function (id) { feux = feux.filter(function (t) { return t.id !== id; }); };
+      var n = 0;
+      var _origRun = _pushPayeCloudRun;
+      _pushPayeCloudRun = function () { n++; };
+      pushPayeCloud._t = null;
+      pushPayeCloud(); pushPayeCloud(); pushPayeCloud();
+      var timers = feux.length;
+      var delai = timers === 1 ? feux[0].d : -1;
+      feux[0].fn();
+      _pushPayeCloudRun = _origRun;
+      setTimeout = _ost; clearTimeout = _oct;
+      try { pushPayeCloud._t = null; } catch (eCT) {}
+      (timers === 1 && delai >= 2000 && n === 1)
+        ? 'OK : 3 appels coalesc\u00e9s en 1 timer (' + delai + ' ms), 1 ex\u00e9cution au d\u00e9clenchement'
+        : 'ECHEC timers=' + timers + ' delai=' + delai + ' n=' + n
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

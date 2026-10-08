@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-205";
+      window.__APP_VERSION = "2026-10-08-206";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6434,7 +6434,9 @@ function payeObj(key) {
             b.style.background = "#fef2f2";
             b.style.color = "#b91c1c";
             b.style.border = "1px solid #fecaca";
-            b.textContent = "⚠️ Synchro en attente — vérifiez la connexion, vos saisies repartiront toutes seules";
+            b.textContent = (st.serveurOccupe
+              ? "⚠️ Serveur occupé — nouvel essai auto, vos saisies sont gardées en local"
+              : "⚠️ Synchro en attente — vérifiez la connexion, vos saisies repartiront toutes seules");
             b.title = String(st.erreur || "");
           } else {
             b.style.display = "none";
@@ -6442,6 +6444,26 @@ function payeObj(key) {
         } catch (e) {}
       }
       function pushPayeCloud() {
+        /* Anti-martèlement : chaque push envoie le document ENTREPRISE ENTIER
+           (gros jsonb) puis joue un upsert avec fusion côté serveur. Sans
+           coalescence, une rafale de saisies = N upserts lourds qui se
+           marchent dessus (verrous Postgres → statement timeout 57014).
+           On regroupe donc les appels rapprochés en un seul push. */
+        try { if (pushPayeCloud._t) clearTimeout(pushPayeCloud._t); } catch (eD) {}
+        pushPayeCloud._t = setTimeout(function () {
+          pushPayeCloud._t = null;
+          _pushPayeCloudRun();
+        }, 2500);
+      }
+      function _payeStrHash(s) {
+        var h = 0;
+        try {
+          s = String(s || "");
+          for (var i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+          return h + ":" + s.length;
+        } catch (eH) { return ""; }
+      }
+      function _pushPayeCloudRun() {
         var uid = getEnterpriseUid();
         if (!uid || !firebaseDbP) return;
         if (payeBootstrapping || payePushBusy) {
@@ -6449,9 +6471,10 @@ function payeObj(key) {
           return;
         }
         payePushBusy = true;
+        var _lance = function () {
         /* Convergence : lire le cloud AVANT d'écrire et fusionner (union par id),
            pour qu'une copie locale périmée ne puisse plus écraser des données récentes. */
-        firebaseDbP
+        return firebaseDbP
           .collection("enterprises")
           .doc(uid)
           .get()
@@ -6518,6 +6541,30 @@ function payeObj(key) {
               payePushBusy = false;
               return;
             }
+            var _pJson = "";
+            try { _pJson = JSON.stringify(payload); } catch (eJ) {}
+            try {
+              if (_pJson) console.log("[Paye] push payload ~" + Math.round(_pJson.length / 1024) + " Ko");
+            } catch (eL3) {}
+            var _pHash = _payeStrHash(_pJson);
+            if (_pHash && _pHash === window._payeLastPushHash) {
+              /* Identique au dernier push réussi (écho temps réel, double
+                 onglet…) : inutile de rejouer un upsert lourd. */
+              payePushBusy = false;
+              try {
+                window._payeSyncEtat = window._payeSyncEtat || {};
+                window._payeSyncEtat.lastOk = Date.now();
+                window._payeSyncEtat.echec = 0;
+                window._payeSyncEtat.serveurOccupe = false;
+                if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
+              } catch (eS2) {}
+              if (payePushQueued) {
+                payePushQueued = false;
+                pushPayeCloud();
+              }
+              return;
+            }
+            window._payePushHashCourant = _pHash;
             return firebaseDbP
               .collection("enterprises")
               .doc(uid)
@@ -6528,12 +6575,14 @@ function payeObj(key) {
             console.log("[Paye] Sync cloud OK");
             try {
               window._payePushEssais = 0;
+              window._payeLastPushHash = window._payePushHashCourant || window._payeLastPushHash;
             } catch (eR) {}
             try {
               window._payePushEssais = 0;
               window._payeSyncEtat = window._payeSyncEtat || {};
               window._payeSyncEtat.lastOk = Date.now();
               window._payeSyncEtat.echec = 0;
+              window._payeSyncEtat.serveurOccupe = false;
               if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
             } catch (eS) {}
             if (payePushQueued) {
@@ -6545,6 +6594,13 @@ function payeObj(key) {
             console.warn("[Paye] Sync cloud error:", e);
             payePushBusy = false;
             var is402 = e && (e.status === 402 || e.statusCode === 402 || (e.message && e.message.indexOf("402") >= 0));
+            /* 57014 / 500-504 : le SERVEUR a mis trop de temps (gros document,
+               verrou occupé par un autre onglet…). Marteler n'aide pas : on
+               espace les réessais. Données intactes en local, rien n'est perdu. */
+            var _emsg = "";
+            try { _emsg = String((e && (e.message || e.error || e.hint)) || e || ""); } catch (eM) {}
+            var isTimeout = !!(e && (e.code === "57014" || /57014/.test(_emsg) || /statement timeout/i.test(_emsg)));
+            var isServeur = isTimeout || !!(e && (e.status === 500 || e.status === 502 || e.status === 503 || e.status === 504 || /(^|[^0-9])500([^0-9]|$)/.test(_emsg)));
             /* Échec audible + réessais : sans ça, une coupure/quota fait diverger
                le cloud en silence, puis le pull suivant écrase les saisies
                (l'utilisateur voit ses montants "revenir" en arrière). */
@@ -6552,24 +6608,60 @@ function payeObj(key) {
             try {
               window._payeSyncEtat = window._payeSyncEtat || {};
               window._payeSyncEtat.echec = Date.now();
+              window._payeSyncEtat.serveurOccupe = (isTimeout || isServeur);
               window._payeSyncEtat.erreur = String((e && e.message) || e || "réseau");
               if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
             } catch (eI) {}
             if (!is402) {
               payePushQueued = false;
               if (nEssai === 0) {
-                try { toast("Synchro cloud en échec — nouvel essai automatique, vos saisies sont gardées", "error"); } catch (eT) {}
+                try { toast(isServeur ? "Serveur occupé — nouvel essai auto, vos saisies sont gardées en local" : "Synchro cloud en échec — nouvel essai automatique, vos saisies sont gardées", "error"); } catch (eT) {}
               }
               if (nEssai < 5) {
                 window._payePushEssais = nEssai + 1;
-                var _delais = [5000, 15000, 30000, 60000, 120000];
+                var _delais = (isTimeout || isServeur)
+                  ? [15000, 45000, 120000, 300000, 600000]
+                  : [5000, 15000, 30000, 60000, 120000];
                 setTimeout(pushPayeCloud, _delais[nEssai] || 60000);
               }
             } else {
               payePushQueued = false;
             }
           });
+        }; /* fin _lance */
+        /* Exclusion mutuelle entre onglets : 2 upserts concurrents sur la même
+           ligne « entreprises » = attentes de verrou Postgres = timeouts 57014
+           en cascade. On sérialise les push (navigateurs récents). */
+        try {
+          if (navigator.locks && navigator.locks.request) {
+            navigator.locks.request("mdb-paye-push", function () { return _lance(); })
+              .catch(function () {
+                payePushBusy = false;
+                payePushQueued = true;
+                setTimeout(pushPayeCloud, 8000);
+              });
+            return;
+          }
+        } catch (eL) {}
+        _lance();
       }
+      /* Dernière chance à la fermeture de l'onglet : tenter l'envoi immédiat
+         si un push coalescé est encore en attente (les données restent de
+         toute façon en local et repartiront à la prochaine ouverture). */
+      try {
+        if (!window._payeBeforeUnloadHook) {
+          window._payeBeforeUnloadHook = true;
+          window.addEventListener("beforeunload", function () {
+            try {
+              if (pushPayeCloud._t) {
+                clearTimeout(pushPayeCloud._t);
+                pushPayeCloud._t = null;
+                _pushPayeCloudRun();
+              }
+            } catch (eB) {}
+          });
+        }
+      } catch (eBH) {}
       function pullPayeCloud() {
         var uid = getEnterpriseUid();
         if (!uid || !firebaseDbP) {
