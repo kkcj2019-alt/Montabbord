@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-208";
+      window.__APP_VERSION = "2026-10-08-209";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6455,9 +6455,11 @@ function payeObj(key) {
             b.style.background = "#fef2f2";
             b.style.color = "#b91c1c";
             b.style.border = "1px solid #fecaca";
-            b.textContent = (st.serveurOccupe
+            b.textContent = (_payeCircuitOuvert()
+              ? "⏸ Synchro en pause (serveur saturé) — reprise auto, vos saisies sont gardées en local"
+              : (st.serveurOccupe
               ? "⚠️ Serveur occupé — nouvel essai auto, vos saisies sont gardées en local"
-              : "⚠️ Synchro en attente — vérifiez la connexion, vos saisies repartiront toutes seules");
+              : "⚠️ Synchro en attente — vérifiez la connexion, vos saisies repartiront toutes seules"));
             b.title = String(st.erreur || "");
           } else {
             b.style.display = "none";
@@ -6491,6 +6493,24 @@ function payeObj(key) {
           payePushQueued = true;
           return;
         }
+        /* Coupe-circuit : après 3 chaînes d'échecs serveur d'affilée, pause
+           30 min au lieu de nourrir l'embouteillage côté base (chaque push =
+           un gros upsert qui attend son verrou). Rien n'est perdu : local
+           intact, reprise auto au réveil ou à la prochaine saisie. */
+        try {
+          if (_payeCircuitOuvert()) {
+            payePushQueued = true;
+            if (!window._payeCircuitTimer) {
+              window._payeCircuitTimer = setTimeout(function () {
+                window._payeCircuitTimer = null;
+                window._payeCircuitJusqua = 0;
+                pushPayeCloud();
+              }, Math.max(5000, window._payeCircuitJusqua - Date.now()) + 2000);
+            }
+            return;
+          }
+          window._payeCircuitJusqua = 0;
+        } catch (eCB) {}
         payePushBusy = true;
         var _lance = function () {
         /* Convergence : lire le cloud AVANT d'écrire et fusionner (union par id),
@@ -6596,6 +6616,8 @@ function payeObj(key) {
             console.log("[Paye] Sync cloud OK");
             try {
               window._payePushEssais = 0;
+              window._payeChainFails = 0;
+              window._payeCircuitJusqua = 0;
               window._payeLastPushHash = window._payePushHashCourant || window._payeLastPushHash;
             } catch (eR) {}
             try {
@@ -6654,6 +6676,19 @@ function payeObj(key) {
                   : [5000, 15000, 30000, 60000, 120000];
                 setTimeout(pushPayeCloud, _delais[nEssai] || 60000);
               }
+              /* 3 chaînes d'échecs SERVEUR d'affilée → on ouvre le
+                 coupe-circuit (pause 30 min). Les simples coupures réseau
+                 gardent le rythme normal (reprise dès le retour). */
+              if ((isTimeout || isServeur) && !window._payeCircuitJusqua) {
+                try {
+                  window._payeChainFails = (window._payeChainFails || 0) + 1;
+                  if (window._payeChainFails >= 3) {
+                    window._payeCircuitJusqua = Date.now() + 30 * 60 * 1000;
+                    try { toast("Synchro en pause 30 min (serveur saturé) — données gardées en local, reprise auto", "error"); } catch (eTC) {}
+                    if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
+                  }
+                } catch (eCF) {}
+              }
             } else {
               payePushQueued = false;
             }
@@ -6683,6 +6718,13 @@ function payeObj(key) {
           window._payeBeforeUnloadHook = true;
           window.addEventListener("beforeunload", function () {
             try {
+              /* L'auto-save diffère son push de 20 s (ptPlanPush) : à la
+                 fermeture, on le purge tout de suite au lieu de le perdre. */
+              if (typeof _ptPushTimer !== "undefined" && _ptPushTimer) {
+                try { clearTimeout(_ptPushTimer); } catch (eC) {}
+                _ptPushTimer = null;
+                try { pushPayeCloud(); } catch (eP2) {}
+              }
               if (pushPayeCloud._t) {
                 clearTimeout(pushPayeCloud._t);
                 pushPayeCloud._t = null;
@@ -6788,7 +6830,7 @@ function payeObj(key) {
             DB.getMain(PAYE_KEY) || {},
             _cur,
             window._payeEcritLocal,
-            120000,
+            _payeDelaiProtection(),
           );
           if (_prot.protege) {
             DB.setMain(PAYE_KEY, _prot.fusion);
@@ -6852,6 +6894,14 @@ function payeObj(key) {
         payePollTimer = setInterval(function () {
           if (document.hidden) return;
           if (!firebaseDbP) return;
+          try {
+            /* Base saturée / synchro en échec : 1 sondage sur 12 (~1/min)
+               au lieu de marteler toutes les 5 s. */
+            if (_payeSynchroEnEchec()) {
+              window._payePollCompteur = (window._payePollCompteur || 0) + 1;
+              if (window._payePollCompteur % 12 !== 0) return;
+            }
+          } catch (ePC) {}
           try {
             firebaseDbP
               .collection("enterprises")
@@ -15153,12 +15203,41 @@ html +=
       /* Rend le calendrier 1..31 : une ligne par jour, Heures jour + Heures nuit (dépliée à la coche) + Observation.
          La modale permet de choisir l'employé (empId optionnel = sélection de l'écran pointage). */
       function showSaisieRapide(empId) {
-        var mois = document.getElementById("pt-mois").value;
+        /* Mois : déjà choisi dans la barre figée (pt-mois) ; repli = mois courant. */
+        var moisEl = document.getElementById("pt-mois");
+        var mois = (moisEl && moisEl.value) || new Date().toISOString().slice(0, 7);
+        if (moisEl && !moisEl.value) moisEl.value = mois;
         var list = getPersonnel();
         list = Array.isArray(list) ? list : [];
-        if (!empId) empId = document.getElementById("pt-select-emp").value;
+        if (!empId) {
+          try { empId = (document.getElementById("pt-select-emp") || {}).value || ""; } catch (eS) { empId = ""; }
+        }
+        if (!empId) {
+          /* Depuis le récap filtré : ouvrir quand même, sur le 1er employé
+             visible avec les mêmes filtres (fonction / dép. / recherche). */
+          try {
+            var ff = document.getElementById("pt-fonction-filter");
+            var fsel = (ff && ff.value) || "Toutes les fonctions";
+            var deptEl = document.getElementById("pt-dept-filter");
+            var deptSel = deptEl ? deptEl.value : "";
+            var searchEl = document.getElementById("pt-emp-search");
+            var q = searchEl ? (searchEl.value || "") : "";
+            var cands = getPersonnelActifs().filter(function (p) {
+              if (!p || p.en_paie === false) return false;
+              if (fsel !== "Toutes les fonctions" && p.fonction !== fsel) return false;
+              if (deptSel && (p.service || "Non défini").toLowerCase() !== String(deptSel).toLowerCase()) return false;
+              if (q) {
+                var hay = ((p.matricule || "") + " " + (p.nom || "") + " " + (p.prenoms || "") + " " + (p.fonction || "")).toLowerCase();
+                if (hay.indexOf(String(q).toLowerCase()) === -1) return false;
+              }
+              return true;
+            });
+            if (cands.length) empId = cands[0].id;
+          } catch (eF) {}
+        }
+        if (!empId && list.length) empId = ((list.find(function (p) { return p && p.en_paie !== false; }) || list[0]) || {}).id || "";
         if (!empId || !mois) {
-          toast("S\u00e9lectionnez un employ\u00e9 et un mois", "error");
+          toast("Aucun employé disponible pour la saisie rapide", "error");
           return;
         }
         var emp = list.find(function (p) {
@@ -15255,7 +15334,7 @@ html +=
           "</select></label>";
         html += "</div>";
         html +=
-          '<details style="margin-bottom:.5rem"><summary style="font-size:.75rem;color:var(--dim);cursor:pointer">Aide</summary><div style="font-size:.75rem;color:var(--dim);line-height:1.65;padding-top:.3rem">Tapez les heures jour de chaque jour (ex : <strong>8</strong> ou <strong>8.5</strong> = 8h30), Entr\u00e9e passe au jour suivant. Cochez <strong>Nuit</strong> pour les heures de nuit, <strong>Absent</strong> pour un jour d\u2019absence. Chaque case <strong>s\u2019enregistre toute seule</strong> en passant \u00e0 la suivante.</div></details>';
+          '<details style="margin-bottom:.5rem"><summary style="font-size:.75rem;color:var(--dim);cursor:pointer">Aide</summary><div style="font-size:.75rem;color:var(--dim);line-height:1.65;padding-top:.3rem">Tapez les heures jour de chaque jour (ex : <strong>8</strong> ou <strong>8.5</strong> = 8h30), Entr\u00e9e passe au jour suivant. <strong style="color:#16a34a">Des heures tapées = PRÉSENT</strong> (ligne verte, la case Absent se décoche toute seule). <strong style="color:#dc2626">Cocher Absent = jour d\u2019absence</strong> (ligne rouge, heures effacées). Cochez <strong>Nuit</strong> pour les heures de nuit. Chaque case <strong>s\u2019enregistre toute seule</strong> en passant \u00e0 la suivante.</div></details>';
         /* (boutons uniques : barre de titre ci-dessus) */
         /* Deux blocs côte à côte (1->mid, mid+1->fin) : tout le mois visible
            d'un coup. La case H. Nuit reste TOUJOURS visible (cellule jamais
@@ -15327,7 +15406,7 @@ html +=
             d +
             '" data-field="hr" value="' +
             escH(rawJ) +
-            '" oninput="ptRapideTotal(' +
+            '" oninput="ptRapideHeuresTapees(' +
             d +
             ');this.dataset.dirty=\'1\'" onchange="ptRapideAutoSave(' +
             d +
@@ -15349,7 +15428,7 @@ html +=
             d +
             '" data-field="hrN" value="' +
             escH(rawN) +
-            '" oninput="ptRapideTotal(' +
+            '" oninput="ptRapideHeuresTapees(' +
             d +
             ');this.dataset.dirty=\'1\'" onchange="ptRapideAutoSave(' +
             d +
@@ -15384,6 +15463,7 @@ html +=
         /* Marge intérieure : le contenu ne touche plus les bords de la modale. */
         html = '<div style="padding:12px 16px 16px">' + html + "</div>";
         openPtModal(html, true);
+        try { for (var _td = 1; _td <= dims; _td++) ptRapideTint(_td); } catch (eTT) {}
       }
       /* Cocher/dé-cocher Nuit : déplie la case des heures de nuit (et la vide si dé-cocher). La cellule reste visible (sinon les colonnes se décalent). */
       function ptRapideNuit(d) {
@@ -15401,6 +15481,7 @@ html +=
           inp.dataset.dirty = "1";
         }
         ptRapideTotal(d);
+        ptRapideTint(d);
       }
       /* Saisie rapide : résout l'employé depuis le champ autocomplété
          (nom affiché exact ou id collé). Retour "" si introuvable. */
@@ -15435,6 +15516,46 @@ html +=
       }
       /* Cocher/dé-cocher Absent : vide les heures du jour (un absent n'a
          pas d'heures, comme dans la modale de pointage). */
+      /* Heures tapées = PRÉSENT : on décocher Absent auto (sinon l'auto-save
+         verrait « absent » et EFFACERAIT les heures tapées), puis teinte. */
+      function ptRapideHeuresTapees(d) {
+        try {
+          var box = document.getElementById("pt-modal-content");
+          if (box && box.querySelector) {
+            var abs = box.querySelector('input[data-r="' + d + '"][data-field="abs"]');
+            var hj = box.querySelector('input[data-r="' + d + '"][data-field="hr"]');
+            var hn = box.querySelector('input[data-r="' + d + '"][data-field="hrN"]');
+            var hrs = 0;
+            try { hrs = parseHeure(hj ? hj.value : "") + parseHeure(hn ? hn.value : ""); } catch (eH) {}
+            if (hrs > 0 && abs && abs.checked) {
+              abs.checked = false;
+              abs.dataset.dirty = "1";
+            }
+          }
+        } catch (eU) {}
+        ptRapideTotal(d);
+        ptRapideTint(d);
+      }
+      /* Teinte de ligne : rouge = absent coché, vert = heures saisies
+         (présent), neutre sinon. Le vert signifie PRÉSENT, jamais absent. */
+      function ptRapideTint(d) {
+        try {
+          var box = document.getElementById("pt-modal-content");
+          if (!box || !box.querySelector) return;
+          var abs = box.querySelector('input[data-r="' + d + '"][data-field="abs"]');
+          if (!abs) return;
+          var row = null;
+          try { row = abs.closest ? abs.closest("tr") : (abs.parentNode ? abs.parentNode.parentNode : null); } catch (eC) {}
+          if (!row || !row.style) return;
+          var hj = box.querySelector('input[data-r="' + d + '"][data-field="hr"]');
+          var hn = box.querySelector('input[data-r="' + d + '"][data-field="hrN"]');
+          var hrs = 0;
+          try { hrs = parseHeure(hj ? hj.value : "") + parseHeure(hn ? hn.value : ""); } catch (eH2) {}
+          if (abs.checked) row.style.background = "#fef2f2";
+          else if (hrs > 0) row.style.background = "#f0fdf4";
+          else row.style.background = "";
+        } catch (eT) {}
+      }
       function ptRapideAbs(d) {
         var cb = document.querySelector(
           '#pt-modal-content input[data-r="' + d + '"][data-field="abs"]',
@@ -15464,6 +15585,9 @@ html +=
             ptRapideNuit(d);
           }
           ptRapideTotal(d);
+          ptRapideTint(d);
+        } else {
+          ptRapideTint(d);
         }
       }
       /* AUTO-SAVE saisie rapide : dès qu'on quitte une case (change/blur),
@@ -15572,6 +15696,9 @@ html +=
         try {
           ptRapideTotal(d);
         } catch (eT) {}
+        try {
+          ptRapideTint(d);
+        } catch (eT3) {}
         try {
           ptRapideMajTotaux();
         } catch (eT2) {}
@@ -17765,10 +17892,12 @@ html +=
       /* --- MODAL GÉNÉRER MOIS COMPLET --- */
       /* Employé au forfait 173.33h/mois ? (fiche employé > Mode de pointage).
          Ne pas confondre avec le type de contrat : un CDI peut pointer au jour le jour.
-         Un prestataire externe FORFAIT aussi bien compté (même mode de pointage). */
+         Un prestataire externe FORFAIT aussi bien compté (même mode de pointage).
+         Tolérant aux variantes de saisie ("Forfait", "forfait_173", "173.33"...). */
       function ptEstForfait(p) {
         if (!p || p.en_paie === false) return false;
-        return (p.mode_pointage || "journalier") === "forfait";
+        var v = String(p.mode_pointage || "journalier").toLowerCase().replace(/[\s_\-.,]/g, "");
+        return v === "forfait" || v === "forfait173" || v === "forfait17333" || v === "17333";
       }
       function showModalGenererMois() {
         var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
@@ -17778,11 +17907,13 @@ html +=
         window._genPool = emps;
         window._genChecked = {};
         emps.forEach(function(p){ window._genChecked[p.id] = true; });
+        var nbActifsPaie = getPersonnelActifs().filter(function(p){ return p && p.en_paie !== false; }).length;
         var fonctions = ["Toutes les fonctions"];
         emps.forEach(function(p){ if (p.fonction && fonctions.indexOf(p.fonction) === -1) fonctions.push(p.fonction); });
         var html = '<div style="padding:20px">' +
           '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
-          '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
+          '<p style="font-size:.78rem;color:#666;margin:0 0 4px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
+          '<p style="font-size:.72rem;color:' + (emps.length ? '#16a34a' : '#dc2626') + ';margin:0 0 16px;font-weight:600">' + emps.length + ' au forfait sur ' + nbActifsPaie + ' actif(s) en paie' + (emps.length ? '' : ' — si un employé manque : vérifiez son Mode de pointage ET la case « En paie » dans sa fiche') + '</p>' +
           '<div class="form-group" style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
           '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois ('+mois+')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option><option value="range">Plage de jours (du … au …)</option></select></div>' +
           '<div id="gen-day-wrap" class="form-group" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
@@ -19553,19 +19684,36 @@ function ptMontPrintEtat(mois, tab) {
       }
       function _ptMontDateCellToDate(cellVal, year, monthIdx) {
         if (cellVal == null || cellVal === "") return "";
-        var num = cellVal instanceof Date ? cellVal.getTime ? cellVal : null : null;
-        if (!num && cellVal instanceof Date) { try { return String(cellVal.getFullYear()) + "-" + String(cellVal.getMonth() + 1).padStart(2, "0") + "-" + String(cellVal.getDate()).padStart(2, "0"); } catch (e) {} }
-        if (typeof cellVal === "number") {
-          var d2 = XLSX && XLSX.SSF ? XLSX.SSF.parse_date_code(cellVal) : null;
+        if (cellVal instanceof Date) { try { return String(cellVal.getFullYear()) + "-" + String(cellVal.getMonth() + 1).padStart(2, "0") + "-" + String(cellVal.getDate()).padStart(2, "0"); } catch (e) {} }
+        if (typeof cellVal === "number" && XLSX && XLSX.SSF) {
+          var d2 = XLSX.SSF.parse_date_code(cellVal);
           if (d2) return String(d2.y) + "-" + String(d2.m).padStart(2, "0") + "-" + String(d2.d).padStart(2, "0");
         }
         var s = String(cellVal).trim();
         var m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
         if (m) return m[1] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[3]).padStart(2, "0");
-        m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+        m = s.match(/^(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{4})$/);
         if (m) return m[3] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
         m = s.match(/\b(\d{1,2})[\/\-\s](\d{1,2})[\/\-\s](\d{4})\b/);
         if (m) return m[3] + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
+        /* « 28 aout », « 28 août », « 28 AOUT 2026 » (tableau réel) */
+        m = s.match(/(\d{1,2})\s*(?:[^\w\d]*)(janv|f[eé]vr|mars|avr|mai|juin|juil|ao[uû]t|sept|oct|nov|d[eé]c)[^\d]{0,3}(\d{4})?/i);
+        if (m) {
+          var moisFr = ["janv", "fevr", "mars", "avr", "mai", "juin", "juil", "aout", "sept", "oct", "nov", "dec"];
+          var found = m[2].toLowerCase();
+          found = found.replace(/[^a-z]/g, "");
+          found = found.replace("fevr", "fevr").replace("fvr", "fevr");
+          if (found === "fe") found = "fevr";
+          var mi = moisFr.indexOf(found);
+          if (mi === -1) {
+            for (var z = 0; z < moisFr.length; z++) if (moisFr[z].indexOf(found) === 0) { mi = z; break; }
+          }
+          if (mi !== -1) {
+            var yy = m[3] ? parseInt(m[3], 10) : (year || 0);
+            if (!yy) return "";
+            return String(yy) + "-" + String(mi + 1).padStart(2, "0") + "-" + String(parseInt(m[1], 10)).padStart(2, "0");
+          }
+        }
         m = s.match(/\b(\d{1,2})[\/\-\s](\d{1,2})\b/);
         if (m && year) return String(year) + "-" + String(monthIdx + 1).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
         m = s.match(/\b(\d{1,2})\b/);
@@ -19575,11 +19723,27 @@ function ptMontPrintEtat(mois, tab) {
         }
         return "";
       }
+      /* Article du catalogue trouvé par son code OU sa désignation
+         (« Fauteuil School » dans Excel = code A01). */
       function _ptMontFindArt(code, ams) {
         if (!code) return null;
         var c = String(code).trim();
         var low = c.toLowerCase();
-        return ams.find(function (a) { var ac = String(a.code || "").toLowerCase(); return ac === low || ac.indexOf(low) >= 0 || low.indexOf(ac) >= 0; });
+        var byCode = ams.find(function (a) { var ac = String(a.code || "").toLowerCase(); return ac === low || (ac && low.indexOf(ac) >= 0) || (low && ac.indexOf(low) >= 0); });
+        if (byCode) return byCode;
+        var nn = _normName(c);
+        if (!nn) return null;
+        return ams.find(function (a) {
+          var dn = _normName(a.designation || a.nom || a.libelle || "");
+          return dn && (dn === nn || dn.indexOf(nn) >= 0 || nn.indexOf(dn) >= 0);
+        });
+      }
+      /* Cellule d'en-tête de colonne : 1/2, 01/02, 1, 2 … ou date Excel */
+      function _ptMontJourCol(v, year, monthIdx) {
+        var d = _ptMontDateCellToDate(v, year, monthIdx);
+        if (!d) return 0;
+        var p = d.split("-");
+        return parseInt(p[2], 10) || 0;
       }
       function _ptMontFindEmp(name, matricule, workers) {
         if (workers.length === 0) return null;
@@ -19604,6 +19768,56 @@ function ptMontPrintEtat(mois, tab) {
         var workers = opts.workers || ptMontWorkers();
         var items = [];
         if (!Array.isArray(rows) || rows.length === 0) return items;
+
+        /* --- MODE 1 : matrice réelle « ARTICLES en lignes, JOURS en colonnes » ---
+           Ligne d'en-tête : libellé article | 1/2 | 01/02 | 3 … (ou dates Excel).
+           Lignes suivantes : le nom de l'employé + ses quantités. */
+        var ligneEntete = -1;
+        for (var hi = 0; hi < Math.min(rows.length, 25); hi++) {
+          var rH = rows[hi] || [];
+          var nbJour = 0, nbTxt = 0;
+          for (var hc = 1; hc < rH.length; hc++) {
+            var v = rH[hc];
+            if (v === "" || v === null || v === undefined) continue;
+            /* Jour d'abord : "1/2", "01/02", 3 ou date Excel — ce sont des
+              chaines, sinon on les compterait comme du texte. */
+            if (_ptMontJourCol(v, y, mIdx) > 0) { nbJour++; continue; }
+            if (typeof v === "string" && _normName(v)) nbTxt++;
+          }
+          if (nbJour >= 4) { ligneEntete = hi; break; }
+        }
+        if (ligneEntete !== -1) {
+          var hdr = rows[ligneEntete];
+          var colJour = [];
+          for (var cj = 1; cj < hdr.length; cj++) {
+            var j = _ptMontJourCol(hdr[cj], y, mIdx);
+            colJour.push({ col: cj, jour: j });
+          }
+          for (var ri = ligneEntete + 1; ri < rows.length; ri++) {
+            var row = rows[ri] || [];
+            if (!row || !row.length) continue;
+            /* Employé ET article sont cherchés dans TOUTE la ligne : le fichier
+               réel peut libeller la ligne par le nom du travailleur ou par
+               l'article, l'autre se trouvant dans une colonne voisine. */
+            var emp = null, art = null;
+            for (var sc = 0; sc < row.length && (!emp || !art); sc++) {
+              var sv = row[sc];
+              if (typeof sv !== "string" || !sv.trim()) continue;
+              if (!emp) emp = _ptMontFindEmp(sv, "", workers);
+              if (!art) art = _ptMontFindArt(sv, ams);
+            }
+            if (!emp || !art) continue;
+            for (var q = 0; q < colJour.length; q++) {
+              var cv = row[colJour[q].col];
+              var qt = parseFloat(cv);
+              if (!qt || isNaN(qt)) continue;
+              items.push({ employee_id: emp.id, employee_nom: emp.nom, article_code: art.code, date: mois + "-" + String(colJour[q].jour).padStart(2, "0"), quantite: qt });
+            }
+          }
+          if (items.length) return items;
+        }
+
+        /* --- MODE 2 : liste (Employé, Article, Date, Quantité) --- */
         var headIdx = -1;
         for (var i = 0; i < rows.length && headIdx === -1; i++) {
           var r0 = rows[i] || [];
@@ -19755,31 +19969,46 @@ function ptMontPrintEtat(mois, tab) {
           return '<div style="flex:1;min-width:110px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px"><div style="font-size:20px;font-weight:800;color:' + color + '">' + v + '</div><div style="font-size:.68rem;color:#64748b;font-weight:600">' + label + '</div></div>';
         }
         var gtx = tot.jours > 0 ? Math.round(100 * tot.pres / tot.jours) : 0;
-        var out = '<div style="font-size:.95rem;font-weight:800;margin-bottom:2px;color:#0f172a">📋 État d\'assiduité — ' + ptMoisLabel(mois) + '</div>';
-        out += '<div style="font-size:.7rem;color:#64748b;margin-bottom:12px">Jours ouvrés lun–ven hors fériés, comptés jusqu\u2019à aujourd\u2019hui · Source : pointage horaire</div>';
+        var out = '<div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px;margin-bottom:2px">' +
+          '<div style="font-size:1.05rem;font-weight:800;color:#0f172a">📋 État d\'assiduité — ' + ptMoisLabel(mois) + '</div>' +
+          '<div style="font-size:.68rem;color:#64748b">Édité le ' + new Date().toLocaleDateString("fr-FR") + ' · Source : pointage horaire · Jours ouvrés lun–ven hors fériés, jusqu\'à aujourd\'hui</div></div>';
         out += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">';
         out += kpi(tot.jours, "Jours ouvrés", "#475569") + kpi(tot.pres, "Présences", "#16a34a") + kpi(tot.abs, "Absences", "#dc2626") + kpi(tot.faute, "Faute société", "#d97706") + kpi(tot.payes, "Absents payés", "#7c3aed") + kpi(gtx + " %", "Taux présence", _ptAssiduiteColor(gtx));
         out += '</div>';
-        out += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap"><span style="font-size:.7rem;font-weight:700;color:#334155">☰ Motifs d\'absence : <span style="color:#92400e;font-weight:600">' + ptMotifLegendTxt() + '</span></span></div>';
-        out += '<div style="overflow-x:auto;max-height:50vh;border:1px solid #e2e8f0;border-radius:10px">';
-        out += '<table style="border-collapse:collapse;width:100%;font-size:.72rem;min-width:820px"><thead><tr style="background:#0f172a;color:#fff">' +
-          '<th style="padding:7px 8px;text-align:left">Matricule</th><th style="padding:7px 8px;text-align:left">Employé</th><th style="padding:7px 8px;text-align:center">Jours</th><th style="padding:7px 8px;text-align:center">Prés.</th><th style="padding:7px 8px;text-align:center">Abs.</th><th style="padding:7px 8px;text-align:center">Motifs</th><th style="padding:7px 8px;text-align:center">Faute</th><th style="padding:7px 8px;text-align:center">Taux</th><th style="padding:7px 8px;text-align:center">Niveau</th><th style="padding:7px 8px;text-align:left">Observation</th></tr></thead><tbody>';
-        if (!items.length) out += '<tr><td colspan="10" style="padding:14px;text-align:center;color:#64748b">Aucun pointage pour cette période</td></tr>';
-        items.forEach(function (it) {
+        out += '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><span style="font-size:.7rem;font-weight:700;color:#334155">Motifs :</span>' +
+          ptMotifList().map(function (m) { return '<span style="font-size:.64rem;font-weight:700;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:20px;padding:1px 8px;white-space:nowrap">' + PT_ABS_MOTIFS[m] + ' · ' + escH(m) + '</span>'; }).join("") +
+          '<span style="font-size:.64rem;font-weight:700;color:#64748b;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:1px 8px;white-space:nowrap">X · Sans motif</span></div>';
+        out += '<div style="overflow:auto;max-height:56vh;border:2px solid #0f172a;border-radius:10px">';
+        var _thA = 'padding:8px 8px;text-align:center;position:sticky;top:0;background:#0f172a;color:#fff;font-size:.66rem;white-space:nowrap;z-index:1';
+        out += '<table style="border-collapse:collapse;width:100%;font-size:.72rem;min-width:1040px"><thead><tr>' +
+          '<th style="' + _thA + '">N°</th><th style="' + _thA + ';text-align:left">Matricule</th><th style="' + _thA + ';text-align:left">Employé</th><th style="' + _thA + ';text-align:left">Fonction</th><th style="' + _thA + '">Jours</th><th style="' + _thA + '">Prés.</th><th style="' + _thA + '">Abs.</th><th style="' + _thA + '">Motifs d\'absence</th><th style="' + _thA + '">Faute soc.</th><th style="' + _thA + '">Taux</th><th style="' + _thA + '">Niveau</th><th style="' + _thA + ';text-align:left">Observation RH</th></tr></thead><tbody>';
+        if (!items.length) out += '<tr><td colspan="12" style="padding:14px;text-align:center;color:#64748b">Aucun pointage pour cette période</td></tr>';
+        items.forEach(function (it, ix) {
           var mc = _ptAssiduiteColor(it.taux);
+          var zebra = (ix % 2 === 0) ? "#ffffff" : "#f8fafc";
           var mkeys = Object.keys(it.motifs);
-          var mTxt = mkeys.length ? mkeys.map(function (k) { return k + ' : ' + it.motifs[k]; }).join(', ') : "—";
-          out += '<tr><td style="padding:6px 8px;border-bottom:1px solid #f1f5f9">' + escH(it.emp.matricule || "—") + '</td>' +
-            '<td style="padding:6px 8px;font-weight:700;border-bottom:1px solid #f1f5f9">' + escH(empNameLine(it.emp)) + '</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9">' + it.jours + '</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9;color:#16a34a;font-weight:700">' + it.pres + '</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9;color:' + (it.abs ? '#dc2626' : 'inherit') + ';font-weight:700">' + it.abs + '</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9;font-size:.66rem">' + escH(mTxt) + '</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9">' + (it.faute ? '<span style="color:#d97706;font-weight:700">' + it.faute + '</span>' : "—") + '</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9;font-weight:800;color:' + mc + '">' + it.taux + ' %</td>' +
-            '<td style="padding:6px 8px;text-align:center;border-bottom:1px solid #f1f5f9;color:' + mc + ';font-weight:600">' + _ptAssiduiteLvl(it.taux) + '</td>' +
-            '<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;font-size:.68rem;color:#475569;max-width:280px;min-width:180px">' + escH(ptAssiduiteObserv(it)) + '</td></tr>';
+          var chips = mkeys.length ? mkeys.map(function (k) { return '<span style="display:inline-block;font-size:.62rem;font-weight:700;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:12px;padding:0 7px;margin:1px;white-space:nowrap">' + escH(k) + ' × ' + it.motifs[k] + '</span>'; }).join("") : '<span style="color:#cbd5e1">—</span>';
+          var bar = '<div style="background:#e2e8f0;border-radius:6px;height:8px;min-width:70px"><div style="background:' + mc + ';height:8px;border-radius:6px;width:' + Math.min(100, it.taux) + '%"></div></div><div style="font-weight:800;color:' + mc + ';font-size:.74rem;margin-top:2px">' + it.taux + ' %</div>';
+          out += '<tr style="background:' + zebra + '">' +
+            '<td style="padding:7px 8px;text-align:center;color:#94a3b8">' + (ix + 1) + '</td>' +
+            '<td style="padding:7px 8px;font-weight:700;white-space:nowrap">' + escH(it.emp.matricule || "—") + '</td>' +
+            '<td style="padding:7px 8px;font-weight:700;white-space:nowrap">' + escH(empNameLine(it.emp)) + '</td>' +
+            '<td style="padding:7px 8px;color:#475569;white-space:nowrap">' + escH(it.emp.fonction || "—") + '</td>' +
+            '<td style="padding:7px 8px;text-align:center">' + it.jours + '</td>' +
+            '<td style="padding:7px 8px;text-align:center;color:#16a34a;font-weight:800">' + it.pres + '</td>' +
+            '<td style="padding:7px 8px;text-align:center;color:' + (it.abs ? '#dc2626' : '#cbd5e1') + ';font-weight:800">' + it.abs + '</td>' +
+            '<td style="padding:7px 8px;text-align:center;max-width:190px">' + chips + '</td>' +
+            '<td style="padding:7px 8px;text-align:center">' + (it.faute ? '<span style="color:#d97706;font-weight:800">' + it.faute + '</span>' : '<span style="color:#cbd5e1">—</span>') + '</td>' +
+            '<td style="padding:7px 8px;text-align:center">' + bar + '</td>' +
+            '<td style="padding:7px 8px;text-align:center;color:' + mc + ';font-weight:700;white-space:nowrap">' + _ptAssiduiteLvl(it.taux) + '</td>' +
+            '<td style="padding:7px 8px;font-size:.68rem;color:#334155;min-width:200px">' + escH(ptAssiduiteObserv(it)) + '</td></tr>';
         });
+        out += '<tr style="background:#0f172a;color:#fff;font-weight:800"><td colspan="4" style="padding:8px;text-align:right">TOTAL (' + items.length + ' employé(s))</td>' +
+          '<td style="padding:8px;text-align:center">' + tot.jours + '</td>' +
+          '<td style="padding:8px;text-align:center">' + tot.pres + '</td>' +
+          '<td style="padding:8px;text-align:center">' + tot.abs + '</td>' +
+          '<td></td><td style="padding:8px;text-align:center">' + tot.faute + '</td>' +
+          '<td style="padding:8px;text-align:center">' + gtx + ' %</td><td></td><td></td></tr>';
         out += '</tbody></table></div>';
         out += '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">';
         out += '<button class="btn btn-sec" style="padding:7px 16px;font-size:.78rem;background:#fff;border:1px solid #e2e8f0;color:#334155;border-radius:8px;font-weight:600" onclick="closePtModal()">Fermer</button>';
@@ -19808,13 +20037,15 @@ function ptMontPrintEtat(mois, tab) {
           '<span>Jours ouvrés : ' + tot.jours + '</span><span>Présences : ' + tot.pres + '</span><span>Absences : ' + tot.abs + '</span><span>Faute société : ' + tot.faute + '</span><span>Absents payés : ' + tot.payes + '</span><span>Taux présence : ' + gtx + ' %</span></div>';
         var rows = '<table style="width:100%;border-collapse:collapse;font-size:8pt">' +
           '<thead><tr style="background:#e2e8f0">' +
-          '<th style="border:1px solid #333;padding:4px">Mat.</th><th style="border:1px solid #333;padding:4px;text-align:left">Employé</th><th style="border:1px solid #333;padding:4px">Jours</th><th style="border:1px solid #333;padding:4px">Prés.</th><th style="border:1px solid #333;padding:4px">Abs.</th><th style="border:1px solid #333;padding:4px;text-align:left">Motifs</th><th style="border:1px solid #333;padding:4px">Faute</th><th style="border:1px solid #333;padding:4px">Taux</th><th style="border:1px solid #333;padding:4px;text-align:left">Observation</th></tr></thead><tbody>';
-        if (!items.length) rows += '<tr><td colspan="9" style="border:1px solid #333;padding:8px;text-align:center">Aucun pointage pour cette période</td></tr>';
-        items.forEach(function (it) {
+          '<th style="border:1px solid #333;padding:4px">N°</th><th style="border:1px solid #333;padding:4px">Mat.</th><th style="border:1px solid #333;padding:4px;text-align:left">Employé</th><th style="border:1px solid #333;padding:4px;text-align:left">Fonction</th><th style="border:1px solid #333;padding:4px">Jours</th><th style="border:1px solid #333;padding:4px">Prés.</th><th style="border:1px solid #333;padding:4px">Abs.</th><th style="border:1px solid #333;padding:4px;text-align:left">Motifs</th><th style="border:1px solid #333;padding:4px">Faute</th><th style="border:1px solid #333;padding:4px">Taux</th><th style="border:1px solid #333;padding:4px;text-align:left">Observation</th></tr></thead><tbody>';
+        if (!items.length) rows += '<tr><td colspan="11" style="border:1px solid #333;padding:8px;text-align:center">Aucun pointage pour cette période</td></tr>';
+        items.forEach(function (it, ix) {
           var mk = Object.keys(it.motifs).sort();
           var mTxt = mk.map(function (k) { return k + ' : ' + it.motifs[k]; }).join(', ');
-          rows += '<tr><td style="border:1px solid #333;padding:3px;text-align:center">' + escH(it.emp.matricule || "·") + '</td>' +
+          rows += '<tr><td style="border:1px solid #333;padding:3px;text-align:center">' + (ix + 1) + '</td>' +
+            '<td style="border:1px solid #333;padding:3px;text-align:center">' + escH(it.emp.matricule || "·") + '</td>' +
             '<td style="border:1px solid #333;padding:3px">' + escH(empNameLine(it.emp)) + '</td>' +
+            '<td style="border:1px solid #333;padding:3px">' + escH(it.emp.fonction || "—") + '</td>' +
             '<td style="border:1px solid #333;padding:3px;text-align:center">' + it.jours + '</td>' +
             '<td style="border:1px solid #333;padding:3px;text-align:center">' + it.pres + '</td>' +
             '<td style="border:1px solid #333;padding:3px;text-align:center">' + it.abs + '</td>' +
@@ -19823,6 +20054,13 @@ function ptMontPrintEtat(mois, tab) {
             '<td style="border:1px solid #333;padding:3px;text-align:center">' + it.taux + ' %</td>' +
             '<td style="border:1px solid #333;padding:3px;font-size:7pt">' + escH(ptAssiduiteObserv(it)) + '</td></tr>';
         });
+        rows += '<tr style="background:#e2e8f0;font-weight:800"><td colspan="4" style="border:1px solid #333;padding:4px;text-align:right">TOTAL (' + items.length + ' employé(s))</td>' +
+          '<td style="border:1px solid #333;padding:4px;text-align:center">' + tot.jours + '</td>' +
+          '<td style="border:1px solid #333;padding:4px;text-align:center">' + tot.pres + '</td>' +
+          '<td style="border:1px solid #333;padding:4px;text-align:center">' + tot.abs + '</td>' +
+          '<td style="border:1px solid #333;padding:4px"></td>' +
+          '<td style="border:1px solid #333;padding:4px;text-align:center">' + tot.faute + '</td>' +
+          '<td style="border:1px solid #333;padding:4px;text-align:center">' + gtx + ' %</td><td style="border:1px solid #333;padding:4px"></td></tr>';
         rows += '</tbody></table>';
         var sig = '<div style="display:flex;justify-content:space-between;margin-top:28px;font-size:9pt"><div>Signature du Responsable RH</div><div style="display:flex;gap:60px"><span>Visa Direction</span><span>Date</span></div></div>';
         var w = window.open("", "_blank", "width=1100,height=800");

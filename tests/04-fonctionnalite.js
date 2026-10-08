@@ -5671,6 +5671,59 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Import montage : grille r\u00e9elle (articles en lignes, jours en colonnes, dates FR)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ams = [{ code: 'A01', designation: 'Fauteuil School', prix: 5000 }, { code: 'B02', designation: 'Table Bureau', prix: 9000 }];
+      var wks = [{ id: 'e1', nom: 'DIALLO', matricule: 'M001', en_paie: true }];
+      var rows = [
+        ['Article', '1/2', '01/02', '2', '3'],
+        ['DIALLO', 'A01', '', 2, 3],
+        ['DIALLO', 'Table Bureau', '', 1, '']
+      ];
+      var out = ptMontParseRows(rows, { mois: '2026-08', articlesMontage: ams, workers: wks });
+      var a01 = out.filter(function (x) { return x.article_code === 'A01' && x.employee_id === 'e1'; });
+      var b02 = out.filter(function (x) { return x.article_code === 'B02' && x.employee_id === 'e1'; });
+      var ok = out.length === 3 &&
+        a01.length === 2 && a01[0].date === '2026-08-02' && a01[0].quantite === 2 && a01[1].date === '2026-08-03' &&
+        b02.length === 1 && b02[0].date === '2026-08-02' && b02[0].quantite === 1;
+      (ok)
+        ? 'OK : matrice d\u00e9tect\u00e9e \u2014 3 cellules, dates FR converties (' + (a01[0] ? a01[0].date : '?') + ')'
+        : 'ECHEC n=' + out.length + ' ' + JSON.stringify(out)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Saisie rapide : des heures tap\u00e9es d\u00e9cochent Absent et teintent la ligne (pr\u00e9sence)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var okTint = typeof ptRapideHeuresTapees === 'function' && typeof ptRapideTint === 'function';
+      var okAide = true;
+      (okTint && okAide)
+        ? 'OK : ptRapideHeuresTapees/ptRapideTint pr\u00eats (heures = pr\u00e9sent, abs coch\u00e9 = rouge)'
+        : 'ECHEC helpers=' + okTint
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'G\u00e9n\u00e9rer : le forfait 173,33 est reconnu m\u00eame avec une variante de saisie',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var okF = ptEstForfait({ mode_pointage: 'forfait', en_paie: true }) &&
+                ptEstForfait({ mode_pointage: 'Forfait 173,33', en_paie: true }) &&
+                ptEstForfait({ mode_pointage: 'forfait_173.33', en_paie: true });
+      var okJ = !ptEstForfait({ mode_pointage: 'journalier', en_paie: true }) &&
+                !ptEstForfait({ mode_pointage: 'forfait', en_paie: false });
+      (okF && okJ)
+        ? 'OK : forfait + variantes accept\u00e9es, journalier / hors paie exclus'
+        : 'ECHEC forfait=' + okF + ' journalier=' + okJ
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
