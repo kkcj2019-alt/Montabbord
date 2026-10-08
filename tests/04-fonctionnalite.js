@@ -5826,6 +5826,87 @@ r.push({
   });
 
   r.push({
+    nom: 'Import montage : structure r\u00e9elle (4 lignes d\'en-t\u00eate + colonne total bleue)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ams = [
+        { code: 'BIG C1M', designation: 'Big C1M', prix: 100 },
+        { code: 'EURO 2 CE3M', designation: 'Euro 2 CE3M', prix: 50 },
+        { code: 'SIVE CIEM', designation: 'Sive CIEM', prix: 20 }
+      ];
+      var wks = [{ id: 'e1', nom: 'BOLOU', prenoms: 'DORGLESS', matricule: 'BO', en_paie: true }];
+      var W = 1 + 7 * 4;
+      function L() { var r = new Array(W).fill(''); return r; }
+      var rD = L(), rP = new Array(W).fill('PALLETTES'),
+          rC = new Array(W).fill('CCU V MON CH'), rA = L(),
+          b1 = L(), t1 = L();
+      var j7 = ['mardi 1 septembre 2026', 'mercredi 2 septembre 2026', 'jeudi 3 septembre 2026',
+                'vendredi 4 septembre 2026', 'samedi 5 septembre 2026', 'dimanche 6 septembre 2026',
+                'lundi 7 septembre 2026'];
+      for (var j = 0; j < 7; j++) {
+        var st = 1 + j * 4;
+        rD[st] = j7[j];
+        rA[st] = 'BIG C1M'; rA[st + 1] = 'EURO 2 CE3M'; rA[st + 2] = 'SIVE CIEM';
+        rA[st + 3] = 'CCU V MON CH';
+      }
+      b1[0] = 'BOLOU DORGLESS';
+      /* jour 1 = colonnes 1..4 : 30 + 7 + 9 + total bleu 46 (IGNORÉ) */
+      b1[1] = 30; b1[2] = 7; b1[3] = 9; b1[4] = 46;
+      b1[5] = 5; /* jour 2 = colonnes 5..8 : BIG C1M = 5 */
+      t1[1] = 30; t1[2] = 7; t1[3] = 9; t1[4] = 46; t1[5] = 5;
+      var rows = [['POSTE'].concat(rD.slice(1)), ['SEMAINE 1'].concat(rP.slice(1)),
+                  [''].concat(rC.slice(1)), [''].concat(rA.slice(1)), b1, t1];
+      var out = ptMontParseRows(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var d = {}; out.forEach(function (x) {
+        var k = x.article_code + '@' + x.date;
+        d[k] = (d[k] || 0) + x.quantite;
+      });
+      /* La date est FUSIONNÉE : les colonnes 2,3 et 5 doivent être lues.
+         La colonne bleue « CCU V MON CH » (46) ne doit JAMAIS créer de ligne,
+         et la ligne de totaux ne doit pas créer de travailleur. */
+      var ok = out.length === 4 &&
+        d['BIG C1M@2026-09-01'] === 30 &&
+        d['EURO 2 CE3M@2026-09-01'] === 7 &&
+        d['SIVE CIEM@2026-09-01'] === 9 &&
+        d['BIG C1M@2026-09-02'] === 5;
+      (ok) ? 'OK : 4 lignes, dates fusionnees propagees, colonne total ignoree'
+           : 'ECHEC n=' + out.length + ' ' + JSON.stringify(d);
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import montage : un code article court ne capture plus tous les en-t\u00eates',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ams = [
+        { code: 'M', designation: 'Modele M', prix: 10 },
+        { code: 'MDI', designation: 'MDI', prix: 20 },
+        { code: 'EURO 2 CE3M', designation: 'Euro 2 CE3M', prix: 50 }
+      ];
+      var wks = [{ id: 'e1', nom: 'BOLOU', prenoms: 'DORGLESS', matricule: 'BO', en_paie: true }];
+      var W = 1 + 7 * 2;
+      function L() { var r = new Array(W).fill(''); return r; }
+      var rD = L(), rA = L(), b1 = L();
+      var j7 = ['mardi 1 septembre 2026', 'mercredi 2 septembre 2026', 'jeudi 3 septembre 2026',
+                'vendredi 4 septembre 2026', 'samedi 5 septembre 2026', 'dimanche 6 septembre 2026',
+                'lundi 7 septembre 2026'];
+      for (var j = 0; j < 7; j++) { var st = 1 + j * 2; rD[st] = j7[j]; rA[st] = 'EURO 2 CE3M'; rA[st+1] = 'MDI'; }
+      b1[0] = 'BOLOU DORGLESS'; b1[1] = 5; b1[2] = 7; /* jour 1 */
+      var rows = [[''].concat(rD.slice(1)), [''].concat(rA.slice(1)), b1];
+      var out = ptMontParseRows(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var codes = out.map(function (x) { return x.article_code; });
+      var jours = out.map(function (x) { return x.date; });
+      var ok = out.length === 2 &&
+        codes.indexOf('EURO 2 CE3M') >= 0 && codes.indexOf('MDI') >= 0 &&
+        jours.every(function (d) { return /^2026-09-\\d\\d$/.test(d); });
+      (ok) ? 'OK : articles exacts ' + JSON.stringify(codes)
+           : 'ECHEC ' + JSON.stringify(out);
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Assiduit\u00e9 : une absence non justifi\u00e9e fait baisser le taux, une justifi\u00e9e non',
     app: 'paye.html', store: storeRealiste,
     code: `
