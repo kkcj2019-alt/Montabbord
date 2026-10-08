@@ -30790,17 +30790,18 @@ function _rhAssiduiteAll(mois, onlyEmpId) {
   var pmap = {};
   for (var i = 0; i < pts.length; i++) { var rec = pts[i]; if (rec && rec.employee_id && rec.date) pmap[rec.employee_id + '|' + rec.date] = rec; }
   var y = parseInt(mois.substring(0, 4), 10), m = parseInt(mois.substring(5, 7), 10);
-  if (isNaN(y) || isNaN(m)) return { items: [], tot: { emp: 0, oures: 0, pres: 0, abs: 0, faute: 0 } };
+  if (isNaN(y) || isNaN(m)) return { items: [], tot: { emp: 0, oures: 0, pres: 0, abs: 0, faute: 0, payes: 0 } };
   var nd = new Date(y, m, 0).getDate();
   var today = getToday();
   var es = getEmployes();
   var items = [];
-  var tot = { emp: 0, oures: 0, pres: 0, abs: 0, faute: 0 };
+  var tot = { emp: 0, oures: 0, pres: 0, abs: 0, faute: 0, payes: 0 };
   for (var i2 = 0; i2 < es.length; i2++) {
     var e = es[i2];
     if (onlyEmpId && e.id !== onlyEmpId) continue;
     if (!_rhEmpInMonth(e, y, m)) continue;
-    var o = 0, p = 0, f = 0;
+    var o = 0, p = 0, f = 0, payes = 0;
+    var motifs = {};
     for (var d = 1; d <= nd; d++) {
       var dt = String(y) + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
       if (dt > today) break;
@@ -30809,14 +30810,35 @@ function _rhAssiduiteAll(mois, onlyEmpId) {
       o++;
       var r = pmap[e.id + '|' + dt];
       if (r) {
-        var hrs = _rhParseH(r.h_j_manual) + _rhParseH(r.h_n_manual);
-        if (r.present === true || hrs > 0) p++;
-        if (r.faute_societe === true) f++;
+        var hrs = _rhParseH(r.h_j_manual) + _rhParseH(r.n_j_manual !== undefined ? r.n_j_manual : 0) + _rhParseH(r.h_n_manual);
+        if (r.present === true || hrs > 0 || r.faute_societe === true) {
+          p++;
+          if (r.faute_societe === true) f++;
+          if (r.absent_paye === true) payes++;
+        } else {
+          if (r.absent_paye === true) payes++;
+          var mo = r.motif || 'Sans motif';
+          motifs[mo] = (motifs[mo] || 0) + 1;
+        }
+      } else {
+        motifs['Sans motif'] = (motifs['Sans motif'] || 0) + 1;
       }
     }
     if (o === 0) continue;
-    items.push({ e: e, oures: o, pres: p, abs: o - p, faute: f });
-    tot.emp++; tot.oures += o; tot.pres += p; tot.abs += (o - p); tot.faute += f;
+    var tx = Math.round(100 * p / o);
+    var obs = (function (it) {
+      var parts = [];
+      if (it.taux >= 97) parts.push('Assiduité exemplaire');
+      else if (it.taux >= 90) parts.push('Assiduité régulière');
+      else if (it.taux >= 75) parts.push('Absences à surveiller (' + it.abs + ' j)');
+      else parts.push('Risque d\'absence élevé (' + it.abs + ' j)');
+      if (it.faute > 0) parts.push('Faute société ' + it.faute + 'x');
+      if (it.payes > 0) parts.push('Absent payé ' + it.payes + 'x');
+      if (it.taux < 75) parts.push('Entretien RH recommandé');
+      return parts.join(' · ');
+    })({ taux: tx, abs: o - p, faute: f, payes: payes });
+    items.push({ e: e, oures: o, pres: p, abs: o - p, faute: f, payes: payes, taux: tx, motifs: motifs, obs: obs });
+    tot.emp++; tot.oures += o; tot.pres += p; tot.abs += (o - p); tot.faute += f; tot.payes += payes;
   }
   return { items: items, tot: tot };
 }
@@ -31680,37 +31702,54 @@ function renderAssiduitePage() {
   html += '<div style="background:var(--surface2,var(--surface));border:1px solid var(--border);border-radius:12px;padding:12px 14px"><div style="font-size:22px;font-weight:800;color:var(--warning)">' + res.tot.faute + '</div><div style="font-size:11px;color:var(--gray-500);font-weight:600">Faute soci\u00e9t\u00e9</div></div>';
   html += '<div style="background:var(--surface2,var(--surface));border:1px solid var(--border);border-radius:12px;padding:12px 14px"><div style="font-size:22px;font-weight:800;color:' + (taux >= 90 ? 'var(--success)' : (taux >= 75 ? 'var(--warning)' : 'var(--danger)')) + '">' + taux + ' %</div><div style="font-size:11px;color:var(--gray-500);font-weight:600">Taux de pr\u00e9sence</div></div>';
   html += '</div>';
-  html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>Employ\u00e9</th><th>Service</th><th>Jours ouvr\u00e9s</th><th>Pr\u00e9sences</th><th>Absences</th><th>Faute soci\u00e9t\u00e9</th><th>Taux</th><th style="width:140px">Niveau</th></tr></thead><tbody>';
-  if (items.length === 0) html += '<tr><td colspan="8" class="text-center text-muted">Aucun pointage pour cette p\u00e9riode</td></tr>';
+  html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>Employ\u00e9</th><th>Service</th><th>Jours ouvr\u00e9s</th><th>Pr\u00e9sences</th><th>Absences</th><th>Motifs</th><th>Faute soci\u00e9t\u00e9</th><th>Absents pay\u00e9s</th><th>Taux</th><th style="width:140px">Niveau</th><th>Observation</th></tr></thead><tbody>';
+  if (items.length === 0) html += '<tr><td colspan="11" class="text-center text-muted">Aucun pointage pour cette p\u00e9riode</td></tr>';
   items.forEach(function(it) {
-    var tX = it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0;
+    var tX = it.taux || (it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0);
     var color = tX >= 90 ? 'var(--success)' : (tX >= 75 ? 'var(--warning)' : 'var(--danger)');
     var lvl = tX >= 90 ? 'Bon (>= 90 %)' : (tX >= 75 ? 'Attention (75\u201389 %)' : 'Risque (< 75 %)');
-    var barC = tX >= 90 ? '#16a34a' : (tX >= 75 ? '#d97706' : '#dc2626');
-    html += '<tr><td class="fw-600">' + escH(rhEmpLabel(it.e)) + '</td><td>' + deptFoncCellI(it.e) + '</td><td>' + it.oures + '</td><td>' + it.pres + '</td><td style="color:' + (it.abs > 0 ? 'var(--danger)' : '') + ';font-weight:700">' + it.abs + '</td><td>' + (it.faute > 0 ? '<span class="badge badge-warning">' + it.faute + '</span>' : '-') + '</td><td><span style="font-weight:800;color:' + color + '">' + tX + ' %</span></td><td><div style="background:#e2e8f0;border-radius:6px;height:8px;width:100%;max-width:120px"><div style="background:' + barC + ';height:8px;border-radius:6px;width:' + Math.min(100, tX) + '%"></div></div><span style="font-size:10px;color:' + color + ';font-weight:600">' + lvl + '</span></td></tr>';
+    var barC = tX >= 90 ? '#16a34a' : (tX >= 75 ? '#d97706' : '#dc2626)';
+    var mkeys = it.motifs ? Object.keys(it.motifs) : [];
+    var mTxt = mkeys.length ? mkeys.map(function (k) { return k + ' : ' + it.motifs[k]; }).join(', ') : (it.abs > 0 ? 'Sans motif' : '—');
+    html += '<tr><td class="fw-600">' + escH(rhEmpLabel(it.e)) + '</td><td>' + deptFoncCellI(it.e) + '</td><td>' + it.oures + '</td><td>' + it.pres + '</td><td style="color:' + (it.abs > 0 ? 'var(--danger)' : '') + ';font-weight:700">' + it.abs + '</td><td style="font-size:11px">' + escH(mTxt) + '</td><td>' + (it.faute > 0 ? '<span class="badge badge-warning">' + it.faute + '</span>' : '-') + '</td><td>' + (it.payes > 0 ? '<span style="color:var(--gray-700)">' + it.payes + '</span>' : '-') + '</td><td><span style="font-weight:800;color:' + color + '">' + tX + ' %</span></td><td><div style="background:#e2e8f0;border-radius:6px;height:8px;width:100%;max-width:120px"><div style="background:' + barC + ';height:8px;border-radius:6px;width:' + Math.min(100, tX) + '%"></div></div><span style="font-size:10px;color:' + color + ';font-weight:600">' + lvl + '</span></td><td style="font-size:11px;color:var(--gray-600);max-width:220px">' + escH(it.obs || '') + '</td></tr>';
   });
   html += '</tbody></table></div></div>';
-  html += '<div style="font-size:11px;color:var(--gray-500);margin-top:6px">Jours ouvr\u00e9s = lundi \u00e0 samedi (dimanche exclu), compt\u00e9s jusqu\u2019\u00e0 aujourd\u2019hui. Une pr\u00e9sence est valid\u00e9e si le pointage indique des heures ou la pr\u00e9sence coch\u00e9e.</div>';
+  html += '<div style="font-size:11px;color:var(--gray-500);margin-top:6px">Jours ouvr\u00e9s = lundi \u00e0 samedi (dimanche exclu), compt\u00e9s jusqu\u2019\u00e0 aujourd\u2019hui. Une pr\u00e9sence est valid\u00e9e si le pointage indique des heures ou la pr\u00e9sence coch\u00e9e. Absences list\u00e9es avec motifs (Maladie:M, Cong\u00e9:C, Permission:P, Formation:F, D\u00e9placement:D, Arr\u00eat:R, Accident:A, Absence injustifi\u00e9e:X, Autre:?).</div>';
   html += '</div>';
   el.innerHTML = html;
 }
 function printAssiduitePage() {
   var mois = window._asMois;
   var res = _rhAssiduiteAll(mois);
-  var rows = res.items.map(function(it) { var tX = it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0; return [rhEmpLabel(it.e), deptFoncCellI(it.e), it.oures, it.pres, it.abs, it.faute, tX + ' %']; });
-  printRhTable('Assiduit\u00e9 et absences \u2014 ' + fmtMois(mois), 'G\u00e9n\u00e9r\u00e9 le ' + new Date().toLocaleDateString('fr-FR'), ['Employ\u00e9', 'Service', 'Jours ouvr\u00e9s', 'Pr\u00e9sences', 'Absences', 'Faute soci\u00e9t\u00e9', 'Taux'], rows);
+  var rows = res.items.map(function(it) {
+    var tX = it.taux || (it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0);
+    var mkeys = it.motifs ? Object.keys(it.motifs) : [];
+    var mTxt = mkeys.length ? mkeys.map(function (k) { return k + ' : ' + it.motifs[k]; }).join(', ') : (it.abs > 0 ? 'Sans motif' : '—');
+    return [rhEmpLabel(it.e), deptFoncCellI(it.e), it.oures, it.pres, it.abs, mTxt, it.faute || 0, it.payes || 0, tX + ' %', it.obs || ''];
+  });
+  printRhTable('Assiduit\u00e9 et absences \u2014 ' + fmtMois(mois), 'G\u00e9n\u00e9r\u00e9 le ' + new Date().toLocaleDateString('fr-FR'), ['Employ\u00e9', 'Service', 'Jours ouvr\u00e9s', 'Pr\u00e9sences', 'Absences', 'Motifs', 'Faute soci\u00e9t\u00e9', 'Absents pay\u00e9s', 'Taux', 'Observation'], rows);
 }
 function exportAssiduiteExcel() {
   var mois = window._asMois;
   var res = _rhAssiduiteAll(mois);
-  var rows = res.items.map(function(it) { var tX = it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0; return [rhEmpLabel(it.e), deptFoncCellI(it.e), it.oures, it.pres, it.abs, it.faute, tX + ' %']; });
-  exportRhTableExcel('Assiduite', 'assiduite_' + mois + '.xlsx', 'Assiduit\u00e9 et absences \u2014 ' + fmtMois(mois), ['Employ\u00e9', 'Service', 'Jours ouvr\u00e9s', 'Pr\u00e9sences', 'Absences', 'Faute soci\u00e9t\u00e9', 'Taux'], rows);
+  var rows = res.items.map(function(it) {
+    var tX = it.taux || (it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0);
+    var mkeys = it.motifs ? Object.keys(it.motifs) : [];
+    var mTxt = mkeys.length ? mkeys.map(function (k) { return k + ' : ' + it.motifs[k]; }).join(', ') : (it.abs > 0 ? 'Sans motif' : '—');
+    return [rhEmpLabel(it.e), deptFoncCellI(it.e), it.oures, it.pres, it.abs, mTxt, it.faute || 0, it.payes || 0, tX + ' %', it.obs || ''];
+  });
+  exportRhTableExcel('Assiduite', 'assiduite_' + mois + '.xlsx', 'Assiduit\u00e9 et absences \u2014 ' + fmtMois(mois), ['Employ\u00e9', 'Service', 'Jours ouvr\u00e9s', 'Pr\u00e9sences', 'Absences', 'Motifs', 'Faute soci\u00e9t\u00e9', 'Absents pay\u00e9s', 'Taux', 'Observation'], rows);
 }
 function exportAssiduiteCSV() {
   var mois = window._asMois;
   var res = _rhAssiduiteAll(mois);
-  var rows = res.items.map(function(it) { var tX = it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0; return [rhEmpLabel(it.e), deptFoncCellI(it.e), it.oures, it.pres, it.abs, it.faute, tX + ' %']; });
-  exportRhTableCSV('assiduite_' + mois + '.csv', ['Employ\u00e9', 'Service', 'Jours ouvr\u00e9s', 'Pr\u00e9sences', 'Absences', 'Faute soci\u00e9t\u00e9', 'Taux'], rows);
+  var rows = res.items.map(function(it) {
+    var tX = it.taux || (it.oures > 0 ? Math.round(100 * it.pres / it.oures) : 0);
+    var mkeys = it.motifs ? Object.keys(it.motifs) : [];
+    var mTxt = mkeys.length ? mkeys.map(function (k) { return k + ' : ' + it.motifs[k]; }).join(', ') : (it.abs > 0 ? 'Sans motif' : '—');
+    return [rhEmpLabel(it.e), deptFoncCellI(it.e), it.oures, it.pres, it.abs, mTxt, it.faute || 0, it.payes || 0, tX + ' %', it.obs || ''];
+  });
+  exportRhTableCSV('assiduite_' + mois + '.csv', ['Employ\u00e9', 'Service', 'Jours ouvr\u00e9s', 'Pr\u00e9sences', 'Absences', 'Motifs', 'Faute soci\u00e9t\u00e9', 'Absents pay\u00e9s', 'Taux', 'Observation'], rows);
 }
 function renderCodesCaisseIn(el) {
   var codes = getCodesCaisse();
