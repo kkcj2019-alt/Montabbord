@@ -5766,15 +5766,17 @@ r.push({
   });
 
   r.push({
-    nom: 'Journalier : le taux horaire d\u00e9duit du forfait \u00ab base bois \u00bb pilote la paie',
+    nom: 'Journalier : le taux horaire d\u00e9duit du forfait MENSUEL pilote la paie',
     app: 'paye.html', store: storeRealiste,
     code: `
       var e1 = ptTauxJournalier({ taux_journalier: 5000 }, '2026-10');
       var e2 = ptTauxHoraire({ taux_journalier: 5000 }, '2026-10');
-      var e3 = ptTauxJournalier({ forfait_bois: 6000 }, '2026-10');
-      var e4 = ptTauxHoraire({ forfait_bois: 6000 }, '2026-10');
+      /* Forfait 240 000 / 22 jours ouvr\u00e9s = 10 909 F/jour, puis /8 */
+      var e3 = ptTauxJournalier({ forfait_mois: 240000 }, '2026-10');
+      var e4 = ptTauxHoraire({ forfait_mois: 240000 }, '2026-10');
       var e5 = ptTauxJournalier({ salaire_base: 173000 }, '2026-10');
-      var ok = e1 === 5000 && e2 === 625 && e3 === 6000 && e4 === 750 && e5 === 173000;
+      var e6 = ptTauxJournalier({ forfait_mois: 240000 }, '2026-02'); /* 20 j ouvr\u00e9s */
+      var ok = e1 === 5000 && e2 === 625 && e3 === Math.round(240000 / 22) && e4 === Math.round(Math.round(240000 / 22) / 8 * 100) / 100 && e5 === 173000 && e6 === Math.round(240000 / 20);
       /* Les heures saisies \u00e0 la main restent des heures pour un travailleur
          au rendement (sinon elles disparaissent du tableau). */
       var rec = { present: true, h_j_manual: '8', h_n_manual: '' };
@@ -5782,9 +5784,43 @@ r.push({
       var rec2 = { present: true, h_j_manual: '6.5' };
       var cPlage = ptCalcDay(rec2, false);
       var okH = cRend.j === 8 && cRend.r === 0 && cPlage.j === 6.5;
-      (ok && okH)
-        ? 'OK : taux 5000F/j -> 625F/h ; forfait bois 6000 -> 750F/h ; heures manuelles visibles m\u00eame au rendement'
-        : 'ECHEC tJ=' + e1 + ' tH=' + e2 + ' fb=' + e3 + ' fbH=' + e4 + ' sal=' + e5 + ' rendJ=' + cRend.j + ' rendR=' + cRend.r
+      /* Absence JUSTIFI\u00e9e : ni pr\u00e9sence ni absence (exclue du taux) */
+      var okJ = ptAbsEstJustifiee('Maladie') && ptAbsEstJustifiee('Accident de travail') && !ptAbsEstJustifiee('Absence injustifi\u00e9e') && !ptAbsEstJustifiee('');
+      (ok && okH && okJ)
+        ? 'OK : 5000F/j -> 625F/h ; forfait 240000/22j -> ' + e3 + 'F/j -> ' + e4 + 'F/h ; f\u00e9vr 20j -> ' + e6 + 'F/j ; heures manuelles visibles ; justifi\u00e9es exclues'
+        : 'ECHEC tJ=' + e1 + ' tH=' + e2 + ' fm=' + e3 + ' fmH=' + e4 + ' sal=' + e5 + ' fev=' + e6 + ' rendJ=' + cRend.j + ' just=' + okJ
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import montage : le vrai registre (dates fusionn\u00e9es + codes articles)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ams = [
+        { code: 'BIG C1M', designation: 'Palette Gaine 1', prix: 5000 },
+        { code: 'EURO 2 CE3M', designation: 'Euro CE3M', prix: 7000 },
+        { code: 'BAN AVEC LIEN', designation: 'Banc', prix: 3000 }
+      ];
+      var wks = [{ id: 'e1', nom: 'BOLOU', prenoms: 'DORGLESS', matricule: 'BO', en_paie: true }];
+      /* Ent\u00eates sur 3 niveaux comme le fichier export\u00e9 */
+      var rows = [
+        ['POSTE', 'mardi 1 septembre 2026', '', '', 'mercredi 2 septembre 2026', '', ''],
+        ['', 'PALLETTES', '', '', 'PALLETTES', '', ''],
+        ['', 'BIG C1M', 'EURO 2 CE3M', 'BAN AVEC LIEN', 'BIG C1M', 'EURO 2 CE3M', 'BAN AVEC LIEN'],
+        ['CLOURED', '', '', '', '', '', ''],
+        ['BOLOU DORGLESS', 30, '', '', '', 5, ''],
+        ['CLOURED', '', '', '', '', '', '']
+      ];
+      var out = ptMontParseRows(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var a = out.filter(function (x) { return x.article_code === 'BIG C1M'; });
+      var b = out.filter(function (x) { return x.article_code === 'EURO 2 CE3M'; });
+      var ok = out.length === 2 &&
+        a.length === 1 && a[0].date === '2026-09-01' && a[0].quantite === 30 && a[0].employee_id === 'e1' &&
+        b.length === 1 && b[0].date === '2026-09-02' && b[0].quantite === 5;
+      (ok)
+        ? 'OK : 30u BIG C1M le 01/09 + 5u EURO 2 CE3M le 02/09 (dates FR + fusion propag\u00e9e)'
+        : 'ECHEC n=' + out.length + ' ' + JSON.stringify(out)
     `,
     attenduPrefixe: 'OK'
   });
