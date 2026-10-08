@@ -5604,6 +5604,32 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Prestataire externe : prorata sur les jours ouvr\u00e9s (22j/22 = forfait int\u00e9gral)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var okJ = ptJoursOuvres('2026-09') === 22 && ptJoursOuvres('2026-10') === 22 && ptJoursOuvres('2026-02') === 20 && ptJoursOuvres('') === 30;
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'e9', nom: 'KOFFI', prenoms: 'CONSTANT', matricule: 'EXT-009', fonction: 'RH', type_contrat: 'Externe', categorie: 'B', status: 'actif', date_entree: '2026-01-05', montant_forfaitaire: 240000 });
+      DB.setMain('mdb_employes', emps);
+      setExternJours('e9', '2026-09', 22);
+      document.getElementById('paie-select-emp').value = 'e9';
+      document.getElementById('paie-mois').value = '2026-09';
+      generateBulletin();
+      var h = document.getElementById('paie-output').innerHTML;
+      var f240 = fmt(240000), f176 = fmt(176000), f120 = fmt(120000);
+      var plein = h.indexOf('22j/22') !== -1 && h.indexOf('j/30') === -1 && h.indexOf(f240) !== -1 && h.indexOf(f176) === -1;
+      setExternJours('e9', '2026-09', 11);
+      generateBulletin();
+      var h2 = document.getElementById('paie-output').innerHTML;
+      var demi = h2.indexOf('11j/22') !== -1 && h2.indexOf(f120) !== -1;
+      (okJ && plein && demi)
+        ? 'OK : jours ouvr\u00e9s 22 (sept) / 20 (f\u00e9v) ; 22j/22 = 240000, 11j/22 = 120000'
+        : 'ECHEC ouvr=' + okJ + ' plein=' + plein + ' demi=' + demi + ' ouvr202609=' + ptJoursOuvres('2026-09')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

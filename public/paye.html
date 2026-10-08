@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-202";
+      window.__APP_VERSION = "2026-10-08-203";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -8139,6 +8139,20 @@ function payeObj(key) {
         m[empId + "|" + mois] = parseInt(val) || 0;
         setPayeSection("externJours", m);
       }
+      /* Jours ouvrés (lun-ven) d'un mois "YYYY-MM".
+         Base de prorata des prestataires externes : un salarié présent
+         tous les jours ouvrés touche son forfait intégral (22j/22 = 100%). */
+      function ptJoursOuvres(mois) {
+        var parts = String(mois || "").split("-");
+        var y = parseInt(parts[0], 10), mi = parseInt(parts[1], 10) - 1;
+        if (isNaN(y) || isNaN(mi) || mi < 0 || mi > 11) return 30;
+        var last = new Date(y, mi + 1, 0).getDate(), n = 0;
+        for (var d = 1; d <= last; d++) {
+          var dw = new Date(y, mi, d).getDay();
+          if (dw !== 0 && dw !== 6) n++;
+        }
+        return n || 30;
+      }
       /* Congé payé : modèle par périodes avec paiements multiples */
       function getCongeRecords() {
         return getPayeSection("congeRecords", []);
@@ -14578,14 +14592,15 @@ function parseHeure(val) {
               parseFloat(emp.salaire_base) ||
               0;
             var jExt = getExternJours(empId, mois);
+            var jOuv = ptJoursOuvres(mois);
             var mfExtPaye =
-              jExt > 0 && jExt < 30 ? Math.round((mfExt * jExt) / 30) : mfExt;
+              jExt > 0 && jExt < jOuv ? Math.round((mfExt * jExt) / jOuv) : mfExt;
             html +=
               '<div style="padding:1.2rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-bottom:1rem">';
             html +=
               '<div style="font-weight:800;color:#15803d;font-size:.9rem">\u2713 Prestataire externe : paiement au forfait avec prorata</div>';
             html +=
-              '<div style="font-size:.78rem;color:#166534;margin-top:4px">Indiquez le nombre de jours travaill\u00e9s dans le mois : le montant est calcul\u00e9 au prorata (forfait \u00f7 30 jours \u00d7 jours travaill\u00e9s).</div>';
+              '<div style="font-size:.78rem;color:#166534;margin-top:4px">Indiquez le nombre de jours travaill\u00e9s dans le mois : le montant est calcul\u00e9 au prorata sur les jours ouvr\u00e9s (forfait \u00f7 ' + jOuv + ' jours \u00d7 jours travaill\u00e9s). Pr\u00e9sence sur tous les jours ouvr\u00e9s = forfait int\u00e9gral.</div>';
             html +=
               '<div style="display:flex;gap:1rem;margin-top:.8rem;flex-wrap:wrap;align-items:flex-end">';
             html +=
@@ -17761,12 +17776,14 @@ html +=
            On le renseigne à partir des jours réellement pointés (jamais en baissant). */
         try {
           var pers = getPersonnel();
+          var jOuvGen = ptJoursOuvres(mois);
           eids.forEach(function(eid){
             var pe = pers.find(function(x){ return x.id === eid; });
             if (!pe || empCategorie(pe) !== "externe") return;
             var nbJ = pts.filter(function(r){
               return r && r.employee_id === eid && r.date && r.date.indexOf(mois) === 0 && r.present === true;
             }).length;
+            if (nbJ > jOuvGen) nbJ = jOuvGen;
             if (nbJ > getExternJours(eid, mois)) setExternJours(eid, mois, nbJ);
           });
         } catch(eExt){}
@@ -23358,24 +23375,28 @@ if (normalHours > 173.33) {
             /* Saisie bulletin : forfait mensuel modifiable (0 = valeur du contrat) */
             if ((jovr.forfait || 0) > 0) mfJ = Math.round(jovr.forfait);
             joursExt = getExternJours(emp.id, mois);
+            var jOuvB = ptJoursOuvres(mois);
             var mfPaye = mfJ;
             /* Sans jours saisis (non pointé) : aucun versement */
             if (joursExt <= 0) mfPaye = 0;
             else {
-              if (joursExt < 30)
-                mfPaye = Math.round((mfJ * joursExt) / 30);
+              /* Prorata sur les JOURS OUVRÉS du mois : présent tous les jours
+                 ouvrés = forfait intégral (22j/22 = 100%). */
+              if (joursExt < jOuvB)
+                mfPaye = Math.round((mfJ * joursExt) / jOuvB);
               stats.hasPointage = true;
             }
             stats.joursExtern = joursExt;
+            stats.joursOuvres = jOuvB;
             items.push({
               n: "11",
               label:
                 "Montant forfaitaire mensuel" +
-                (joursExt > 0 && joursExt < 30
-                  ? " (prorata " + joursExt + "j/30)"
+                (joursExt > 0 && joursExt < jOuvB
+                  ? " (prorata " + joursExt + "j/" + jOuvB + ")"
                   : ""),
               base: mfJ,
-              taux: joursExt > 0 ? joursExt + "j/30" : "",
+              taux: joursExt > 0 ? joursExt + "j/" + jOuvB : "",
               gain: mfPaye,
               ret: 0,
             });
@@ -24674,7 +24695,8 @@ if (normalHours > 173.33) {
           var mfJ = parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0;
           var mfEff = (jovrM.forfait || 0) > 0 ? Math.round(jovrM.forfait) : mfJ;
           var jExt = getExternJours(emp.id, mois);
-          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: (jExt > 0 ? jExt : 30) + "j/30", gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
+          var jOuvR = ptJoursOuvres(mois);
+          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: (jExt > 0 ? jExt : jOuvR) + "j/" + jOuvR, gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
           rows.push(zero("Heures Suppl."));
         }
         if (cat === "titulaire") {
@@ -30631,17 +30653,18 @@ function printCongeIndividuel(empId) {
             parseFloat(emp.salaire_base) ||
             0;
           var jExtP = getExternJours(emp.id, mois);
+          var jOuvP = ptJoursOuvres(mois);
           var mfProrataP =
-            jExtP > 0 && jExtP < 30 ? Math.round((mfP * jExtP) / 30) : mfP;
+            jExtP > 0 && jExtP < jOuvP ? Math.round((mfP * jExtP) / jOuvP) : mfP;
           h +=
             "<tr><td><strong>Forfait mensuel:</strong> " +
             fmt(mfP) +
             " F" +
-            (jExtP > 0 && jExtP < 30
-              ? " (prorata " + jExtP + "j/30 = " + fmt(mfProrataP) + " F)"
+            (jExtP > 0 && jExtP < jOuvP
+              ? " (prorata " + jExtP + "j/" + jOuvP + " = " + fmt(mfProrataP) + " F)"
               : "") +
             "</td><td><strong>Jours facturés:</strong> " +
-            (jExtP > 0 ? jExtP : 30) +
+            (jExtP > 0 ? jExtP : jOuvP) +
             "j</td></tr></table>";
         } else {
           h +=
