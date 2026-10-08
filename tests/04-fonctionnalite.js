@@ -5533,6 +5533,27 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Bulletin : anciennet\u00e9 affich\u00e9e en en-t\u00eate',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      emps.forEach(function (p) { if (p.id === 'e1') p.date_entree = '2020-03-15'; });
+      DB.setMain('mdb_employes', emps);
+      var sel = document.getElementById('paie-select-emp');
+      if (sel) sel.value = 'e1';
+      var mm = document.getElementById('paie-mois');
+      if (mm) mm.value = '2026-10';
+      generateBulletin();
+      var h = document.getElementById('paie-output').innerHTML;
+      var att = calcAnciennete('2020-03-15');
+      (h.indexOf('Anciennet') !== -1 && att !== '-' && h.indexOf(att) !== -1)
+        ? 'OK : en-t\u00eate avec anciennet\u00e9 (' + att + ')'
+        : 'ECHEC anc=' + (h.indexOf('Anciennet') !== -1) + ' val=' + att
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
