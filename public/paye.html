@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-210";
+      window.__APP_VERSION = "2026-10-08-211";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5759,6 +5759,23 @@ function _payeCircuitOuvert() {
     return !!(window._payeCircuitJusqua && Date.now() < window._payeCircuitJusqua);
   } catch (eCO) { return false; }
 }
+/* Ferme le temps réel + le sondage quand la base souffre (chaque
+   abonnement Realtime = 1 SELECT / seconde côté Postgres). */
+function _payeRealtimeCouper() {
+  try {
+    if (payeSnapshotUnsub) { payeSnapshotUnsub(); payeSnapshotUnsub = null; }
+    _payeStopPoll();
+    window._payeRealtimeCoupe = true;
+  } catch (eRC) {}
+}
+function _payeRealtimeReprendre() {
+  try {
+    if (!window._payeRealtimeCoupe) return;
+    window._payeRealtimeCoupe = false;
+    var uid = getEnterpriseUid();
+    if (uid && firebaseDbP) startRealtimeSync();
+  } catch (eRR) {}
+}
 /* Nature d'une ligne d'acompte/prêt pour l'affichage (état + journal) :
    'solde' si la pièce est un solde de salaire, sinon 'acompte' ou 'pret'.
    La déduction paie ne change pas (un solde déjà versé doit toujours réduire
@@ -6496,7 +6513,10 @@ function payeObj(key) {
         /* Coupe-circuit : après 3 chaînes d'échecs serveur d'affilée, pause
            30 min au lieu de nourrir l'embouteillage côté base (chaque push =
            un gros upsert qui attend son verrou). Rien n'est perdu : local
-           intact, reprise auto au réveil ou à la prochaine saisie. */
+           intact, reprise auto au réveil ou à la prochaine saisie.
+           On coupe aussi le TEMPS RÉEL : chaque abonnement ouvert génère
+           1 requête Postgres par seconde dans Supabase — c'est ce qui
+           sature la base quand plusieurs postes/onglets sont ouverts. */
         try {
           if (_payeCircuitOuvert()) {
             payePushQueued = true;
@@ -6504,12 +6524,13 @@ function payeObj(key) {
               window._payeCircuitTimer = setTimeout(function () {
                 window._payeCircuitTimer = null;
                 window._payeCircuitJusqua = 0;
-                pushPayeCloud();
+                _payeRealtimeReprendre();
               }, Math.max(5000, window._payeCircuitJusqua - Date.now()) + 2000);
             }
             return;
           }
           window._payeCircuitJusqua = 0;
+          _payeRealtimeReprendre();
         } catch (eCB) {}
         payePushBusy = true;
         var _lance = function () {
@@ -6684,7 +6705,8 @@ function payeObj(key) {
                   window._payeChainFails = (window._payeChainFails || 0) + 1;
                   if (window._payeChainFails >= 3) {
                     window._payeCircuitJusqua = Date.now() + 30 * 60 * 1000;
-                    try { toast("Synchro en pause 30 min (serveur saturé) — données gardées en local, reprise auto", "error"); } catch (eTC) {}
+                    _payeRealtimeCouper();
+                    try { toast("Synchro en pause 30 min (serveur saturé) — temps réel coupé, données gardées en local, reprise auto", "error"); } catch (eTC) {}
                     if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
                   }
                 } catch (eCF) {}
