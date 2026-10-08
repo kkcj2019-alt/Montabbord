@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-211";
+      window.__APP_VERSION = "2026-10-08-212";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6492,7 +6492,7 @@ function payeObj(key) {
         try { if (pushPayeCloud._t) clearTimeout(pushPayeCloud._t); } catch (eD) {}
         pushPayeCloud._t = setTimeout(function () {
           pushPayeCloud._t = null;
-          _pushPayeCloudRun();
+          _payePushCloudRun();
         }, 2500);
       }
       function _payeStrHash(s) {
@@ -6503,7 +6503,29 @@ function payeObj(key) {
           return h + ":" + s.length;
         } catch (eH) { return ""; }
       }
-      function _pushPayeCloudRun() {
+      /* Lecture du dossier cloud avec CACHE courte : la convergence
+   (lire avant d'écrire) ne doit pas télécharger le dossier entier à chaque
+   sauvegarde. Sans ce cache, chaque push = 1 téléchargement complet du
+   dossier entreprise : c'est ce qui saturait la bande passante (20 To). */
+      function _payeLireCloud(uid) {
+        try {
+          if (window._payeCloudCache && Date.now() - window._payeCloudCacheAt < 30000) {
+            var cached = window._payeCloudCache;
+            return Promise.resolve({
+              exists: true,
+              data: function () { return cached; },
+            });
+          }
+        } catch (eLC) {}
+        return firebaseDbP.collection("enterprises").doc(uid).get().then(function (doc) {
+          try {
+            window._payeCloudCache = (doc && doc.exists) ? doc.data() : {};
+            window._payeCloudCacheAt = Date.now();
+          } catch (eCC) {}
+          return doc;
+        });
+      }
+      function _payePushCloudRun() {
         var uid = getEnterpriseUid();
         if (!uid || !firebaseDbP) return;
         if (payeBootstrapping || payePushBusy) {
@@ -6536,10 +6558,7 @@ function payeObj(key) {
         var _lance = function () {
         /* Convergence : lire le cloud AVANT d'écrire et fusionner (union par id),
            pour qu'une copie locale périmée ne puisse plus écraser des données récentes. */
-        return firebaseDbP
-          .collection("enterprises")
-          .doc(uid)
-          .get()
+        return _payeLireCloud(uid)
           .then(function (doc) {
             var cloud = doc && doc.exists ? doc.data() : {};
             var payload = {};
@@ -6635,6 +6654,11 @@ function payeObj(key) {
           .then(function () {
             payePushBusy = false;
             console.log("[Paye] Sync cloud OK");
+            try {
+              /* Le cloud vient d'être écrit : son état est connu, inutile de
+                 le retélécharger au prochain push pendant 30 s. */
+              window._payeCloudCacheAt = Date.now();
+            } catch (eCC2) {}
             try {
               window._payePushEssais = 0;
               window._payeChainFails = 0;
@@ -6750,7 +6774,7 @@ function payeObj(key) {
               if (pushPayeCloud._t) {
                 clearTimeout(pushPayeCloud._t);
                 pushPayeCloud._t = null;
-                _pushPayeCloudRun();
+                _payePushCloudRun();
               }
             } catch (eB) {}
           });
@@ -6916,12 +6940,16 @@ function payeObj(key) {
         payePollTimer = setInterval(function () {
           if (document.hidden) return;
           if (!firebaseDbP) return;
+          window._payePollTick = (window._payePollTick || 0) + 1;
           try {
-            /* Base saturée / synchro en échec : 1 sondage sur 12 (~1/min)
-               au lieu de marteler toutes les 5 s. */
+            /* Base saturée / synchro en échec : 1 sondage sur 12 (~4 min)
+               au lieu de marteler. */
             if (_payeSynchroEnEchec()) {
-              window._payePollCompteur = (window._payePollCompteur || 0) + 1;
-              if (window._payePollCompteur % 12 !== 0) return;
+              if (window._payePollTick % 12 !== 0) return;
+            } else if (payeSnapshotUnsub) {
+              /* Temps réel actif : le sondage n'est qu'un filet de sécurité
+                 (1 sur 5) — c'est lui qui 下载 le dossier complet. */
+              if (window._payePollTick % 5 !== 0) return;
             }
           } catch (ePC) {}
           try {
@@ -6934,7 +6962,7 @@ function payeObj(key) {
               })
               .catch(function () {});
           } catch (e) {}
-        }, 5000);
+        }, 20000);
       }
 
       function startRealtimeSync() {
