@@ -5554,6 +5554,37 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Plafond 173.33h : surplus en +15%, forfait sans case = rien, avec case = pay\u00e9',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'e4', nom: 'Forfait', prenoms: 'F', matricule: 'MF', fonction: 'X', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', mode_pointage: 'forfait', salaire_base: 200000 });
+      emps.push({ id: 'e5', nom: 'ForfaitPlus', prenoms: 'F', matricule: 'MG', fonction: 'X', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', mode_pointage: 'forfait', droit_hs: true, salaire_base: 200000 });
+      DB.setMain('mdb_employes', emps);
+      var recs = [];
+      ['e1', 'e4', 'e5'].forEach(function (eid) {
+        for (var d = 1; d <= 31; d++) {
+          var dw = new Date(2026, 9, d).getDay();
+          if (dw >= 1 && dw <= 5) recs.push({ id: 'pl' + eid + '_' + d, employee_id: eid, date: '2026-10-' + (d < 10 ? '0' : '') + d, h_j_manual: '8' });
+        }
+      });
+      setPointageData(recs);
+      var P = function (id) { return getPersonnel().filter(function (p) { return p.id === id; })[0]; };
+      var s1 = getMonthStats(P('e1'), '2026-10');
+      var s4 = getMonthStats(P('e4'), '2026-10');
+      var s5 = getMonthStats(P('e5'), '2026-10');
+      var ok1 = s1.normalHours === 173.33 && s1.hs15.toFixed(2) === '2.67' && s1.hs50 === 0;
+      var hs4 = s4.hs15 + s4.hs50 + s4.hs75 + s4.hs100;
+      var ok4 = s4.normalHours === 173.33 && hs4 === 0;
+      var ok5 = s5.normalHours === 173.33 && s5.hs15.toFixed(2) === '2.67';
+      (ok1 && ok4 && ok5)
+        ? 'OK : 176h -> 173.33 normales + 2.67 en +15% ; forfait sans case : 173.33 et 0 sup ; avec case : 2.67 pay\u00e9es'
+        : 'ECHEC std(n=' + s1.normalHours + ' hs15=' + s1.hs15 + ') forfait(n=' + s4.normalHours + ' hs=' + hs4 + ') override(n=' + s5.normalHours + ' hs15=' + s5.hs15 + ')'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
