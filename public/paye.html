@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-212";
+      window.__APP_VERSION = "2026-10-08-213";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -3876,6 +3876,60 @@
                   <option value="horaire">Horaire</option>
                 </select>
               </div>
+              <div style="flex: 1; min-width: 130px">
+                <label style="font-weight: 700; font-size: 0.72rem"
+                  >Salaire de base (F)</label
+                >
+                <input
+                  type="number"
+                  id="bulk-salaire-base"
+                  min="0"
+                  step="1000"
+                  placeholder="— Inchangé —"
+                  style="
+                    width: 100%;
+                    padding: 4px;
+                    border: 1px solid #93c5fd;
+                    border-radius: 4px;
+                  "
+                />
+              </div>
+              <div style="flex: 1; min-width: 130px">
+                <label style="font-weight: 700; font-size: 0.72rem"
+                  >Taux journalier (F)</label
+                >
+                <input
+                  type="number"
+                  id="bulk-taux-journalier"
+                  min="0"
+                  step="100"
+                  placeholder="— Inchangé —"
+                  style="
+                    width: 100%;
+                    padding: 4px;
+                    border: 1px solid #93c5fd;
+                    border-radius: 4px;
+                  "
+                />
+              </div>
+              <div style="flex: 1; min-width: 130px">
+                <label style="font-weight: 700; font-size: 0.72rem"
+                  >Forfait base bois (F/j)</label
+                >
+                <input
+                  type="number"
+                  id="bulk-forfait-bois"
+                  min="0"
+                  step="100"
+                  placeholder="— Inchangé —"
+                  style="
+                    width: 100%;
+                    padding: 4px;
+                    border: 1px solid #93c5fd;
+                    border-radius: 4px;
+                  "
+                />
+              </div>
               <button
                 class="btn"
                 onclick="applyBulkPersonnel()"
@@ -5307,6 +5361,21 @@
             <div class="form-group">
               <label>Changement à partir de (mois)</label
               ><input type="month" name="salaire_effet_mois" />
+            </div>
+            <div class="form-group">
+              <label>Taux journalier (FCFA / jour)</label
+              ><input type="number" name="taux_journalier" min="0" step="1" placeholder="ex : 5000" />
+              <div style="font-size: 0.66rem; color: var(--dim); margin-top: 2px">
+                Journaliers : la paie = taux journalier × heures ÷ 8.
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Forfait journalier « base bois » (FCFA / jour)</label
+              ><input type="number" name="forfait_bois" min="0" step="1" placeholder="ex : 6000" oninput="ptForfaitBoisApercu(this)" />
+              <div id="forfait-bois-hint" style="font-size: 0.66rem; color: var(--dim); margin-top: 2px">
+                Forfait journalier « base bois » en FCFA : le taux journalier
+                et le taux horaire en découlent.
+              </div>
             </div>
             <div class="form-group" style="grid-column: span 3">
               <label>Historique des salaires</label>
@@ -6942,16 +7011,34 @@ function payeObj(key) {
           if (!firebaseDbP) return;
           window._payePollTick = (window._payePollTick || 0) + 1;
           try {
-            /* Base saturée / synchro en échec : 1 sondage sur 12 (~4 min)
-               au lieu de marteler. */
-            if (_payeSynchroEnEchec()) {
-              if (window._payePollTick % 12 !== 0) return;
-            } else if (payeSnapshotUnsub) {
-              /* Temps réel actif : le sondage n'est qu'un filet de sécurité
-                 (1 sur 5) — c'est lui qui 下载 le dossier complet. */
-              if (window._payePollTick % 5 !== 0) return;
-            }
+            if (_payeSynchroEnEchec()) return;
+            /* Le temps reel est-il vraiment connecte ? Si oui la sonde
+               nest qu un filet de securite (1 sur 3). Sinon cest elle
+               qui apporte les saisies des autres postes : on la garde
+               frequente, sinon il faut recharger a la main. */
+            if (window.__MDB_RT__ === true && window._payePollTick % 3 !== 0) return;
           } catch (ePC) {}
+          /* Sonde LEGERE : on ne lit que updated_at (quelques octets).
+             Le dossier complet nest telecharge que sil a change. */
+          try {
+            var sbL = window.SB_CLIENT;
+            if (sbL && sbL.from) {
+              sbL.from("enterprises").select("updated_at").eq("id", uid).limit(1).then(function (res) {
+                try {
+                  if (res && res.error) return;
+                  var row = res && res.data && res.data[0];
+                  if (!row) return;
+                  var ts = String(row.updated_at || "");
+                  if (!ts || (window._payeVuTs && window._payeVuTs === ts)) return;
+                  window._payeVuTs = ts;
+                  _payeLireCloud(uid).then(function (doc) {
+                    if (doc && doc.exists) _payeApplyRemote(doc.data() || {});
+                  }).catch(function () {});
+                } catch (eQ) {}
+              }).catch(function () {});
+              return;
+            }
+          } catch (eSBL) {}
           try {
             firebaseDbP
               .collection("enterprises")
@@ -6962,7 +7049,7 @@ function payeObj(key) {
               })
               .catch(function () {});
           } catch (e) {}
-        }, 20000);
+        }, 12000);
       }
 
       function startRealtimeSync() {
@@ -12629,7 +12716,17 @@ function addArticleMontageFromPt(e) {
         var newFonction = document.getElementById("bulk-fonction").value;
         var newCategorie = document.getElementById("bulk-categorie").value;
         var newPtType = document.getElementById("bulk-pointage-type").value;
-        if (!newFonction && !newCategorie && !newPtType)
+        /* Salaire / taux : laissés vides = inchangés */
+        var _sbEl = document.getElementById("bulk-salaire-base");
+        var _tjEl = document.getElementById("bulk-taux-journalier");
+        var _fbEl = document.getElementById("bulk-forfait-bois");
+        var newSalBase = _sbEl && String(_sbEl.value).trim() !== "" ? parseFloat(_sbEl.value) : null;
+        var newTauxJ = _tjEl && String(_tjEl.value).trim() !== "" ? parseFloat(_tjEl.value) : null;
+        var newForfaitB = _fbEl && String(_fbEl.value).trim() !== "" ? parseFloat(_fbEl.value) : null;
+        if (newSalBase !== null && isNaN(newSalBase)) newSalBase = null;
+        if (newTauxJ !== null && isNaN(newTauxJ)) newTauxJ = null;
+        if (newForfaitB !== null && isNaN(newForfaitB)) newForfaitB = null;
+        if (!newFonction && !newCategorie && !newPtType && newSalBase === null && newTauxJ === null && newForfaitB === null)
           return toast("Choisissez au moins une option", "error");
         var list = getPersonnel();
         var count = 0;
@@ -12681,10 +12778,28 @@ function addArticleMontageFromPt(e) {
               });
               emp.salaire_base = newSalBulk;
             }
+            /* Salaire de base / taux journalier / forfait base bois saisis
+               dans l'action groupée (0 = effacer la valeur). */
+            if (newSalBase !== null) {
+              emp.salaire_base = newSalBase;
+              if (!emp.salaire_history)
+                emp.salaire_history = [{ montant: newSalBase, dateEffet: curMoisBulk }];
+              else {
+                var hi2 = emp.salaire_history.findIndex(function (h) { return h.dateEffet === curMoisBulk; });
+                if (hi2 !== -1) emp.salaire_history[hi2] = { montant: newSalBase, dateEffet: curMoisBulk };
+                else emp.salaire_history.push({ montant: newSalBase, dateEffet: curMoisBulk });
+                emp.salaire_history.sort(function (a, b) { return (a.dateEffet || "").localeCompare(b.dateEffet || ""); });
+              }
+            }
+            if (newTauxJ !== null) emp.taux_journalier = newTauxJ;
+            if (newForfaitB !== null) emp.forfait_bois = newForfaitB;
             count++;
           }
         });
-        DB.setMain("mdb_personnel", list);
+        /* La fiche se lit via getPersonnel() = clé « mdb_employes » : c'est
+           là qu'il faut écrire (l'ancienne clé « mdb_personnel » n'était
+           lue par personne : l'action groupée ne changeait rien). */
+        setPersonnel(list);
         toast(
           count +
             " employé" +
@@ -13261,6 +13376,8 @@ function addArticleMontageFromPt(e) {
           date_entree: normalizeDate(g("date_entree")),
           date_sortie: normalizeDate(g("date_sortie")),
           salaire_base: parseNum(g("salaire_base")),
+          taux_journalier: parseNum(g("taux_journalier")),
+          forfait_bois: parseNum(g("forfait_bois")),
           cnps: g("cnps"),
           banque: g("banque"),
           numero_banque: g("numero_banque"),
@@ -13628,6 +13745,8 @@ function addArticleMontageFromPt(e) {
                 emp.date_entree || new Date().toISOString().substring(0, 10),
               date_sortie: emp.date_sortie || "",
               salaire_base: emp.salaire_base || 0,
+              taux_journalier: emp.taux_journalier || 0,
+              forfait_bois: emp.forfait_bois || 0,
               cnps: emp.cnps || "",
               banque: emp.banque || "",
               numero_banque: emp.numero_banque || "",
@@ -16408,23 +16527,29 @@ html +=
          repli sur h_j/h_n manuels (pointage groupé, saisie libre) si aucun créneau. */
       function ptCalcDay(rec, isR) {
         if (!rec || (rec.present === false && !rec.absent_paye)) return {j:0, n:0, r:0};
+        var hjm = parseHeure(rec.h_j_manual || "");
+        var hnm = parseHeure(rec.h_n_manual || "");
+        var hasJ = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin;
+        var hasN = rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin;
+        /* Des heures saisies à la main = heures de TRAVAIL, même pour un
+           travailleur au rendement. Le rendement ne concerne que les jours de
+           montage (créneaux ou production), pas les heures saisies. */
+        if (isR && !hasJ && !hasN && (hjm > 0 || hnm > 0)) isR = false;
         if (rec.absent_paye) {
-          var aj = parseHeure(rec.h_j_manual || ""), an = parseHeure(rec.h_n_manual || "");
+          var aj = hjm, an = hnm;
           if (isR) return {j:0, n:0, r:aj + an};
           return {j:aj, n:an, r:0};
         }
-        var hasJ = rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin;
-        var hasN = rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin;
         var c = ptCoreCalc({
           ja:rec.j_arrivee, jp1:rec.j_pause, jp2:rec.j_reprise, jf:rec.j_fin,
           na:rec.n_arrivee, np1:rec.n_pause, np2:rec.n_reprise, nf:rec.n_fin,
           libres:rec.h_libres, isR:isR
         });
         if (!isR) {
-          if (!hasJ) { c.j = parseHeure(rec.h_j_manual || ""); }
-          else if (c.j === 0) { var lj = parseHeure(rec.h_j_manual || ""); if (lj > 0) c.j = lj; }
-          if (!hasN) { c.n = parseHeure(rec.h_n_manual || ""); }
-          else if (c.n === 0) { var ln = parseHeure(rec.h_n_manual || ""); if (ln > 0) c.n = ln; }
+          if (!hasJ) { c.j = hjm; }
+          else if (c.j === 0) { if (hjm > 0) c.j = hjm; }
+          if (!hasN) { c.n = hnm; }
+          else if (c.n === 0) { if (hnm > 0) c.n = hnm; }
         }
         return c;
       }
@@ -16608,6 +16733,9 @@ html +=
               var hJ = cc.j,
                 hN = cc.n,
                 hR = cc.r;
+              /* Heures réelles saisies : on affiche les heures, jamais « R »
+                 (le rendement ne concerne que les jours de montage). */
+              if ((hJ > 0 || hN > 0) && hR === 0) isR = false;
               if (hJ === 0 && hN === 0 && hR === 0 && rec.present === true && !isR) hJ = 0;
               if (
                 hJ > 0 ||
@@ -17874,6 +18002,8 @@ html +=
               var isRf = (emp.rendement===true)||(rec.rendement===true);
               var ccf = ptCalcDay(rec, isRf);
               var hJ = ccf.j, hN = ccf.n, hR = ccf.r;
+              /* Heures saisies à la main = heures de travail (même au rendement). */
+              if ((hJ>0 || hN>0) && hR===0) isRf = false;
               if (hJ===0 && hN===0 && hR===0 && rec.present===true && !isRf) hJ=8;
               var ptStr = ptTimesStr(rec);
               if (isRf) {
@@ -19801,6 +19931,34 @@ function ptMontPrintEtat(mois, tab) {
       }
       function _normName(n) {
         return String(n || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+      }
+      /* ===== FORFAIT « BASE BOIS » (journaliers) =====
+         Chez vous, une partie des journaliers est payée au forfait de
+         production (base bois). On saisit le montant journalier convenu :
+         l'app en déduit le taux journalier puis le taux horaire, et la
+         paie applique taux horaire × heures pointées. */
+      function ptTauxJournalier(emp, mois) {
+        if (!emp) return 0;
+        var taux = parseFloat(emp.taux_journalier) || 0;
+        if (taux > 0) return taux;
+        var fb = parseFloat(emp.forfait_bois) || 0; /* forfait journalier base bois */
+        if (fb > 0) return fb;
+        return parseFloat(emp.salaire_base) || 0;
+      }
+      function ptTauxHoraire(emp, mois) {
+        return ptTauxJournalier(emp, mois) / 8;
+      }
+      function ptForfaitBoisApercu(input) {
+        try {
+          var hint = document.getElementById("forfait-bois-hint");
+          if (!hint) return;
+          var f = input ? parseFloat(input.value) : 0;
+          if (!f || f <= 0) {
+            hint.textContent = "Forfait journalier « base bois » en FCFA : le taux journalier et le taux horaire en découlent.";
+            return;
+          }
+          hint.innerHTML = "Forfait <strong>" + Math.round(f) + " F/jour</strong> → taux horaire <strong>" + Math.round(f / 8) + " F/h</strong> (paie = taux h × heures pointées).";
+        } catch (e) {}
       }
       function _ptMontDateCellToDate(cellVal, year, monthIdx) {
         if (cellVal == null || cellVal === "") return "";
@@ -24322,10 +24480,7 @@ if (normalHours > 173.33) {
             totalBrutJ += mfPaye;
             mfJ = mfPaye;
           } else {
-            tauxJ =
-              parseFloat(emp.taux_journalier) ||
-              parseFloat(emp.salaire_base) ||
-              0;
+            tauxJ = ptTauxJournalier(emp, mois);
             thJ = tauxJ / 8;
             /* Saisie bulletin : taux journalier modifiable (0 = valeur du contrat) */
             if ((jovr.tauxJ || 0) > 0) { tauxJ = jovr.tauxJ; thJ = tauxJ / 8; }
@@ -28086,7 +28241,11 @@ function printCongeIndividuel(empId) {
               emp.id +
               "'," +
               per.num +
-              ')" style="font-size:.6rem;color:var(--blue)">Détail</a></td>';
+              ')" style="font-size:.6rem;color:var(--blue)">Détail</a>' +
+              ' &nbsp;<a href="#" onclick="event.preventDefault();generateAttestationConge(\'' +
+              emp.id +
+              "','')" +
+              '" title="Éditer l\'attestation de congé (dates, type, jours)" style="font-size:.6rem;color:var(--orange);font-weight:700">📄 Attestation</a></td>';
             html +=
               '<td style="text-align:right;font-weight:700;color:var(--green)">' +
               fmt(per.conge_du) +
@@ -31063,6 +31222,95 @@ function printCongeIndividuel(empId) {
         h +=
           "<p>La présente attestation lui est délivrée à sa demande pour servir et valoir ce que de droit.</p>";
         h += "</div>";
+        h += _docFooterHTML();
+        h +=
+          '<div class="no-print" style="margin-top:18px;text-align:center"><button onclick="window.print()" style="padding:10px 18px;background:#0b1526;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">🖨️ Imprimer / PDF</button></div>';
+        h += "</body></html>";
+        w.document.write(h);
+        w.document.close();
+      }
+
+      /* Attestation de congé : document officiel attestant qu'un employé a
+         bénéficié d'un congé (type, dates, nombre de jours).
+         Sur le même modèle que l'attestation de travail. */
+      function generateAttestationConge(empId, congeId) {
+        var emp = (getPersonnel() || []).find(function (p) {
+          return p.id === empId;
+        });
+        if (!emp) {
+          toast("Employé introuvable", "error");
+          return;
+        }
+        var cg = null;
+        try {
+          var listC = getCongePaie ? (getCongePaie() || []) : (getPayeSection("congeRecords", []) || []);
+          cg = congeId
+            ? listC.find(function (c) { return String(c.id) === String(congeId); })
+            : listC.filter(function (c) { return c.employeId === empId || c.employee_id === empId; }).sort(function (a, b) {
+                return String(b.date_depart || b.dateDep || "").localeCompare(String(a.date_depart || a.dateDep || ""));
+              })[0];
+        } catch (e) {}
+        var dDep = (cg && (cg.date_depart || cg.dateDepart || cg.dateDep)) || "";
+        var dRet = (cg && (cg.date_retour || cg.dateRetour || cg.dateRet)) || "";
+        var typeC = (cg && (cg.type || cg.libelle || cg.typeConge)) || "Congé";
+        var nbJ = cg && (cg.nbJours || cg.duree || cg.jours);
+        if (!nbJ && dDep && dRet) {
+          var a1 = new Date(dDep + "T00:00:00"), a2 = new Date(dRet + "T00:00:00");
+          nbJ = Math.max(1, Math.round((a2 - a1) / 86400000) + 1);
+        }
+        var civil = emp.sexe === "F" ? "Mme" : "M.";
+        var nomComplet = escH(emp.nom + " " + (emp.prenoms || ""));
+        var w = window.open("", "_blank", "width=900,height=700");
+        if (!w) {
+          toast("Autorisez les popups", "error");
+          return;
+        }
+        var h =
+          '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Attestation de Congé - ' +
+          escH(emp.matricule || "") +
+          '</title><style>@page{size:A4;margin:18mm 14mm}body{font-family:"Plus Jakarta Sans",Calibri,Arial,sans-serif;color:#0f172a;font-size:11pt;line-height:1.55;margin:0;padding:24px}@media print{body{padding:0}.no-print{display:none}}h1{text-align:center;font-size:17pt;letter-spacing:1.5px;margin:14px 0 4px;text-transform:uppercase;color:#0b1526}h1+div{text-align:center;font-size:8pt;color:#64748b;letter-spacing:.6px;margin-bottom:18px}.ref{font-size:8.5pt;color:#475569;margin-bottom:14px}.body{font-size:10.5pt;text-align:justify}.body p{margin:8px 0}.info-table{width:100%;border-collapse:collapse;margin:14px 0;font-size:9.5pt}.info-table th{background:#f1f5f9;text-align:left;padding:6px 8px;border:1px solid #cbd5e1;width:32%}.info-table td{padding:6px 8px;border:1px solid #cbd5e1}</style></head><body><div class="no-print" style="position:sticky;top:0;background:#fff;z-index:10;display:flex;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid #e2e8f0;margin-bottom:12px"><button onclick="window.close()" style="padding:8px 14px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;cursor:pointer;font-weight:700">← Retour</button><button onclick="window.print()" style="padding:8px 14px;background:#0b1526;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">🖨️ Imprimer / PDF</button></div>';
+        h += _socHeaderHTML();
+        h += "<h1>Attestation de Congé</h1><div></div>";
+        h += '<div class="ref">Réf. : ATT-CONG/' + escH(emp.matricule || "") + "/" + new Date().getFullYear() + "</div>";
+        h +=
+          '<div class="body"><p>Je soussigné(e), agissant en qualité de <strong>Gérant</strong> de la société <strong>' +
+          escH((payeObj("mdb_entreprise")).nom || "MA SOCIETE") +
+          "</strong>, atteste que :</p>";
+        h +=
+          '<table class="info-table"><tr><th>Matricule</th><td><strong>' +
+          escH(emp.matricule || "") +
+          "</strong></td></tr><tr><th>Nom & Prénoms</th><td>" +
+          nomComplet +
+          "</td></tr><tr><th>Emploi occupé</th><td>" +
+          escH(emp.fonction || "-") +
+          " — Département : " +
+          escH(emp.service || "-") +
+          "</td></tr><tr><th>Type de congé</th><td><strong>" +
+          escH(String(typeC).charAt(0).toUpperCase() + String(typeC).slice(1)) +
+          "</strong></td></tr><tr><th>Date de départ</th><td>" +
+          _fmtDateLong(dDep || new Date().toISOString().slice(0, 10)) +
+          "</td></tr>" +
+          (dRet
+            ? "<tr><th>Date de reprise</th><td>" + _fmtDateLong(dRet) + "</td></tr>"
+            : "") +
+          "<tr><th>Nombre de jours</th><td><strong>" +
+          (nbJ || "-") +
+          " jour(s)</strong></td></tr></table>";
+        h +=
+          "<p>" +
+          civil +
+          " <strong>" +
+          nomComplet +
+          "</strong>, matricule <strong>" +
+          escH(emp.matricule || "") +
+          "</strong>, a bénéficié d'un congé de type <strong>" +
+          escH(String(typeC)) +
+          "</strong>" +
+          (nbJ ? " d'une durée de <strong>" + nbJ + " jour(s)</strong>" : "") +
+          (dDep ? ", à compter du <strong>" + _fmtDateLong(dDep) + "</strong>" : "") +
+          (dRet ? " jusqu'au <strong>" + _fmtDateLong(dRet) + "</strong> inclus" : "") +
+          ".</p>";
+        h += "<p>La présente attestation lui est délivrée pour servir et valoir ce que de droit.</p></div>";
         h += _docFooterHTML();
         h +=
           '<div class="no-print" style="margin-top:18px;text-align:center"><button onclick="window.print()" style="padding:10px 18px;background:#0b1526;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">🖨️ Imprimer / PDF</button></div>';

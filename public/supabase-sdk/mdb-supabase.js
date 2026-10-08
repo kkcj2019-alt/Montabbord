@@ -320,6 +320,11 @@
         }
       );
       channel.subscribe(function(status) {
+        /* Le temps réel est-il réellement CONNECTÉ ? L'appli s'en sert pour
+           savoir si elle doit frequent le cloud : sinon elle ne verrait les
+           saisies des autres postes qu'au prochain rechargement manuel. */
+        if (status === 'SUBSCRIBED') window.__MDB_RT__ = true;
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED' || status === 'CHANNEL_CLOSED') window.__MDB_RT__ = false;
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           if (onError) onError(new Error('Realtime: ' + status));
         }

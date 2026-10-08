@@ -5765,6 +5765,30 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Journalier : le taux horaire d\u00e9duit du forfait \u00ab base bois \u00bb pilote la paie',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var e1 = ptTauxJournalier({ taux_journalier: 5000 }, '2026-10');
+      var e2 = ptTauxHoraire({ taux_journalier: 5000 }, '2026-10');
+      var e3 = ptTauxJournalier({ forfait_bois: 6000 }, '2026-10');
+      var e4 = ptTauxHoraire({ forfait_bois: 6000 }, '2026-10');
+      var e5 = ptTauxJournalier({ salaire_base: 173000 }, '2026-10');
+      var ok = e1 === 5000 && e2 === 625 && e3 === 6000 && e4 === 750 && e5 === 173000;
+      /* Les heures saisies \u00e0 la main restent des heures pour un travailleur
+         au rendement (sinon elles disparaissent du tableau). */
+      var rec = { present: true, h_j_manual: '8', h_n_manual: '' };
+      var cRend = ptCalcDay(rec, true);
+      var rec2 = { present: true, h_j_manual: '6.5' };
+      var cPlage = ptCalcDay(rec2, false);
+      var okH = cRend.j === 8 && cRend.r === 0 && cPlage.j === 6.5;
+      (ok && okH)
+        ? 'OK : taux 5000F/j -> 625F/h ; forfait bois 6000 -> 750F/h ; heures manuelles visibles m\u00eame au rendement'
+        : 'ECHEC tJ=' + e1 + ' tH=' + e2 + ' fb=' + e3 + ' fbH=' + e4 + ' sal=' + e5 + ' rendJ=' + cRend.j + ' rendR=' + cRend.r
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
