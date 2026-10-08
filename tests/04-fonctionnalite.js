@@ -5585,6 +5585,25 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Pointage : le r\u00e9sum\u00e9 (bulletin + impression) montre les sup pay\u00e9es',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var okH = ptHsDetailTxt({ hs15: 6, hs50: 2, hs75: 0, hs100: 0 }) === '15% : 6h \u00b7 50% : 2h' && ptHsDetailTxt({}) === '';
+      document.getElementById('paie-select-emp').value = 'e1';
+      document.getElementById('paie-mois').value = '2026-10';
+      var recs = [];
+      for (var d = 1; d <= 10; d++) recs.push({ id: 'sm' + d, employee_id: 'e1', date: '2026-10-' + (d < 10 ? '0' : '') + d, h_j_manual: '8' });
+      setPointageData(recs);
+      generateBulletin();
+      var h = document.getElementById('paie-output').innerHTML;
+      var okM = h.indexOf('H. Normales') !== -1 && h.indexOf('64.0h') !== -1 && h.indexOf('Sup. pay\u00e9es') !== -1 && h.indexOf('15%') !== -1;
+      (okH && okM) ? 'OK : helper + m\u00e9mo bulletin (64.0h normales, sup 15%/50%)'
+                   : 'ECHEC helper=' + okH + ' memo=' + okM
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
