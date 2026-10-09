@@ -6200,6 +6200,38 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Effacer pointages : filtres type/fonction/recherche r\u00e9agissent',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-mois').value = '2026-10';
+      showModalEffacer();
+      var h = document.getElementById('pt-modal-content').innerHTML;
+      var okW = h.indexOf('id="eff-search"') !== -1 && h.indexOf('onchange="effFilterEmps()"') !== -1;
+      document.getElementById('eff-type').value = 'titulaire';
+      effFilterEmps();
+      var h1 = document.getElementById('eff-emp-list').innerHTML;
+      var okT = h1.indexOf('value="e1"') !== -1;
+      document.getElementById('eff-type').value = 'journalier';
+      effFilterEmps();
+      var h2 = document.getElementById('eff-emp-list').innerHTML;
+      var okJ = h2.indexOf('value="e1"') === -1;
+      document.getElementById('eff-type').value = 'all';
+      document.getElementById('eff-search').value = 'zzz-introuvable';
+      effFilterEmps();
+      var h3 = document.getElementById('eff-emp-list').innerHTML;
+      var okS = h3.indexOf('value="e1"') === -1;
+      document.getElementById('eff-search').value = 'diallo';
+      effFilterEmps();
+      var h4 = document.getElementById('eff-emp-list').innerHTML;
+      var okS2 = h4.indexOf('value="e1"') !== -1;
+      (okW && okT && okJ && okS && okS2)
+        ? 'OK : recherche + onchange pr\u00e9sents, titulaire garde e1, journalier l\u2019exclut, recherche filtre'
+        : 'ECHEC widgets=' + okW + ' type=' + okT + '/' + okJ + ' recherche=' + okS + '/' + okS2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
