@@ -5682,7 +5682,7 @@ r.push({
         ['DIALLO', 'A01', '', 2, 3],
         ['DIALLO', 'Table Bureau', '', 1, '']
       ];
-      var out = ptMontParseRows(rows, { mois: '2026-08', articlesMontage: ams, workers: wks });
+      var out = ptMontParseLignes(rows, { mois: '2026-08', articlesMontage: ams, workers: wks });
       var a01 = out.filter(function (x) { return x.article_code === 'A01' && x.employee_id === 'e1'; });
       var b02 = out.filter(function (x) { return x.article_code === 'B02' && x.employee_id === 'e1'; });
       var ok = out.length === 3 &&
@@ -5812,7 +5812,7 @@ r.push({
         ['BOLOU DORGLESS', 30, '', '', '', 5, ''],
         ['CLOURED', '', '', '', '', '', '']
       ];
-      var out = ptMontParseRows(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var out = ptMontParseLignes(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
       var a = out.filter(function (x) { return x.article_code === 'BIG C1M'; });
       var b = out.filter(function (x) { return x.article_code === 'EURO 2 CE3M'; });
       var ok = out.length === 2 &&
@@ -5821,6 +5821,57 @@ r.push({
       (ok)
         ? 'OK : 30u BIG C1M le 01/09 + 5u EURO 2 CE3M le 02/09 (dates FR + fusion propag\u00e9e)'
         : 'ECHEC n=' + out.length + ' ' + JSON.stringify(out)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Assiduit\u00e9 : une faute entreprise AVEC motif est justifi\u00e9e (taux inchang\u00e9, pas de pr\u00e9sence)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      var emp = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; })[0];
+      var now = new Date(); var y = now.getFullYear(), m = now.getMonth() + 1;
+      var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+      var mz = y + '-' + pad(m);
+      var nd = new Date(y, m, 0).getDate(), today = now.getDate();
+      var recs = [], ouvres = [], n = 0;
+      for (var d = 1; d <= nd && d <= today; d++) {
+        var dow = new Date(y, m - 1, d).getDay();
+        if (dow === 0 || dow === 6) continue;
+        ouvres.push(d);
+      }
+      /* 1er jour : faute entreprise AVEC motif ; 2e : pay\u00e9 SANS motif ;
+         les autres : pr\u00e9sents. */
+      var dFaute = ouvres[0], dSansMotif = ouvres[1];
+      for (var i = 0; i < ouvres.length; i++) {
+        var dd = ouvres[i];
+        if (dd === dFaute || dd === dSansMotif) continue;
+        n++;
+        recs.push({ id: DB.id(), employee_id: emp.id, date: mz + '-' + pad(dd),
+                    present: true, h_j_manual: '8' });
+      }
+      /* jour pay\u00e9 sans travail + motif d'entreprise (Panne machine) */
+      recs.push({ id: DB.id(), employee_id: emp.id, date: mz + '-' + pad(dFaute),
+                  present: false, absent_paye: true, motif: 'Panne machine',
+                  h_j_manual: '8', rattrap_gagnees: 8 });
+      /* jour pay\u00e9 sans travail SANS motif = absence non justifi\u00e9e */
+      recs.push({ id: DB.id(), employee_id: emp.id, date: mz + '-' + pad(dSansMotif),
+                  present: false, absent_paye: true, h_j_manual: '8' });
+      setPayeSection('pointage', recs);
+      var r = ptAssiduiteData(mz);
+      var it = r.items.filter(function (x) { return x.emp.id === emp.id; })[0];
+      /* Jours point\u00e9s = n ; jour 3 (faute entreprise AVEC motif) = absence
+         JUSTIFI\u00c9E \u2192 sortie du calcul ; jour 4 (sans motif) = absence
+         r\u00e9elle qui fait baisser le taux. */
+      var tauxAttendu = Math.round(100 * n / (n + 1)); /* jour sans motif = absence r\u00e9elle */
+      var ok = it && it.pres === n && it.absJust === 1 && it.payes === 2 &&
+        it.taux === tauxAttendu && it.abs === 1 && it.nonPointes === 0;
+      (ok) ? 'OK : pr\u00e9sences=' + it.pres + ' justifi\u00e9es=' + it.absJust +
+                 ' pay\u00e9s=' + it.payes + ' abs=' + it.abs + ' taux=' + it.taux + '% (attendu ' + tauxAttendu + '%)'
+          : 'ECHEC ' + JSON.stringify({ pres: it && it.pres, absJust: it && it.absJust,
+            payes: it && it.payes, taux: it && it.taux, attendu: tauxAttendu,
+            abs: it && it.abs, n: n });
     `,
     attenduPrefixe: 'OK'
   });
@@ -5856,7 +5907,7 @@ r.push({
       t1[1] = 30; t1[2] = 7; t1[3] = 9; t1[4] = 46; t1[5] = 5;
       var rows = [['POSTE'].concat(rD.slice(1)), ['SEMAINE 1'].concat(rP.slice(1)),
                   [''].concat(rC.slice(1)), [''].concat(rA.slice(1)), b1, t1];
-      var out = ptMontParseRows(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var out = ptMontParseLignes(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
       var d = {}; out.forEach(function (x) {
         var k = x.article_code + '@' + x.date;
         d[k] = (d[k] || 0) + x.quantite;
@@ -5873,6 +5924,203 @@ r.push({
            : 'ECHEC n=' + out.length + ' ' + JSON.stringify(d);
     `,
     attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Import montage : le registre r\u00e9el complet (3 semaines, 11 articles, colonne bleue)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var arts = [
+        ['SIVE CIEM', 'Sive Ciem'], ['BIG KBBI CE3M O1', 'Big Kbbi Ce3m'],
+        ['EU1 EUR BIG CE2M ANE CE2B ANE', 'Ce2m'], ['EU1 EUR BIG CE3M ARE CE3B ANE', 'Ce3m'],
+        ['EU1 EUR BIG CE1 ARE CE1B ANE', 'Ce1'], ['EU1 EUR BIG CE2B ANE', 'Ce2b'],
+        ['EU1 EUR BIG CE3B ANE', 'Ce3b'], ['EU1 EUR BAN CO CP', 'Banc'],
+        ['FREES LUNA BO E1', 'Luna'], ['CAFE LAVADO BO CE', 'Lavado'],
+        ['CAFE FREES CO CU 0 1 46 CP', 'Cafe']
+      ];
+      var N = arts.length, BLOC = N + 1, JOURS = 7, SEM = 3;
+      var JJ = ['mardi 1 septembre 2026','mercredi 2 septembre 2026','jeudi 3 septembre 2026',
+        'vendredi 4 septembre 2026','samedi 5 septembre 2026','dimanche 6 septembre 2026','lundi 7 septembre 2026',
+        'mardi 8 septembre 2026','mercredi 9 septembre 2026','jeudi 10 septembre 2026',
+        'vendredi 11 septembre 2026','samedi 12 septembre 2026','dimanche 13 septembre 2026','lundi 14 septembre 2026',
+        'mardi 15 septembre 2026','mercredi 16 septembre 2026','jeudi 17 septembre 2026',
+        'vendredi 18 septembre 2026','samedi 19 septembre 2026','dimanche 20 septembre 2026','lundi 21 septembre 2026'];
+      var W = 1 + BLOC * JOURS * SEM;
+      function L() { var r = new Array(W).fill(''); r[0] = ''; return r; }
+      var r1 = L(), r2 = L(), r3 = L(), r4 = L(), r5 = L();
+      var i = 1, jn = 0;
+      for (var s2 = 0; s2 < SEM; s2++) {
+        r2[0] = 'SEMAINE ' + (s2 + 1);
+        for (var j = 0; j < JOURS; j++, i += BLOC, jn++) {
+          r1[i] = JJ[jn];
+          for (var a = 0; a < N; a++) { r4[i + a] = 'MON ' + arts[a][1].toUpperCase(); r5[i + a] = arts[a][0]; }
+          r2[i + N] = 'CCU V MON CH'; r4[i + N] = 'MON'; r5[i + N] = '........';
+        }
+      }
+      for (var c = 0; c < W; c++) if (c) r3[c] = 'PALLETTES';
+      var b1 = L(); b1[0] = 'BOLOU DORGLESS'; b1[2] = 30; b1[1] = '0.00'; b1[3] = '0.00';
+      var b2 = L(); b2[0] = 'BOLOU DORGLESS'; b2[1 + BLOC * 7] = 30;
+      var b3 = L(); b3[0] = 'BOLOU DORGLESS'; b3[1 + BLOC * 14] = 25;
+      var tot = L(); tot[0] = '*'; tot[2] = 30; tot[1 + BLOC * 7] = 30;
+      var rows = [r1, r2, r3, r4, r5, b1, b2, b3, tot];
+      var wks = [{ id: 'e1', nom: 'BOLOU', prenoms: 'DORGLESS', matricule: 'BO', en_paie: true }];
+      var ams = [{ code: 'SIVE CIEM', designation: 'Sive Ciem', prix: 100 },
+                 { code: 'BIG KBBI CE3M O1', designation: 'Kbbi', prix: 200 }];
+      var out = ptMontParseLignes(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var d1 = out.filter(function (x) { return x.date === '2026-09-01'; });
+      var d8 = out.filter(function (x) { return x.date === '2026-09-08'; });
+      var d15 = out.filter(function (x) { return x.date === '2026-09-15'; });
+      var ok = out.length === 3 &&
+        d1.length === 1 && d1[0].article_code === 'BIG KBBI CE3M O1' && d1[0].quantite === 30 &&
+        d8.length === 1 && d8[0].article_code === 'SIVE CIEM' && d8[0].quantite === 30 &&
+        d15.length === 1 && d15[0].article_code === 'SIVE CIEM' && d15[0].quantite === 25;
+      (ok) ? 'OK : 3 lignes aux bonnes dates (01, 08, 15/09), codes pris dans le fichier'
+           : 'ECHEC n=' + out.length + ' ' + JSON.stringify(out);
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime de production : barres progressives 0 / 25 F / 75 F par tranches',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      var now = new Date(); var mz = now.getFullYear() + '-' +
+        (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var pts = getPointageMontage().filter(function (p) {
+        return p && p.employee_id === emp.id && String(p.date || '').indexOf(mz) === 0;
+      });
+      pts.forEach(function (p) { delete p.quantite; });
+      /* 4 500 articles répartis sur plusieurs lignes et plusieurs jours. */
+      var d1 = mz + '-01', d2 = mz + '-02';
+      [[d1, 'A', 1000], [d1, 'B', 900], [d2, 'A', 1500], [d2, 'C', 1100]].forEach(function (x) {
+        pts.push({ id: DB.id(), employee_id: emp.id, date: x[0],
+                   article_code: x[1], quantite: x[2] });
+      });
+      setPointageMontage(pts);
+      var r = ptPrimeProdCalcul(emp.id, mz);
+      /* 0-2999 : 0 F | 3000-3999 : 999 x 25 = 24 975 | 4000+ : 501 x 75 = 37 575
+         total = 62 550 F */
+      /* Règle des seuils : jusqu'à 3000 articles → 0 F ;
+         les 1000 suivantes (3001–4000) → 25 F ; les suivantes → 75 F. */
+      var attendu = 1000 * 25 + 500 * 75;
+      var ok = r.quantite === 4500 && r.montant === attendu && r.detail.length === 3;
+      (ok) ? 'OK : 4500 articles -> ' + r.montant + ' F (attendu ' + attendu + ' F), ' +
+                 r.detail.length + ' tranches'
+           : 'ECHEC qte=' + r.quantite + ' montant=' + r.montant + ' attendu=' + attendu;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+    r.push({
+    nom: 'Synchro : une saisie distante arrive sans rechargement manuel',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var e1 = emps[0];
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var pts = getPointageData().slice();
+      var avant = pts.length;
+      pts.push({ id: 'sync-1', employee_id: e1.id, date: mz + '-05', present: false, motif: 'Panne machine', absent_paye: true });
+      setPayeSection('pointage', pts);
+      var local = getPayeData();
+      var remote = JSON.parse(JSON.stringify(local));
+      _payeApplyRemote({ [PAYE_KEY]: remote });
+      var recu = getPayeData().pointage || [];
+      var r = recu.filter(function (x) { return x && x.id === 'sync-1'; })[0];
+      var ad = ptAssiduiteData(mz);
+      var it = ad.items.filter(function (x) { return x.emp && x.emp.id === e1.id; })[0];
+      var ok = recu.length > avant && r && r.motif === 'Panne machine' && r.absent_paye === true && it && it.payes >= 1;
+      (ok) ? 'OK : la saisie du poste A est appliquee (' + recu.length + ' lignes), payes=' + (it ? it.payes : 0)
+           : 'ECHEC avant=' + avant + ' recu=' + recu.length + ' motif=' + (r && r.motif) + ' payes=' + (it ? it.payes : 0);
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prix d\'articles variables : m\u00eame article, prix diff\u00e9rent par employ\u00e9 / p\u00e9riode / date',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var e1 = emps[0], e2 = emps[1];
+      if (!e2) {
+        e2 = JSON.parse(JSON.stringify(e1));
+        e2.id = 'emp-test-2'; e2.matricule = 'ZZ'; e2.nom = 'TESTDEUX';
+        setPersonnel(getPersonnel().concat([e2]));
+        e2 = getPersonnelActifs().filter(function (x) { return x.id === 'emp-test-2'; })[0];
+      }
+      setPayeSection('prix_articles', [
+        { id: 'r1', code: 'A', prix: 500, emp_id: '', date_debut: '', date_fin: '' },
+        { id: 'r2', code: 'A', prix: 100, emp_id: '', date_debut: '2026-10-01', date_fin: '' },
+        { id: 'r3', code: 'A', prix: 200, emp_id: e1.id, date_debut: '', date_fin: '' },
+        { id: 'r4', code: 'A', prix: 1, emp_id: e1.id, date_debut: '2026-09-05', date_fin: '2026-09-05' },
+        { id: 'r5', code: 'A', prix: 0.5, emp_id: e2.id, date_debut: '2026-09-05', date_fin: '2026-09-05' }
+      ]);
+      var ok = ptPrixArticle('A', e1.id, '2026-09-01') === 200 &&
+        ptPrixArticle('A', e2.id, '2026-09-01') === 500 &&
+        ptPrixArticle('A', e1.id, '2026-09-05') === 1 &&
+        ptPrixArticle('A', e2.id, '2026-09-05') === 0.5 &&
+        ptPrixArticle('A', e1.id, '2026-10-02') === 100 &&
+        ptPrixArticle('A', e1.id, '2026-11-02') === 100;
+      (ok) ? 'OK : la r\u00e8gle la plus sp\u00e9cifique gagne (employ\u00e9+date > employ\u00e9 > date > d\u00e9faut)'
+           : 'ECHEC ' + JSON.stringify([
+               ptPrixArticle('A', e1.id, '2026-09-01'), ptPrixArticle('A', e2.id, '2026-09-01'),
+               ptPrixArticle('A', e1.id, '2026-09-05'), ptPrixArticle('A', e2.id, '2026-09-05'),
+               ptPrixArticle('A', e1.id, '2026-10-02')]);
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cong\u00e9 : un montant plaqu\u00e9 remplace le droit calcul\u00e9',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emp = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; })[0];
+      var d0 = '2026-01', f0 = '2026-12';
+      var libre = calcCongeDroit(emp, f0, 30, d0);
+      setCongeMontantForce(emp.id, d0, f0, 500000);
+      var force = calcCongeDroit(emp, f0, 30, d0);
+      setCongeMontantForce(emp.id, d0, f0, 0);
+      var relu = calcCongeDroit(emp, f0, 30, d0);
+      var ok = !libre.force &&
+        force.montant === 500000 && force.force === true && force.droit === libre.montant &&
+        relu.montant === libre.montant && !relu.force;
+      (ok) ? 'OK : calcul=' + libre.montant + ' F, plaq\u00e9=500000 F, retour au calcul=' + relu.montant + ' F'
+           : 'ECHEC ' + JSON.stringify({ libre: libre.montant, force: force.montant, relu: relu.montant });
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Heures \u00e0 rattraper : reprend les heures libres, modifiable \u00e0 la main',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var els = {
+        'pe-pst': { checked: true },
+        'pe-pst-rattrap': { checked: true },
+        'pe-libres': { value: '7' },
+        'pe-hg': { value: '0', dataset: {} }
+      };
+      var ancien = document.getElementById;
+      document.getElementById = function (id) { return els[id] || null; };
+      try {
+        ptPstLibresVersRattrap();
+        var apresDefaut = els['pe-hg'].value;
+        /* si l'utilisateur corrige le champ, on ne l'écrase plus */
+        els['pe-hg'].value = '5'; els['pe-hg'].dataset.touche = '1';
+        els['pe-libres'].value = '9';
+        ptPstLibresVersRattrap();
+        var apresTouche = els['pe-hg'].value;
+        /* et le forçage reprend la main */
+        ptPstLibresVersRattrap(true);
+        var apresForce = els['pe-hg'].value;
+      } finally { document.getElementById = ancien; }
+      var ok = parseFloat(apresDefaut) === 7 && parseFloat(apresTouche) === 5 && parseFloat(apresForce) === 9;
+      (ok) ? 'OK : 7 h libres -> 7 h ; saisie manuelle (5) respectée ; 9 h libres -> 9 h'
+           : 'ECHEC defaut=' + apresDefaut + ' touche=' + apresTouche + ' force=' + apresForce;
+    `,
+attenduPrefixe: 'OK'
   });
 
   r.push({
@@ -5894,7 +6142,7 @@ r.push({
       for (var j = 0; j < 7; j++) { var st = 1 + j * 2; rD[st] = j7[j]; rA[st] = 'EURO 2 CE3M'; rA[st+1] = 'MDI'; }
       b1[0] = 'BOLOU DORGLESS'; b1[1] = 5; b1[2] = 7; /* jour 1 */
       var rows = [[''].concat(rD.slice(1)), [''].concat(rA.slice(1)), b1];
-      var out = ptMontParseRows(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
+      var out = ptMontParseLignes(rows, { mois: '2026-09', articlesMontage: ams, workers: wks });
       var codes = out.map(function (x) { return x.article_code; });
       var jours = out.map(function (x) { return x.date; });
       var ok = out.length === 2 &&

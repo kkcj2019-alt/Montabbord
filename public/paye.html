@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-08-219";
+      window.__APP_VERSION = "2026-10-08-220";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -2015,6 +2015,8 @@
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#7c3aed;color:white" onclick="showModalPointageFacial()">📷 Pointage facial</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#22c55e;color:white" onclick="showSaisieRapide()">⏱ Saisie rapide</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#0ea5e9;color:white" onclick="showModalGenererMois()">📅 Générer mois complet</button>
+          <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#db2777;color:white" onclick="showModalPrixArticles()" title="Prix différents selon la période, l'employé ou la date">🏷️ Prix articles</button>
+          <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#f59e0b;color:white" onclick="showModalPrimeProd()" title="Barres de la prime de production (0 / 25 F / 75 F)">🏆 Prime production</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#f97316;color:white" onclick="showModalPointageGroupe()">👥 Pointage groupé</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#8b5cf6;color:white" onclick="showModalEnregistrerVisage()">Face ID</button>
           <button class="btn btn-sec" style="padding:5px 12px;font-size:.72rem" onclick="ptActualiser()">🔄 Actualiser</button>
@@ -6572,9 +6574,12 @@ function payeObj(key) {
    (lire avant d'écrire) ne doit pas télécharger le dossier entier à chaque
    sauvegarde. Sans ce cache, chaque push = 1 téléchargement complet du
    dossier entreprise : c'est ce qui saturait la bande passante (20 To). */
-      function _payeLireCloud(uid) {
+      function _payeLireCloud(uid, force) {
         try {
-          if (window._payeCloudCache && Date.now() - window._payeCloudCacheAt < 30000) {
+          /* force = on sait que le cloud a changé (sonde updated_at) :
+             le cache servirait à renvoyer l'ANCIENNE version, et les
+             saisies de l'autre poste n'arriveraient jamais. */
+          if (!force && window._payeCloudCache && Date.now() - window._payeCloudCacheAt < 30000) {
             var cached = window._payeCloudCache;
             return Promise.resolve({
               exists: true,
@@ -6711,6 +6716,13 @@ function payeObj(key) {
               return;
             }
             window._payePushHashCourant = _pHash;
+            /* HORODATAGE : c'est lui que lisent les AUTRES postes pour savoir
+               s'il faut recharger. Sans cette écriture, leur sonde voyait
+               toujours la même valeur et il fallait rafraîchir à la main.
+               Horodatage côté client (millisecondes) : deux écritures dans
+               la même seconde restent distinguables. */
+            payload.updated_at = new Date().toISOString();
+            payload.maj_par = "poste-" + String(Math.floor(Math.random() * 900) + 100);
             return firebaseDbP
               .collection("enterprises")
               .doc(uid)
@@ -6723,6 +6735,10 @@ function payeObj(key) {
               /* Le cloud vient d'être écrit : son état est connu, inutile de
                  le retélécharger au prochain push pendant 30 s. */
               window._payeCloudCacheAt = Date.now();
+              /* On note l'horodatage écrit : notre propre sonde ne doit pas
+                .redéclencher un téléchargement pour ce que nous venons
+                 d'écrire. */
+              window._payeVuTs = payload.updated_at;
             } catch (eCC2) {}
             try {
               window._payePushEssais = 0;
@@ -7004,15 +7020,14 @@ function payeObj(key) {
         _payeStopPoll();
         payePollTimer = setInterval(function () {
           if (document.hidden) return;
-          if (!firebaseDbP) return;
+if (!firebaseDbP) return;
+          /* Sonde LÉGÈRE (le coût est 1 ligne, pas le dossier entier) :
+             elle reste à 6 s même quand le temps réel est actif, sinon
+             une écriture faite à 4,9 s peut attendre 36 s et donner
+             l'impression qu'il faut rafraîchir à la main. */
           window._payePollTick = (window._payePollTick || 0) + 1;
           try {
             if (_payeSynchroEnEchec()) return;
-            /* Le temps reel est-il vraiment connecte ? Si oui la sonde
-               nest qu un filet de securite (1 sur 3). Sinon cest elle
-               qui apporte les saisies des autres postes : on la garde
-               frequente, sinon il faut recharger a la main. */
-            if (window.__MDB_RT__ === true && window._payePollTick % 3 !== 0) return;
           } catch (ePC) {}
           /* Sonde LEGERE : on ne lit que updated_at (quelques octets).
              Le dossier complet nest telecharge que sil a change. */
@@ -7026,8 +7041,10 @@ function payeObj(key) {
                   if (!row) return;
                   var ts = String(row.updated_at || "");
                   if (!ts || (window._payeVuTs && window._payeVuTs === ts)) return;
-                  window._payeVuTs = ts;
-                  _payeLireCloud(uid).then(function (doc) {
+window._payeVuTs = ts;
+                  /* force : on a détecté un changement, le cache de
+                     30 s ne doit pas nous renvoyer l'ancienne version. */
+                  _payeLireCloud(uid, true).then(function (doc) {
                     if (doc && doc.exists) _payeApplyRemote(doc.data() || {});
                   }).catch(function () {});
                 } catch (eQ) {}
@@ -7044,8 +7061,8 @@ function payeObj(key) {
                 if (doc && doc.exists) _payeApplyRemote(doc.data() || {});
               })
               .catch(function () {});
-          } catch (e) {}
-        }, 12000);
+} catch (e) {}
+        }, 6000);
       }
 
       function startRealtimeSync() {
@@ -7593,7 +7610,13 @@ function payeObj(key) {
           });
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#16a34a;font-weight:700">' + (pan > 0 ? fmtF(pan) : "—") + '</td>';
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' + (mont.total > 0 ? fmtF(mont.total) : "—") + '</td>';
-          html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' + (mont.prime > 0 ? fmtF(mont.prime) : "—") + '</td></tr>';
+          /* La prime n'est AJOUTEE qu'au bulletin (« Prime de Production »).
+             Ici on affiche le montant des barres, sans le verser dans le
+             récap montage. */
+          var _ppM = 0, _ppQ = 0;
+          try { var _pp = ptPrimeProdCalcul(e.id, mois); _ppM = _pp.montant; _ppQ = _pp.quantite; } catch (ePp) {}
+          html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' +
+            (_ppQ > 0 ? '<span title="' + _ppQ + ' articles — bars">' + fmtF(_ppM) + '</span>' : "—") + '</td></tr>';
         });
         html += '</tbody></table></div>';
         box.innerHTML = html;
@@ -15644,13 +15667,14 @@ html +=
           return '<tr style="background:#f8fafc;font-weight:800;border-top:2px solid #000"><td colspan="3" style="text-align:right">Sous-total (' + jj + ' j)</td><td style="text-align:center">' + ptFmtDec(tj) + 'h</td><td></td><td style="text-align:center">' + ptFmtDec(tn) + 'h</td><td></td><td style="text-align:center">' + ptFmtDec((tj + tn)) + 'h</td></tr>';
         };
         html += '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start">';
-        html += '<div style="flex:1 1 330px;min-width:0;overflow-x:auto;background:#fff;border:1px solid var(--border);border-radius:8px">' + srHead + rowsHtml.slice(0, mid).join("") + footH(jr1, totJ1, totN1) + "</tbody></table></div>";
-        html += '<div style="flex:1 1 330px;min-width:0;overflow-x:auto;background:#fff;border:1px solid var(--border);border-radius:8px">' + srHead + rowsHtml.slice(mid).join("") + footH(jr2, totJ2, totN2) + "</tbody></table></div>";
+        html += '<div style="flex:1 1 min(580px,calc(50% - 8px));min-width:0;overflow-x:auto;background:#fff;border:1px solid var(--border);border-radius:8px">' + srHead + rowsHtml.slice(0, mid).join("") + footH(jr1, totJ1, totN1) + "</tbody></table></div>";
+        html += '<div style="flex:1 1 min(580px,calc(50% - 8px));min-width:0;overflow-x:auto;background:#fff;border:1px solid var(--border);border-radius:8px">' + srHead + rowsHtml.slice(mid).join("") + footH(jr2, totJ2, totN2) + "</tbody></table></div>";
         html += "</div>";
         html += '<div style="display:flex;gap:1.1rem;justify-content:flex-end;align-items:center;background:#f8fafc;border:2px solid #000;border-radius:8px;padding:6px 14px;font-weight:800;margin-top:8px;font-size:.82rem;flex-wrap:wrap"><span>TOTAUX (<span id="pt-r-jrs">' + jrSaisis + '</span> jour(s))</span><span>Jour : <span id="pt-r-totJ">' + ptFmtDec(totJ) + 'h</span></span><span>Nuit : <span id="pt-r-totN">' + ptFmtDec(totN) + 'h</span></span><span>Total : <span id="pt-r-totG">' + ptFmtDec((totJ + totN)) + 'h</span></span></div>';
         /* Marge intérieure : le contenu ne touche plus les bords de la modale. */
         html = '<div style="padding:12px 16px 16px">' + html + "</div>";
-        openPtModal(html, true);
+        /* xl : la saisie rapide occupe l'écran (trop de colonnes). */
+        openPtModal(html, true, true);
         try { for (var _td = 1; _td <= dims; _td++) ptRapideTint(_td); } catch (eTT) {}
       }
       /* Cocher/dé-cocher Nuit : déplie la case des heures de nuit (et la vide si dé-cocher). La cellule reste visible (sinon les colonnes se décalent). */
@@ -15730,14 +15754,28 @@ html +=
           var box = document.getElementById("pt-modal-content");
           if (!box || !box.querySelector) return;
           var f = box.querySelector('input[data-r="' + d + '"][data-field="faute"]');
-          if (!f || !f.checked) return;
+          if (!f) return;
           var abs = box.querySelector('input[data-r="' + d + '"][data-field="abs"]');
-          if (abs) abs.checked = true;
           var hj = box.querySelector('input[data-r="' + d + '"][data-field="hr"]');
           var obs = box.querySelector('input[data-r="' + d + '"][data-field="obs"]');
           var mot = box.querySelector('select[data-r="' + d + '"][data-field="motif"]');
-          if (hj && !hj.value) hj.value = String(getFormatHeures() === "hhmm" ? "8:00" : "8");
-          var mTxt = mot && mot.value ? mot.value : "Non précisé";
+          if (!f.checked) {
+            /* Plus une faute entreprise : on revient aux motifs d'absence. */
+            if (mot) mot.innerHTML = ptMotifOptions("");
+            if (abs) { abs.checked = false; }
+            ptRapideTotal(d); ptRapideTint(d);
+            return;
+          }
+          if (abs) abs.checked = true;
+          if (hj && !parseHeure(hj.value)) hj.value = String(getFormatHeures() === "hhmm" ? "8:00" : "8");
+          /* Le menu passe aux motifs d'ENTREPRISE : c'est ce qui manquait
+             pour pouvoir dire « panne machine », « coupure courant »… */
+          if (mot) {
+            mot.innerHTML = ptMotifFauteOptions("");
+            mot.style.background = "#fef3c7";
+            mot.style.borderColor = "#d97706";
+          }
+          var mTxt = mot && mot.value ? mot.value : "motif non précisé";
           if (obs && !obs.value.trim()) obs.value = "Faute entreprise — absence payée (" + mTxt + ")";
         } catch (eF) {}
         ptRapideTotal(d);
@@ -15770,6 +15808,22 @@ html +=
           '#pt-modal-content input[data-r="' + d + '"][data-field="abs"]',
         );
         if (cb) cb.dataset.dirty = "1";
+        /* Motif choisi : on le recopie dans l'observation (c'est elle qui
+           sera imprimée sur la fiche de pointage d\u00e9taill\u00e9e). */
+        try {
+          var ft0 = document.querySelector('#pt-modal-content input[data-r="' + d + '"][data-field="faute"]');
+          var mo0 = document.querySelector('#pt-modal-content select[data-r="' + d + '"][data-field="motif"]');
+          var ob0 = document.querySelector('#pt-modal-content input[data-r="' + d + '"][data-field="obs"]');
+          if (ft0 && ft0.checked && mo0 && mo0.value) {
+            if (ob0) {
+              var keep = ob0.value.trim();
+              if (!keep || keep.indexOf("Faute entreprise") === 0 || keep.indexOf("Absent") === 0) {
+                ob0.value = "Faute entreprise \u2014 absence pay\u00e9e (" + mo0.value + ")";
+                ob0.dataset.dirty = "1";
+              }
+            }
+          }
+        } catch (eMo0) {}
         if (cb && cb.checked) {
           /* Case cochée SANS heures = absence : on vide, motif à choisir. */
           var hj = document.querySelector(
@@ -15823,8 +15877,10 @@ html +=
         if (!box || !box.querySelector) return;
         var getInp = function (f) {
           try {
+            /* Les motifs sont des <select> : un simple « input » ne les
+               trouvait jamais, et le motif \u00e9tait perdu \u00e0 l'enregistrement. */
             return box.querySelector(
-              'input[data-r="' + d + '"][data-field="' + f + '"]',
+              'input[data-r="' + d + '"][data-field="' + f + '"],select[data-r="' + d + '"][data-field="' + f + '"]',
             );
           } catch (eQ) {
             return null;
@@ -15874,13 +15930,16 @@ html +=
           rec.present = false;
           delete rec.h_j_manual;
           delete rec.h_n_manual;
-          /* Motif d'absence + faute entreprise (absence payée 8h). */
+          /* Motif d'absence + faute entreprise (absence pay\u00e9e). */
           if (motif) rec.motif = motif; else delete rec.motif;
           rec.absent_paye = vPaye;
           if (vPaye) {
-            rec.h_j_manual = String(getFormatHeures() === "hhmm" ? "8:00" : "8");
-            rec.rattrap_gagnees = 8;
-            if (!obs) obs = "Faute entreprise — absence payée" + (motif ? " (" + motif + ")" : "");
+            /* Les heures pay\u00e9es sont celles saisies (8 par d\u00e9faut),
+               pas une valeur fig\u00e9e. */
+            var hPay = hrsSaisies > 0 ? hrsSaisies : 8;
+            rec.h_j_manual = String(getFormatHeures() === "hhmm" ? ptFmtHM(hPay) : hPay);
+            rec.rattrap_gagnees = Math.round(hPay * 100) / 100;
+            if (!obs) obs = "Faute entreprise \u2014 absence pay\u00e9e" + (motif ? " (" + motif + ")" : "");
           }
           any = true;
         } else {
@@ -17464,6 +17523,28 @@ html +=
         var s = String(motif).trim();
         return s ? s.charAt(0).toUpperCase() : "X";
       }
+      /* Motifs spécifiques d'une FAUTE D'ENTREPRISE : le jour est payé et
+         justifié, mais il faut dire de quoi il s'agit. */
+      var PT_FAUTE_ENT_MOTIFS = [
+        "Panne machine", "Coupure electricite", "Coupure courant",
+        "Manque de matiere", "Materiel indisponible", "Probleme transport",
+        "Intemperies", "Requisition entreprise", "Casier bloque",
+        "Autre motif entreprise"
+      ];
+      function ptMotifFauteOptions(sel) {
+        var out = '<option value="">&#8212; Pr\u00e9ciser la faute &#8212;</option>';
+        PT_FAUTE_ENT_MOTIFS.forEach(function (m) {
+          out += '<option value="' + escH(m) + '"' + (sel === m ? " selected" : "") + '>' + escH(m) + '</option>';
+        });
+        return out;
+      }
+      /* Vrai motif d'une absence JUSTIFI\u00c9E li\u00e9e \u00e0 l'entreprise. */
+      function ptFauteEntMotifValide(motif) {
+        var m = String(motif || "").trim();
+        if (!m) return false;
+        return PT_FAUTE_ENT_MOTIFS.indexOf(m) >= 0 ||
+          m.indexOf("faute entreprise") !== -1 || m.indexOf("faute de l'entreprise") !== -1;
+      }
       function ptMotifLegendTxt() {
         return ptMotifList().map(function (m) { return PT_ABS_MOTIFS[m] + '=' + m; }).join(" \u00b7 ");
       }
@@ -17558,8 +17639,8 @@ html +=
         var rendChk = (rec && rec.rendement === true) || montDuJour;
         html += '<div style="display:flex;gap:12px;align-items:flex-end;margin-top:12px;flex-wrap:wrap">' +
           '<label title="' + (montDuJour ? "Montage pointé ce jour : le jour compte en rendement" : "Cochez si ce jour doit compter en rendement (après avoir pointé le montage)") + '" style="font-size:.8rem;display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap"><input type="checkbox" id="pe-rend" ' + (rendChk ? "checked" : "") + ' ' + dis + ' oninput="ptEditRecalc()"> Rendement (R)' + (montDuJour ? ' <span style="font-size:.62rem;color:#ea580c;font-weight:700">· montage pointé</span>' : '') + '</label>' +
-          '<div style="flex:1;min-width:150px"><label style="font-size:.75rem;font-weight:600">Heures libres (+)</label>' +
-          '<input type="number" id="pe-libres" value="' + (rec && rec.h_libres ? rec.h_libres : 0) + '" min="0" step="0.25" ' + dis + ' oninput="ptEditRecalc()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.85rem"></div>' +
+          '<div style="flex:1;min-width:150px"><label style="font-size:.75rem;font-weight:600" title="Heures payées de la journée (saisie directe). Si « payé sans travail » est coché, cette valeur devient la valeur par défaut des heures à rattraper.">Heures libres (+)</label>' +
+          '<input type="number" id="pe-libres" value="' + (rec && rec.h_libres ? rec.h_libres : 0) + '" min="0" step="0.25" ' + dis + ' oninput="ptEditRecalc();ptPstLibresVersRattrap()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.85rem"></div>' +
           '</div>';
         html += '<div id="pe-summary" style="margin-top:12px;font-size:.85rem;font-weight:700"></div>';
 var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === true));
@@ -17585,7 +17666,7 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
         html += '<div style="margin-top:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px">' +
           '<div style="font-size:.82rem;font-weight:700;color:#ea580c;margin-bottom:8px">Gestion des heures à rattraper</div>' +
           '<div style="display:flex;gap:12px;margin-bottom:8px">' +
-          '<div style="flex:1"><label style="font-size:.72rem">Heures à rattraper</label><input type="number" id="pe-hg" value="' + (rec && rec.rattrap_gagnees ? rec.rattrap_gagnees : 0) + '" min="0" step="0.5" ' + dis + ' style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px"></div>' +
+          '<div style="flex:1"><label style="font-size:.72rem" title="Reprend automatiquement les heures libres. Corrigez ici si le jour n\u2019est pas enti\u00e8rement \u00e0 rattraper.">Heures à rattraper</label><input type="number" id="pe-hg" value="' + (rec && rec.rattrap_gagnees ? rec.rattrap_gagnees : 0) + '" min="0" step="0.5" ' + dis + ' oninput="this.dataset.touche=String(1)" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px"></div>' +
           '<div style="flex:1"><label style="font-size:.72rem">Heures utilisées (Rattrapage)</label><input type="number" id="pe-hu" value="' + (rec && rec.rattrap_utilisees ? rec.rattrap_utilisees : 0) + '" min="0" step="0.5" ' + dis + ' style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px"></div>' +
           '</div>' +
           '<label style="font-size:.78rem;cursor:pointer"><input type="checkbox" id="pe-rattrap" ' + (rec && rec.jour_rattrapage ? "checked" : "") + ' ' + dis + '> <b>Jour de rattrapage</b> : l\'employé vient travailler pour récupérer ses heures (reportez-les dans « Heures utilisées »)</label>' +
@@ -17652,19 +17733,52 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
           return false;
         } catch(e){ return true; }
       }
+      /* ===== HEURES LIBRES <-> HEURES À RATTRAPER =====
+         Règle simple : « à rattraper » Suit toujours « heures libres »
+         (7 h libres → 7 h à rattraper). On peut corriger « à rattraper »
+         à la main : dès qu'on le touche, il n'est plus écrasé. */
+      function ptPstLibresVersRattrap(force) {
+        try {
+          var pst = document.getElementById("pe-pst");
+          var rat = document.getElementById("pe-pst-rattrap");
+          var lib = document.getElementById("pe-libres");
+          var hg = document.getElementById("pe-hg");
+          if (!pst || !pst.checked || !lib || !hg) return;
+          if (rat && !rat.checked && !force) return;
+          /* Si l'utilisateur a saisi lui-même « à rattraper », on respecte. */
+          if (hg.dataset.touche === "1" && !force) return;
+          var v = parseFloat(lib.value);
+          if (isNaN(v) || v <= 0) return;
+          hg.value = (Math.round(v * 100) / 100);
+        } catch (eL) {}
+      }
+      /* Ouverture de la modale : « à rattraper » prend la valeur des heures
+         libres (ou 8 h si aucune), sauf si la saisie a déjà été faite. */
+      function ptPstRattrapDefaut() {
+        try {
+          var lib = document.getElementById("pe-libres");
+          var hg = document.getElementById("pe-hg");
+          if (!hg) return;
+          delete hg.dataset.touche;
+          var v = lib ? parseFloat(lib.value) : NaN;
+          if (!isNaN(v) && v > 0) hg.value = Math.round(v * 100) / 100;
+          else if (!parseFloat(hg.value)) hg.value = 8;
+        } catch (eR0) {}
+      }
       function peTogglePst() {
         var s = document.getElementById("pe-pst-sub");
         var c = document.getElementById("pe-pst");
         if (s) s.style.display = (c && c.checked) ? "" : "none";
-        if (c && c.checked) {
+if (c && c.checked) {
           /* AUCUN créneau pré-rempli : vous saisissez directement le nombre
              d'heures payées dans « Heures libres ». */
-          var lib = document.getElementById("pe-libres");
-          if (lib && !parseFloat(lib.value)) { lib.value = 8; lib.dataset.dirty = "1"; }
           var rat0 = document.getElementById("pe-pst-rattrap");
           if (rat0 && !rat0.checked) rat0.checked = true;
-          var hg0 = document.getElementById("pe-hg");
-          if (hg0 && !parseFloat(hg0.value)) hg0.value = 8;
+          /* Heures libres mises à 8 si vide, puis « à rattraper » prend
+             EXACTEMENT cette valeur (7 h libres → 7 h à rattraper). */
+          var lib = document.getElementById("pe-libres");
+          if (lib && !parseFloat(lib.value)) { lib.value = 8; lib.dataset.dirty = "1"; }
+          ptPstRattrapDefaut();
           try { ptEditRecalc(); } catch (eR) {}
         }
       }
@@ -17781,8 +17895,14 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
             rec.h_j_manual = storeH(8);
             rec.h_n_manual = "";
           }
-          /* « à rattraper » = exactement les heures payées (pas +8 figé). */
-          if (pstR) rec.rattrap_gagnees = Math.round(_paidPst * 100) / 100;
+          /* « à rattraper » : la valeur saisie dans le champ fait foi ; sinon
+             elle vaut exactement les heures payées (jamais 8 de force). */
+          var _hgTouche = document.getElementById("pe-hg");
+          if (pstR) {
+            rec.rattrap_gagnees = (_hgTouche && _hgTouche.dataset.touche === "1")
+              ? (parseFloat(_hgTouche.value) || 0)
+              : Math.round(_paidPst * 100) / 100;
+          }
         } else if (absent || rattrap) {
           rec.present = false;
           rec.absent_paye = false;
@@ -18119,9 +18239,17 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
                 if (rec.present===false) { obs="Absent"; }
               }
               if (rec.faute_societe) obs="Faute société";
-              if (rec.paye_sans_travail) obs = "Payé sans travail" + (rec.pst_a_rattraper ? " — à rattraper" : "");
+              if (rec.pst_a_rattraper) obs = (obs ? obs + " \u2014 " : "") + "\u00e0 rattraper";
               if (rec.jour_rattrapage) obs="Jour de rattrapage";
-              if (rec.absent_paye) obs="Absent payé (faute entreprise) — à rattraper";
+              /* Le MOTIF r\u00e9el de la faute entreprise est imp\u00e9r\u00e9ment
+                 sur la fiche : sans lui, on ne savait pas de quoi il
+                 s'agissait ("juste pay\u00e9 sans travail"). */
+              if (rec.absent_paye === true || rec.faute_societe === true) {
+                var _fm = String(rec.motif || "").trim();
+                var _fobs = String(rec.observation || rec.obs || "").trim();
+                obs = "Absent pay\u00e9 (faute entreprise)" + (_fm ? " \u2014 " + _fm : " \u2014 motif non pr\u00e9cis\u00e9");
+                if (_fobs && _fobs.indexOf("(") === -1) obs += " \u2014 " + _fobs;
+              }
               if (montSetF[dk]) {
                 var mq = ptMontageObs(montQteF, dk);
                 obs = (obs ? obs+" — " : "") + "Montage (rendement)" + (mq ? " : " + mq : "");
@@ -19904,6 +20032,7 @@ function ptMontPrintEtat(mois, tab) {
         out += '<input type="file" id="im-file" accept=".xlsx,.xls" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:.75rem;background:#fff">';
         out += '<button class="btn btn-sec" style="padding:6px 12px;font-size:.75rem;border-radius:8px;border:1px solid #cbd5e1" onclick="ptMontDownloadTpl(\'' + escH(mois) + '\')">📄 Télécharger modèle</button>';
         out += '</div>';
+        out += '<div id="im-info"></div>';
         out += '<div style="max-height:34vh;overflow:auto;border:1px solid #e2e8f0;border-radius:10px"><table id="im-tbl" style="border-collapse:collapse;font-size:.68rem;width:100%"><thead><tr style="background:#f8fafc;position:sticky;top:0"><th style="padding:4px;border:1px solid #e2e8f0;text-align:left">Employé</th><th style="padding:4px;border:1px solid #e2e8f0;text-align:left">Matricule</th><th style="padding:4px;border:1px solid #e2e8f0;text-align:left">Article</th><th style="padding:4px;border:1px solid #e2e8f0;text-align:left">Date</th><th style="padding:4px;border:1px solid #e2e8f0;text-align:right">Quantité</th></tr></thead><tbody></tbody></table></div>' +
           '<div id="im-recap" style="margin-top:10px"></div>' +
           '<div id="im-totaux" style="margin-top:8px"></div>' +
@@ -19916,15 +20045,84 @@ function ptMontPrintEtat(mois, tab) {
         var inp = document.getElementById("im-file");
         if (inp) inp.onchange = function (e) { ptMontPreviewImport(e, mois); };
       }
+      /* MODÈLE EXCEL : la MÊME disposition que le registre réel
+         L1  : dates (mardi 1 septembre 2026, mercredi 2 septembre 2026…)
+         L2  : SEMAINE 1 | PALLETTES | CCU V MON CH | …
+         L3  : PALLETTES
+         L4  : MON + désignation
+         L5  : code de chaque article  (+ « ........ » pour la colonne
+               bleue des totaux du jour)
+         L6+ : un travailleur par ligne, puis la ligne de totaux (« * »).
+       Comme cela, le fichier de l'app et le fichier exporté ont exactement
+       la même forme : plus rien à deviner à l'import. */
       function ptMontDownloadTpl(mois) {
-        var csv = [["Employé", "Matricule", "Article", "Date", "Quantité"]].concat([
-          ["DUPONT Jean", "", "A01", mois + "-01", 10],
-          ["DUPONT Jean", "", "A01", mois + "-02", 8]
-        ]);
-        var blob = new Blob(["\uFEFF" + csv.map(function (r) { return r.join(";"); }).join("\n")], { type: "text/csv;charset=utf-8" });
+        var m = String(mois || "");
+        var p = m.split("-");
+        var an = parseInt(p[0], 10) || new Date().getFullYear();
+        var mo = parseInt(p[1], 10) || 1;
+        var ams = getArticlesMontage() || [];
+        var emps = (getPersonnelActifs() || []).filter(function (x) { return x.en_paie !== false; });
+        var JOURS = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
+        var MOIS = ["janvier", "f\u00e9vrier", "mars", "avril", "mai", "juin", "juillet",
+                    "ao\u00fbt", "septembre", "octobre", "novembre", "d\u00e9cembre"];
+        /* On prend les 11 premiers articles du catalogue. */
+        var arts = ams.slice(0, 11);
+        var nA = Math.max(arts.length, 1);
+        var nbJour = 7, nbSem = 2;
+
+        var rows = [];
+        /* L1 : dates, une par bloc de (nbA + 1) colonnes */
+        var r1 = [""];
+        for (var s2 = 0; s2 < nbSem; s2++) {
+          for (var j = 0; j < nbJour; j++) {
+            var dnum = s2 * 7 + j + 1;
+            var dt = new Date(an, mo - 1, dnum);
+            if (dt.getMonth() !== mo - 1) { r1.push(""); continue; }
+            var d = dt.getDate();
+            for (var k = 0; k <= nA; k++) r1.push(k === 0 ? (JOURS[dt.getDay()] + " " + d + " " + MOIS[mo - 1] + " " + an) : "");
+          }
+        }
+        rows.push(r1);
+        /* L2 : SEMAINE n + PALLETTES + colonne bleue */
+        var r2 = [], r3 = [], r4 = [], r5 = [];
+        for (var s3 = 0; s3 < nbSem; s3++) {
+          var cols = 1 + (nA + 1) * nbJour;
+          for (var c = 0; c < cols; c++) {
+            var pos = c % (nA + 1);
+            r2.push(c === 0 ? "SEMAINE " + (s3 + 1) : (pos === nA ? "CCU V MON CH" : "PALLETTES"));
+            r3.push(c === 0 ? "" : "PALLETTES");
+            if (c === 0) { r4.push(""); r5.push(""); continue; }
+            if (pos === nA) { r4.push("MON"); r5.push("........"); continue; }
+            var art = arts[pos - 1];
+            r4.push(art ? "MON " + String(art.designation || art.code).toUpperCase() : "");
+            r5.push(art ? String(art.code) : "");
+          }
+        }
+        rows.push(r2); rows.push(r3); rows.push(r4); rows.push(r5);
+        /* Une ligne par travailleur + la ligne de totaux */
+        emps.forEach(function (e) {
+          var lr = [e.nom + " " + (e.prenoms || "")];
+          for (var c2 = 1; c2 < r5.length; c2++) lr.push("");
+          rows.push(lr);
+        });
+        var lt = ["*"];
+        for (var c3 = 1; c3 < r5.length; c3++) lt.push("");
+        rows.push(lt);
+
+        try {
+          var ws = XLSX.utils.aoa_to_sheet(rows);
+          var wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, "REGISTRE");
+          XLSX.writeFile(wb, "montage_registre_modele_" + an + "-" + String(mo).padStart(2, "0") + ".xlsx");
+          toast("Modèle téléchargé : même disposition que le registre", "success");
+          return;
+        } catch (eX) {}
+        /* Repli CSV si XLSX n'est pas disponible. */
+        var csv = rows.map(function (r) { return r.join(";"); }).join("\n");
+        var blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
         var a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = "montage_import_modele.csv";
+        a.download = "montage_registre_modele.csv";
         a.click();
       }
       window._imParsed = [];
@@ -19943,8 +20141,21 @@ function ptMontPrintEtat(mois, tab) {
             var wb = XLSX.read(data, { type: "array" });
             var sheet = wb.Sheets[wb.SheetNames[0]];
             var rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-            var parsed = ptMontParseRows(rows, { mois: mois });
+            var res = ptMontParseRows(rows, { mois: mois });
+            /* Le mode « registre » renvoie {items, layout} : on aplatit. */
+            var parsed = Array.isArray(res) ? res : (res && res.items) || [];
+            window._imLayout = (!Array.isArray(res) && res) ? (res.layout || null) : null;
             window._imParsed = parsed;
+            /* Ce que le lecteur a compris du fichier (disposition réelle). */
+            var info = document.getElementById("im-info");
+            if (info) {
+              var L = window._imLayout;
+              var hC = 0; parsed.forEach(function (x) { if (x.hors_catalogue) hC++; });
+              info.innerHTML = (L
+                  ? '<div style="font-size:.68rem;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;border-radius:6px;padding:5px 8px;margin-bottom:6px">📐 Disposition reconnue : ligne des dates <b>L' + L.rowDates + '</b>, semaine <b>L' + L.semaine + '</b>, codes d\'articles <b>L' + L.codes + '</b>, travailleurs dès <b>L' + L.premierTravailleur + '</b>.</div>'
+                  : '<div style="font-size:.68rem;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:5px 8px;margin-bottom:6px">⚠ Disposition inhabituelle : lecture automatique (vérifiez les dates et articles ci-dessous).</div>') +
+                (hC ? '<div style="font-size:.68rem;color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:5px 8px;margin-bottom:6px">⚠ <b>' + hC + '</b> ligne(s) avec un code article absent du catalogue : ajoutez-les dans Articles Montage ou fixez un prix dans 🏷️ Prix articles.</div>' : "");
+            }
             var tb = document.querySelector("#im-tbl tbody");
             if (tb) {
               tb.innerHTML = "";
@@ -19981,7 +20192,13 @@ function ptMontPrintEtat(mois, tab) {
               var totG = 0, totM = 0;
               var lignes = codes.map(function (c) {
                 var a = amsI.find(function (x) { return x.code === c; });
-                var prix = a ? (parseFloat(a.prix) || 0) : 0;
+                /* Prix résolu à l'import (règles par employé / date) sinon
+                   le prix du catalogue. */
+                var prix = 0, vu = false;
+                parsed.forEach(function (it) {
+                  if (it.article_code === c && typeof it.prix === "number" && !vu) { prix = it.prix; vu = true; }
+                });
+                if (!vu) prix = a ? (parseFloat(a.prix) || 0) : 0;
                 var m = parArt[c] * prix;
                 totG += parArt[c]; totM += m;
                 return '<tr><td style="padding:4px 8px;border:1px solid #e2e8f0;font-weight:700">' + escH(c) + '</td>' +
@@ -20012,7 +20229,12 @@ function ptMontPrintEtat(mois, tab) {
               var lEmp = empCles.map(function (ke) {
                 var e = parEmp[ke];
                 var a = amsI.find(function (x) { return x.code === e.art; });
-                var px = a ? (parseFloat(a.prix) || 0) : 0;
+                var px = 0, vu = false;
+                parsed.forEach(function (it) {
+                  if (it.employee_nom === e.nom && it.article_code === e.art &&
+                      typeof it.prix === "number" && !vu) { px = it.prix; vu = true; }
+                });
+                if (!vu) px = a ? (parseFloat(a.prix) || 0) : 0;
                 gEmp += e.q; gEmpM += e.q * px;
                 return '<tr><td style="padding:4px 8px;border:1px solid #e2e8f0;font-weight:700">' + escH(e.nom || "?") +
                   (e.mat ? ' <span style="color:#64748b;font-weight:400">' + escH(e.mat) + '</span>' : "") + '</td>' +
@@ -20258,6 +20480,192 @@ function _ptMontFindArt(code, ams) {
          Les blocs se répètent verticalement (SEMAINE 1, SEMAINE 2, ...).
          Les cellules fusionnées ne renvoie une valeur que sur la 1re colonne :
          on propage donc la date du jour vers la droite. */
+      /* ===== LECTURE DETERMINISTE DU REGISTRE (le vrai fichier exporté) =====
+     On ne devine PLUS la disposition : on l'ancre sur les marqueurs du
+     fichier réel :
+       ligne 1  : « mardi 1 septembre 2026 », « mercredi 2 septembre 2026 »…
+                  (une date couvre TOUTES les colonnes de sa journée)
+       ligne 2  : SEMAINE 1 | PALLETTES | CCU V MON CH | PALLETTES | …
+       ligne 3  : MON + désignation de chaque article
+       ligne 4  : le CODE de chaque article  (+ « ........ » pour la
+                  colonne bleue des totaux du jour, qui n'est PAS un article)
+       ensuite  : une ligne par travailleur (nom en colonne A), puis la
+                  ligne de totaux (« * »).
+     Le CODE de l'article est pris tel quel dans le fichier : c'est lui qui
+     fait foi (pas le nom du catalogue). */
+      function _ptMontEstLigneSemaine(row) {
+        for (var c = 0; c <= 1 && c < (row || []).length; c++) {
+          var v = row[c];
+          if (typeof v === "string" && /^\s*SEMAI?NE\s*\d+/i.test(v)) return true;
+        }
+        return false;
+      }
+      function _ptMontCelluleUtile(v) {
+        if (v === "" || v === null || v === undefined) return false;
+        if (typeof v === "number") return false;
+        var s2 = String(v).trim();
+        if (!s2) return false;
+        if (/^PALLE?TTES?$/i.test(s2)) return false;
+        if (/^CCU\b/i.test(s2)) return false;
+        if (/^[.\s\u2026]+$/.test(s2)) return false;   /* « ........ » */
+        if (/^MON(\s|$)/i.test(s2)) return false;       /* « MON SIVE CIEM » */
+        return true;
+      }
+      /* Article du catalogue correspondant au code du fichier (pour le prix).
+         1) code identique ; 2) le code du catalogue est entièrement contenu
+         dans le code Excel ; 3) aucun → article hors catalogue. */
+      function _ptMontArtPourCode(code, ams) {
+        var c = String(code || "").trim();
+        if (!c) return null;
+        var low = c.toLowerCase();
+        var ex = ams.find(function (a) { return String(a.code || "").trim().toLowerCase() === low; });
+        if (ex) return ex;
+        var toks = low.split(/\s+/).filter(function (t) { return t.length >= 2; });
+        if (toks.length < 1) return null;
+        var best = null, bestLen = 0;
+        ams.forEach(function (a) {
+          var ac = String(a.code || "").trim().toLowerCase();
+          if (!ac || ac.length < 3) return;
+          if (low.indexOf(ac) >= 0 && ac.length > bestLen) { best = a; bestLen = ac.length; }
+        });
+        if (best) return best;
+        /* Tous les mots du code catalogue présents dans le code Excel. */
+        ams.forEach(function (a) {
+          [a.code, a.designation].forEach(function (src) {
+            var ac = String(src || "").trim().toLowerCase();
+            var t2 = ac.split(/\s+/).filter(function (t) { return t.length >= 2; });
+            if (t2.length < 2) return;
+            var ok = t2.every(function (t) { return low.indexOf(t) >= 0; });
+            if (ok && ac.length > bestLen) { best = a; bestLen = ac.length; }
+          });
+        });
+        return best;
+      }
+      function ptMontParseRegistre(rows, opts) {
+        var mois = opts.mois || "";
+        var y = 0, mIdx = 0;
+        if (mois) { var ps = String(mois).split("-"); y = parseInt(ps[0], 10); mIdx = parseInt(ps[1], 10) - 1; }
+        var ams = opts.articlesMontage || getArticlesMontage();
+        var workers = opts.workers || ptMontWorkers();
+        var items = [], layout = null;
+        if (!Array.isArray(rows) || !rows.length || !ams.length) return { items: items, layout: layout };
+
+        /* 1) Ligne des dates */
+        var rowDates = -1, dayByCol = {};
+        for (var r0 = 0; r0 < Math.min(rows.length, 12) && rowDates === -1; r0++) {
+          var cand = rows[r0] || [], tmp = {}, distinct = {}, nb = 0;
+          for (var c0 = 0; c0 < cand.length; c0++) {
+            var v0 = cand[c0];
+            if (v0 === "" || v0 === null || v0 === undefined) continue;
+            var d0 = _ptMontDateCellToDate(v0, y, mIdx, true);
+            if (!d0) continue;
+            var p0 = d0.split("-");
+            if (parseInt(p0[2], 10) < 1 || parseInt(p0[2], 10) > 31) continue;
+            if (y && p0[0] !== String(y)) continue;
+            tmp[c0] = d0; distinct[d0] = true; nb++;
+          }
+          if (Object.keys(distinct).length >= 2) { rowDates = r0; dayByCol = tmp; }
+        }
+        if (rowDates < 0) return { items: items, layout: layout };
+        /* Une date couvre les colonnes jusqu'à la date suivante. */
+        var maxCols = 0;
+        for (var i0 = 0; i0 < rows.length; i0++) maxCols = Math.max(maxCols, (rows[i0] || []).length);
+        (function (d2c) {
+          var cols = Object.keys(d2c).map(function (x) { return parseInt(x, 10); })
+            .sort(function (a, b) { return a - b; });
+          for (var k = 0; k < cols.length; k++) {
+            var from = cols[k];
+            var to = (k + 1 < cols.length) ? cols[k + 1] - 1 : maxCols - 1;
+            for (var cc = from; cc <= to; cc++) if (!d2c[cc]) d2c[cc] = d2c[from];
+          }
+        })(dayByCol);
+
+        /* 2) Blocs SEMAINE + ligne des codes + lignes travailleurs */
+        var blocs = [], start = rowDates + 1;
+        for (var r1 = start; r1 < rows.length; r1++) {
+          if (_ptMontEstLigneSemaine(rows[r1])) { blocs.push({ debut: r1, fin: rows.length }); if (blocs.length > 1) blocs[blocs.length - 2].fin = r1; }
+        }
+        if (!blocs.length) blocs = [{ debut: rowDates + 1, fin: rows.length }];
+
+        blocs.forEach(function (bl) {
+          /* Ligne des codes = dernière ligne « utile » avant le premier
+             travailleur du bloc. */
+          var rowCodes = -1, premierEmp = -1;
+          for (var r2 = bl.debut + 1; r2 < bl.fin; r2++) {
+            var rw = rows[r2] || [];
+            var nom0 = "";
+            for (var lc = 0; lc <= 1 && lc < rw.length; lc++) {
+              if (typeof rw[lc] === "string" && rw[lc].trim()) { nom0 = rw[lc].trim(); break; }
+            }
+            if (nom0 && _ptMontFindEmp(nom0, "", workers)) { premierEmp = r2; break; }
+          }
+          if (premierEmp === -1) return;
+          /* La ligne des codes ne peut pas être la ligne des DATES. */
+          function _ligneEstDates(rw) {
+            var dd = {}, n = 0;
+            for (var cc = 0; cc < (rw || []).length; cc++) {
+              var dv = _ptMontDateCellToDate(rw[cc], y, mIdx, true);
+              if (!dv) continue;
+              dd[dv] = true;
+            }
+            return Object.keys(dd).length >= 2;
+          }
+          for (var r3 = premierEmp - 1; r3 >= bl.debut; r3--) {
+            if (r3 === rowDates) continue;
+            var rc = rows[r3] || [], nbOk = 0;
+            if (_ligneEstDates(rc)) continue;
+            for (var c3 = 1; c3 < rc.length; c3++) if (_ptMontCelluleUtile(rc[c3])) nbOk++;
+            if (nbOk >= 3) { rowCodes = r3; break; }
+          }
+          if (rowCodes === -1) return;
+          if (!layout) {
+            layout = { rowDates: rowDates + 1, semaine: bl.debut + 1, codes: rowCodes + 1,
+                        premierTravailleur: premierEmp + 1 };
+          }
+          /* Colonnes articles : la ligne des codes fait foi. La colonne
+             bleue des totaux est repérée par les « ........ » (ou par un
+             en-tête exactement « MON »). */
+          var hdr = rows[rowCodes] || [], hdrPrec = rows[rowCodes - 1] || [];
+          /* On part du PREMIER travailleur : c'est lui qui porte les quantités
+             (dans le registre réel, c'est souvent la seule ligne renseignée). */
+          for (var r4 = premierEmp; r4 < bl.fin; r4++) {
+            var lw = rows[r4] || [], nom = "";
+            for (var lc2 = 0; lc2 <= 1 && lc2 < lw.length; lc2++) {
+              if (typeof lw[lc2] === "string" && lw[lc2].trim()) { nom = lw[lc2].trim(); break; }
+            }
+            if (!nom) continue;
+            var emp = _ptMontFindEmp(nom, "", workers);
+            if (!emp) continue;
+            for (var cc2 = 1; cc2 < hdr.length; cc2++) {
+              var code = hdr[cc2];
+              if (!_ptMontCelluleUtile(code)) continue;
+              var d = dayByCol[cc2];
+              if (!d) continue;
+              var q = parseFloat(lw[cc2]);
+              if (!q || isNaN(q) || q <= 0) continue;
+              var art = _ptMontArtPourCode(code, ams);
+              items.push({
+                employee_id: emp.id,
+                employee_nom: emp.nom,
+                employee_matricule: emp.matricule || "",
+                article_code: String(code).trim(),
+                date: d,
+                quantite: q,
+                prix: art ? (parseFloat(art.prix) || 0) : 0,
+                article_libelle: art ? (art.designation || art.code) : "",
+                hors_catalogue: !art,
+              });
+            }
+          }
+        });
+        return { items: items, layout: layout };
+      }
+      /* Toujours un tableau, quel que soit le mode de lecture (le mode
+     « registre » renvoie en plus la disposition reconnue). */
+      function ptMontParseLignes(rows, opts) {
+        var r = ptMontParseRows(rows, opts);
+        return Array.isArray(r) ? r : ((r && r.items) || []);
+      }
       function ptMontParseGrille(rows, opts) {
         opts = opts || {};
         var mois = opts.mois || "";
@@ -20366,8 +20774,16 @@ items.push({
         }
         if (name) {
           var nn = _normName(name);
-          var fe2 = workers.find(function (w) { var wn = _normName(w.nom || ""); return wn === nn || wn.indexOf(nn) >= 0 || nn.indexOf(wn) >= 0; });
-          if (fe2) return fe2;
+          /* « * », « …… », « 0.00 »… se réduisent à une chaîne vide et
+             matchaient alors N'IMPORTE QUEL travailleur (ligne de totaux
+             du registre transformée en production). */
+          if (nn && nn.replace(/\s/g, "").length >= 3) {
+            var fe2 = workers.find(function (w) {
+              var wn = _normName(w.nom || "");
+              return wn && (wn === nn || wn.indexOf(nn) >= 0 || nn.indexOf(wn) >= 0);
+            });
+            if (fe2) return fe2;
+          }
         }
         return null;
       }
@@ -20381,7 +20797,13 @@ items.push({
         var items = [];
         if (!Array.isArray(rows) || rows.length === 0) return items;
 
-        /* --- MODE 0 : le VRAI registre (dates fusionnées + codes articles) --- */
+        /* --- MODE 0 : le VRAI registre (SEMAINE / PALLETTES / code en ligne) --- */
+        try {
+          var reg = ptMontParseRegistre(rows, opts);
+          if (reg && reg.items.length) { reg.parsed = true; return reg; }
+        } catch (eR0) {}
+
+        /* --- MODE 1 : grille multi-niveaux (compatibilité) --- */
         try {
           var grille = ptMontParseGrille(rows, opts);
           if (grille.length) return grille;
@@ -20550,20 +20972,31 @@ items.push({
             if (feries[dt]) continue;
             o++;
             var r = pmap[emp.id + '|' + dt];
-            if (r) {
+if (r) {
               var hrs = parseHeure(r.h_j_manual || "") + parseHeure(r.h_n_manual || "");
               var mo2 = r.motif || "Sans motif";
               var just = ptAbsEstJustifiee(mo2);
-              if (r.present === true || hrs > 0 || r.faute_societe === true) {
-                p++;
-                if (r.faute_societe === true) f++;
-                if (r.absent_paye === true) payes++;
-              } else {
-                if (r.absent_paye === true) payes++;
+              if (r.absent_paye === true || r.faute_societe === true) {
+                /* JOUR PAY\u00c9 SANS TRAVAIL (faute entreprise, panne, accident,
+                   maternit\u00e9\u2026) : l'absence est r\u00e9elle mais JUSTIFI\u00c9E.
+                   - elle ne fait PAS baisser le taux d'assiduit\u00e9 (elle est
+                     exclue du calcul comme une absence justifi\u00e9e) ;
+                   - elle n'est PAS compt\u00e9e comme une pr\u00e9sence r\u00e9elle :
+                     les primes et indemnit\u00e9s qui exigent une pr\u00e9sence
+                     effective ne sont donc pas vers\u00e9es ce jour-l\u00e0.
+                   Un jour pay\u00e9 SANS MOTIF, lui, reste une absence non
+                   justifi\u00e9e. */
+                payes++;
                 motifs[mo2] = (motifs[mo2] || 0) + 1;
-                /* Absent justifié : exclu du calcul (ni présence ni absence).
-                   Absent NON justifié : ne compte pas comme présence, il
-                   sera déduit dans le total des absences. */
+                if (just || r.faute_societe === true || ptFauteEntMotifValide(mo2)) absJust++;
+                if (r.faute_societe === true) f++;
+              } else if (r.present === true || hrs > 0) {
+                p++;
+              } else {
+                motifs[mo2] = (motifs[mo2] || 0) + 1;
+                /* Absent justifi\u00e9 : exclu du calcul (ni pr\u00e9sence ni absence).
+                   Absent NON justifi\u00e9 : ne compte pas comme pr\u00e9sence, il
+                   sera d\u00e9duit du total des absences. */
                 if (just) absJust++;
               }
             } else {
@@ -20862,6 +21295,163 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         }
         return items;
       }
+      /* ===== PRIX D'ARTICLES VARIABLES =====
+         Un même article peut être payé différemment :
+           - selon la PÉRIODE  (500 F aujourd'hui, 100 F demain) ;
+           - selon l'EMPLOYÉ   (200 F pour l'un, 300 F pour l'autre) ;
+           - selon la DATE     (1 F pour l'un ce jour-là, 0,5 F pour l'autre).
+         Règle la plus-SPÉCIFIQUE gagne :
+           article + employé + date  >  article + date  >  article + employé
+           >  article + période  >  prix du catalogue.
+         Stockage : paye.section "prix_articles" = [{id, code, prix, emp_id,
+         date_debut, date_fin, note}] (emp_id vide = tous les employés ;
+         dates vides = valable toujours). */
+      function getPrixArticlesRegles() {
+        var v = getPayeSection("prix_articles", []);
+        return Array.isArray(v) ? v : [];
+      }
+      function setPrixArticlesRegles(list) { setPayeSection("prix_articles", list || []); }
+      function ptPrixRegleDansPeriode(r, date) {
+        var d = String(date || "");
+        if (!d) return true;
+        var deb = String(r.date_debut || ""), fin = String(r.date_fin || "");
+        if (deb && d < deb) return false;
+        if (fin && d > fin) return false;
+        return true;
+      }
+      function ptPrixArticlesValides(empId, date) {
+        var emp = String(empId || "");
+        return getPrixArticlesRegles().filter(function (r) {
+          if (!r || !r.code) return false;
+          var re = String(r.emp_id || "");
+          if (re && re !== emp) return false;
+          return ptPrixRegleDansPeriode(r, date);
+        });
+      }
+      /* Prix effectif d'un article, ou null si le catalogue suffit. */
+      function ptPrixArticle(code, empId, date) {
+        var cands = ptPrixArticlesValides(empId, date).filter(function (r) {
+          return String(r.code) === String(code);
+        });
+        if (!cands.length) return null;
+        /* Spécificité, de la plus précise à la moins précise :
+           employé + date (5) > date seule (4) > employé seul (3)
+           = période seule (3) > règle générique (1).
+           À égalité, la période la plus récente l'emporte. */
+        function _spec(r) {
+          var he = !!r.emp_id, hd = !!(r.date_debut || r.date_fin);
+          return he ? (hd ? 5 : 3) : (hd ? 4 : 1);
+        }
+        cands.sort(function (a, b) {
+          var sa = _spec(a), sb = _spec(b);
+          if (sa !== sb) return sb - sa;
+          return String(b.date_debut || "").localeCompare(String(a.date_debut || ""));
+        });
+        var r = cands[0];
+        var p = parseFloat(r.prix);
+        return isNaN(p) ? null : p;
+      }
+      /* Prix final en tenant compte des règles, sinon du catalogue. */
+      function ptPrixEffectif(code, empId, date) {
+        var p = ptPrixArticle(code, empId, date);
+        if (p !== null) return p;
+        var ams = getArticlesMontage();
+        var a = ams.find(function (x) { return String(x.code) === String(code); });
+        return a ? (parseFloat(a.prix) || 0) : 0;
+      }
+      function ptPrixArticlesVides() {
+        return !getPrixArticlesRegles().some(function (r) { return r && r.code && parseFloat(r.prix) > 0; });
+      }
+      /* ===== MODALE : PRIX DES ARTICLES (variables par période / employé / date) ===== */
+      function showModalPrixArticles() {
+        var ams = getArticlesMontage() || [];
+        var emps = (getPersonnelActifs() || []).filter(function (p) { return p.en_paie !== false; });
+        function nomEmp(id) {
+          if (!id) return "Tous les employés";
+          for (var i = 0; i < emps.length; i++) if (emps[i].id === id) return (emps[i].nom || "?") + " " + (emps[i].prenoms || "");
+          return "Employé inconnu";
+        }
+        var html =
+          '<div style="padding:14px 18px 18px">' +
+          '<div style="font-size:.95rem;font-weight:800;margin-bottom:2px">🏷️ Prix des articles (variables)</div>' +
+          '<div style="font-size:.72rem;color:#475569;margin-bottom:10px">Le même article peut être payé ' +
+          '<b>500 F aujourd\'hui et 100 F demain</b>, <b>200 F pour un employé et 300 F pour un autre</b>, ' +
+          'ou <b>1 F et 0,5 F le même jour</b>. Sans règle, le prix du catalogue s\'applique. ' +
+          'La règle la plus précise l\'emporte.</div>' +
+          '<div style="display:grid;grid-template-columns:1.4fr .8fr 1.3fr .9fr .9fr auto;gap:6px;align-items:end;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px">' +
+          '<div><label style="font-size:.66rem;font-weight:700">Article</label><select id="pa-code" style="width:100%;padding:5px;font-size:.78rem">' +
+          ams.map(function (a) { return '<option value="' + escH(a.code) + '">' + escH(a.code) + " — " + escH(a.designation || "") + ' (' + fmtF(a.prix) + ')'; }).join("") +
+          '</select></div>' +
+          '<div><label style="font-size:.66rem;font-weight:700">Prix (F)</label><input type="number" id="pa-prix" min="0" step="0.5" style="width:100%;padding:5px;font-size:.78rem" placeholder="500"></div>' +
+          '<div><label style="font-size:.66rem;font-weight:700">Employé</label><select id="pa-emp" style="width:100%;padding:5px;font-size:.78rem"><option value="">Tous</option>' +
+          emps.map(function (p) { return '<option value="' + escH(p.id) + '">' + escH((p.nom || "") + " " + (p.prenoms || "")) + '</option>'; }).join("") +
+          '</select></div>' +
+          '<div><label style="font-size:.66rem;font-weight:700">Du</label><input type="date" id="pa-deb" style="width:100%;padding:4px;font-size:.74rem"></div>' +
+          '<div><label style="font-size:.66rem;font-weight:700">Au</label><input type="date" id="pa-fin" style="width:100%;padding:4px;font-size:.74rem"></div>' +
+          '<div><button class="btn" onclick="ptPrixArticleAjouter()" style="padding:6px 12px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700">+ Ajouter</button></div>' +
+          '</div>' +
+          '<div id="pa-liste" style="margin-top:10px"></div>' +
+          '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 20px">Fermer</button></div>' +
+          "</div>";
+        openPtModal(html, true, true);
+        ptPrixArticlesRender();
+      }
+      function ptPrixArticlesRender() {
+        var box = document.getElementById("pa-liste");
+        if (!box) return;
+        var regles = getPrixArticlesRegles().filter(function (r) { return r && r.code; });
+        if (!regles.length) {
+          box.innerHTML = '<div style="padding:12px;text-align:center;color:#64748b;font-size:.8rem;border:1px dashed #cbd5e1;border-radius:8px">Aucune règle : tous les articles utilisent leur prix du catalogue.</div>';
+          return;
+        }
+        var emps = (getPersonnelActifs() || []).filter(function (p) { return p.en_paie !== false; });
+        function nomEmp(id) {
+          if (!id) return "<b>Tous</b>";
+          for (var i = 0; i < emps.length; i++) if (emps[i].id === id) return escH((emps[i].nom || "") + " " + (emps[i].prenoms || ""));
+          return "Employé inconnu";
+        }
+        function dt(x) { return x ? escH(_ptImDateLbl(x)) : "—"; }
+        box.innerHTML =
+          '<div style="max-height:46vh;overflow:auto;border:1px solid #e2e8f0;border-radius:8px"><table style="border-collapse:collapse;font-size:.74rem;width:100%">' +
+          '<thead><tr style="background:#f8fafc"><th style="padding:6px 8px;text-align:left">Article</th>' +
+          '<th style="padding:6px 8px;text-align:right">Prix</th><th style="padding:6px 8px;text-align:left">Employé</th>' +
+          '<th style="padding:6px 8px;text-align:left">Du</th><th style="padding:6px 8px;text-align:left">Au</th>' +
+          '<th style="padding:6px 8px;text-align:center">Spécificité</th><th></th></tr></thead><tbody>' +
+          regles.map(function (r) {
+            var spec = r.emp_id ? ((r.date_debut || r.date_fin) ? "employé + date" : "employé") : ((r.date_debut || r.date_fin) ? "période" : "générique");
+            return '<tr><td style="padding:5px 8px;border-top:1px solid #e2e8f0;font-weight:700">' + escH(r.code) + '</td>' +
+              '<td style="padding:5px 8px;border-top:1px solid #e2e8f0;text-align:right;font-weight:700">' + fmtF(r.prix) + '</td>' +
+              '<td style="padding:5px 8px;border-top:1px solid #e2e8f0">' + nomEmp(r.emp_id) + '</td>' +
+              '<td style="padding:5px 8px;border-top:1px solid #e2e8f0">' + dt(r.date_debut) + '</td>' +
+              '<td style="padding:5px 8px;border-top:1px solid #e2e8f0">' + dt(r.date_fin) + '</td>' +
+              '<td style="padding:5px 8px;border-top:1px solid #e2e8f0;text-align:center;font-size:.66rem">' + escH(spec) + '</td>' +
+              '<td style="padding:5px 8px;border-top:1px solid #e2e8f0;text-align:right">' +
+              '<button class="btn" title="Supprimer cette règle de prix" aria-label="Supprimer cette règle de prix" onclick="ptPrixArticleSupprimer(\'' + escH(r.id) + '\')" style="padding:2px 8px;background:#fee2e2;color:#dc2626;border:none;border-radius:4px;font-size:.7rem">✕</button></td></tr>';
+          }).join("") + "</tbody></table></div>";
+      }
+      function ptPrixArticleAjouter() {
+        var g = function (id) { return (document.getElementById(id) || {}).value || ""; };
+        var code = String(g("pa-code") || "").trim();
+        var prix = parseFloat(g("pa-prix"));
+        if (!code) { toast("Choisissez un article", "error"); return; }
+        if (isNaN(prix) || prix < 0) { toast("Prix invalide", "error"); return; }
+        var deb = g("pa-deb") || "", fin = g("pa-fin") || "";
+        if (deb && fin && deb > fin) { toast("La date de début doit précéder la fin", "error"); return; }
+        var list = getPrixArticlesRegles().filter(function (r) { return r && r.code; });
+        list.push({ id: DB.id(), code: code, prix: prix, emp_id: String(g("pa-emp") || ""), date_debut: deb, date_fin: fin, note: "" });
+        setPrixArticlesRegles(list);
+        ptPrixArticlesRender();
+        toast("Règle enregistrée : " + code + " = " + fmtF(prix), "success");
+        try { switchPtTab("montage"); } catch (eRr) {}
+        try { switchPtTab("recap"); } catch (eRr2) {}
+      }
+      function ptPrixArticleSupprimer(id) {
+        var list = getPrixArticlesRegles().filter(function (r) { return r && r.id !== id; });
+        setPrixArticlesRegles(list);
+        ptPrixArticlesRender();
+        toast("Règle supprimée", "success");
+        try { switchPtTab("montage"); } catch (eRd) {}
+      }
       function calcMontageMensuel(empId, mois) {
         var ams = getArticlesMontage();
         var pts = getPointageMontage().filter(function (p) {
@@ -20874,7 +21464,11 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             return a.code === pts[i].article_code;
           });
           if (am) {
-            total += (pts[i].quantite || 0) * am.prix;
+            /* Prix de la ligne d'abord (si saisi), puis la règle
+               employé/date/période, puis le catalogue. */
+            var _pxL = parseFloat(pts[i].prix);
+            var pxE = (_pxL > 0) ? _pxL : ptPrixEffectif(pts[i].article_code, pts[i].employee_id, pts[i].date);
+            total += (pts[i].quantite || 0) * pxE;
             if (am.compte_prime !== false) qtePrime += pts[i].quantite || 0;
           }
         }
@@ -25274,13 +25868,28 @@ if (normalHours > 173.33) {
             gain: montage.total,
             ret: 0,
           });
-        if (montage.prime > 0)
+        /* Prime de Production = prime PROGRESSIVE par tranches d'articles.
+           Elle remplace l'ancienne prime au seuil unique, qui restait
+           nursing dans le récap Montage. */
+        var pp = null;
+        try { pp = ptPrimeProdCalcul(emp.id, mois); } catch (ePP) {}
+        var primeProd = (pp && pp.actif) ? pp.montant : 0;
+        if (pp && pp.montant_ca > 0)
+          items.push({
+            n: "28",
+            label: "Prime sur CA HT",
+            base: pp.montant_ca,
+            taux: "1",
+            gain: pp.montant_ca,
+            ret: 0,
+          });
+        if (primeProd > 0)
           items.push({
             n: "28",
             label: "Prime de Production",
-            base: montage.prime,
+            base: primeProd,
             taux: "1",
-            gain: montage.prime,
+            gain: primeProd,
             ret: 0,
           });
         ptRemonterMontage(items);
@@ -27869,11 +28478,13 @@ if (normalHours > 173.33) {
         renderCongeTable(showAll);
       }
       /* Calcule le congé dû selon convention CI */
-      function calcCongeDroit(emp, finPeriode, jours) {
+      function calcCongeDroit(emp, finPeriode, jours, debutPeriode) {
         if (!emp || !finPeriode) return { montant: 0, detail: [] };
         var sum = 0,
           count = 0;
         var detail = [];
+        /* Montant PLAQÉ par le chef : il prime sur tout le calcul. */
+        var force = debutPeriode ? getCongeMontantForce(emp.id, debutPeriode, finPeriode) : 0;
         var fy = parseInt(finPeriode.split("-")[0]),
           fm = parseInt(finPeriode.split("-")[1]);
         var moisNoms = [
@@ -27926,7 +28537,8 @@ if (normalHours > 173.33) {
         }
         var moy = count > 0 ? Math.round(sum / count) : 0;
         var tauxJ = Math.round(moy / 30);
-        var montant = tauxJ * (jours || 30);
+        var droit = tauxJ * (jours || 30);
+        var montant = force > 0 ? Math.round(force) : droit;
         return {
           montant: montant,
           detail: detail,
@@ -27934,7 +28546,303 @@ if (normalHours > 173.33) {
           tauxJour: tauxJ,
           jours: jours || 30,
           total: sum,
+          force: force > 0,
+          droit: droit,
         };
+      }
+      /* ===== PRIME DE PRODUCTION PROGRESSIVE =====
+     Barres par défaut (cumulatives) :
+       0 → 2 999 articles      : 0 F
+       3 000 → 3 999 articles  : 25 F par article de la tranche
+       4 000 et au-delà        : 75 F par article de la tranche
+     Exemple 4 500 articles : 0 + (999 × 25) + (501 × 75).
+     La prime est calculée par EMPLOYÉ et par MOIS, à partir des quantités
+     d'articles réellement pointées. Elle va uniquement dans la ligne
+     « Prime de Production » du bulletin (jamais dans le récap Montage).
+     Les taux sont versionnés par période : un changement ne réécrit pas
+     les mois déjà payés. */
+      function getPrimeProdConfig() {
+        var v = getPayeSection("prime_production", null);
+        if (!v || !Array.isArray(v.versions)) {
+          v = {
+            actif: true,
+            /* Barres : {jusqu_a: 3000, taux: 0} puis {jusqu_a: 4000, taux: 25}
+               puis {jusqu_a: null, taux: 75} (null = sans plafond). */
+            bandes: [
+              { jusqu_a: 3000, taux: 0 },
+              { jusqu_a: 4000, taux: 25 },
+              { jusqu_a: null, taux: 75 },
+            ],
+            taux_ca_ht: 0,
+            articles_exclus: [],
+            factures_exclus: [],
+            versions: [{ id: DB.id(), debut: "2000-01", fin: "", label: "Barres d'origine",
+                         bandes: [{ jusqu_a: 3000, taux: 0 }, { jusqu_a: 4000, taux: 25 }, { jusqu_a: null, taux: 75 }],
+                         taux_ca_ht: 0, articles_exclus: [], factures_exclus: [] }],
+          };
+          setPayeSection("prime_production", v);
+        }
+        if (!Array.isArray(v.versions)) v.versions = [];
+        return v;
+      }
+      function setPrimeProdConfig(v) { setPayeSection("prime_production", v); }
+      /* Version applicable au mois donné (la plus récente qui le couvre). */
+      function ptPrimeProdVersion(mois) {
+        var cfg = getPrimeProdConfig();
+        var m = String(mois || "");
+        var vs = cfg.versions.filter(function (v) {
+          if (!v) return false;
+          if (v.debut && m && m < v.debut) return false;
+          if (v.fin && m && m > v.fin) return false;
+          return true;
+        });
+        if (!vs.length) return null;
+        vs.sort(function (a, b) { return String(b.debut || "").localeCompare(String(a.debut || "")); });
+        return vs[0];
+      }
+      function ptPrimeProdBandes(mois) {
+        var v = ptPrimeProdVersion(mois);
+        if (v && Array.isArray(v.bandes) && v.bandes.length) return v.bandes;
+        return getPrimeProdConfig().bandes;
+      }
+      function ptPrimeProdExclus(mois, cle) {
+        var v = ptPrimeProdVersion(mois);
+        var l = (v && Array.isArray(v[cle])) ? v[cle] : (getPrimeProdConfig()[cle] || []);
+        return (l || []).map(function (x) { return String(x).trim().toLowerCase(); }).filter(Boolean);
+      }
+      /* Quantités pointées d'un employé sur le mois, hors exclusions. */
+      function ptPrimeProdQuantites(empId, mois) {
+        var exArt = ptPrimeProdExclus(mois, "articles_exclus");
+        var exFac = ptPrimeProdExclus(mois, "factures_exclus");
+        var pts = (getPointageMontage() || []).filter(function (p) {
+          return p && p.employee_id === empId && p.date && String(p.date).indexOf(mois) === 0;
+        });
+        var total = 0, parArt = {};
+        pts.forEach(function (p) {
+          var code = String(p.article_code || "").trim().toLowerCase();
+          var fac = String(p.facture || p.facture_id || "").trim().toLowerCase();
+          if (exArt.indexOf(code) >= 0) return;
+          if (fac && exFac.indexOf(fac) >= 0) return;
+          var q = parseFloat(p.quantite) || 0;
+          if (q <= 0) return;
+          total += q;
+          parArt[p.article_code] = (parArt[p.article_code] || 0) + q;
+        });
+        return { total: total, parArt: parArt, nbLignes: pts.length };
+      }
+      /* Chiffre d'affaires HT d'un employé sur le mois (pour le taux
+         « prime sur CA », qui reste un taux séparé). */
+      function getMontageCAHT(empId, mois) {
+        var ca = 0;
+        (getPointageMontage() || []).forEach(function (p) {
+          if (!p || p.employee_id !== empId) return;
+          if (!p.date || String(p.date).indexOf(mois) !== 0) return;
+          var q = parseFloat(p.quantite) || 0;
+          if (q <= 0) return;
+          /* Prix enregistré sur la ligne, sinon prix effectif. */
+          var px = parseFloat(p.prix);
+          if (!px || px <= 0) px = ptPrixEffectif(p.article_code, empId, p.date);
+          ca += q * px;
+        });
+        return Math.round(ca);
+      }
+      /* Montant progressif : chaque tranche est payée sur les articles
+         qui tombent DANS cette tranche (cumul des tranches). */
+      function ptPrimeProdCalcul(empId, mois) {
+        var cfg = getPrimeProdConfig();
+        var bandes = ptPrimeProdBandes(mois);
+        var q = ptPrimeProdQuantites(empId, mois);
+        var reste = q.total, detail = [], montant = 0, seuilPrec = 0;
+        for (var i = 0; i < bandes.length && reste > 0; i++) {
+          var b = bandes[i] || {};
+          var taux = parseFloat(b.taux) || 0;
+          var plaf = (b.jusqu_a === null || b.jusqu_a === undefined || b.jusqu_a === "") ? null : parseFloat(b.jusqu_a);
+          var capa = (plaf === null) ? reste : Math.max(0, Math.min(reste, plaf - seuilPrec));
+          var m = capa * taux;
+          detail.push({ de: seuilPrec, a: plaf === null ? "∞" : plaf, taux: taux, unites: capa, montant: Math.round(m) });
+          montant += m; reste -= capa;
+          if (plaf !== null) seuilPrec = plaf;
+        }
+        var ca = 0;
+        try { ca = getMontageCAHT(empId, mois) || 0; } catch (eCA) {}
+        var tauxCa = parseFloat((ptPrimeProdVersion(mois) || {}).taux_ca_ht || cfg.taux_ca_ht) || 0;
+        return {
+          actif: cfg.actif !== false,
+          employe_id: empId,
+          mois: mois,
+          quantite: q.total,
+          parArt: q.parArt,
+          montant: Math.round(montant),
+          detail: detail,
+          ca_ht: ca,
+          taux_ca_ht: tauxCa,
+          montant_ca: Math.round(ca * tauxCa),
+        };
+      }
+      /* Nouveau taux à compter d'un mois : on clôt la version courante et
+         on ouvre la suivante (les mois déjà payés ne bougent pas). */
+      function ptPrimeProdNouvelleVersion(debutIso, bandes, tauxCa, label) {
+        var cfg = getPrimeProdConfig();
+        var d = String(debutIso || "").slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(d)) return false;
+        var jourPrec = d + "-01";
+        /* on clôture la version qui s'applique la veille */
+        var prec = ptPrimeProdVersion(jourPrec);
+        if (prec && !prec.fin) prec.fin = d;
+        cfg.versions.push({
+          id: DB.id(), debut: d, fin: "",
+          label: label || ("Barres " + d),
+          bandes: (bandes || []).map(function (b) { return { jusqu_a: b.jusqu_a, taux: parseFloat(b.taux) || 0 }; }),
+          taux_ca_ht: parseFloat(tauxCa) || 0,
+          articles_exclus: (cfg.articles_exclus || []).slice(),
+          factures_exclus: (cfg.factures_exclus || []).slice(),
+        });
+        setPrimeProdConfig(cfg);
+        return true;
+      }
+      /* ===== MODALE : BARRES DE LA PRIME DE PRODUCTION ===== */
+      function showModalPrimeProd() {
+        var cfg = getPrimeProdConfig();
+        var mz = (document.getElementById("pt-mois") || {}).value || "";
+        var v = ptPrimeProdVersion(mz) || cfg.versions[cfg.versions.length - 1] || {};
+        var b = (v.bandes || cfg.bandes).slice();
+        var html =
+          '<div style="padding:14px 18px 18px;max-width:720px">' +
+          '<div style="font-size:.95rem;font-weight:800">🏆 Prime de Production — barres progressives</div>' +
+          '<div style="font-size:.72rem;color:#475569;margin:2px 0 10px">Chaque tranche est payée sur les articles qui tombent <b>dedans</b>, et les tranches s\'additionnent. ' +
+          'Exemple : 4 500 articles = 0 + 999 × 25 F + 501 × 75 F.</div>' +
+          '<div id="pp-bandes"></div>' +
+          '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">' +
+          '<label style="font-size:.74rem;font-weight:700">À partir du mois</label>' +
+          '<input type="month" id="pp-debut" value="' + escH(mz || new Date().toISOString().slice(0, 7)) + '" style="padding:5px;border:1px solid #cbd5e1;border-radius:6px">' +
+          '<label style="font-size:.74rem;font-weight:700;margin-left:10px">Taux prime sur CA HT (%)</label>' +
+          '<input type="number" id="pp-ca" min="0" step="0.1" value="' + (parseFloat(v.taux_ca_ht) || 0) + '" style="width:80px;padding:5px;border:1px solid #cbd5e1;border-radius:6px">' +
+          '<span style="flex:1"></span>' +
+          '<button class="btn" onclick="ppAjouterBande()" style="padding:6px 12px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;font-weight:700">+ Tranche</button>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;align-items:center;margin-top:10px">' +
+          '<label style="font-size:.74rem;font-weight:700">Articles exclus</label>' +
+          '<input type="text" id="pp-ex" placeholder="séparés par des virgules" value="' + escH((v.articles_exclus || []).join(", ")) + '" style="flex:1;padding:6px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem">' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">' +
+          '<label style="font-size:.74rem;font-weight:700">Factures exclues</label>' +
+          '<input type="text" id="pp-exf" placeholder="séparées par des virgules" value="' + escH((v.factures_exclus || []).join(", ")) + '" style="flex:1;padding:6px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem">' +
+          '</div>' +
+          '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">' +
+          '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 18px">Fermer</button>' +
+          '<button class="btn" onclick="ptPrimeProdEnregistrer()" style="padding:8px 18px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700">💾 Enregistrer les taux</button>' +
+          "</div>" +
+          '<div id="pp-apercu" style="margin-top:10px"></div>' +
+          "</div>";
+        openPtModal(html, true);
+        window._ppBandes = b;
+        ppRendreBandes();
+      }
+      function ppRendreBandes() {
+        var box = document.getElementById("pp-bandes");
+        if (!box) return;
+        var b = window._ppBandes || [];
+        box.innerHTML =
+          '<div style="max-height:230px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px"><table style="border-collapse:collapse;font-size:.78rem;width:100%">' +
+          '<thead><tr style="background:#f8fafc"><th style="padding:5px 8px;text-align:left">De</th><th style="padding:5px 8px;text-align:left">Jusqu\u2019à (articles)</th>' +
+          '<th style="padding:5px 8px;text-align:right">F / article</th><th></th></tr></thead><tbody>' +
+          b.map(function (x, i) {
+            var dep = i === 0 ? 0 : (b[i - 1].jusqu_a === null || b[i - 1].jusqu_a === undefined ? "" : b[i - 1].jusqu_a);
+            return '<tr><td style="padding:4px 8px;border-top:1px solid #e2e8f0">' + (dep === "" ? "∞" : dep) + '</td>' +
+              '<td style="padding:4px 8px;border-top:1px solid #e2e8f0"><input type="number" min="0" step="100" value="' +
+              (x.jusqu_a === null || x.jusqu_a === undefined ? "" : escH(x.jusqu_a)) +
+              '" onchange="ppSetBande(' + i + ',\'plaf\',this.value)" placeholder="sans limite" style="width:110px;padding:3px 5px;border:1px solid #cbd5e1;border-radius:5px"></td>' +
+              '<td style="padding:4px 8px;border-top:1px solid #e2e8f0;text-align:right"><input type="number" min="0" step="1" value="' +
+              (parseFloat(x.taux) || 0) + '" onchange="ppSetBande(' + i + ',\'taux\',this.value)" style="width:90px;padding:3px 5px;border:1px solid #cbd5e1;border-radius:5px;text-align:right"></td>' +
+              '<td style="padding:4px 8px;border-top:1px solid #e2e8f0;text-align:right">' +
+              '<button class="btn" title="Supprimer cette tranche" aria-label="Supprimer cette tranche" onclick="ppSupprimerBande(' + i +
+              ')" style="padding:2px 7px;background:#fee2e2;color:#dc2626;border:none;border-radius:4px;font-size:.7rem">✕</button></td></tr>';
+          }).join("") + "</tbody></table></div>";
+        ppApercu();
+      }
+      function ppSetBande(i, champ, val) {
+        var b = window._ppBandes || [];
+        if (!b[i]) return;
+        b[i][champ] = (val === "" || val === null) ? null : parseFloat(val);
+        ppRendreBandes();
+      }
+      function ppSupprimerBande(i) {
+        var b = window._ppBandes || [];
+        b.splice(i, 1);
+        ppRendreBandes();
+      }
+      function ppAjouterBande() {
+        var b = window._ppBandes || [];
+        var dernier = b.length ? b[b.length - 1].jusqu_a : null;
+        b.push({ jusqu_a: (dernier === null || dernier === undefined) ? null : parseFloat(dernier) + 1000, taux: 0 });
+        ppRendreBandes();
+      }
+      function ptPrimeProdMontant(quantite) {
+        var b = window._ppBandes || [];
+        var reste = parseFloat(quantite) || 0, seuil = 0, tot = 0;
+        for (var i = 0; i < b.length && reste > 0; i++) {
+          var plaf = (b[i].jusqu_a === null || b[i].jusqu_a === undefined) ? null : parseFloat(b[i].jusqu_a);
+          var capa = (plaf === null) ? reste : Math.max(0, Math.min(reste, plaf - seuil));
+          tot += capa * (parseFloat(b[i].taux) || 0);
+          reste -= capa;
+          if (plaf !== null) seuil = plaf;
+        }
+        return Math.round(tot);
+      }
+      function ppApercu() {
+        var box = document.getElementById("pp-apercu");
+        if (!box) return;
+        var ex = [500, 3000, 3500, 4000, 4500, 6000];
+        box.innerHTML = '<div style="font-size:.74rem;font-weight:700;margin-bottom:4px">🧮 Exemple</div>' +
+          '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+          ex.map(function (q) {
+            return '<span style="font-size:.7rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:2px 9px">' +
+              q + ' art. → <b>' + fmtF(ptPrimeProdMontant(q)) + ' F</b></span>';
+          }).join("") + "</div>";
+      }
+      function ptPrimeProdEnregistrer() {
+        var debut = (document.getElementById("pp-debut") || {}).value || "";
+        var ca = parseFloat((document.getElementById("pp-ca") || {}).value) || 0;
+        var ex = String((document.getElementById("pp-ex") || {}).value || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+        var exf = String((document.getElementById("pp-exf") || {}).value || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+        var bandes = (window._ppBandes || []).filter(function (x) { return parseFloat(x.taux) > 0 || x.jusqu_a !== null; });
+        if (!bandes.length) { toast("Ajoutez au moins une tranche", "error"); return; }
+        var cfg = getPrimeProdConfig();
+        cfg.bandes = bandes;
+        cfg.articles_exclus = ex;
+        cfg.factures_exclus = exf;
+        ptPrimeProdNouvelleVersion(debut, bandes, ca, "Barres " + debut);
+        setPrimeProdConfig(cfg);
+        closePtModal();
+        toast("Barres de prime enregistrées", "success");
+      }
+      /* ===== CONGÉ : MONTANT PLAQUÉ (forcé) =====
+         Le droit se calcule tout seul, mais vous pouvez imposer un montant
+         par employé et par période de congé. Si le montant saisi est > 0,
+         il REMPLACE le droit calculé. Les avances déjà versées sont
+         déduites du montant retenu, comme pour le droit calculé. */
+      function getCongeMontantsForces() {
+        var v = getPayeSection("conge_montants", []);
+        return Array.isArray(v) ? v : [];
+      }
+      function getCongeMontantForce(empId, debutIso, finIso) {
+        var m = parseFloat(getCongeMontantsForces().filter(function (r) {
+          return r && r.employee_id === empId &&
+            r.debut_periode === debutIso && r.fin_periode === finIso;
+        })[0]?.montant);
+        return isNaN(m) || m < 0 ? 0 : m;
+      }
+      function setCongeMontantForce(empId, debutIso, finIso, montant) {
+        var list = getCongeMontantsForces().filter(function (r) {
+          return !(r && r.employee_id === empId &&
+            r.debut_periode === debutIso && r.fin_periode === finIso);
+        });
+        var m = parseFloat(montant);
+        if (!isNaN(m) && m > 0) {
+          list.push({ id: DB.id(), employee_id: empId, debut_periode: debutIso,
+                      fin_periode: finIso, montant: m, date_saisie: new Date().toISOString().slice(0, 10) });
+        }
+        setPayeSection("conge_montants", list);
       }
       function calcAnnee(d, dateSortie) {
         if (!d) return 0;
@@ -27981,16 +28889,17 @@ if (normalHours > 173.33) {
             "-" +
             (end.getMonth() + 1 < 10 ? "0" : "") +
             (end.getMonth() + 1);
-          var calc = calcCongeDroit(emp, finPeriode, 30);
+          var debutIso =
+            cur.getFullYear() +
+            "-" +
+            (cur.getMonth() < 9 ? "0" : "") +
+            (cur.getMonth() + 1);
+          var calc = calcCongeDroit(emp, finPeriode, 30, debutIso);
           periods.push({
             num: num,
             debut: startStr,
             fin: endStr,
-            debutIso:
-              cur.getFullYear() +
-              "-" +
-              (cur.getMonth() < 9 ? "0" : "") +
-              (cur.getMonth() + 1),
+            debutIso: debutIso,
             finIso: finPeriode,
             conge_du: calc.montant,
             calcul: calc,
@@ -28030,6 +28939,37 @@ if (normalHours > 173.33) {
           if (r.paiements) all = all.concat(r.paiements);
         });
         return all;
+      }
+      /* Saisir (ou lever) le montant de congé forcé d'une période */
+      function ptSaisirCongeForce(empId, debutIso, finIso, actuel, droit) {
+        var emp = getPersonnel().find(function (p) { return p.id === empId; });
+        var html =
+          '<div style="padding:16px 20px;max-width:480px">' +
+          '<div style="font-weight:800;font-size:.95rem;margin-bottom:2px">📌 Montant du congé</div>' +
+          '<div style="font-size:.74rem;color:#475569;margin-bottom:10px">' +
+          escH((emp ? (emp.nom + " " + (emp.prenoms || "")) : "Employé")) + ' — période du <b>' +
+          escH(debutIso) + '</b> au <b>' + escH(finIso) + '</b><br>' +
+          'Calcul automatique : <b>' + fmtF(droit || 0) + ' F</b> pour 30 jours.</div>' +
+          '<label style="font-size:.75rem;font-weight:700">Montant à retenir (F)</label>' +
+          '<input type="number" id="cg-force" min="0" step="500" value="' + (Number(actuel) || 0) +
+          '" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:.9rem;margin:3px 0 8px">' +
+          '<div style="font-size:.66rem;color:#64748b;margin-bottom:10px">Tapez un montant : il remplace le calcul automatique (les avances déjà versées restent déduites). ' +
+          'Laissez <b>0</b> pour revenir au calcul automatique.</div>' +
+          '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+          '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 18px">Annuler</button>' +
+          '<button class="btn" onclick="ptValiderCongeForce(\'' + escH(empId) + "','" + escH(debutIso) +
+          "','" + escH(finIso) + '\')" style="padding:8px 18px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-weight:700">Enregistrer</button>' +
+          "</div></div>";
+        openPtModal(html);
+        try { document.getElementById("cg-force").focus(); } catch (eF) {}
+      }
+      function ptValiderCongeForce(empId, debutIso, finIso) {
+        var v = parseFloat((document.getElementById("cg-force") || {}).value);
+        if (isNaN(v) || v < 0) { toast("Montant invalide", "error"); return; }
+        setCongeMontantForce(empId, debutIso, finIso, v);
+        closePtModal();
+        try { renderCongeTable(sessionStorage.getItem('congeShowAll') === '1'); } catch (eR) {}
+        toast(v > 0 ? "Montant de congé fixé à " + fmtF(v) : "Retour au calcul automatique", "success");
       }
       function toggleCongeSoldes() {
         var cb = document.getElementById("conge-show-all");
@@ -28571,9 +29511,19 @@ function printCongeIndividuel(empId) {
               emp.id +
               "','')" +
               '" title="Éditer l\'attestation de congé (dates, type, jours)" style="font-size:.6rem;color:var(--orange);font-weight:700">📄 Attestation</a></td>';
+            /* Montant du droit : calculé, ou PLAQÉ par le chef (donc modifiable). */
+            var _cc = per.calcul || {};
             html +=
-              '<td style="text-align:right;font-weight:700;color:var(--green)">' +
+              '<td style="text-align:right;font-weight:700;color:' + (_cc.force ? "#7c3aed" : "var(--green)") + '">' +
               fmt(per.conge_du) +
+              (_cc.force
+                ? ' <span title="Montant forcibly saisi (le calcul automatique donnait ' +
+                  fmt(_cc.droit || 0) + ' F)" style="font-size:.62rem;color:#7c3aed;font-weight:800">📌</span>'
+                : "") +
+              ' <a href="#" onclick="event.preventDefault();ptSaisirCongeForce(\'' +
+              escH(emp.id) + "','" + escH(per.debutIso) + "','" + escH(per.finIso) +
+              "'," + (per.conge_du || 0) + "," + (_cc.droit || 0) +
+              ')" title="Fixer un montant précis pour cette période de congé" style="font-size:.6rem;color:var(--blue);font-weight:700">✎</a>' +
               "</td>";
             html +=
               '<td style="text-align:right">' +
@@ -31558,7 +32508,7 @@ function printCongeIndividuel(empId) {
       /* Attestation de congé : document officiel attestant qu'un employé a
          bénéficié d'un congé (type, dates, nombre de jours).
          Sur le même modèle que l'attestation de travail. */
-      function generateAttestationConge(empId, congeId) {
+      function generateAttestationConge(empId, congeId, prevu) {
         var emp = (getPersonnel() || []).find(function (p) {
           return p.id === empId;
         });
@@ -31566,15 +32516,27 @@ function printCongeIndividuel(empId) {
           toast("Employé introuvable", "error");
           return;
         }
+        /* prevu = congé PLANIFIÉ transmis depuis l'index : c'est lui qui
+           fait foi (dates, type, jours), pas une approximation. */
         var cg = null;
-        try {
-          var listC = getCongePaie ? (getCongePaie() || []) : (getPayeSection("congeRecords", []) || []);
-          cg = congeId
-            ? listC.find(function (c) { return String(c.id) === String(congeId); })
-            : listC.filter(function (c) { return c.employeId === empId || c.employee_id === empId; }).sort(function (a, b) {
-                return String(b.date_depart || b.dateDep || "").localeCompare(String(a.date_depart || a.dateDep || ""));
-              })[0];
-        } catch (e) {}
+        if (prevu) {
+          cg = {
+            id: congeId || prevu.conge_id,
+            date_depart: prevu.date_depart || prevu.date_depart_iso || "",
+            date_retour: prevu.date_retour || prevu.date_reprise || prevu.date_reprise_iso || "",
+            type: prevu.type || "Congé",
+            nbJours: prevu.nb_jours || prevu.nbJours || prevu.duree || prevu.jours || 0,
+          };
+        } else {
+          try {
+            var listC = getCongePaie ? (getCongePaie() || []) : (getPayeSection("congeRecords", []) || []);
+            cg = congeId
+              ? listC.find(function (c) { return String(c.id) === String(congeId); })
+              : listC.filter(function (c) { return c.employeId === empId || c.employee_id === empId; }).sort(function (a, b) {
+                  return String(b.date_depart || b.dateDep || "").localeCompare(String(a.date_depart || a.dateDep || ""));
+                })[0];
+          } catch (e) {}
+        }
         var dDep = (cg && (cg.date_depart || cg.dateDepart || cg.dateDep)) || "";
         var dRet = (cg && (cg.date_retour || cg.dateRetour || cg.dateRet)) || "";
         var typeC = (cg && (cg.type || cg.libelle || cg.typeConge)) || "Congé";
