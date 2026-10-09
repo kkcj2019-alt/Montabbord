@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-239";
+      window.__APP_VERSION = "2026-10-09-240";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -7622,6 +7622,13 @@ window._payeVuTs = ts;
         });
         h += "</div>";
         container.innerHTML = h;
+        /* Le total paye en caisse, jour par jour, dans l'entete. */
+        var _elTds = container.querySelectorAll('thead .panier-jour-paye');
+        for (var _di = 0; _di < _elTds.length; _di++) {
+          var _dt = mois + '-' + (_di + 1 < 10 ? '0' : '') + (_di + 1);
+          var _pv = panierVerseJour(mois, _dt);
+          if (_elTds[_di]) _elTds[_di].textContent = _pv.montant > 0 ? fmtF(_pv.montant) + ' F' : '';
+        }
       }
 
       var _pmeQ = "";
@@ -27520,6 +27527,142 @@ function panierVerser() {
   toast(n + " prime(s) de panier versée(s) : " + fmtF(Math.round(total)) + " F", "success");
   try { loadPanierUI(); } catch (e) {}
 }
+/* ============ TRAVAILLEURS D'UN JOUR DONNÉ ============
+   On choisit un jour : la liste des gens qui l'ont travaillé (et qui ont
+   la prime de panier cochée ce jour-là) s'affiche, avec le montant.
+   C'est là qu'on paie — le jour n'a pas besoin d'être une nuit. */
+function showPanierJour(jour) {
+  var mois = (document.getElementById("pt-mois") || {}).value || "";
+  if (!jour) {
+    var d = new Date();
+    jour = mois + "-" + (d.getDate() < 10 ? "0" : "") + d.getDate();
+    if (jour.indexOf(mois) !== 0) jour = mois + "-01";
+  }
+  var un = getPanierMontantJour();
+  var deja = panierVerseJour(mois, jour);
+  var lignes = [];
+  (getPersonnel() || []).forEach(function (p) {
+    if (!p || p.en_paie === false) return;
+    var j = getPanierJours(p.id, mois);
+    if (j.indexOf(jour) === -1) return;
+    var rec = null;
+    var pts = [];
+    try { pts = getPointageData() || []; } catch (e) {}
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i] && pts[i].employee_id === p.id && String(pts[i].date || "").slice(0, 10) === jour) { rec = pts[i]; break; }
+    }
+    var nuit = ptPanierNuitLe(p.id, jour);
+    var verse = getPanierVerseJourEmp(p.id, jour);
+    lignes.push({ emp: p, rec: rec, nuit: nuit, verse: verse, montant: verse > 0 ? verse : un });
+  });
+  lignes.sort(function (a, b) {
+    return String(a.emp.matricule || "").localeCompare(String(b.emp.matricule || ""), undefined, { numeric: true });
+  });
+
+  var h = "";
+  h += '<div style="font-size:.8rem;margin-bottom:10px">';
+  h += "Travailleurs ayant droit à la prime de panier le <b>" + escH(jour) + "</b>";
+  h += " &nbsp;\u00b7&nbsp; " + fmtF(un) + " F par personne &nbsp;\u00b7&nbsp; ";
+  h += "déjà versé en caisse ce jour-là : <b style=\"color:#16a34a\">" + fmtF(deja.montant) + " F</b> (" + deja.nombre + " personne(s))";
+  h += "</div>";
+
+  h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">';
+  h += '<label style="font-size:.76rem;font-weight:600">Jour :</label>';
+  h += '<input type="date" id="pj-date" value="' + escH(jour) + '" onchange="showPanierJour(this.value)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px">';
+  h += '<label style="font-size:.76rem;margin-left:8px">Caisse :</label>';
+  h += '<select id="pv-caisse" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px">';
+  (payeArr("mdb_caisses") || []).forEach(function (c) {
+    h += '<option value="' + escH(c.id) + '">' + escH(c.nom || c.id) + "</option>";
+  });
+  h += "</select>";
+  h += '<label style="font-size:.76rem;margin-left:8px">Moyen :</label>';
+  h += '<select id="pv-moyen" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px">';
+  ["espece", "Orange Money", "MTN Money", "Wave", "Moov Money"].forEach(function (m) {
+    h += '<option value="' + m + '">' + m + "</option>";
+  });
+  h += "</select>";
+  h += '<label style="font-size:.76rem;margin-left:8px">Exécutant :</label>';
+  h += '<input type="text" id="pv-exec" placeholder="nom" style="width:120px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px">';
+  h += '<label style="font-size:.76rem;margin-left:8px">Montant global :</label>';
+  h += '<input type="number" id="pv-global" min="0" step="25" placeholder="' + un + '" style="width:100px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px">';
+  h += '<button class="btn btn-sec" onclick="panierAppliquerGlobal()" style="padding:4px 10px;font-size:.72rem">Appliquer</button>';
+  h += "</div>";
+
+  if (!lignes.length) {
+    h += '<div style="font-size:.78rem;color:#94a3b8;padding:12px;border:1px dashed #e2e8f0;border-radius:8px">';
+    h += "Aucun travailleur n\u2019a la prime de panier cochée pour ce jour. Utilise les cases de l\u2019en-tête du tableau ci-dessus.";
+    h += "</div>";
+  } else {
+    h += '<div style="max-height:340px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px"><table style="width:100%;border-collapse:collapse;font-size:.76rem">';
+    h += '<thead><tr style="background:#f8fafc"><th style="padding:5px"></th><th style="padding:5px;text-align:left">Employé</th><th style="padding:5px;text-align:left">Fonction</th><th style="padding:5px;text-align:left">Pointage du jour</th><th style="padding:5px;text-align:right">Déjà versé</th><th style="padding:5px;text-align:right">À payer</th></tr></thead><tbody>';
+    lignes.forEach(function (r) {
+      var pointe = r.rec ? ("J: " + ptFmtHShort(parseHeure(r.rec.h_j_manual) + parseHeure(r.rec.h_n_manual)) + "h") : "\u2014";
+      h += '<tr>' +
+        '<td style="padding:3px 5px"><input type="checkbox" class="pv-cb" data-emp="' + escH(r.emp.id) + '"' + (r.verse <= 0 ? " checked" : "") + ' style="width:14px;height:14px"></td>' +
+        '<td style="padding:3px 5px">' + escH((r.emp.matricule ? r.emp.matricule + " - " : "") + r.emp.nom + " " + (r.emp.prenoms || "")) + (r.nuit ? ' <span title="Pointé la nuit" style="color:#7c3aed;font-weight:700">\u25c4 nuit</span>' : "") + "</td>" +
+        '<td style="padding:3px 5px;font-size:.68rem;color:#64748b">' + escH(r.emp.fonction || "") + "</td>" +
+        '<td style="padding:3px 5px;font-size:.68rem">' + pointe + "</td>" +
+        '<td style="padding:3px 5px;text-align:right;color:#16a34a">' + (r.verse > 0 ? fmtF(r.verse) + " F" : "\u2014") + "</td>" +
+        '<td style="padding:3px 5px;text-align:right"><input type="number" class="pv-mt" data-emp="' + escH(r.emp.id) + '" min="0" step="25" value="' + r.montant + '" style="width:100px;padding:3px 5px;text-align:right;border:1px solid #cbd5e1;border-radius:5px"></td>' +
+        "</tr>";
+    });
+    h += "</tbody></table></div>";
+    h += '<div style="margin-top:8px;font-weight:800;text-align:right">Total : <span id="pv-total">0 F</span></div>';
+  }
+  h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">';
+  h += '<button class="btn btn-sec" onclick="closePtModal()">Fermer</button>';
+  h += '<button class="btn" style="background:#f97316;color:#fff" onclick="panierVerserJour()">💸 Payer ce jour</button>';
+  h += "</div>";
+  openPtModal(h, true);
+  panierTotalVerse();
+}
+/* Ce qui a été payé à CETTE personne CE JOUR-LA. */
+function getPanierVerseJourEmp(empId, jour) {
+  var d = String(jour).slice(0, 10);
+  var t = 0;
+  getPanierPaiements().forEach(function (p) {
+    if (!p || p.employee_id !== String(empId) || p.date !== d) return;
+    t += parseFloat(p.montant) || 0;
+  });
+  return Math.round(t);
+}
+/* Paiement : une sortie de caisse code PANIER par personne cochée. */
+function panierVerserJour() {
+  var jour = (document.getElementById("pj-date") || {}).value || getToday();
+  var caisseId = (document.getElementById("pv-caisse") || {}).value || "";
+  var moyen = (document.getElementById("pv-moyen") || {}).value || "espece";
+  var executant = (document.getElementById("pv-exec") || {}).value || "";
+  var remettant = "";
+  try { remettant = (currentUser && (currentUser.nom || currentUser.login)) || ""; } catch (e) {}
+  var n = 0, total = 0;
+  var cbs = document.querySelectorAll(".pv-cb");
+  for (var i = 0; i < cbs.length; i++) {
+    if (!cbs[i].checked) continue;
+    var id = cbs[i].getAttribute("data-emp");
+    var inp = document.querySelector('.pv-mt[data-emp="' + id + '"]');
+    var m = parseFloat((inp && inp.value) || 0);
+    if (!(m > 0)) continue;
+    var e = (getPersonnel() || []).filter(function (p) { return String(p.id) === String(id); })[0];
+    if (!e) continue;
+    savePanierPaiement({
+      employee_id: id,
+      employeNom: ((e.nom || "") + " " + (e.prenoms || "")).trim(),
+      date: jour,
+      montant: m,
+      moyen: moyen,
+      caisseId: caisseId,
+      executant: executant,
+      remettant: remettant,
+      observations: "Prime de panier du " + jour,
+    });
+    total += m;
+    n++;
+  }
+  if (!n) { toast("Aucun montant à verser", "error"); return; }
+  closePtModal();
+  toast(n + " prime(s) de panier versée(s) le " + jour + " : " + fmtF(Math.round(total)) + " F", "success");
+  try { loadPanierUI(); } catch (e) {}
+}
       function loadPanierUI() {
         var container = document.getElementById("pt-panier-container");
         if (!container) return;
@@ -27593,6 +27736,7 @@ function panierVerser() {
           '<button class="btn btn-sec" onclick="clearAllPanier()" style="font-size:.75rem;padding:4px 14px">Tout effacer</button>';
         h +=
           '<button class="btn" onclick="savePanierUI()" style="font-size:.75rem;padding:4px 14px">Enregistrer</button>';
+        h += '<button class="btn" onclick="showPanierJour()" style="font-size:.75rem;padding:4px 14px;background:#f97316;color:#fff;font-weight:700">📅 Travailleurs d\u2019un jour</button>';
         h += '<button class="btn" onclick="showPanierVersement()" style="font-size:.75rem;padding:4px 14px;background:#16a34a;color:#fff;font-weight:700">💸 Verser la prime de panier</button>';
         h +=
           '<span style="font-size:.72rem;color:var(--dim)">Cliquez la case d\'un jour (en-tête) pour cocher toute la fonction ; décochez ensuite qui n\'a pas eu la prime.</span>';
@@ -27602,7 +27746,8 @@ function panierVerser() {
         h +=
           '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:.72rem;min-width:900px">';
         h +=
-          '<thead><tr><th style="border:1px solid #d1d5db;padding:4px 8px;text-align:left;min-width:160px">Employé</th>';
+          '<thead><tr><th style="border:1px solid #d1d5db;padding:4px 8px;text-align:left;min-width:160px">Employé</th>' +
+          '<th style="border:1px solid #d1d5db;padding:3px;text-align:center;width:36px;background:#0f172a;color:#fff;font-size:.58rem;writing-mode:vertical-rl;letter-spacing:1px">PAYÉ CAISSE</th>';
 
         var jNoms = ["L", "M", "M", "J", "V", "S", "D"];
         for (var d = 1; d <= daysInMonth; d++) {
@@ -27622,7 +27767,7 @@ function panierVerser() {
             jNoms[(dow + 6) % 7] +
             '</div><div style="font-weight:800">' +
             d +
-            "</div></th>";
+            '</div><div class="panier-jour-paye" style="font-size:.55rem;color:#b45309;font-weight:800"></div></th>';
         }
         h +=
           '<th style="border:1px solid #d1d5db;padding:4px;text-align:right">Total</th></tr></thead><tbody>';
@@ -27632,7 +27777,7 @@ function panierVerser() {
           if (filtreFonction && fonction !== filtreFonction) return;
           h +=
             '<tr><td colspan="' +
-            (daysInMonth + 2) +
+            (daysInMonth + 3) +
             '" style="background:#e0e7ff;border:1px solid #d1d5db;padding:3px 8px;font-weight:700;font-size:.75rem;color:#3730a3">' +
             '<label style="cursor:pointer"><input type="checkbox" class="panier-fnc-sel" data-fonction="' +
             escH(fonction) +
@@ -27683,6 +27828,10 @@ function panierVerser() {
                 ' style="width:14px;height:14px"></td>';
             }
             h +=
+              '<td style="border:1px solid #d1d5db;padding:3px 4px;text-align:right;font-size:.7rem;font-weight:700;color:#16a34a" id="panier-paye-' +
+              emp.id +
+              '">' + (getPanierVerse(emp.id, mois) > 0 ? fmtF(getPanierVerse(emp.id, mois)) + ' F' : '—') + '</td>';
+            h +=
               '<td style="border:1px solid #d1d5db;padding:3px 6px;text-align:right;font-weight:700" id="panier-total-' +
               emp.id +
               '">' +
@@ -27692,7 +27841,22 @@ function panierVerser() {
           });
         });
 
-        h += "</tbody></table></div>";
+        /* Synthese : montant du et montant REELLEMENT paye en caisse. */
+        var _sommeDu = 0, _sommePaye = 0;
+        (getPersonnel() || []).forEach(function (p) {
+          if (!p || p.en_paie === false) return;
+          var _j = getPanierJours(p.id, mois);
+          if (!_j.length) return;
+          _sommeDu += _j.length * montantUn;
+          _sommePaye += getPanierVerse(p.id, mois);
+        });
+        h += '</tbody><tfoot><tr style="background:#f8fafc;font-weight:800">' +
+          '<td style="border:1px solid #d1d5db;padding:5px 8px;text-align:right;font-size:.72rem">TOTAUX</td>' +
+          '<td style="border:1px solid #d1d5db;padding:5px;text-align:right;font-size:.72rem;color:#16a34a">' + fmtF(_sommePaye) + ' F</td>' +
+          '<td colspan="' + (daysInMonth + 3) + '" style="border:1px solid #d1d5db;padding:5px 8px;text-align:right;font-size:.72rem">' +
+            'Montant dû : <strong>' + fmtF(_sommeDu) + ' F</strong> · Déjà versé en caisse : <strong style="color:#16a34a">' + fmtF(_sommePaye) + ' F</strong>' +
+            (_sommeDu > 0 && _sommePaye >= _sommeDu ? ' ✓ tout est versé' : ' · reste ' + fmtF(Math.max(0, _sommeDu - _sommePaye)) + ' F') +
+          '</td></tr></tfoot></table></div>';
         container.innerHTML = h;
 
         /* Case d'un JOUR dans l'en-tête : coche toute la fonction filtrée. */
