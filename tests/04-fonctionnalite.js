@@ -6075,6 +6075,43 @@ r.push({
   });
 
   r.push({
+    nom: 'Retard de reprise : retour pr\u00e9vu -> reprise r\u00e9elle = absent injustifi\u00e9',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      /* Cong\u00e9 du 10 au 14 (= reprise pr\u00e9vue le 14), reprise r\u00e9elle le 18 :
+         10..13 = cong\u00e9 (le 11 est un dimanche), 14..17 = ABSENT. */
+      var avant = (payeArr('mdb_rh_conges') || []).filter(function (c) { return c.id !== 'cg-test-3'; }).slice();
+      avant.push({ id: 'cg-test-3', employee_id: emp.id, type: 'annual',
+                   date_depart: mz + '-10', date_retour: mz + '-14', date_reprise: mz + '-18' });
+      DB.setMain('mdb_rh_conges', avant);
+      var pts = getPointageData().filter(function (r) {
+        return !(r && r.employee_id === emp.id && r.date >= mz + '-10' && r.date <= mz + '-18');
+      });
+      setPayeSection('pointage', pts);
+      ptCongePointageAuto(mz);
+      var lignes = getPointageData().filter(function (r) {
+        return r && r.employee_id === emp.id && r.date >= mz + '-10' && r.date <= mz + '-18';
+      });
+      var conges = lignes.filter(function (r) { return r.conge_auto === true; }).map(function (r) { return r.date.slice(8, 10); }).sort().join(',');
+      var retards = lignes.filter(function (r) { return r.retard_reprise_auto === true; });
+      var retJours = retards.map(function (r) { return r.date.slice(8, 10); }).sort().join(',');
+      var motifsOk = retards.every(function (r) { return r.present === false && r.motif === 'Absence injustifi\u00e9e'; });
+      var ad = ptAssiduiteData(mz);
+      var it = ad.items.filter(function (x) { return x.emp && x.emp.id === emp.id; })[0];
+      /* Le 18 (= reprise) n'est ni cong\u00e9 ni absent. Les 14..17 font
+         baisser le taux (absences injustifi\u00e9es). */
+      var repriseLibre = lignes.every(function (r) { return r.date !== mz + '-18'; });
+      var ok = conges === '10,12,13' && retJours === '14,15,16,17' && motifsOk && repriseLibre;
+      (ok) ? 'OK : cong\u00e9=' + conges + ' absent=' + retJours + ' (X injustifi\u00e9), reprise ' + mz + '-18 libre'
+           : 'ECHEC conge=' + conges + ' retard=' + retJours + ' motifsOk=' + motifsOk + ' repriseLibre=' + repriseLibre;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Cong\u00e9 modifi\u00e9 : le pointage auto suit (jours retir\u00e9s, saisie manuelle gard\u00e9e)',
     app: 'paye.html', store: storeRealiste,
     code: `

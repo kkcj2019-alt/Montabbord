@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-228";
+      window.__APP_VERSION = "2026-10-09-229";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -16833,11 +16833,18 @@ html +=
       /* Dernier jour de congé INCLUS : la date saisie (retour prévu ou
            reprise réelle) est le jour de REPRISE au travail, donc le
            congé s'arrête la veille. Ex : départ 10/01, reprise 09/02 →
-           congé du 10/01 au 08/02, le 09 n'est PAS un jour de congé. */
+           congé du 10/01 au 08/02, le 09 n'est PAS un jour de congé.
+           Si la reprise réelle est AVANT le retour prévu, le congé
+           s'arrête à la reprise (il est revenu). Si elle est APRÈS,
+           le congé s'arrête quand même au retour prévu : l'écart est
+           une absence, pas un congé. */
       function ptCongeDernierJour(c) {
-        var fin = String((c && (c.date_reprise || c.date_retour)) || (c && c.date_depart) || "");
+        var ret = String((c && c.date_retour) || "").slice(0, 10);
+        var rep = String((c && c.date_reprise) || "").slice(0, 10);
+        var fin = ret || (c && c.date_depart) || "";
         if (!/^\d{4}-\d{2}-\d{2}/.test(fin)) return "";
         fin = fin.slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rep) && rep < ret) fin = rep;
         var d = new Date(parseInt(fin.slice(0, 4), 10), parseInt(fin.slice(5, 7), 10) - 1, parseInt(fin.slice(8, 10), 10));
         d.setDate(d.getDate() - 1);
         var m = d.getMonth() + 1, j = d.getDate();
@@ -16862,7 +16869,7 @@ html +=
         var nd = new Date(y, mi, 0).getDate();
         var debutM = m + "-01", finM = m + "-" + (nd < 10 ? "0" : "") + nd;
         /* Plage voulue AUJOURD'HUI, d'après les congés planifiés. */
-        var voulu = {}, motifsVoulus = {};
+        var voulu = {}, motifsVoulus = {}, retardVoulu = {};
         ptRhCongesActifs().forEach(function (c) {
           if (!c || !c.employee_id) return;
           var d1 = String(c.date_depart || "");
@@ -16877,26 +16884,44 @@ html +=
             voulu[c.employee_id + "|" + dk] = true;
             motifsVoulus[c.employee_id + "|" + dk] = motif;
           }
+          /* RETARD DE REPRISE : reprise réelle après le retour prévu →
+             les jours entre les deux sont des ABSENCES (pas des congés).
+             Ex : reprise prévue le 10, pointé le 20 → du 10 au 19 = absent.
+             Le jour de la reprise lui-même est un jour travaillé. */
+          var retPrev = String(c.date_retour || "").slice(0, 10);
+          var reprReel = String(c.date_reprise || "").slice(0, 10);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(retPrev) && /^\d{4}-\d{2}-\d{2}$/.test(reprReel) && reprReel > retPrev) {
+            for (var d3 = 1; d3 <= nd; d3++) {
+              var dk3 = m + "-" + (d3 < 10 ? "0" : "") + d3;
+              if (dk3 < retPrev || dk3 >= reprReel) continue;
+              var dow3 = new Date(y, mi - 1, d3).getDay();
+              if (dow3 === 0) continue;
+              retardVoulu[c.employee_id + "|" + dk3] = true;
+            }
+          }
         });
         var pts = getPointageData();
         var cree = 0, suppr = 0, maj = 0;
         var garde = [];
         pts.forEach(function (r) {
-          if (!r || r.conge_auto !== true) { garde.push(r); return; }
+          if (!r || (r.conge_auto !== true && r.retard_reprise_auto !== true)) { garde.push(r); return; }
           var cle = r.employee_id + "|" + r.date;
           if (String(r.date || "").indexOf(m) !== 0) { garde.push(r); return; }
-          if (!voulu[cle]) {
-            /* Le congé a été raccourci/déplacé : on retire la ligne auto,
-               SAUF si quelqu'un l'a retouchée à la main (elle devient
-               alors une ligne normale). */
+          var estRetard = r.retard_reprise_auto === true;
+          var attendu = estRetard ? retardVoulu[cle] : voulu[cle];
+          if (!attendu) {
+            /* Le congé a été raccourci/déplacé (ou la reprise corrigée) :
+               on retire la ligne auto, SAUF si quelqu'un l'a retouchée à
+               la main (elle devient alors une ligne normale). */
             if (ptCongeAutoIntacte(r)) { suppr++; return; }
             delete r.conge_auto;
+            delete r.retard_reprise_auto;
             garde.push(r);
             return;
           }
           /* Toujours dans la plage : le motif suit le congé (sauf
-             retouche manuelle). */
-          if (ptCongeAutoIntacte(r) && motifsVoulus[cle] && r.motif !== motifsVoulus[cle]) {
+             retouche manuelle). Le retard reste une absence injustifiée. */
+          if (!estRetard && ptCongeAutoIntacte(r) && motifsVoulus[cle] && r.motif !== motifsVoulus[cle]) {
             r.motif = motifsVoulus[cle]; maj++;
           }
           garde.push(r);
@@ -16909,6 +16934,17 @@ html +=
             id: DB.id(), employee_id: p[0], date: p[1],
             present: false, motif: motifsVoulus[cle] || "Congé",
             conge_auto: true, conge_id: "",
+          });
+          cree++;
+        });
+        Object.keys(retardVoulu).forEach(function (cle) {
+          var deja = garde.some(function (r) { return r && (r.employee_id + "|" + r.date) === cle; });
+          if (deja) return;
+          var p = cle.split("|");
+          garde.push({
+            id: DB.id(), employee_id: p[0], date: p[1],
+            present: false, motif: "Absence injustifiée",
+            retard_reprise_auto: true, conge_id: "",
           });
           cree++;
         });
@@ -32738,56 +32774,44 @@ function printCongeIndividuel(empId) {
           "</title><style>@page{size:A4;margin:16mm 13mm}body{font-family:Roboto,Calibri,Arial,sans-serif;color:#0f172a;font-size:10.5pt;line-height:1.5;margin:0;padding:22px}@media print{body{padding:0}.no-print{display:none}}h1{text-align:center;font-size:16pt;letter-spacing:1.5px;margin:12px 0 2px;text-transform:uppercase;color:#0b1526}.sub{text-align:center;font-size:8pt;color:#64748b;margin-bottom:14px}.info{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;font-size:9.5pt;margin-bottom:12px}table{width:100%;border-collapse:collapse;font-size:9.5pt}th{background:#1e293b;color:#fff;padding:6px 8px;text-align:left;font-size:8.5pt;text-transform:uppercase}td{padding:5px 8px;border-bottom:1px solid #e2e8f0}td.r,th.r{text-align:right}tfoot td{font-weight:800;background:#f1f5f9;border-top:2px solid #0b1526}.refs{margin-top:12px;padding:8px 10px;background:#f8fafc;border-left:3px solid #94a3b8;font-size:7.5pt;color:#475569}.libre{margin-top:12px;padding:10px;background:#f0fdf4;border:1px solid #86efac;font-size:9pt;color:#14532d}</style></head><body>";
         h +=
           '<div class="no-print" style="position:sticky;top:0;background:#fff;z-index:10;display:flex;gap:8px;padding:10px 0;border-bottom:1px solid #e2e8f0;margin-bottom:12px"><button onclick="try{window.close()}catch(e){}; setTimeout(function(){try{history.back()}catch(e){}},200)" style="padding:8px 14px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;cursor:pointer;font-weight:700">\u2190 Retour</button><button onclick="window.print()" style="padding:8px 14px;background:#0b1526;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">\uD83D\uDDA8\uFE0F Imprimer / PDF</button></div>';
-        h += _socHeaderHTML();
-        h +=
-          '<h1>Solde de Tout Compte</h1><div class="sub">Réf. STC/' +
-          escH(rec.matricule || "") +
-          "/" +
-          (rec.dateFin || "").slice(0, 4) +
-          " — édité le " +
-          new Date(rec.createdAt || Date.now()).toLocaleDateString("fr-FR") +
-          (rec.createdBy ? " par " + escH(rec.createdBy) : "") +
-          "</div>";
-        h +=
-          '<div class="info"><div><b>Matricule :</b> ' +
-          escH(rec.matricule || "-") +
-          "</div><div><b>Nom & Prénoms :</b> " +
-          escH(rec.nom || "-") +
-          "</div><div><b>Emploi :</b> " +
-          escH(rec.fonction || "-") +
-          "</div><div><b>Catégorie :</b> " +
-          escH(rec.categorie || "-") +
-          "</div><div><b>Date d'entrée :</b> " +
-          escH(rec.dateEntree || "-") +
-          "</div><div><b>Date de sortie :</b> " +
-          escH(rec.dateFin || "-") +
-          "</div><div><b>Motif :</b> " +
-          escH((rec.motif || "").replace(/_/g, " ")) +
-          "</div><div><b>Ancienneté :</b> " +
-          escH(rec.anciennete || "-") +
-          "</div></div>";
-        h +=
-          '<table><thead><tr><th>Rubrique</th><th class="r">Base / Référence</th><th class="r">Montant (FCFA)</th></tr></thead><tbody>';
-        (rec.items || []).forEach(function (it) {
-          h +=
-            "<tr><td>" +
-            escH(it.label) +
-            '</td><td class="r" style="color:#64748b;font-size:8.5pt">' +
-            escH(it.ref || "-") +
-            '</td><td class="r">' +
-            fmt(it.amount || 0) +
-            "</td></tr>";
-        });
-        h +=
-          '</tbody><tfoot><tr><td colspan="2">NET À PAYER (brut, avant retenues CNPS/ITS sur les éléments imposables)</td><td class="r">' +
-          fmt(rec.total || 0) +
-          "</td></tr></tfoot></table>";
-        h +=
-          "<div class=\"libre\">✔ La présente décomposition couvre l'ensemble des sommes dues au titre de la rupture du contrat de travail. Le paiement du présent solde vaut reçu final, sans préjudice des dispositions d'ordre public.</div>";
-        h +=
-          "<div class=\"refs\"><b>Base légale :</b> Loi n°2015-532 du 20/07/2015 portant Code du travail — art. 18.4/18.7 (préavis), art. 18.16 (indemnité de rupture), art. 25.1, 25.2 & 25.9 (congés : 2,2 j ouvrables/mois + majorations ancienneté, indemnité compensatrice), art. 15.8 (CDD : 3 % du brut total) • Décret n°96-200 du 07/03/1996 (durées de préavis par catégorie et ancienneté) • Décret n°96-201 du 07/03/1996 (licenciement : 30 % jusqu'à 5 ans, 35 % de 6 à 10 ans, 40 % au-delà, sur le salaire global mensuel moyen des 12 mois, fractions d'année arrondies au mois inférieur, condition ≥ 1 an de service) • Convention collective sectorielle applicable (gratification, dispositions plus favorables).</div>";
-        h += _docFooterHTML();
-        h += "</body></html>";
+        /* Modele papier de l'entreprise : reference DRH/ACSER, type explicite. */
+        var _JL = ['DIMANCHE','LUNDI','MARDI','MERCREDI','JEUDI','VENDREDI','SAMEDI'];
+        var _jj = function (d) { d = String(d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-'; return d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4); };
+        var _jjl = function (d) { d = String(d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-'; var _dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10)); return _JL[_dt.getDay()] + ' ' + _jj(d); };
+        var _tt = String(typeC || '');
+        var _typeTxt = (_tt === 'annual' || /annuel/i.test(_tt)) ? 'congé annuel'
+          : (_tt === 'exceptionnel' || /exceptionnel/i.test(_tt)) ? 'congé exceptionnel'
+          : (_tt === 'maternite' || /maternit/i.test(_tt)) ? 'congé de maternité'
+          : (_tt === 'maladie' || /maladie/i.test(_tt)) ? 'congé de maladie'
+          : (_tt === 'sans_solde' || /sans solde/i.test(_tt)) ? 'congé sans solde'
+          : _tt.toLowerCase() || 'congé';
+        var _dur = parseInt(nbJ, 10) || 0;
+        var _durTxt = _dur >= 7
+          ? (function () { var _s2 = Math.round(_dur / 7); return _s2 + ' semaine' + (_s2 > 1 ? 's' : ''); })()
+          : _dur + ' jour' + (_dur > 1 ? 's' : '');
+        var _dep10 = String(dDep || '').slice(0, 10);
+        var _ref = 'DRH/ACSER' + _dep10.slice(0, 4) + '-' + _dep10.slice(5, 7) + '-';
+        var _seq = String((cg && cg.numero) || '').match(/(\d+)\s*$/);
+        _ref += _seq ? _seq[1] : '01';
+        var _ent = {}; try { _ent = payeObj('mdb_entreprise') || {}; } catch (eE2) {}
+        var _nomSoc = _ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICE (ACSER)';
+        var _adrSoc = _ent.adresse || '08 BP 2054 Abidjan 08';
+        var _telSoc = _ent.telephone || '27 23 40 02 48';
+        var _aj = new Date();
+        var _aujTxt = ((_aj.getDate() < 10 ? '0' : '') + _aj.getDate()) + '/' + (((_aj.getMonth() + 1) < 10 ? '0' : '') + (_aj.getMonth() + 1)) + '/' + _aj.getFullYear();
+        h += '<div style="text-align:center;font-size:20px;font-weight:800;text-decoration:underline;margin:26px 0 18px;letter-spacing:1px">ATTESTATION DE CONGE</div>';
+        h += '<div style="font-weight:800;margin:6px 0 14px">N/Réf : ' + escH(_ref) + '</div>';
+        h += '<div>Nous soussignés société ' + escH(_nomSoc) + ' Adresse : ' + escH(_adrSoc) + ',</div>';
+        h += '<div>Siège : Abidjan Zone industrielle de Yopougon, Tel :' + escH(_telSoc) + ',</div>';
+        h += '<div style="margin-top:10px">Attestons par la présente que :</div>';
+        h += '<div style="display:flex;gap:60px;margin:14px 0 10px"><span><strong>' + escH(civil) + ' ' + nomComplet + '</strong></span><span>Matricule <strong>' + escH(emp.matricule || '') + '</strong></span></div>';
+        h += '<div>Part en ' + escH(_typeTxt) + ' à compter du <strong>' + escH(_jjl(dDep)) + ' après 17H00</strong></div>';
+        h += '<div>Pour une durée de <strong>' + escH(_durTxt) + '</strong>.</div>';
+        h += '<div>La date effective de reprise de service est fixée au <strong>' + escH(_jjl(dRet)) + ' à 08h00</strong>.</div>';
+        h += '<div style="margin-top:10px">En foi de quoi, la présente attestation lui est délivrée pour servir et valoir ce que de droit.</div>';
+        h += '<div style="margin-top:26px;text-align:right;padding-right:40px">Fait à Abidjan, Le ' + escH(_aujTxt) + '</div>';
+        h += '<div style="margin-top:56px;text-align:right;padding-right:40px"><u style="font-weight:800">La Direction des Ressources Humaines</u></div>';
+
         w.document.write(h);
         w.document.close();
       }
