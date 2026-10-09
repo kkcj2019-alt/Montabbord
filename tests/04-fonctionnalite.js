@@ -6232,6 +6232,89 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Pointage collectif : le scroll horizontal survit au re-rendu',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-mois').value = '2026-10';
+      renderPtRecap();
+      var h = document.getElementById('pt-recap-container').innerHTML;
+      var okW = h.indexOf('id="pt-recap-scroll"') !== -1;
+      document.getElementById('pt-recap-scroll').scrollLeft = 456;
+      renderPtRecap();
+      var kept = document.getElementById('pt-recap-scroll').scrollLeft === 456;
+      (okW && kept) ? 'OK : wrapper id + scrollLeft 456 conserv\u00e9 apr\u00e8s re-rendu'
+                    : 'ECHEC wrapper=' + okW + ' scroll=' + document.getElementById('pt-recap-scroll').scrollLeft
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime CA HT : taux en % (pas x100) et taux individuel prioritaire',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.taux_ca_ht = 5;
+      (cfg.versions || []).forEach(function (v) { v.taux_ca_ht = 5; });
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 150 }]);
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'e9', nom: 'Taux', prenoms: 'I', matricule: 'M009', fonction: 'X', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', taux_prime_ca: 10 });
+      DB.setMain('mdb_employes', emps);
+      setPointageMontage([
+        { id: 'm1', employee_id: 'e9', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 150 },
+        { id: 'm2', employee_id: 'e1', date: '2026-10-06', article_code: 'E2', quantite: 10, prix: 150 }
+      ]);
+      var r9 = ptPrimeProdCalcul('e9', '2026-10');
+      var r1 = ptPrimeProdCalcul('e1', '2026-10');
+      var ok9 = r9.montant_ca === 150 && r9.taux_ca_ht === 10;
+      var ok1 = r1.montant_ca === 75 && r1.taux_ca_ht === 5;
+      (ok9 && ok1) ? 'OK : individuel 10% de 1500 = 150, global 5% de 1500 = 75 (pas x100)'
+                   : 'ECHEC ind=' + r9.montant_ca + '/' + r9.taux_ca_ht + ' glob=' + r1.montant_ca + '/' + r1.taux_ca_ht
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : tri matricules + total par article (Yapo 1 + Yekre 1 = 2)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var s = ptTriMatricule([{ matricule: 'M10' }, { matricule: 'M2' }, { matricule: '' }]);
+      var okT = s[0].matricule === '' && s[1].matricule === 'M2' && s[2].matricule === 'M10';
+      var t = ptMontTotaux(
+        [{ emp: 'yapo', article: 'E2', qte: 1 }, { emp: 'yekre', article: 'E2', qte: 1 }, { emp: 'yapo', article: 'E3', qte: 0 }],
+        { E2: 150 }
+      );
+      var okQ = t.parArt.E2 === 2 && t.grand === 300 && t.parEmp.yapo === 150 && t.parEmp.yekre === 150;
+      (okT && okQ) ? 'OK : tri M2 < M10, E2 = 1+1 = 2 (300 F)'
+                   : 'ECHEC tri=' + JSON.stringify(s.map(function (x) { return x.matricule; })) + ' tot=' + JSON.stringify(t.parArt) + '/' + t.grand
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Bulletin simple : la prime sur CA HT appara\u00eet (taux global)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.taux_ca_ht = 5;
+      (cfg.versions || []).forEach(function (v) { v.taux_ca_ht = 5; });
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 150 }]);
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'ej2', nom: 'JourCA', prenoms: 'T', matricule: 'MJ02', fonction: 'Manoeuvre', service: 'Prod', type_contrat: 'Journalier', categorie: 'A', status: 'actif', date_embauche: '2024-06-01', salaire_base: 4000 });
+      DB.setMain('mdb_employes', emps);
+      setPointageMontage([{ id: 'm9', employee_id: 'ej2', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 150 }]);
+      var emp = getPersonnel().filter(function (p) { return p.id === 'ej2'; })[0];
+      var rows = getSimpleBulletinRows(emp, '2026-10', calculatePayroll(emp, '2026-10'));
+      var rCA = rows.filter(function (r) { return (r.label || '').indexOf('Prime sur CA HT') === 0; })[0];
+      (rCA && rCA.gain === 75 && rCA.taux === '1' && rCA.label.indexOf('(5%)') !== -1)
+        ? 'OK : ligne Prime sur CA HT (5%) = 75, taux 1'
+        : 'ECHEC ligne=' + (rCA ? rCA.label + '/' + rCA.gain + '/' + rCA.taux : 'absente')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
