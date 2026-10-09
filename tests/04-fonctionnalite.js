@@ -6844,7 +6844,7 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Prime production : modale avec cases à cocher articles + factures par employé',
+    nom: 'Prime production : la modale ne programme QUE les tranches et les articles exclus',
     app: 'paye.html', store: storeRealiste,
     code: `
       var cfg = getPrimeProdConfig();
@@ -6856,33 +6856,28 @@ attenduPrefixe: 'OK'
       setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }, { code: 'E3', designation: 'Euro 3', prix: 50 }]);
       setPointageMontage([{ id: 'ck-p1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100, facture: 'FA10' }]);
       showModalPrimeProd();
+      /* Les tranches et la liste des articles exclus restent. */
       var hArts = String((document.getElementById('pp-ex-arts') || {}).innerHTML || '');
       var okArts = hArts.indexOf('data-pp-exart="E2"') !== -1 && hArts.indexOf('data-pp-exart="E3"') !== -1;
-      var hFacs = String((document.getElementById('pp-ex-facs') || {}).innerHTML || '');
-      var okFacs = hFacs.indexOf('data-pp-exfac="FA10"') !== -1;
-      var hSel = String((document.getElementById('pp-fac-emp') || {}).innerHTML || '');
-      var okSel = hSel.indexOf('e1') !== -1;
-      /* Cocher E3 dans la checklist articles. */
+      var okTranches = !!document.getElementById('pp-bandes') && !!document.getElementById('pp-debut');
+      /* Les factures exclues ont disparu de la modale (elles se cochent
+         dans le Journal de vente). */
+      var okPlusDeFacs = typeof ppRendreExFacs === 'undefined' && typeof ppRendreSelectFacEmp === 'undefined' && typeof ppRendreExFacsEmp === 'undefined' && typeof ppExFacToggle === 'undefined';
+      /* Cocher E3 dans la checklist articles, puis enregistrer le bareme. */
       ppExArtToggle({ getAttribute: function () { return 'E3'; }, checked: true });
       var okToggle = (window._ppExArts || []).indexOf('e3') !== -1;
-      /* Enregistrer le barème courant avec les checklists cochées. */
-      window._ppExFacs = ['FA10'];
       window._ppBandes = [{ jusqu_a: null, taux: 10 }];
       var nom = ptBaremeNouveau('Check', '2000-01');
       window._ppCible = nom.id;
       var okSave = ptPrimeProdEnregistrer(true) === true;
       var b = getPrimeProdBaremes().filter(function (x) { return String(x.id) === String(nom.id); })[0];
-      var okB = !!(b && b.articles_exclus.indexOf('e3') !== -1 && b.factures_exclus.indexOf('FA10') !== -1);
-      /* Cocher FA10 pour e1 uniquement (facture par employé). */
-      window._ppFacEmp = 'e1';
-      ppExFacEmpToggle({ getAttribute: function () { return 'FA10'; }, checked: true });
-      var okFacEmp = ptFacturesExclusEmploye('e1').indexOf('fa10') !== -1;
-      /* La checklist de l'employé affiche la facture. */
-      var hFacEmp = String((document.getElementById('pp-ex-facs-emp') || {}).innerHTML || '');
-      var okHFacEmp = hFacEmp.indexOf('data-pp-exfacemp="FA10"') !== -1;
-      (okArts && okFacs && okSel && okToggle && okSave && okB && okFacEmp && okHFacEmp)
-        ? 'OK : arts=' + okArts + ' facs=' + okFacs + ' sel=' + okSel + ' save=' + okB + ' facEmp=' + okFacEmp
-        : 'ECHEC arts=' + okArts + ' facs=' + okFacs + ' sel=' + okSel + ' toggle=' + okToggle + ' save=' + okSave + ' b=' + okB + ' facEmp=' + okFacEmp + ' hFacEmp=' + okHFacEmp
+      var okB = !!(b && b.articles_exclus.indexOf('e3') !== -1);
+      /* L'exclusion de facture se fait bien par le Journal de vente. */
+      DB.setMain('mdb_factures_hors_prime_ca', [{ id: 'fa10', numero: 'FA10' }]);
+      var okJournal = ptFactureHorsCA('fa10') === true;
+      (okArts && okTranches && okPlusDeFacs && okToggle && okSave && okB && okJournal)
+        ? 'OK : tranches + articles exclus, plus aucune facture dans la modale, exclusion par le journal'
+        : 'ECHEC arts=' + okArts + ' tranches=' + okTranches + ' plusDeFacs=' + okPlusDeFacs + ' toggle=' + okToggle + ' save=' + okSave + ' bareme=' + okB + ' journal=' + okJournal
     `,
     attenduPrefixe: 'OK'
   });
