@@ -6512,11 +6512,182 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Prime production : mode articles / CA / les deux par employé',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: null, taux: 10 }];
+      cfg.versions = [{ id: 'v-md', debut: '2000-01', fin: '', label: 'G', bandes: cfg.bandes, taux_ca_ht: 2, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      cfg.factures_exclus_employe = {};
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      setPointageMontage([{ id: 'md-p1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 50, prix: 100 }]);
+      /* Sans mode : les deux primes (barres 50x10 + CA 5000x2%). */
+      var emps = payeArr('mdb_employes');
+      emps[0].prime_mode = '';
+      DB.setMain('mdb_employes', emps);
+      var lesDeux = ptPrimeProdCalcul('e1', '2026-10');
+      var okDeux = lesDeux.montant === 500 && lesDeux.montant_ca === 100;
+      /* Mode articles : pas de prime CA. */
+      emps = payeArr('mdb_employes');
+      emps[0].prime_mode = 'articles';
+      DB.setMain('mdb_employes', emps);
+      var rArt = ptPrimeProdCalcul('e1', '2026-10');
+      var okArt = rArt.montant === 500 && rArt.montant_ca === 0;
+      /* Mode CA : pas de barres. */
+      emps = payeArr('mdb_employes');
+      emps[0].prime_mode = 'ca';
+      DB.setMain('mdb_employes', emps);
+      var rCa = ptPrimeProdCalcul('e1', '2026-10');
+      var okCa = rCa.montant === 0 && rCa.montant_ca === 100 && rCa.ca_ht === 5000;
+      /* Valeur inconnue : retour au defaut « les deux ». */
+      emps = payeArr('mdb_employes');
+      emps[0].prime_mode = 'n_importe_quoi';
+      DB.setMain('mdb_employes', emps);
+      var okDefaut = ptPrimeProdCalcul('e1', '2026-10').montant === 500;
+      (okDeux && okArt && okCa && okDefaut)
+        ? 'OK : les deux=' + lesDeux.montant + '/' + lesDeux.montant_ca + ' articles=' + rArt.montant + '/' + rArt.montant_ca + ' ca=' + rCa.montant + '/' + rCa.montant_ca
+        : 'ECHEC deux=' + lesDeux.montant + '/' + lesDeux.montant_ca + ' art=' + rArt.montant + '/' + rArt.montant_ca + ' ca=' + rCa.montant + '/' + rCa.montant_ca + ' defaut=' + okDefaut
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : facture exclue du CA pour un employé précis',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: null, taux: 10 }];
+      cfg.versions = [{ id: 'v-fx', debut: '2000-01', fin: '', label: 'G', bandes: cfg.bandes, taux_ca_ht: 1, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      cfg.factures_exclus_employe = {};
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      setPointageMontage([
+        { id: 'fx-p1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100, facture: 'FA77' },
+        { id: 'fx-p2', employee_id: 'e1', date: '2026-10-06', article_code: 'E2', quantite: 20, prix: 100 }
+      ]);
+      var caAvant = getMontageCAHT('e1', '2026-10');
+      var okAvant = caAvant === 3000;
+      /* Exclure FA77 du CA de e1 seul. */
+      ptSetFacturesExclusEmploye('e1', ['FA77']);
+      var caApres = getMontageCAHT('e1', '2026-10');
+      var qApres = ptPrimeProdQuantites('e1', '2026-10');
+      var r = ptPrimeProdCalcul('e1', '2026-10');
+      var okApres = caApres === 2000 && qApres.total === 20 && r.montant_ca === 20 && r.montant === 200;
+      /* Un autre employé pointant la même facture n'est pas affecté. */
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'fx2', nom: 'Autre', matricule: 'MX2', fonction: 'M', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', en_paie: true });
+      DB.setMain('mdb_employes', emps);
+      setPointageMontage(getPointageMontage().concat([{ id: 'fx-p3', employee_id: 'fx2', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100, facture: 'FA77' }]));
+      var caAutre = getMontageCAHT('fx2', '2026-10');
+      var okAutre = caAutre === 1000;
+      /* Retrait : la facture redevient comptee pour e1. */
+      ptSetFacturesExclusEmploye('e1', []);
+      var okRetrait = getMontageCAHT('e1', '2026-10') === 3000 && ptFacturesExclusEmploye('e1').length === 0;
+      (okAvant && okApres && okAutre && okRetrait)
+        ? 'OK : avant=' + caAvant + ' apres=' + caApres + ' q=' + qApres.total + ' autre=' + caAutre + ' retrait=' + okRetrait
+        : 'ECHEC avant=' + okAvant + ' apres=' + caApres + '/' + qApres.total + ' autre=' + caAutre + ' retrait=' + okRetrait
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : modale avec cases à cocher articles + factures par employé',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: null, taux: 10 }];
+      cfg.versions = [{ id: 'v-ck', debut: '2000-01', fin: '', label: 'G', bandes: cfg.bandes, taux_ca_ht: 0, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      cfg.factures_exclus_employe = {};
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }, { code: 'E3', designation: 'Euro 3', prix: 50 }]);
+      setPointageMontage([{ id: 'ck-p1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100, facture: 'FA10' }]);
+      showModalPrimeProd();
+      var hArts = String((document.getElementById('pp-ex-arts') || {}).innerHTML || '');
+      var okArts = hArts.indexOf('data-pp-exart="E2"') !== -1 && hArts.indexOf('data-pp-exart="E3"') !== -1;
+      var hFacs = String((document.getElementById('pp-ex-facs') || {}).innerHTML || '');
+      var okFacs = hFacs.indexOf('data-pp-exfac="FA10"') !== -1;
+      var hSel = String((document.getElementById('pp-fac-emp') || {}).innerHTML || '');
+      var okSel = hSel.indexOf('e1') !== -1;
+      /* Cocher E3 dans la checklist articles. */
+      ppExArtToggle({ getAttribute: function () { return 'E3'; }, checked: true });
+      var okToggle = (window._ppExArts || []).indexOf('e3') !== -1;
+      /* Enregistrer le barème courant avec les checklists cochées. */
+      window._ppExFacs = ['FA10'];
+      window._ppBandes = [{ jusqu_a: null, taux: 10 }];
+      var nom = ptBaremeNouveau('Check', '2000-01');
+      window._ppCible = nom.id;
+      var okSave = ptPrimeProdEnregistrer(true) === true;
+      var b = getPrimeProdBaremes().filter(function (x) { return String(x.id) === String(nom.id); })[0];
+      var okB = !!(b && b.articles_exclus.indexOf('e3') !== -1 && b.factures_exclus.indexOf('FA10') !== -1);
+      /* Cocher FA10 pour e1 uniquement (facture par employé). */
+      window._ppFacEmp = 'e1';
+      ppExFacEmpToggle({ getAttribute: function () { return 'FA10'; }, checked: true });
+      var okFacEmp = ptFacturesExclusEmploye('e1').indexOf('fa10') !== -1;
+      /* La checklist de l'employé affiche la facture. */
+      var hFacEmp = String((document.getElementById('pp-ex-facs-emp') || {}).innerHTML || '');
+      var okHFacEmp = hFacEmp.indexOf('data-pp-exfacemp="FA10"') !== -1;
+      (okArts && okFacs && okSel && okToggle && okSave && okB && okFacEmp && okHFacEmp)
+        ? 'OK : arts=' + okArts + ' facs=' + okFacs + ' sel=' + okSel + ' save=' + okB + ' facEmp=' + okFacEmp
+        : 'ECHEC arts=' + okArts + ' facs=' + okFacs + ' sel=' + okSel + ' toggle=' + okToggle + ' save=' + okSave + ' b=' + okB + ' facEmp=' + okFacEmp + ' hFacEmp=' + okHFacEmp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : la grille de pointage saisit la facture de la journée',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      setPointageMontage([{ id: 'fg-p1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 5, prix: 100, facture: 'FA55' }]);
+      buildMontageModalGrid('2026-10-05', ['E2'], [{ id: 'e1', nom: 'Diallo', matricule: 'M001' }]);
+      var hWiz = String((document.getElementById('wiz-step-3') || {}).innerHTML || '');
+      var okWiz = hWiz.indexOf('id="pt-montage-facture"') !== -1 && hWiz.indexOf('FA55') !== -1;
+      buildMontageGrid('2026-10-05', ['E2'], [{ id: 'e1', nom: 'Diallo', matricule: 'M001' }], false);
+      var hPage = String((document.getElementById('pt-montage-grid') || {}).innerHTML || '');
+      var okPage = hPage.indexOf('id="pt-mont-facture"') !== -1 && hPage.indexOf('FA55') !== -1;
+      (okWiz && okPage)
+        ? 'OK : champ facture present dans la grille modale et la grille page, valeur FA55 rechargee'
+        : 'ECHEC wiz=' + okWiz + ' page=' + okPage
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
 function run(rapport) {
   rapport.section('4. Garde-fous fonctionnels');
+
+  /* Controle statique : la carte de configuration de la prime de production
+     vit dans Donnees de Salaire (tab-primes), plus dans tab-montage ni dans
+     l'en-tête du pointage. */
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'paye.html'), 'utf8');
+    const iHdr = src.indexOf('id="pt-header-actions"');
+    const iMont = src.indexOf('id="tab-montage"');
+    const iPrimes = src.indexOf('id="tab-primes"');
+    const segHdr = iHdr >= 0 ? src.slice(iHdr, iHdr + 3000) : '';
+    const segMont = (iMont >= 0 && iPrimes > iMont) ? src.slice(iMont, iPrimes) : '';
+    const segPrimes = iPrimes >= 0 ? src.slice(iPrimes, iPrimes + 2000) : '';
+    const okHdr = !!segHdr && segHdr.indexOf('showModalPrimeProd') === -1;
+    const okMont = !!segMont && segMont.indexOf('pp-resume') === -1 && segMont.indexOf('showModalPrimeProd') === -1;
+    const okPrimes = !!segPrimes && segPrimes.indexOf('pp-resume') !== -1 && segPrimes.indexOf('showModalPrimeProd(') !== -1;
+    if (okHdr && okMont && okPrimes) {
+      rapport.ok('Prime production : carte configurée dans Éléments de paie (tab-primes), retirée de tab-montage et de l\'en-tête');
+    } else {
+      rapport.ko('Prime production : placement carte — header=' + okHdr + ' montage=' + okMont + ' primes=' + okPrimes);
+    }
+  } catch (eSt) {
+    rapport.ko('Prime production : placement carte illisible (' + eSt.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
