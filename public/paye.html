@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-227";
+      window.__APP_VERSION = "2026-10-09-228";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -16830,40 +16830,90 @@ html +=
         if (t === "exceptionnel") return "Autorisation exceptionnelle";
         return t || "Congé";
       }
+      /* Dernier jour de congé INCLUS : la date saisie (retour prévu ou
+           reprise réelle) est le jour de REPRISE au travail, donc le
+           congé s'arrête la veille. Ex : départ 10/01, reprise 09/02 →
+           congé du 10/01 au 08/02, le 09 n'est PAS un jour de congé. */
+      function ptCongeDernierJour(c) {
+        var fin = String((c && (c.date_reprise || c.date_retour)) || (c && c.date_depart) || "");
+        if (!/^\d{4}-\d{2}-\d{2}/.test(fin)) return "";
+        fin = fin.slice(0, 10);
+        var d = new Date(parseInt(fin.slice(0, 4), 10), parseInt(fin.slice(5, 7), 10) - 1, parseInt(fin.slice(8, 10), 10));
+        d.setDate(d.getDate() - 1);
+        var m = d.getMonth() + 1, j = d.getDate();
+        return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m + "-" + (j < 10 ? "0" : "") + j;
+      }
+      /* Une ligne auto est « intacte » si personne ne l'a retouchée :
+         pas d'heures, pas de créneaux, pas d'observation. */
+      function ptCongeAutoIntacte(r) {
+        if (!r) return false;
+        if (r.present === true) return false;
+        if (parseHeure(r.h_j_manual || "") > 0 || parseHeure(r.h_n_manual || "") > 0) return false;
+        if (parseFloat(r.h_libres) > 0) return false;
+        if (r.j_arrivee || r.j_pause || r.j_reprise || r.j_fin) return false;
+        if (r.n_arrivee || r.n_pause || r.n_reprise || r.n_fin) return false;
+        if (String(r.observation || r.obs || r.pst_observation || "").trim()) return false;
+        return true;
+      }
       function ptCongePointageAuto(mois) {
         var m = String(mois || "");
         if (!/^\d{4}-\d{2}$/.test(m)) return 0;
         var y = parseInt(m.slice(0, 4), 10), mi = parseInt(m.slice(5, 7), 10);
         var nd = new Date(y, mi, 0).getDate();
         var debutM = m + "-01", finM = m + "-" + (nd < 10 ? "0" : "") + nd;
-        var conges = ptRhCongesActifs().filter(function (c) {
-          if (!c || !c.employee_id) return false;
-          var d1 = String(c.date_depart || ""), d2 = String(c.date_retour || c.date_depart || "");
-          if (!d1) return false;
-          return d1 <= finM && d2 >= debutM;
-        });
-        if (!conges.length) return 0;
-        var pts = getPointageData();
-        var a = 0;
-        conges.forEach(function (c) {
-          var d1 = String(c.date_depart || ""), d2 = String(c.date_retour || c.date_depart || "");
+        /* Plage voulue AUJOURD'HUI, d'après les congés planifiés. */
+        var voulu = {}, motifsVoulus = {};
+        ptRhCongesActifs().forEach(function (c) {
+          if (!c || !c.employee_id) return;
+          var d1 = String(c.date_depart || "");
+          var d2 = ptCongeDernierJour(c);
+          if (!d1) return;
           var motif = ptCongeMotifAuto(c.type);
           for (var d = 1; d <= nd; d++) {
             var dk = m + "-" + (d < 10 ? "0" : "") + d;
             if (dk < d1 || dk > d2) continue;
             var dow = new Date(y, mi - 1, d).getDay();
             if (dow === 0) continue; /* dimanche : jamais pointé */
-            var existe = pts.some(function (r) { return r && r.employee_id === c.employee_id && r.date === dk; });
-            if (existe) continue;
-            pts.push({
-              id: DB.id(), employee_id: c.employee_id, date: dk,
-              present: false, motif: motif, conge_auto: true, conge_id: c.id || "",
-            });
-            a++;
+            voulu[c.employee_id + "|" + dk] = true;
+            motifsVoulus[c.employee_id + "|" + dk] = motif;
           }
         });
-        if (a > 0) setPointageData(pts);
-        return a;
+        var pts = getPointageData();
+        var cree = 0, suppr = 0, maj = 0;
+        var garde = [];
+        pts.forEach(function (r) {
+          if (!r || r.conge_auto !== true) { garde.push(r); return; }
+          var cle = r.employee_id + "|" + r.date;
+          if (String(r.date || "").indexOf(m) !== 0) { garde.push(r); return; }
+          if (!voulu[cle]) {
+            /* Le congé a été raccourci/déplacé : on retire la ligne auto,
+               SAUF si quelqu'un l'a retouchée à la main (elle devient
+               alors une ligne normale). */
+            if (ptCongeAutoIntacte(r)) { suppr++; return; }
+            delete r.conge_auto;
+            garde.push(r);
+            return;
+          }
+          /* Toujours dans la plage : le motif suit le congé (sauf
+             retouche manuelle). */
+          if (ptCongeAutoIntacte(r) && motifsVoulus[cle] && r.motif !== motifsVoulus[cle]) {
+            r.motif = motifsVoulus[cle]; maj++;
+          }
+          garde.push(r);
+        });
+        Object.keys(voulu).forEach(function (cle) {
+          var deja = garde.some(function (r) { return r && (r.employee_id + "|" + r.date) === cle; });
+          if (deja) return;
+          var p = cle.split("|");
+          garde.push({
+            id: DB.id(), employee_id: p[0], date: p[1],
+            present: false, motif: motifsVoulus[cle] || "Congé",
+            conge_auto: true, conge_id: "",
+          });
+          cree++;
+        });
+        if (cree > 0 || suppr > 0 || maj > 0) setPointageData(garde);
+        return cree;
       }
       /* Un jour est « au rendement » (lettre R) seulement s'il y a une
              VRAIE production montage ce jour-là, ou si la case rendement

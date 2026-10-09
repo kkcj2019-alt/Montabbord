@@ -6043,7 +6043,7 @@ r.push({
       var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
       var emp = emps[0];
       var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
-      /* Cong\u00e9 annuel du 3 au 6 du mois en cours. */
+      /* Cong\u00e9 annuel du 3 au 6 (= reprise le 6 : le cong\u00e9 finit le 5). */
       var avant = (payeArr('mdb_rh_conges') || []).slice();
       avant.push({ id: 'cg-test-1', employee_id: emp.id, type: 'annual',
                    date_depart: mz + '-03', date_retour: mz + '-06' });
@@ -6060,19 +6060,61 @@ r.push({
       var ad = ptAssiduiteData(mz);
       var it = ad.items.filter(function (x) { return x.emp && x.emp.id === emp.id; })[0];
       var motifsOk = lignes.every(function (r) { return r.present === false && r.conge_auto === true && !!r.motif; });
-      /* Les jours ouvr\u00e9s du cong\u00e9 ne font pas baisser le taux : ils
-         sortent du calcul comme des absences justifi\u00e9es. */
+      /* Le 6 (= jour de reprise) ne doit PAS \u00eatre point\u00e9 cong\u00e9. */
+      var repriseLibre = lignes.every(function (r) { return r.date !== mz + '-06'; });
       var nbOuvres = lignes.filter(function (r) {
         var dw = new Date(parseInt(r.date.slice(0,4),10), parseInt(r.date.slice(5,7),10) - 1, parseInt(r.date.slice(8,10),10)).getDay();
         return dw !== 0 && dw !== 6;
       }).length;
-      var ok = n === lignes.length && lignes.length >= 1 && motifsOk &&
+      var ok = n === lignes.length && lignes.length >= 1 && motifsOk && repriseLibre &&
         it && it.absJust >= nbOuvres;
-      (ok) ? 'OK : ' + n + ' jour(s) cr\u00e9\u00e9(s) (' + lignes.map(function (r) { return r.date.slice(8,10) + '/' + r.motif; }).join(', ') + '), absJust=' + (it ? it.absJust : 0)
-           : 'ECHEC n=' + n + ' lignes=' + lignes.length + ' motifsOk=' + motifsOk + ' absJust=' + (it && it.absJust) + ' nbOuvres=' + nbOuvres;
+      (ok) ? 'OK : ' + n + ' jour(s) cr\u00e9\u00e9(s) (' + lignes.map(function (r) { return r.date.slice(8,10) + '/' + r.motif; }).join(', ') + '), reprise ' + mz + '-06 libre, absJust=' + (it ? it.absJust : 0)
+           : 'ECHEC n=' + n + ' lignes=' + lignes.length + ' motifsOk=' + motifsOk + ' repriseLibre=' + repriseLibre + ' absJust=' + (it && it.absJust) + ' nbOuvres=' + nbOuvres;
     `,
     attenduPrefixe: 'OK'
   });
+
+  r.push({
+    nom: 'Cong\u00e9 modifi\u00e9 : le pointage auto suit (jours retir\u00e9s, saisie manuelle gard\u00e9e)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var avant = (payeArr('mdb_rh_conges') || []).filter(function (c) { return c.id !== 'cg-test-2'; }).slice();
+      avant.push({ id: 'cg-test-2', employee_id: emp.id, type: 'annual',
+                   date_depart: mz + '-10', date_retour: mz + '-14' });
+      DB.setMain('mdb_rh_conges', avant);
+      var pts = getPointageData().filter(function (r) {
+        return !(r && r.employee_id === emp.id && r.date >= mz + '-10' && r.date <= mz + '-14');
+      });
+      setPayeSection('pointage', pts);
+      ptCongePointageAuto(mz);
+      /* Le 12 est retouch\u00e9 \u00e0 la main (8 h point\u00e9es : reprise anticip\u00e9e).
+         On mute ET on sauve le M\u00caME tableau (chaque lecture DB = copie). */
+      var tous = getPointageData();
+      var j12 = tous.filter(function (r) { return r && r.employee_id === emp.id && r.date === mz + '-12'; })[0];
+      if (j12) { j12.h_j_manual = '8'; setPointageData(tous); }
+      /* Le chef raccourcit le cong\u00e9 : reprise le 12 au lieu du 14. */
+      var cs = payeArr('mdb_rh_conges');
+      cs.forEach(function (c) { if (c.id === 'cg-test-2') c.date_retour = mz + '-12'; });
+      DB.setMain('mdb_rh_conges', cs);
+      ptCongePointageAuto(mz);
+      var apres = getPointageData().filter(function (r) {
+        return r && r.employee_id === emp.id && r.date >= mz + '-10' && r.date <= mz + '-14';
+      });
+      var auto = apres.filter(function (r) { return r.conge_auto === true; }).map(function (r) { return r.date.slice(8, 10); }).sort().join(',');
+      var j12b = apres.filter(function (r) { return r.date === mz + '-12'; })[0];
+      /* Attendu : auto sur 10 (le 11 est un dimanche, jamais cr\u00e9\u00e9) ;
+         le 13 intact est supprim\u00e9 ; le 12 retouch\u00e9 est gard\u00e9
+         mais n'est plus une ligne auto. */
+      var ok = auto === '10' && j12b && j12b.conge_auto !== true && String(j12b.h_j_manual) === '8';
+      (ok) ? 'OK : auto=' + auto + ', 12 gard\u00e9 en manuel (8h), 13 supprim\u00e9'
+           : 'ECHEC auto=' + auto + ' j12=' + JSON.stringify(j12b && { h: j12b.h_j_manual, auto: j12b.conge_auto });
+    `,
+    attenduPrefixe: 'OK'
+  });
+
 
   r.push({
     nom: 'Synchro : une saisie distante arrive sans rechargement manuel',
