@@ -6014,6 +6014,67 @@ r.push({
   });
 
     r.push({
+    nom: 'R\u00e9cap : la lettre R exige une vraie production montage ou la case du jour',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cas = [
+        [true, false, false, false],  /* fiche au rendement + heures + pas de montage -> PAS de R */
+        [true, false, true, true],    /* fiche + vraie production -> R */
+        [false, true, false, true],   /* case du jour coch\u00e9e -> R */
+        [true, true, false, true],    /* fiche + case du jour -> R */
+        [false, false, false, false], /* rien -> pas de R */
+        [false, false, true, true]    /* production seule (montage import\u00e9) -> R */
+      ];
+      var fails = [];
+      cas.forEach(function (c, i) {
+        var r = ptRecapJourRendement(c[0], c[1], c[2]);
+        if (r !== c[3]) fails.push(i);
+      });
+      (fails.length === 0) ? 'OK : 6 cas (heures sans montage -> pas de R ; montage ou case -> R)'
+           : 'ECHEC cas ' + fails.join(',');
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Cong\u00e9 planifi\u00e9 : ligne de pointage cr\u00e9\u00e9e toute seule, justifi\u00e9e',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      /* Cong\u00e9 annuel du 3 au 6 du mois en cours. */
+      var avant = (payeArr('mdb_rh_conges') || []).slice();
+      avant.push({ id: 'cg-test-1', employee_id: emp.id, type: 'annual',
+                   date_depart: mz + '-03', date_retour: mz + '-06' });
+      DB.setMain('mdb_rh_conges', avant);
+      /* On vide d'abord d'\u00e9ventuelles lignes sur ces jours. */
+      var pts = getPointageData().filter(function (r) {
+        return !(r && r.employee_id === emp.id && r.date >= mz + '-03' && r.date <= mz + '-06');
+      });
+      setPayeSection('pointage', pts);
+      var n = ptCongePointageAuto(mz);
+      var lignes = getPointageData().filter(function (r) {
+        return r && r.employee_id === emp.id && r.date >= mz + '-03' && r.date <= mz + '-06';
+      });
+      var ad = ptAssiduiteData(mz);
+      var it = ad.items.filter(function (x) { return x.emp && x.emp.id === emp.id; })[0];
+      var motifsOk = lignes.every(function (r) { return r.present === false && r.conge_auto === true && !!r.motif; });
+      /* Les jours ouvr\u00e9s du cong\u00e9 ne font pas baisser le taux : ils
+         sortent du calcul comme des absences justifi\u00e9es. */
+      var nbOuvres = lignes.filter(function (r) {
+        var dw = new Date(parseInt(r.date.slice(0,4),10), parseInt(r.date.slice(5,7),10) - 1, parseInt(r.date.slice(8,10),10)).getDay();
+        return dw !== 0 && dw !== 6;
+      }).length;
+      var ok = n === lignes.length && lignes.length >= 1 && motifsOk &&
+        it && it.absJust >= nbOuvres;
+      (ok) ? 'OK : ' + n + ' jour(s) cr\u00e9\u00e9(s) (' + lignes.map(function (r) { return r.date.slice(8,10) + '/' + r.motif; }).join(', ') + '), absJust=' + (it ? it.absJust : 0)
+           : 'ECHEC n=' + n + ' lignes=' + lignes.length + ' motifsOk=' + motifsOk + ' absJust=' + (it && it.absJust) + ' nbOuvres=' + nbOuvres;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Synchro : une saisie distante arrive sans rechargement manuel',
     app: 'paye.html', store: storeRealiste,
     code: `

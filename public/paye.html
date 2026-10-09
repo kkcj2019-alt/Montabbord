@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-226";
+      window.__APP_VERSION = "2026-10-09-227";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -16809,6 +16809,72 @@ html +=
         if (!d) return "";
         return Object.keys(d).map(function(k){ return k + "=" + d[k]; }).join(", ");
       }
+      /* ===== CONGÉS PLANIFIÉS → POINTAGE AUTO =====
+         Quand un travailleur est mis en congé sur une période (index),
+         sa ligne de pointage est remplie TOUTE SEULE sur cette période :
+         absence justifiée marquée « C », jours comptés dans « payés »
+         ni dans les présences. Les deux pointages lisent la même base,
+         donc l'index voit la même chose. On ne crée que les jours
+         manquants : une saisie manuelle gagne toujours. */
+      function ptRhCongesActifs() {
+        var v = [];
+        try { v = payeArr("mdb_rh_conges"); } catch (eC) {}
+        return Array.isArray(v) ? v.slice() : [];
+      }
+      function ptCongeMotifAuto(type) {
+        var t = String(type || "");
+        if (t === "annual") return "Congé annuel";
+        if (t === "maladie") return "Maladie";
+        if (t === "maternite") return "Maternité";
+        if (t === "sans_solde") return "Congé sans solde";
+        if (t === "exceptionnel") return "Autorisation exceptionnelle";
+        return t || "Congé";
+      }
+      function ptCongePointageAuto(mois) {
+        var m = String(mois || "");
+        if (!/^\d{4}-\d{2}$/.test(m)) return 0;
+        var y = parseInt(m.slice(0, 4), 10), mi = parseInt(m.slice(5, 7), 10);
+        var nd = new Date(y, mi, 0).getDate();
+        var debutM = m + "-01", finM = m + "-" + (nd < 10 ? "0" : "") + nd;
+        var conges = ptRhCongesActifs().filter(function (c) {
+          if (!c || !c.employee_id) return false;
+          var d1 = String(c.date_depart || ""), d2 = String(c.date_retour || c.date_depart || "");
+          if (!d1) return false;
+          return d1 <= finM && d2 >= debutM;
+        });
+        if (!conges.length) return 0;
+        var pts = getPointageData();
+        var a = 0;
+        conges.forEach(function (c) {
+          var d1 = String(c.date_depart || ""), d2 = String(c.date_retour || c.date_depart || "");
+          var motif = ptCongeMotifAuto(c.type);
+          for (var d = 1; d <= nd; d++) {
+            var dk = m + "-" + (d < 10 ? "0" : "") + d;
+            if (dk < d1 || dk > d2) continue;
+            var dow = new Date(y, mi - 1, d).getDay();
+            if (dow === 0) continue; /* dimanche : jamais pointé */
+            var existe = pts.some(function (r) { return r && r.employee_id === c.employee_id && r.date === dk; });
+            if (existe) continue;
+            pts.push({
+              id: DB.id(), employee_id: c.employee_id, date: dk,
+              present: false, motif: motif, conge_auto: true, conge_id: c.id || "",
+            });
+            a++;
+          }
+        });
+        if (a > 0) setPointageData(pts);
+        return a;
+      }
+      /* Un jour est « au rendement » (lettre R) seulement s'il y a une
+             VRAIE production montage ce jour-là, ou si la case rendement
+             du jour est cochée. Le simple fait d'être « au rendement » sur
+             la fiche employé ne suffit pas : sinon des heures pointées
+             normalement s'afficheraient « R+8h ». */
+      function ptRecapJourRendement(empRendFiche, recRendJour, montFait) {
+        if (montFait === true) return true;
+        if (recRendJour === true) return true;
+        return false;
+      }
       function renderPtRecap() {
         var cont = document.getElementById("pt-recap-container");
         if (!cont) return;
@@ -16827,6 +16893,8 @@ html +=
         var year = parseInt(mois.split("-")[0]),
           mIdx = parseInt(mois.split("-")[1]) - 1;
         var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
+        /* Congés planifiés : on remplit les jours de congé manquants. */
+        try { ptCongePointageAuto(mois); } catch (eCg) {}
         var ff = document.getElementById("pt-fonction-filter");
         var fsel = ff && ff.value ? ff.value : "Toutes les fonctions";
         var deptEl = document.getElementById("pt-dept-filter");
@@ -16975,6 +17043,17 @@ html +=
               var hJ = cc.j,
                 hN = cc.n,
                 hR = cc.r;
+              /* Le « R » n'apparaît que s'il y a une VRAIE production
+                 montage ce jour-là (ou la case rendement du jour cochée).
+                 Un travailleur « au rendement » sur sa fiche mais pointé
+                 avec de simples heures n'affiche plus « R+8h » : on montre
+                 ses heures (J: 8h). Le rendement ne concerne que les jours
+                 de montage. */
+              var rendReel = ptRecapJourRendement(p.rendement === true, rec.rendement === true, montFait);
+              if (isR && !rendReel) {
+                var ccH = ptCalcDay(rec, false);
+                hJ = ccH.j; hN = ccH.n; hR = 0; isR = false;
+              }
               /* Heures réelles saisies : on affiche les heures, jamais « R »
                  (le rendement ne concerne que les jours de montage). */
               if ((hJ > 0 || hN > 0) && hR === 0) isR = false;
@@ -17688,6 +17767,10 @@ html +=
       var PT_ABS_MOTIFS = {
         "Maladie": "M",
         "Cong\u00e9": "C",
+        "Cong\u00e9 annuel": "C",
+        "Cong\u00e9 sans solde": "C",
+        "Autorisation exceptionnelle": "E",
+        "Maternit\u00e9": "C",
         "Permission": "P",
         "Formation": "F",
         "D\u00e9placement": "D",
@@ -17842,11 +17925,23 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
           '<div style="border:1px solid #bbf7d0;background:#f0fdf4;border-radius:8px;padding:10px">' +
           '<label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:700;color:#166534"><input type="checkbox" id="pe-pst" ' + (pstOn ? "checked" : "") + ' ' + dis + ' onchange="peTogglePst()"> Jours payés sans travail <span style="font-weight:400;font-size:.72rem">(faute entreprise, accident, maternité, arrêt… : la journée est payée)</span></label>' +
           '<div id="pe-pst-sub" style="display:' + (pstOn ? "" : "none") + ';margin-top:8px;margin-left:26px">' +
-          '<label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="pe-pst-rattrap" ' + (rec && (rec.pst_a_rattraper || rec.absent_paye) ? "checked" : "") + ' ' + dis + '> <span style="font-weight:600">À rattraper ?</span> <span style="font-weight:400;font-size:.7rem;color:#166534">(coché par défaut : ces heures payées seront dues)</span></label>' +
-          '<div style="margin-top:8px"><label style="font-size:.72rem;font-weight:700;color:#166534">Cause de l\u2019absence</label>' +
-          '<select id="pe-pst-motif" ' + dis + ' style="width:100%;padding:7px;border:1px solid #86efac;border-radius:6px;font-size:.82rem;background:#fff;color:#0f172a">' + ptMotifOptions((rec && rec.motif) || "") + '</select></div>' +
+          '<label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="pe-pst-rattrap" ' + (rec && (rec.pst_a_rattraper || rec.absent_paye) ? "checked" : "") + ' ' + dis + ' onchange="ptPstRattrapDefaut()"> <span style="font-weight:600">À rattraper ?</span> <span style="font-weight:400;font-size:.7rem;color:#166534">(coché par défaut : ces heures payées seront dues)</span></label>' +
+          '<div style="display:flex;gap:10px;margin-top:8px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:130px"><label style="font-size:.72rem;font-weight:800;color:#dc2626">Heures payées</label>' +
+          '<input type="number" id="pe-payees" min="0" step="0.25" value="' + (pstOn ? ((parseFloat((rec && rec.h_libres) || 0) || 0) || 8) : 0) + '" ' + dis + ' oninput="ptPstPayeesMaj()" style="width:100%;padding:7px;border:2px solid #dc2626;border-radius:6px;font-size:.9rem;font-weight:800;color:#dc2626;background:#fef2f2;text-align:center"></div>' +
+          '<div style="flex:1;min-width:130px"><label style="font-size:.72rem;font-weight:800;color:#dc2626">À rattraper</label>' +
+          '<input type="number" id="pe-pst-rg" min="0" step="0.25" value="' + (rec && rec.rattrap_gagnees ? rec.rattrap_gagnees : (pstOn ? 8 : 0)) + '" ' + dis + ' oninput="ptPstRattrapChampMaj()" style="width:100%;padding:7px;border:2px solid #dc2626;border-radius:6px;font-size:.9rem;font-weight:800;color:#dc2626;background:#fef2f2;text-align:center"></div>' +
+          '</div>' +
+          '<div style="font-size:.66rem;color:#166534;margin-top:3px">Écris librement le nombre d\u2019heures à rattraper ci-dessus. Si tu ne changes rien, il reprend les heures payées.</div>' +
+          '<div style="margin-top:8px"><label style="font-size:.72rem;font-weight:700;color:#166534">Cause de l\u2019absence (faute de l\u2019entreprise)</label>' +
+          '<select id="pe-pst-motif" ' + dis + ' onchange="ptPstMotifMaj()" style="width:100%;padding:7px;border:1px solid #86efac;border-radius:6px;font-size:.82rem;background:#fff;color:#0f172a">' + ptMotifFauteOptions(ptMotifListeSeule((rec && rec.motif) || "")) + '</select></div>' +
+          '<div id="pe-pst-libre-wrap" style="display:none;margin-top:6px">' +
+          '<label style="font-size:.72rem;font-weight:700;color:#166534">Écris ici la vraie cause</label>' +
+          '<input type="text" id="pe-pst-libre" ' + dis + ' value="' + escH(ptMotifLibreVal(rec && rec.motif)) + '" oninput="ptPstMotifMaj()" placeholder="ex : groupe électrogène en panne, pas de courant" style="width:100%;padding:7px;border:1px dashed #86efac;border-radius:6px;font-size:.8rem;background:#fff;box-sizing:border-box"></div>' +
+          '<div style="margin-top:8px"><label style="font-size:.72rem;font-weight:700;color:#166534">Observation (elle sera imprimée sur la fiche de pointage)</label>' +
+          '<textarea id="pe-pst-obs" ' + dis + ' placeholder="écris librement ce que tu veux..." style="width:100%;min-height:44px;padding:7px;border:1px solid #86efac;border-radius:6px;font-size:.8rem;margin-top:3px;box-sizing:border-box">' + escH(ptPstObsVal(rec)) + '</textarea></div>' +
           '</div></div>' +
-          '<label style="display:flex;gap:8px;align-items:center;cursor:pointer;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pe-abs" ' + (absPlain ? "checked" : "") + ' ' + dis + ' onchange="peToggleAbs()"> Marquer comme absent <span style="font-weight:400;font-size:.72rem">(sans motif = absence injustifiée)</span></label>' +
+          '<label id="pe-abs-lbl" style="display:flex;gap:8px;align-items:center;cursor:pointer;color:#dc2626;background:#fef2f2;border:2px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pe-abs" ' + (absPlain || pstOn ? "checked" : "") + ' ' + dis + ' onchange="peToggleAbs()"> <span style="font-weight:800">Marquer comme absent</span> <span style="font-weight:400;font-size:.72rem" id="pe-abs-hint">(sans motif = absence injustifiée)</span></label>' +
           '<div id="pe-abs-sub" style="display:' + (absPlain ? "" : "none") + ';margin-left:26px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:8px 10px">' +
           '<label style="font-size:.72rem;font-weight:700;color:#92400e">Motif de l\u2019absence</label>' +
           '<select id="pe-motif" ' + dis + ' onchange="ptEditRecalc()" style="width:100%;padding:7px;border:1px solid #fcd34d;border-radius:6px;font-size:.82rem;background:#fff;color:#0f172a">' + ptMotifOptions(rec && rec.motif) + '</select>' +
@@ -17871,6 +17966,9 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
           '</div></div></div>';
         openPtModal(html, true);
         ptEditRecalc();
+        /* À l'ouverture : absent rouge + champ libre « Autre » si faute. */
+        try { if (document.getElementById("pe-pst") && document.getElementById("pe-pst").checked) peTogglePst(); } catch (eOpenPst) {}
+        try { ptPstMotifMaj(); } catch (eOpenMot) {}
       }
       function ptEditToggleNuit() {
         var w = document.getElementById("pe-nuit-wrap");
@@ -17954,11 +18052,89 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
           else if (!parseFloat(hg.value)) hg.value = 8;
         } catch (eR0) {}
       }
-      function peTogglePst() {
+      /* ===== FAUTE ENTREPRISE DANS LA MODALE DU JOUR =====
+       Quand « Jours payés sans travail » est coché :
+         - le jour est automatiquement marqué ABSENT, en rouge ;
+         - les heures payées sont affichées en rouge, saisissables ;
+         - les heures à rattraper sont affichées en rouge, et tu peux
+           écrire le nombre que tu veux (sinon = heures payées) ;
+         - si la cause est « Autre », un champ libre s'ouvre pour écrire
+           la vraie cause, et l'observation reste libre. */
+      /* « Panne machine — groupe en panne » -> on garde la liste seule. */
+      function ptMotifListeSeule(motif) {
+        var m = String(motif || "").trim();
+        if (PT_FAUTE_ENT_MOTIFS.indexOf(m) >= 0) return m;
+        if (m) return "Autre motif entreprise";
+        return "";
+      }
+      /* La partie libre d'un motif « Autre ». */
+      function ptMotifLibreVal(motif) {
+        var m = String(motif || "").trim();
+        if (!m) return "";
+        if (PT_FAUTE_ENT_MOTIFS.indexOf(m) >= 0) return "";
+        var i = m.indexOf("—");
+        if (i >= 0) return m.slice(i + 1).trim();
+        if (/^Autre motif entreprise$/i.test(m)) return "";
+        return m;
+      }
+      function ptPstObsVal(rec) {
+        if (!rec) return "";
+        var o = String(rec.pst_observation || "").trim();
+        if (o) return o;
+        var w = String(rec.observation || rec.obs || "").trim();
+        if (w && /^Faute entreprise/i.test(w)) return w.replace(/^Faute entreprise\s*[—-]\s*/, "");
+        return "";
+      }
+      /* Champ « heures payées » -> heures libres + « à rattraper ». */
+      function ptPstPayeesMaj() {
+        try {
+          var pe = document.getElementById("pe-payees");
+          var lib = document.getElementById("pe-libres");
+          var v = parseFloat(pe && pe.value);
+          if (lib) { lib.value = (isNaN(v) || v <= 0) ? 0 : v; lib.dataset.dirty = "1"; }
+          var rg = document.getElementById("pe-pst-rg");
+          if (rg && !(rg.dataset.touche === "1")) rg.value = (isNaN(v) || v <= 0) ? 0 : v;
+          var hg = document.getElementById("pe-hg");
+          if (hg && !(hg.dataset.touche === "1")) hg.value = (isNaN(v) || v <= 0) ? 0 : v;
+          var rat = document.getElementById("pe-pst-rattrap");
+          if (rat && !rat.checked && v > 0) rat.checked = true;
+          try { ptEditRecalc(); } catch (eR) {}
+        } catch (e) {}
+      }
+      /* Champ « à rattraper » (rouge) -> champ du bas. */
+      function ptPstRattrapChampMaj() {
+        try {
+          var rg = document.getElementById("pe-pst-rg");
+          if (rg) rg.dataset.touche = "1";
+          var hg = document.getElementById("pe-hg");
+          if (hg) { hg.value = rg ? rg.value : 0; hg.dataset.touche = "1"; }
+        } catch (e) {}
+      }
+      /* Ouverture du champ libre quand la cause = « Autre ». */
+      function ptPstMotifMaj() {
+        try {
+          var sel = document.getElementById("pe-pst-motif");
+          var wrap = document.getElementById("pe-pst-libre-wrap");
+          if (!sel || !wrap) return;
+          var autre = !sel.value || /Autre/i.test(sel.value);
+          wrap.style.display = autre ? "" : "none";
+          if (autre) {
+            var lb = document.getElementById("pe-pst-libre");
+            if (lb && !lb.dataset.touche) {
+              var ob = document.getElementById("pe-pst-obs");
+              if (ob && !ob.value.trim() && lb.value) { ob.value = lb.value; ob.dataset.touche = "1"; }
+            }
+          }
+        } catch (e) {}
+      }
+function peTogglePst() {
         var s = document.getElementById("pe-pst-sub");
         var c = document.getElementById("pe-pst");
         if (s) s.style.display = (c && c.checked) ? "" : "none";
-if (c && c.checked) {
+        var abs = document.getElementById("pe-abs");
+        var lbl = document.getElementById("pe-abs-lbl");
+        var hint = document.getElementById("pe-abs-hint");
+        if (c && c.checked) {
           /* AUCUN créneau pré-rempli : vous saisissez directement le nombre
              d'heures payées dans « Heures libres ». */
           var rat0 = document.getElementById("pe-pst-rattrap");
@@ -17968,7 +18144,38 @@ if (c && c.checked) {
           var lib = document.getElementById("pe-libres");
           if (lib && !parseFloat(lib.value)) { lib.value = 8; lib.dataset.dirty = "1"; }
           ptPstRattrapDefaut();
+          /* ABSENT automatiquement, en ROUGE : le jour n'a pas été
+             travaillé, c'est l'entreprise qui est en faute. */
+          if (abs && !abs.checked) abs.checked = true;
+          if (lbl) {
+            lbl.style.borderColor = "#dc2626";
+            lbl.style.boxShadow = "0 0 0 3px rgba(220,38,38,.18)";
+          }
+          if (hint) hint.textContent = "(coché tout seul : l'entreprise est en cause)";
+          /* Heures payées affichées en rouge */
+          var pe = document.getElementById("pe-payees");
+          if (pe) {
+            var v = parseFloat(lib && lib.value);
+            pe.value = (isNaN(v) || v <= 0) ? 8 : v;
+            pe.style.color = "#dc2626";
+            pe.style.background = "#fef2f2";
+          }
+          var rg = document.getElementById("pe-pst-rg");
+          if (rg) {
+            rg.value = (pe && pe.value) ? pe.value : 8;
+            rg.style.color = "#dc2626";
+            rg.style.background = "#fef2f2";
+            delete rg.dataset.touche;
+          }
+          ptPstMotifMaj();
           try { ptEditRecalc(); } catch (eR) {}
+        } else {
+          if (lbl) { lbl.style.borderColor = "#fecaca"; lbl.style.boxShadow = "none"; }
+          if (hint) hint.textContent = "(sans motif = absence injustifiée)";
+          var pe0 = document.getElementById("pe-payees");
+          if (pe0) pe0.value = 0;
+          var rg0 = document.getElementById("pe-pst-rg");
+          if (rg0) { rg0.value = 0; delete rg0.dataset.touche; }
         }
       }
       function peToggleAbs() {
@@ -18012,6 +18219,16 @@ if (c && c.checked) {
         var absPaye = pst;
         var pstR = pst && gc("pe-pst-rattrap");
         var motifSel = g("pe-pst-motif").trim();
+        /* Motif « Autre » : on prend le texte libre écrit par l'utilisateur
+           (champ cause + observation), sinon on garde la liste. */
+        var motifLibre = g("pe-pst-libre").trim();
+        var pstObs = g("pe-pst-obs").trim();
+        if (pst && motifSel && /Autre/i.test(motifSel)) {
+          var detail = [motifLibre, pstObs].filter(Boolean).join(" — ");
+          motifSel = detail ? "Autre motif entreprise — " + detail : "Autre motif entreprise";
+        } else if (pst && !motifSel && (motifLibre || pstObs)) {
+          motifSel = [motifLibre, pstObs].filter(Boolean).join(" — ");
+        }
         var rattrap = gc("pe-rattrap");
         if (!rec) {
           rec = {id:DB.id(), employee_id:empId, date:dk, present:true, h_j_manual:"", h_n_manual:""};
@@ -18023,17 +18240,37 @@ if (c && c.checked) {
         rec.n_arrivee = g("pe-na") || ""; rec.n_pause = g("pe-np1") || "";
         rec.n_reprise = g("pe-np2") || ""; rec.n_fin = g("pe-nf") || "";
         rec.rendement = gc("pe-rend");
+        /* Heures libres : le champ rouge « Heures payées » fait foi
+           quand le jour est payé sans travail (le champ normal suit). */
+        var _hPayeesRouges = parseFloat(g("pe-payees"));
         rec.h_libres = parseFloat(g("pe-libres")) || 0;
+        if (pst && !isNaN(_hPayeesRouges) && _hPayeesRouges > 0) {
+          rec.h_libres = _hPayeesRouges;
+          try {
+            var _libChamp = document.getElementById("pe-libres");
+            if (_libChamp) _libChamp.value = _hPayeesRouges;
+          } catch (eLib) {}
+        }
         rec.paye_sans_travail = pst;
         rec.pst_a_rattraper = pstR;
         rec.absent_paye = absPaye;
+        /* L'observation libre du bloc faute entreprise est conservée à
+           part : c'est elle qui est imprimée sur la fiche. */
+        if (pst) {
+          if (pstObs) rec.pst_observation = pstObs;
+          else delete rec.pst_observation;
+        }
         /* Motif : cause du « jour payé sans travail », sinon celui de
            l'absence. Aucun motif = absence INJUSTIFIÉE (elle fait baisser
            le taux d'assiduité). */
         if (motifSel) rec.motif = motifSel;
         else if (absent) { var _motif = g("pe-motif").trim(); if (_motif) rec.motif = _motif; else delete rec.motif; }
         else delete rec.motif;
-        rec.rattrap_gagnees = parseFloat(g("pe-hg")) || 0;
+        /* Heures à rattraper : le champ rouge de la modale fait foi,
+           sinon le champ du bas, sinon les heures payées. */
+        var _rg = parseFloat(g("pe-pst-rg"));
+        if (isNaN(_rg) || _rg < 0) _rg = parseFloat(g("pe-hg")) || 0;
+        rec.rattrap_gagnees = _rg || 0;
         rec.rattrap_utilisees = parseFloat(g("pe-hu")) || 0;
         /* NB : les heures libres ne s'ajOUTENT PAS aux heures à rattraper.
            Elles sont déjà reportées plus bas (elles représentent les heures
@@ -18084,13 +18321,19 @@ if (c && c.checked) {
             rec.h_j_manual = storeH(8);
             rec.h_n_manual = "";
           }
-          /* « à rattraper » : la valeur saisie dans le champ fait foi ; sinon
-             elle vaut exactement les heures payées (jamais 8 de force). */
+          /* « à rattraper » : priorité au champ ROUGE de la modale (que tu
+             peux écrire librement), puis au champ du bas s'il a été
+             touché, sinon exactement les heures payées (jamais 8 de force). */
           var _hgTouche = document.getElementById("pe-hg");
+          var _rgRouge = document.getElementById("pe-pst-rg");
+          var _rgVal = _rgRouge ? parseFloat(_rgRouge.value) : NaN;
+          var _rgTouche = _rgRouge && (_rgRouge.dataset.touche === "1" || (!isNaN(_rgVal) && Math.abs(_rgVal - _paidPst) > 0.001));
           if (pstR) {
-            rec.rattrap_gagnees = (_hgTouche && _hgTouche.dataset.touche === "1")
-              ? (parseFloat(_hgTouche.value) || 0)
-              : Math.round(_paidPst * 100) / 100;
+            rec.rattrap_gagnees = !isNaN(_rgVal) && (_rgTouche || _rgVal > 0)
+              ? Math.round(_rgVal * 100) / 100
+              : (_hgTouche && _hgTouche.dataset.touche === "1")
+                ? (parseFloat(_hgTouche.value) || 0)
+                : Math.round(_paidPst * 100) / 100;
           }
         } else if (absent || rattrap) {
           rec.present = false;
@@ -21147,6 +21390,7 @@ items.push({
             m.indexOf("accident") !== -1 || m.indexOf("arrêt") !== -1 || m.indexOf("arret") !== -1 ||
             m.indexOf("déplacement") !== -1 || m.indexOf("deplacement") !== -1 ||
             m.indexOf("mission") !== -1 || m.indexOf("familial") !== -1 ||
+            m.indexOf("sans solde") !== -1 || m.indexOf("autorisation") !== -1 || m.indexOf("exceptionnel") !== -1 ||
             m.indexOf("maternité") !== -1 || m.indexOf("maternite") !== -1) return true;
         if (m.indexOf("injust") !== -1) return false;
         return false;
@@ -21182,7 +21426,7 @@ items.push({
 if (r) {
               var hrs = parseHeure(r.h_j_manual || "") + parseHeure(r.h_n_manual || "");
               var mo2 = r.motif || "Sans motif";
-              var just = ptAbsEstJustifiee(mo2);
+              var just = ptAbsEstJustifiee(mo2) || r.conge_auto === true;
               if (r.absent_paye === true || r.faute_societe === true) {
                 /* JOUR PAY\u00c9 SANS TRAVAIL (faute entreprise, panne, accident,
                    maternit\u00e9\u2026) : l'absence est r\u00e9elle mais JUSTIFI\u00c9E.
@@ -21433,6 +21677,27 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
       }
       function advanceMontageCell(input) {
         clearTimeout(input._ptTimer);
+        /* Grille de l'assistant (travailleurs en lignes, articles en
+           colonnes) : Entrée descend dans la MÊME colonne (même article,
+           travailleur suivant), pas vers la 1re colonne de la ligne
+           suivante. */
+        try {
+          var artC = input.getAttribute && input.getAttribute("data-article");
+          if (artC) {
+            var tdW = input.parentNode;
+            var trW = tdW.parentNode;
+            var nextTrW = trW.nextElementSibling;
+            if (nextTrW) {
+              var sameIdxW = Array.prototype.indexOf.call(trW.children, tdW);
+              var nextTdW = nextTrW.children[sameIdxW];
+              if (nextTdW) {
+                var niW = nextTdW.querySelector("input");
+                if (niW) { niW.focus(); niW.select(); return; }
+              }
+            }
+            return;
+          }
+        } catch (eW) {}
         /* Si l'onglet Montage n'est plus visible, ne pas déplacer le curseur */
         var mc = document.getElementById("pt-montage-container");
         if (mc && mc.style.display === "none") return;
