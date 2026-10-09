@@ -6315,6 +6315,203 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Montage : le taux de prime CA saisi devant le nom est enregistré sur la fiche',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'etc1', nom: 'TauxGrille', prenoms: 'A', matricule: 'MG1', fonction: 'Manoeuvre', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', en_paie: true });
+      DB.setMain('mdb_employes', emps);
+      /* Saisie dans la grille : valeur 3.5 % puis remise a 0 (= barème). */
+      var fake = { value: '3.5', getAttribute: function (n) { return n === 'data-emp-tx' ? 'etc1' : null; }, style: {} };
+      ptMontTauxCa(fake);
+      var e1 = getPersonnel().filter(function (p) { return p.id === 'etc1'; })[0];
+      var ok1 = e1.taux_prime_ca === 3.5 && typeof e1.updatedAt === 'number';
+      fake.value = '3.5';
+      ptMontTauxCa(fake);
+      var okIdem = getPersonnel().filter(function (p) { return p.id === 'etc1'; })[0].taux_prime_ca === 3.5;
+      fake.value = 'abc';
+      ptMontTauxCa(fake);
+      var e0 = getPersonnel().filter(function (p) { return p.id === 'etc1'; })[0];
+      /* Texte illisible et valeur negative : jamais de taux negatif. */
+      fake.value = '-4';
+      ptMontTauxCa(fake);
+      var okNeg = getPersonnel().filter(function (p) { return p.id === 'etc1'; })[0].taux_prime_ca === 0;
+      /* Le taux individuel prime sur le taux du bareme dans le calcul. */
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      fake.value = '10';
+      ptMontTauxCa(fake);
+      setPointageMontage([{ id: 'mt1', employee_id: 'etc1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100 }]);
+      var r = ptPrimeProdCalcul('etc1', '2026-10');
+      var okCalc = r.ca_ht === 1000 && r.taux_ca_ht === 10 && r.montant_ca === 100;
+      (ok1 && okIdem && okNeg && okCalc)
+        ? 'OK : 3.5 % puis 10 % enregistrés, illisible/negatif -> 0, calcul 10 % de 1000 = 100'
+        : 'ECHEC fiche=' + e1.taux_prime_ca + '/' + e0.taux_prime_ca + ' calc=' + r.ca_ht + '/' + r.taux_ca_ht + '/' + r.montant_ca
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : deux bar\u00e8mes diff\u00e9rents, un par employ\u00e9, cumulables par \u00e9quipe',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Deux barèmes coexistent : l'un « Monteurs », l'autre « Emballage ». */
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: 100, taux: 0 }, { jusqu_a: null, taux: 10 }];
+      cfg.taux_ca_ht = 1;
+      cfg.versions = [{ id: 'v-gl', debut: '2000-01', fin: '', label: 'General', bandes: cfg.bandes, taux_ca_ht: 1, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      setPrimeProdConfig(cfg);
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'bm1', nom: 'MonteurUn', matricule: 'MB1', fonction: 'M', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', en_paie: true });
+      emps.push({ id: 'bm2', nom: 'EmballageUn', matricule: 'MB2', fonction: 'M', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', en_paie: true });
+      DB.setMain('mdb_employes', emps);
+      var b1 = ptBaremeNouveau('Monteurs', '2000-01');
+      var b2 = ptBaremeNouveau('Emballage', '2000-01');
+      ptBaremeEnregistrer({ id: b1.id, label: 'Monteurs', debut: '2000-01', fin: '', bandes: [{ jusqu_a: 100, taux: 0 }, { jusqu_a: null, taux: 50 }], taux_ca_ht: 4, articles_exclus: [], factures_exclus: [] });
+      ptBaremeEnregistrer({ id: b2.id, label: 'Emballage', debut: '2000-01', fin: '', bandes: [{ jusqu_a: 100, taux: 0 }, { jusqu_a: null, taux: 5 }], taux_ca_ht: 2, articles_exclus: ['E3'], factures_exclus: [] });
+      var okCreate = getPrimeProdBaremes().length === 2;
+      /* Meme quantite, deux baremes : deux montants differents. */
+      ptAffecterBareme(b1.id, ['bm1']);
+      ptAffecterBareme(b2.id, ['bm2']);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }, { code: 'E3', designation: 'E3', prix: 100 }]);
+      setPointageMontage([
+        { id: 'bp1', employee_id: 'bm1', date: '2026-10-05', article_code: 'E2', quantite: 200, prix: 100 },
+        { id: 'bp2', employee_id: 'bm2', date: '2026-10-05', article_code: 'E2', quantite: 200, prix: 100 }
+      ]);
+      var r1 = ptPrimeProdCalcul('bm1', '2026-10');
+      var r2 = ptPrimeProdCalcul('bm2', '2026-10');
+      /* 200 articles : 100 a 0 + 100 au taux du bareme. */
+      var okMont = r1.montant === 5000 && r2.montant === 500 && r1.bareme_label === 'Monteurs' && r2.bareme_label === 'Emballage';
+      /* Taux CA : celui du bareme, sinon le taux individuel de la fiche. */
+      var okCa = r1.taux_ca_ht === 4 && r2.taux_ca_ht === 2;
+      var liste = getPersonnel();
+      liste.filter(function (p) { return p.id === 'bm1'; })[0].taux_prime_ca = 7;
+      setPersonnel(liste);
+      var okInd = ptPrimeProdCalcul('bm1', '2026-10').taux_ca_ht === 7;
+      /* Sans taux individuel, c'est le taux du barème qui s'applique. */
+      var liste2 = getPersonnel();
+      liste2.filter(function (p) { return p.id === 'bm1'; })[0].taux_prime_ca = 0;
+      setPersonnel(liste2);
+      var okBarCa = ptPrimeProdCalcul('bm1', '2026-10').taux_ca_ht === 4;
+      /* Le retrait remet sur le bareme general (10 F/article, 1 %). */
+      ptAffecterBareme('', ['bm1']);
+      var r3 = ptPrimeProdCalcul('bm1', '2026-10');
+      var okRetrait = r3.montant === 1000 && r3.taux_ca_ht === 1 && r3.bareme_label === '';
+      /* Supprimer un bareme : ses employes retombent sur le general. */
+      ptBaremeSupprimer(b2.id);
+      var okSuppr = getPrimeProdBaremes().length === 1 &&
+        ptPrimeProdCalcul('bm2', '2026-10').montant === 1000;
+      /* Un bareme limite dans le temps ne s'applique pas apres sa fin. */
+      ptBaremeEnregistrer({ id: b1.id, label: 'Monteurs', debut: '2000-01', fin: '2026-09', bandes: [{ jusqu_a: 100, taux: 0 }, { jusqu_a: null, taux: 50 }], taux_ca_ht: 4, articles_exclus: [], factures_exclus: [] });
+      ptAffecterBareme(b1.id, ['bm1']);
+      var rHors = ptPrimeProdCalcul('bm1', '2026-10');
+      var okPeriode = rHors.bareme_label === '' && rHors.montant === 1000 && rHors.taux_ca_ht === 1;
+      (okCreate && okMont && okCa && okInd && okBarCa && okRetrait && okSuppr && okPeriode)
+        ? 'OK : 2 baremes (5000/500 F), taux CA 4/2 %, individuel 7 %, retrait et suppression -> general, bareme hors periode ignore'
+        : 'ECHEC create=' + okCreate + ' mont=' + r1.montant + '/' + r2.montant + ' ca=' + r1.taux_ca_ht + '/' + r2.taux_ca_ht +
+          ' ind=' + okInd + ' barca=' + okBarCa + ' retrait=' + r3.montant + '/' + r3.taux_ca_ht + ' suppr=' + okSuppr + ' periode=' + okPeriode
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : les exclusions d\'articles suivent le bareme de l\'employé',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: null, taux: 10 }];
+      cfg.versions = [{ id: 'v-gl', debut: '2000-01', fin: '', label: 'G', bandes: cfg.bandes, taux_ca_ht: 0, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      setPrimeProdConfig(cfg);
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'bx1', nom: 'ExcluUn', matricule: 'MX1', fonction: 'M', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', en_paie: true });
+      DB.setMain('mdb_employes', emps);
+      var b = ptBaremeNouveau('Sans E3', '2000-01');
+      ptBaremeEnregistrer({ id: b.id, label: 'Sans E3', debut: '2000-01', fin: '', bandes: [{ jusqu_a: null, taux: 10 }], taux_ca_ht: 0, articles_exclus: ['e3'], factures_exclus: [] });
+      ptAffecterBareme(b.id, ['bx1']);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }, { code: 'E3', designation: 'E3', prix: 100 }]);
+      setPointageMontage([
+        { id: 'bx-p1', employee_id: 'bx1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100 },
+        { id: 'bx-p2', employee_id: 'bx1', date: '2026-10-06', article_code: 'E3', quantite: 90, prix: 100 }
+      ]);
+      var r = ptPrimeProdCalcul('bx1', '2026-10');
+      /* E3 est exclu (comparaison insensible a la casse) : 10 articles retenus. */
+      var ok = r.quantite === 10 && r.montant === 100;
+      /* Un employe sans bareme garde tous ses articles. */
+      ptAffecterBareme('', ['bx1']);
+      var r2 = ptPrimeProdCalcul('bx1', '2026-10');
+      var ok2 = r2.quantite === 100 && r2.montant === 1000;
+      (ok && ok2) ? 'OK : E3 exclu par le bareme (10 art.), general sans exclusion (100 art.)'
+                  : 'ECHEC bareme=' + r.quantite + '/' + r.montant + ' general=' + r2.quantite + '/' + r2.montant
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : la grille affiche la case « Prime CA % » devant chaque nom',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'gr1', nom: 'GrilleUn', matricule: 'MG9', fonction: 'M', service: 'Prod', type_contrat: 'CDI', categorie: 'A', status: 'actif', date_embauche: '2024-01-01', en_paie: true, taux_prime_ca: 2.5 });
+      DB.setMain('mdb_employes', emps);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      setPointageMontage([]);
+      var wk = getPersonnel().filter(function (p) { return p.id === 'gr1'; })[0];
+      buildMontageModalGrid('2026-10-05', ['E2'], [wk]);
+      var html = String(document.getElementById('wiz-step-3').innerHTML || '');
+      /* La case est dans la colonne figee du nom, AVANT le nom du travailleur. */
+      var posCase = html.indexOf('class="pt-mont-tx"');
+      var posNom = html.indexOf('pt-mont-name');
+      var okAvance = posCase !== -1 && posNom !== -1 && posCase < posNom;
+      var okValeur = html.indexOf('data-emp-tx="gr1" value="2.5"') !== -1;
+      var okHandler = html.indexOf('ptMontTauxCa(this)') !== -1;
+      var okEntete = html.indexOf('Prime CA %') !== -1;
+      /* Les autres travailleurs gardent la case vide (= taux du bareme). */
+      var okVide = html.indexOf('data-emp-tx="gr1" value=""') === -1;
+      (okAvance && okValeur && okHandler && okEntete && okVide)
+        ? 'OK : case Prime CA % (2.5) avant le nom, taux reel repris, vide pour les autres'
+        : 'ECHEC avance=' + okAvance + ' valeur=' + okValeur + ' handler=' + okHandler + ' entete=' + okEntete
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : la modale gere le cycle creation / duplication / affectation',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      showModalPrimeProd();
+      var okOuverture = !!document.getElementById('pp-sel-bar') && !!document.getElementById('pp-emps');
+      /* prompt() vide : le nom par defaut doit suffire. */
+      ppBarNouveau();
+      var l = getPrimeProdBaremes();
+      var okCreation = l.length === 1 && l[0].label === 'Barème 1';
+      ppBarDupliquer();
+      var okCopie = getPrimeProdBaremes().length === 2;
+      /* Renommage a la frappe puis enregistrement des tranches. */
+      ppRenommerCible('Monteurs');
+      window._ppBandes = [{ jusqu_a: 100, taux: 0 }, { jusqu_a: null, taux: 60 }];
+      var okSave = ptPrimeProdEnregistrer(true) === true;
+      var enregistre = getPrimeProdBaremes().filter(function (b) { return b.label === 'Monteurs'; })[0];
+      var okContenu = enregistre && enregistre.bandes.length === 2 && enregistre.bandes[1].taux === 60;
+      var emps = getPersonnel();
+      var cible = emps.filter(function (p) { return p.id === 'e1'; })[0];
+      ptAffecterBareme(enregistre.id, [cible.id]);
+      var okAffectation = ptBaremeIdEmploye(cible.id) === enregistre.id &&
+        ptBaremePour(cible.id, '2026-10').label === 'Monteurs';
+      /* Suppression : confirmation refusee => rien ne disparait. */
+      ppBarSupprimer();
+      var okRefus = getPrimeProdBaremes().length === 2;
+      ptBaremeSupprimer(enregistre.id);
+      var okSuppr = getPrimeProdBaremes().length === 1 && ptBaremeIdEmploye(cible.id) === '';
+      (okOuverture && okCreation && okCopie && okSave && okContenu && okAffectation && okRefus && okSuppr)
+        ? 'OK : modale ouverte, barème créé/copié/renommé/enregistré, affecté puis supprimé ( employe remisé sur général)'
+        : 'ECHEC ouverture=' + okOuverture + ' creation=' + okCreation + ' copie=' + okCopie + ' save=' + okSave +
+          ' contenu=' + okContenu + ' affectation=' + okAffectation + ' refus=' + okRefus + ' suppr=' + okSuppr
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
