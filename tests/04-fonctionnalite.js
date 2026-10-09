@@ -6188,6 +6188,18 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Impression bulletins : barre Retour/Imprimer pr\u00e9sente (t\u00e9l\u00e9phone)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var b = bulPrintBar();
+      var ok = b.indexOf('pback-hint') !== -1 && b.indexOf('window.close()') !== -1 && b.indexOf('window.print()') !== -1 && b.indexOf('Retour') !== -1 && b.indexOf('Imprimer') !== -1;
+      ok ? 'OK : barre Retour + Imprimer + aide fermeture'
+         : 'ECHEC barre=' + b.slice(0, 120)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
