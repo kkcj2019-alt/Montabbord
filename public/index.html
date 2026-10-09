@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-09-233';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-09-234';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2488,7 +2488,7 @@ var navGroups = [
     {key:'tresorerie:caisse',label:'Caisse'},
     {key:'tresorerie:banque',label:'Banque'}
   ]},
-  {title:'Ressources Humaines', items:[{key:'rhdashboard',label:'Tableau de bord'},{key:'employes',label:'Employ\u00e9s'},{key:'contrats',label:'Contrats'},{key:'conges',label:'Suivi des cong\u00e9s'},{key:'assiduite',label:'Assiduit\u00e9 & Absences'},{key:'demandes',label:'Demandes d\u2019explication'},{key:'sanctions',label:'Sanctions'},{key:'missions',label:'Ordres de mission'},{key:'acomptesPrets',label:'Acompte et Pr\u00eats salaire'}]},
+  {title:'Ressources Humaines', items:[{key:'rhdashboard',label:'Tableau de bord'},{key:'employes',label:'Employ\u00e9s'},{key:'contrats',label:'Contrats'},{key:'conges',label:'Suivi des cong\u00e9s'},{key:'assiduite',label:'Assiduit\u00e9 & Absences'},{key:'assiduiteAnnuelle',label:'Rapport annuel'},{key:'demandes',label:'Demandes d\u2019explication'},{key:'sanctions',label:'Sanctions'},{key:'missions',label:'Ordres de mission'},{key:'acomptesPrets',label:'Acompte et Pr\u00eats salaire'}]},
     
   {title:'Administration', items:[{key:'adminDashboard',label:'Tableau de bord'},{key:'actif',label:'Actif'},{key:'taches',label:'T\u00e2ches'},{key:'reunions',label:'Réunions & Tâches'},{key:'parametres',label:'Paramètres'}]}
 ];
@@ -6658,6 +6658,7 @@ function navigateTo(page) {
     sanctions: renderSanctionsPage,
     conges: renderCongesPage,
     assiduite: renderAssiduitePage,
+    assiduiteAnnuelle: renderAssiduiteAnnuelle,
     missions: renderMissions,
     bcFournisseurs: renderBCFournisseurs,
     blFournisseurs: renderBLFournisseurs,
@@ -31468,6 +31469,238 @@ function _rhEmpInMonth(e, y, m) {
   if (e.date_sortie && e.date_sortie.substring(0, 7) < ms) return false;
   return true;
 }
+/* =====================================================================
+   RAPPORT ANNUEL D'ASSIDUITÉ
+   Le point clé : on ne juge l'employé que depuis sa date d'entrée.
+   Quelqu'un embauché le 15 n'est pas pénalisé pour les jours où il
+   n'était pas dans l'entreprise ; quelqu'un parti en cours d'année non
+   plus. On compte donc les jours réellement « sous contrat ».
+   ===================================================================== */
+function _asJoursOuvresDe(y, m, du, au) {
+  var nd = new Date(y, m, 0).getDate();
+  var n = 0;
+  var fin = Math.min(nd, au || nd);
+  for (var d = 1; d <= fin; d++) {
+    var dt = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    if (dt < du) continue;
+    var dow = new Date(y, m - 1, d).getDay();
+    if (dow === 0) continue; /* dimanche */
+    n++;
+  }
+  return n;
+}
+/* Combien de mois l'employé compte sur l'année ? (prorata d'entrée/sortie) */
+function _asMoisSurLAnnee(e, y) {
+  var deb = String((e && (e.date_entree || e.date_embauche)) || "").slice(0, 10);
+  var fin = String((e && (e.date_sortie || e.date_depart)) || "").slice(0, 10);
+  var d = deb ? deb : y + '-01-01';
+  var f = fin ? fin : y + '-12-31';
+  if (d < y + '-01-01') d = y + '-01-01';
+  if (f > y + '-12-31') f = y + '-12-31';
+  if (f < d) return { mois: 0, debut: d, fin: f };
+  var dm = parseInt(d.slice(5, 7), 10);
+  var fm = parseInt(f.slice(5, 7), 10);
+  var mois = fm - dm + 1;
+  /* on ne compte pas le mois d'entrée en entier si l'embauche est tardive */
+  if (parseInt(d.slice(8, 10), 10) > 15 && mois > 0) mois -= 1;
+  return { mois: mois, debut: d, fin: f };
+}
+/* Un an complet de rapport pour un employé. */
+function _rhAssiduiteAnnee(e, annee) {
+  var pts = getPayeSectionI('pointage', []);
+  var pmap = {};
+  for (var i = 0; i < pts.length; i++) {
+    var r = pts[i];
+    if (r && r.employee_id && r.date) pmap[r.employee_id + '|' + String(r.date).slice(0, 10)] = r;
+  }
+  var per = _asMoisSurLAnnee(e, annee);
+  var today = getToday();
+  var limite = today.indexOf(String(annee)) === 0 ? today : annee + '-12-31';
+  var moisNoms = ['', 'Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
+  var parMois = [];
+  var totO = 0, totP = 0, totA = 0, totF = 0, totPayes = 0, totC = 0;
+  var motifs = {};
+
+  for (var m = 1; m <= 12; m++) {
+    var mm = String(m).padStart(2, '0');
+    var du = per.debut, au = per.fin;
+    var _ndM = new Date(annee, m, 0).getDate();
+    var _debutM = annee + '-' + mm + '-01';
+    var _finM = annee + '-' + mm + '-' + String(_ndM).padStart(2, '0');
+    if (_finM < du || _debutM > au) {
+      parMois.push({ mois: annee + '-' + mm, label: moisNoms[m] + ' ' + annee, oures: 0, pres: 0, abs: 0, taux: null, horsPeriode: true });
+      continue;
+    }
+    var y = annee;
+    var nd = new Date(y, m, 0).getDate();
+    var o = 0, p = 0, ab = 0, f = 0, payes = 0, conges = 0;
+    for (var d = 1; d <= nd; d++) {
+      var dt = y + '-' + mm + '-' + String(d).padStart(2, '0');
+      if (dt < du || dt > au) continue;   /* pas sous contrat ce jour-là */
+      if (dt > limite) break;              /* on ne compte pas le futur */
+      var dow = new Date(y, m - 1, d).getDay();
+      if (dow === 0) continue;
+      o++;
+      var rec = pmap[e.id + '|' + dt];
+      var hrs = rec ? _rhParseH(rec.h_j_manual) + _rhParseH(rec.h_n_manual) : 0;
+      var estConge = rec && rec.conge_auto === true;
+      if (estConge) conges++;
+      if (rec && (rec.present === true || hrs > 0 || rec.faute_societe === true)) {
+        p++;
+        if (rec.faute_societe === true) f++;
+        if (rec.absent_paye === true) payes++;
+      } else {
+        ab++;
+        var mo = (rec && rec.motif) ? rec.motif : (estConge ? 'Congé' : 'Sans motif');
+        motifs[mo] = (motifs[mo] || 0) + 1;
+      }
+    }
+    totO += o; totP += p; totA += ab; totF += f; totPayes += payes; totC += conges;
+    parMois.push({
+      mois: y + '-' + mm, label: moisNoms[m], oures: o, pres: p, abs: ab,
+      conges: conges, payes: payes, faute: f,
+      taux: o > 0 ? Math.round(100 * p / o) : null,
+      horsPeriode: false
+    });
+  }
+  return {
+    emp: e,
+    annee: annee,
+    mois: parMois,
+    periode: per,
+    oures: totO, pres: totP, abs: totA, conges: totC,
+    payes: totPayes, faute: totF,
+    motifs: motifs,
+    taux: totO > 0 ? Math.round(100 * totP / totO) : 0,
+    tauxAbsence: totO > 0 ? Math.round(100 * totA / totO) : 0
+  };
+}
+/* Le rapport annuel pour tous les employés. */
+function _rhAssiduiteAnneeTous(annee) {
+  var es = getEmployes();
+  var out = [];
+  for (var i = 0; i < es.length; i++) {
+    var a = _rhAssiduiteAnnee(es[i], annee);
+    if (a.oures === 0) continue;
+    out.push(a);
+  }
+  out.sort(function (a, b) { return String(a.emp.matricule || "").localeCompare(String(b.emp.matricule || ""), undefined, { numeric: true }); });
+  return out;
+}
+/* La page. */
+function renderAssiduiteAnnuelle() {
+  var el = document.getElementById('content');
+  if (!el) return;
+  var y = parseInt(window._asAnnee || new Date().getFullYear(), 10);
+  window._asAnnee = y;
+  var data = _rhAssiduiteAnneeTous(y);
+
+  var h = '';
+  h += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">';
+  h += '<button class="btn btn-sec" onclick="assidAnnee(' + (y - 1) + ')">◀ ' + (y - 1) + '</button>';
+  h += '<b style="font-size:1.05rem">Rapport annuel d\'assiduité — ' + y + '</b>';
+  h += '<button class="btn btn-sec" onclick="assidAnnee(' + (y + 1) + ')">' + (y + 1) + ' ▶</button>';
+  h += '<button class="btn btn-sec" onclick="printAssidAnnuelle()" style="margin-left:auto">🖨 Imprimer</button>';
+  h += '<button class="btn btn-sec" onclick="exportAssidAnnuelleCSV()">⤓ CSV</button>';
+  h += '<button class="btn btn-sec" onclick="exportAssidAnnuelleExcel()">⤓ Excel</button>';
+  h += '</div>';
+  h += '<div style="font-size:.78rem;color:#64748b;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:8px 10px;margin-bottom:12px">';
+  h += 'Chaque employé est jugé <b>uniquement depuis sa date d\'entrée</b> (et jusqu\'à sa sortie) : les jours avant son embauche ne comptent jamais dans son taux. ';
+  h += 'Les colonnes marquées « — » sont des mois où il n\'était pas encore dans l\'entreprise.';
+  h += '</div>';
+
+  if (!data.length) {
+    el.innerHTML = h + '<div style="text-align:center;padding:2rem;color:#94a3b8;border:1px dashed #e2e8f0;border-radius:8px">Aucune présence en ' + y + ".</div>";
+    return;
+  }
+
+  var tO = 0, tP = 0, tA = 0;
+  data.forEach(function (a) { tO += a.oures; tP += a.pres; tA += a.abs; });
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:12px">';
+  h += '<div style="background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px"><div style="font-size:.68rem;color:#64748b;text-transform:uppercase">Employés suivis</div><div style="font-size:1.3rem;font-weight:800">' + data.length + "</div></div>";
+  h += '<div style="background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px"><div style="font-size:.68rem;color:#64748b;text-transform:uppercase">Jours ouvrés comptés</div><div style="font-size:1.3rem;font-weight:800">' + fmtF(tO) + "</div></div>";
+  h += '<div style="background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px"><div style="font-size:.68rem;color:#64748b;text-transform:uppercase">Jours d\'absence</div><div style="font-size:1.3rem;font-weight:800;color:#dc2626">' + fmtF(tA) + "</div></div>";
+  h += '<div style="background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px"><div style="font-size:.68rem;color:#64748b;text-transform:uppercase">Taux d\'assiduité global</div><div style="font-size:1.3rem;font-weight:800;color:' + (tO && Math.round(100 * tP / tO) >= 90 ? "#16a34a" : "#b45309") + '">' + (tO ? Math.round(100 * tP / tO) : 0) + " %</div></div>";
+  h += "</div>";
+
+  h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.74rem;background:#fff">';
+  h += '<thead><tr style="background:#0f172a;color:#fff">';
+  h += '<th style="padding:7px;text-align:left;position:sticky;left:0;background:#0f172a">Matricule</th>';
+  h += '<th style="padding:7px;text-align:left">Employé</th>';
+  h += '<th style="padding:7px;text-align:left">Entrée</th>';
+  var noms = ['', 'Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
+  for (var m = 1; m <= 12; m++) h += '<th style="padding:5px 3px;text-align:center" title="' + noms[m] + ' ' + y + '">' + noms[m] + "</th>";
+  h += '<th style="padding:7px;text-align:right">J. ouvrés</th><th style="padding:7px;text-align:right">Absences</th><th style="padding:7px;text-align:right">Taux</th><th style="padding:7px;text-align:left">Motifs</th>';
+  h += "</tr></thead><tbody>";
+
+  data.forEach(function (a) {
+    var e = a.emp;
+    h += '<tr style="border-top:1px solid #e2e8f0">';
+    h += '<td style="padding:5px 7px;position:sticky;left:0;background:#f8fafc;font-weight:700">' + escH(e.matricule || "-") + "</td>";
+    h += '<td style="padding:5px 7px">' + escH(e.nom + " " + (e.prenoms || "")) + "</td>";
+    h += '<td style="padding:5px 7px;font-size:.7rem;color:#64748b">' + escH(String(e.date_entree || "-").slice(0, 10)) + "</td>";
+    a.mois.forEach(function (mm) {
+      if (mm.horsPeriode || mm.taux === null) {
+        h += '<td style="padding:4px 3px;text-align:center;color:#cbd5e1" title="Pas dans l\'entreprise ce mois-là">—</td>';
+        return;
+      }
+      var c = mm.taux >= 95 ? "#16a34a" : mm.taux >= 85 ? "#b45309" : "#dc2626";
+      var bg = mm.taux >= 95 ? "#f0fdf4" : mm.taux >= 85 ? "#fffbeb" : "#fef2f2";
+      h += '<td style="padding:4px 3px;text-align:center;background:' + bg + ';color:' + c + ';font-weight:700" title="' + escH(mm.label + " : " + mm.pres + "/" + mm.oures + " jours présents, " + mm.abs + " absence(s)") + '">' + mm.taux + "</td>";
+    });
+    h += '<td style="padding:5px 7px;text-align:right">' + a.oures + "</td>";
+    h += '<td style="padding:5px 7px;text-align:right;color:' + (a.abs > 0 ? "#dc2626" : "#94a3b8") + ';font-weight:700">' + a.abs + "</td>";
+    h += '<td style="padding:5px 7px;text-align:right;font-weight:800;color:' + (a.taux >= 90 ? "#16a34a" : a.taux >= 75 ? "#b45309" : "#dc2626") + '">' + a.taux + " %</td>";
+    var mot = Object.keys(a.motifs).map(function (k) { return k + " : " + a.motifs[k]; }).join(", ");
+    h += '<td style="padding:5px 7px;font-size:.66rem;color:#64748b;max-width:220px">' + escH(mot || "—") + "</td>";
+    h += "</tr>";
+  });
+  h += "</tbody></table></div>";
+  el.innerHTML = h;
+}
+function assidAnnee(y) { window._asAnnee = y; renderAssiduiteAnnuelle(); }
+function printAssidAnnuelle() {
+  var y = window._asAnnee || new Date().getFullYear();
+  var data = _rhAssiduiteAnneeTous(y);
+  var head = ['Matricule', 'Employé', 'Entrée', 'J. ouvrés', 'Présences', 'Absences', 'Congés', 'Jours payés', 'Faute entreprise', 'Taux assiduité'];
+  for (var m = 1; m <= 12; m++) head.push(["Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Août", "Sep", "Oct", "Nov", "Déc"][m - 1]);
+  var rows = data.map(function (a) {
+    var r = [a.emp.matricule || "-", a.emp.nom + " " + (a.emp.prenoms || ""), String(a.emp.date_entree || "-").slice(0, 10),
+      a.oures, a.pres, a.abs, a.conges, a.payes, a.faute, a.taux + " %"];
+    a.mois.forEach(function (mm) { r.push(mm.horsPeriode || mm.taux === null ? "—" : mm.taux + "%"); });
+    return r;
+  });
+  printRhTable("Rapport annuel d'assiduité " + y, "Taux calculé depuis la date d'entrée de chaque employé", head, rows);
+}
+function exportAssidAnnuelleCSV() {
+  var y = window._asAnnee || new Date().getFullYear();
+  var data = _rhAssiduiteAnneeTous(y);
+  var noms = ["Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Août", "Sep", "Oct", "Nov", "Déc"];
+  var head = ['Matricule', 'Employé', 'Entrée', 'J. ouvrés', 'Présences', 'Absences', 'Congés', 'Jours payés', 'Faute entreprise', 'Taux'];
+  noms.forEach(function (n) { head.push(n); });
+  var rows = data.map(function (a) {
+    var r = [a.emp.matricule || "", a.emp.nom + " " + (a.emp.prenoms || ""), String(a.emp.date_entree || "").slice(0, 10),
+      a.oures, a.pres, a.abs, a.conges, a.payes, a.faute, a.taux + "%"];
+    a.mois.forEach(function (mm) { r.push(mm.horsPeriode || mm.taux === null ? "" : mm.taux + "%"); });
+    return r;
+  });
+  exportRhTableCSV("assiduite_annuelle_" + y + ".csv", head, rows);
+}
+function exportAssidAnnuelleExcel() {
+  var y = window._asAnnee || new Date().getFullYear();
+  var data = _rhAssiduiteAnneeTous(y);
+  var noms = ["Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Août", "Sep", "Oct", "Nov", "Déc"];
+  var head = ['Matricule', 'Employé', 'Entrée', 'J. ouvrés', 'Présences', 'Absences', 'Congés', 'Jours payés', 'Faute entreprise', 'Taux'];
+  noms.forEach(function (n) { head.push(n); });
+  var rows = data.map(function (a) {
+    var r = [a.emp.matricule || "", a.emp.nom + " " + (a.emp.prenoms || ""), String(a.emp.date_entree || "").slice(0, 10),
+      a.oures, a.pres, a.abs, a.conges, a.payes, a.faute, a.taux + "%"];
+    a.mois.forEach(function (mm) { r.push(mm.horsPeriode || mm.taux === null ? "" : mm.taux + "%"); });
+    return r;
+  });
+  if (typeof exportRhTableExcel === 'function') exportRhTableExcel('assiduite_annuelle_' + y + '.xlsx', head, rows);
+  else exportRhTableCSV("assiduite_annuelle_" + y + ".csv", head, rows);
+}
 function _rhAssiduiteAll(mois, onlyEmpId) {
   var pts = getPayeSectionI('pointage', []);
   var pmap = {};
@@ -32900,7 +33133,8 @@ function renderAssiduitePage() {
   html += '</tbody></table></div></div>';
   html += '<div style="font-size:11px;color:var(--gray-500);margin-top:6px">Jours ouvr\u00e9s = lundi \u00e0 samedi (dimanche exclu), compt\u00e9s jusqu\u2019\u00e0 aujourd\u2019hui. Une pr\u00e9sence est valid\u00e9e si le pointage indique des heures ou la pr\u00e9sence coch\u00e9e. Absences list\u00e9es avec motifs (Maladie:M, Cong\u00e9:C, Permission:P, Formation:F, D\u00e9placement:D, Arr\u00eat:R, Accident:A, Absence injustifi\u00e9e:X, Autre:?).</div>';
   html += '</div>';
-  el.innerHTML = html;
+  html += '<div style="margin-top:10px"><button class="btn btn-sec" onclick="navigateTo(\'assiduiteAnnuelle\')" style="padding:6px 14px">📊 Rapport annuel</button></div>';
+  
 }
 function printAssiduitePage() {
   var mois = window._asMois;
