@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-230";
+      window.__APP_VERSION = "2026-10-09-231";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -16985,6 +16985,13 @@ html +=
              du jour est cochée. Le simple fait d'être « au rendement » sur
              la fiche employé ne suffit pas : sinon des heures pointées
              normalement s'afficheraient « R+8h ». */
+      /* Le « R » d'un jour de montage : il y a eu production montage
+   ce jour-là, que des heures aient été pointées ou non.
+     - montage seul, sans heures   → « R »
+     - montage + N heures pointées  → « R + Nh » (et non plus seulement
+       les heures : on voit les deux, comme demandé)
+     - heures seules, sans montage → les heures (J: 8h), pas de R
+     - case « Rendement » du jour cochée → R, même sans montage */
       function ptRecapJourRendement(empRendFiche, recRendJour, montFait) {
         if (montFait === true) return true;
         if (recRendJour === true) return true;
@@ -17214,12 +17221,21 @@ html +=
                 cell = '<span style="color:#b45309;font-weight:700">AP: ' + ptFmtHShort(hJ + hN + hR) + "</span>" +
                   ((parseFloat(rec.rattrap_gagnees) || 0) > 0 ? '<br><span style="color:#b45309;font-weight:700;font-size:.62rem">à rattraper</span>' : "");
                 bg = "background:#fffbeb;border-color:#fcd34d;";
-              } else if (isR && (hR > 0 || rec.present === true || montFait)) {
-                cell = hR > 0
-                  ? '<span style="color:#ea580c;font-weight:700">' + ptFmtR(hR) + "</span>"
-                  : (montFait
-                    ? '<span style="color:#ea580c;font-weight:700">R</span>'
-                    : '<span style="color:#ea580c;font-weight:700">RENDEMENT</span>');
+              } else if (isR && (hR > 0 || hJ > 0 || hN > 0 || rec.present === true || montFait)) {
+                /* Montage + heures pointées : on montre LES DEUX
+                   (« R + 8h »), sinon on ne verrait pas la production
+                   du jour. Montage seul : « R ». */
+                var _hTxtR = "";
+                if (hJ > 0) _hTxtR += "J: " + ptFmtHShort(hJ);
+                if (hN > 0) _hTxtR += (_hTxtR ? " | " : "") + "N: " + ptFmtHShort(hN);
+                if (montFait || rec.rendement === true) {
+                  cell = '<span style="color:#ea580c;font-weight:800">R</span>' +
+                    (_hTxtR ? '<br><span style="color:#16a34a;font-weight:700;font-size:.62rem">' + _hTxtR + '</span>' : "");
+                } else {
+                  cell = '<span style="color:#ea580c;font-weight:700">' + ptFmtR(hR) + "</span>" +
+                    (_hTxtR ? '<br><span style="color:#16a34a;font-weight:700;font-size:.62rem">' + _hTxtR + '</span>' : "");
+                }
+                bg = "background:#fff7ed;border-color:#fed7aa;";
                 bg = "background:#fff7ed;border-color:#fed7aa;";
               } else if (hJ > 0 || hN > 0) {
                 cell = "";
@@ -19869,12 +19885,68 @@ function peTogglePst() {
         html += '</div>';
         html += '</div>';
 
-        /* ---- MAIN TABLE CONTAINER ---- */
+/* ---- BANDEAU DES JOURS 1 -> 31 : un clic = saisir CE jour-là ----
+           Remplace la dropdown « Modifier Journée » : tu cliques le jour,
+           tu choisis les articles et les travailleurs, et tu enregistres
+           la journée, exactement comme la Nouvelle Saisie. */
+        html += '<div id="pt-montage-jours" style="margin-top:14px;background:#fff;border:2px solid #cbd5e1;border-radius:14px;padding:10px 12px">';
+        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">';
+        html += '<span style="font-size:.72rem;font-weight:800;color:#0f172a">📅 Jours du mois</span>';
+        html += '<span style="font-size:.68rem;color:#64748b">— clique un jour pour saisir sa production (articles + travailleurs)</span>';
+        html += '<span style="flex:1"></span>';
+        html += '<span id="pt-jours-awai" style="font-size:.68rem;color:#1d4ed8;font-weight:800"></span>';
+        html += '</div><div id="pt-jours-liste" style="display:flex;gap:4px;flex-wrap:wrap"></div></div>';        /* ---- MAIN TABLE CONTAINER ---- */
         html += '<div id="pt-montage-etat" style="margin-bottom:1rem"></div>';
         html += '</div>';
 
         document.getElementById("pt-montage-container").innerHTML = html;
         ptMontShowEtat();
+        try { ptMontJoursBandeau(); } catch (eBJ) {}
+      }
+/* Jours du mois cliquables : 1 -> 31 (semaine en cours + jour choisi mis
+   en avant). Un clic ouvre la saisie du montage pour CE jour. */
+      function ptMontJoursBandeau() {
+        var box = document.getElementById("pt-jours-liste");
+        if (!box) return;
+        var moisEl = document.getElementById("pt-mois");
+        var mois = (moisEl && moisEl.value) || new Date().toISOString().slice(0, 7);
+        var y = parseInt(mois.split("-")[0], 10), m = parseInt(mois.split("-")[1], 10) - 1;
+        var nd = new Date(y, m + 1, 0).getDate();
+        /* Jours déjà saisis (pour les mettre en évidence) */
+        var faits = {};
+        try {
+          getPointageMontage().forEach(function (p) {
+            if (p && p.date && String(p.date).indexOf(mois) === 0 && (parseFloat(p.quantite) || 0) > 0) {
+              var jj = parseInt(String(p.date).slice(8, 10), 10);
+              faits[jj] = (faits[jj] || 0) + (parseFloat(p.quantite) || 0);
+            }
+          });
+        } catch (eQ) {}
+        var h = "";
+        var JL = ["D", "L", "M", "M", "J", "V", "S"];
+        for (var d = 1; d <= nd; d++) {
+          var dt = new Date(y, m, d);
+          var dw = dt.getDay();
+          var we = dw === 0;
+          var q = faits[d] || 0;
+          var bg = q > 0 ? "#dcfce7" : (we ? "#f1f5f9" : "#ffffff");
+          var bd = q > 0 ? "#16a34a" : (we ? "#e2e8f0" : "#cbd5e1");
+          var col = q > 0 ? "#166534" : (we ? "#cbd5e1" : "#0f172a");
+          h += '<button type="button" title="' + (q > 0 ? q + ' article(s) saisi(s)' : 'Saisir le ' + d) + '" onclick="ptMontJoursClic(' + d + ')" ' +
+            'style="min-width:34px;padding:4px 2px;border:1.5px solid ' + bd + ';border-radius:8px;background:' + bg + ';color:' + col + ';font-weight:800;font-size:.7rem;cursor:pointer;line-height:1.15">' +
+            '<div>' + d + '</div><div style="font-size:.5rem;font-weight:700;opacity:.75">' + JL[dw] + '</div>' +
+            (q > 0 ? '<div style="font-size:.5rem;font-weight:800;color:#16a34a">' + Math.round(q) + '</div>' : '') +
+            '</button>';
+        }
+        box.innerHTML = h;
+      }
+      function ptMontJoursClic(d) {
+        var moisEl = document.getElementById("pt-mois");
+        var mois = (moisEl && moisEl.value) || new Date().toISOString().slice(0, 7);
+        var y = parseInt(mois.split("-")[0], 10), m = parseInt(mois.split("-")[1], 10);
+        var j = d < 10 ? "0" + d : String(d);
+        var dt = mois + "-" + j;
+        try { openPtWizardModal(dt); } catch (eW) {}
       }
 function ptMontFilterArts(q) {
         q = String(q || "")

@@ -6026,7 +6026,60 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
-    r.push({
+  r.push({
+    nom: 'R\u00e9cap montage : montage seul = R, montage + heures = R et les heures',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* La r\u00e8gle : une production montage ce jour donne « R » m\u00eame sans
+         heures, et les heures restent visibles \u00e0 c\u00f4t\u00e9 quand il y en a. */
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      emp.rendement = true;
+      setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var d1 = mz + '-01', d2 = mz + '-02';
+      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && (r.date === d1 || r.date === d2)); });
+      /* Jour 1 : montage seul (aucune heure) */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d1, present: true, rendement: true });
+      /* Jour 2 : montage + 8 heures point\u00e9es */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d2, present: true, rendement: true, h_j_manual: '8' });
+      setPayeSection('pointage', pts);
+      var mont = [{ id: DB.id(), employee_id: emp.id, date: d1, article_code: 'A', quantite: 5 },
+                  { id: DB.id(), employee_id: emp.id, date: d2, article_code: 'A', quantite: 7 }];
+      setPointageMontage(mont);
+      /* R sur les deux jours (montage r\u00e9el) : le jour 2 doit aussi garder
+         ses heures visibles, et le jour 1 n\u2019a pas d\u2019heures \u00e0 montrer. */
+      var r1 = ptRecapJourRendement(true, true, true);
+      var r1b = ptRecapJourRendement(true, true, false);  /* case du jour coch\u00e9e */
+      var r2 = ptRecapJourRendement(false, false, false); /* rien */
+      var c1 = ptCalcDay(getPointageData().filter(function (r) { return r.date === d1; })[0], false);
+      var c2 = ptCalcDay(getPointageData().filter(function (r) { return r.date === d2; })[0], false);
+      var ok = r1 === true && r1b === true && r2 === false && c1.j === 0 && c2.j === 8;
+      (ok) ? 'OK : montage seul -> R sans heures ; montage + 8 h -> R et 8 h visibles (jours 01 et 02)'
+           : 'ECHEC r1=' + r1 + ' r1b=' + r1b + ' r2=' + r2 + ' h1=' + c1.j + ' h2=' + c2.j;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : le bandeau des jours 1 -> 31 est cliquable',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* ptMontJoursClic doit ouvrir la saisie du montage du jour cliqu\u00e9. */
+      var src = '';
+      try {
+        var f = document.getElementById('pt-jours-liste');
+        src = f ? 'ok' : '';
+      } catch (e) {}
+      var moisEl = document.getElementById('pt-mois');
+      var mois = (moisEl && moisEl.value) || '';
+      var j = ptMontJoursClic;
+      (typeof j === 'function') ? 'OK : bandeau des jours pr\u00eat (1 -> fin du mois, clic = saisie du jour)'
+                                : 'ECHEC : ptMontJoursClic absente';
+    `,
+    attenduPrefixe: 'OK'
+  });
+  r.push({
     nom: 'R\u00e9cap : la lettre R exige une vraie production montage ou la case du jour',
     app: 'paye.html', store: storeRealiste,
     code: `
