@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-233";
+      window.__APP_VERSION = "2026-10-09-234";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6517,6 +6517,8 @@ function payeObj(key) {
           /* Congés planifiés (index) : la paie doit voir les AJOUTS *et* les
              SUPPRESSIONS, sinon le pointage garde des « C » après effacement. */
           "mdb_rh_conges",
+          /* Factures cochées « hors CA » dans le Journal de vente. */
+          "mdb_factures_hors_prime_ca",
           "mdb_acomptesPrets",
           "mdb_salairesPaiements",
           "mdb_caisses",
@@ -6699,6 +6701,8 @@ function payeObj(key) {
               /* Congés planifiés : envoyés pour que l’index et les autres
                  postes voient la même chose. */
               "mdb_rh_conges",
+              /* Factures cochées « hors CA » dans le Journal de vente. */
+              "mdb_factures_hors_prime_ca",
               "mdb_acomptesPrets",
               "mdb_salairesPaiements",
               "mdb_caisses",
@@ -7625,7 +7629,50 @@ window._payeVuTs = ts;
         if (p.type === "custom") return String(p.label || "Prime").substring(0, 14);
         return L[p.type] || String(p.type || "?").substring(0, 14);
       }
-      function renderPrimeEmpMatrix() {
+      /* ===== DROIT À LA PRIME : droit / type / taux, par employé =====
+     Dans la grille « Éléments de paie par employé » on règle par ligne :
+       - la case        : l'employé a-t-il droit à la prime de production ?
+       - le type         : sur CA, sur articles (montage), ou les deux
+       - le taux (%)     : appliqué au total HT du mois quand c'est sur CA
+       (0 ou vide = taux du barème général) */
+      function pmeEmploye(empId) {
+        var l = getPersonnel() || [];
+        return l.filter(function (e) { return e && e.id === empId; })[0] || null;
+      }
+      function pmeMajEmploye(empId, champ, val) {
+        var l = (getPersonnel() || []).slice();
+        var modif = false;
+        for (var i = 0; i < l.length; i++) {
+          if (l[i] && l[i].id === empId) { l[i][champ] = val; modif = true; break; }
+        }
+        if (!modif) return;
+        setPersonnel(l);
+        try { pushPayeCloud(); } catch (eP) {}
+        try { renderPrimeEmpMatrix(); } catch (eR) {}
+      }
+      function pmePrimeDroit(empId, on) { pmeMajEmploye(empId, "prime_droit", !!on); }
+      function pmePrimeMode(empId, mode) { pmeMajEmploye(empId, "prime_mode", mode || ""); }
+      function pmePrimeTaux(empId, val) {
+        var v = parseFloat(val);
+        if (isNaN(v) || v < 0) v = 0;
+        pmeMajEmploye(empId, "taux_prime_ca", v);
+      }
+      /* L'employé a-t-il droit à la prime de production ? */
+      function pmePrimeDroitDe(empId) {
+        var e = pmeEmploye(empId);
+        if (!e) return true;
+        return e.prime_droit !== false;
+      }
+      function pmePrimeModeDe(empId) {
+        var e = pmeEmploye(empId);
+        return (e && e.prime_mode) ? String(e.prime_mode) : "";
+      }
+      function pmePrimeTauxDe(empId) {
+        var e = pmeEmploye(empId);
+        return (e && parseFloat(e.taux_prime_ca)) ? parseFloat(e.taux_prime_ca) : 0;
+      }
+
+function renderPrimeEmpMatrix() {
         var box = document.getElementById("prime-emp-matrix");
         if (!box) return;
         var primes = getPrimesSpec();
@@ -7647,7 +7694,8 @@ window._payeVuTs = ts;
         html += '<th style="position:sticky;top:0;background:#f0fdf4;z-index:2;padding:6px;border:1px solid var(--border)">PANIER</th>';
         html += '<th style="position:sticky;top:0;background:#faf5ff;z-index:2;padding:6px;border:1px solid var(--border)">MONTAGE</th>';
         html += '<th style="position:sticky;top:0;background:#faf5ff;z-index:2;padding:6px;border:1px solid var(--border)">PRIME PROD.' + (cfg.seuil ? '<div style="font-weight:400;font-size:.6rem">seuil ' + cfg.seuil + '</div>' : '') + '</th>';
-        html += '<th style="position:sticky;top:0;background:#eff6ff;z-index:2;padding:6px;border:1px solid var(--border)">PRIME CA</th></tr></thead><tbody>';
+        html += '<th style="position:sticky;top:0;background:#eff6ff;z-index:2;padding:6px;border:1px solid var(--border)">PRIME CA</th>';
+        html += '<th style="position:sticky;top:0;background:#fef3c7;z-index:2;padding:6px;border:1px solid var(--border);min-width:196px">PRIME PRODUCTION<div style="font-weight:400;font-size:.6rem">droit · type · taux %</div></th></tr></thead><tbody>';
         emps.forEach(function(e){
           var eff = {};
           try { getPrimesSpecEmp(e.id, mois).forEach(function(x){ eff[x.id] = x; }); } catch(errEff){}
@@ -7673,9 +7721,18 @@ window._payeVuTs = ts;
           var _ppM = 0, _ppQ = 0, _ppCA = 0, _ppCaHT = 0;
           try { var _pp = ptPrimeProdCalcul(e.id, mois); _ppM = _pp.montant; _ppQ = _pp.quantite; _ppCA = _pp.montant_ca; _ppCaHT = _pp.ca_ht; } catch (ePp) {}
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' +
-            (_ppQ > 0 ? '<span title="' + _ppQ + ' articles — bars">' + fmtF(_ppM) + '</span>' : "—") + '</td>' +
+            (pmePrimeDroitDe(e.id) && _ppQ > 0 ? '<span title="' + _ppQ + ' articles — barres">' + fmtF(_ppM) + '</span>' : (pmePrimeDroitDe(e.id) ? "—" : '<span title="Pas de prime">✕</span>')) + '</td>' +
             '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#1d4ed8;font-weight:700">' +
-            (_ppCA > 0 ? '<span title="CA HT ' + fmtF(_ppCaHT) + '">' + fmtF(_ppCA) + '</span>' : "—") + '</td></tr>';
+            (_ppCA > 0 ? '<span title="CA HT ' + fmtF(_ppCaHT) + '">' + fmtF(_ppCA) + '</span>' : "—") + '</td>' +
+            '<td style="padding:3px;border:1px solid var(--border);text-align:center;white-space:nowrap">' +
+            '<input type="checkbox" ' + (pmePrimeDroitDe(e.id) ? "checked" : "") + ' onchange="pmePrimeDroit(\'' + e.id + '\',this.checked)" title="Cet employé a-t-il droit à la prime de production ?" style="width:14px;height:14px;vertical-align:middle;accent-color:#f59e0b">' +
+            '<select onchange="pmePrimeMode(\'' + e.id + '\',this.value)" title="Sur quoi se calcule sa prime" style="width:82px;padding:2px 3px;margin-left:4px;border:1px solid #ddd;border-radius:4px;font-size:.66rem">' +
+            '<option value=""' + (pmePrimeModeDe(e.id) === "" ? " selected" : "") + '>les deux</option>' +
+            '<option value="ca"' + (pmePrimeModeDe(e.id) === "ca" ? " selected" : "") + '>sur CA</option>' +
+            '<option value="articles"' + (pmePrimeModeDe(e.id) === "articles" ? " selected" : "") + '>sur art.</option>' +
+            '</select>' +
+            '<input type="number" min="0" step="0.1" value="' + (pmePrimeTauxDe(e.id) || "") + '" placeholder="%" onchange="pmePrimeTaux(\'' + e.id + '\',this.value)" title="Taux appliqué au total HT du mois (vide ou 0 = taux du barème)" style="width:52px;padding:2px 3px;margin-left:4px;border:1px solid #ddd;border-radius:4px;font-size:.66rem;text-align:right">' +
+            "</td></tr>";
         });
         html += '</tbody></table></div>';
         box.innerHTML = html;
@@ -29396,6 +29453,7 @@ if (normalHours > 173.33) {
           var code = String(p.article_code || "").trim().toLowerCase();
           var fac = String(p.facture || p.facture_id || "").trim().toLowerCase();
           if (exArt.indexOf(code) >= 0) return;
+          /* Facture cochée « hors CA » dans le Journal de vente. */
           if (fac && (exFac.indexOf(fac) >= 0 || exFacEmp.indexOf(fac) >= 0)) return;
           var q = parseFloat(p.quantite) || 0;
           if (q <= 0) return;
@@ -29406,6 +29464,27 @@ if (normalHours > 173.33) {
       }
       /* Chiffre d'affaires HT d'un employé sur le mois (pour le taux
          « prime sur CA », qui reste un taux séparé). */
+      /* Factures cochées « hors CA » dans le Journal de vente : elles ne
+         comptent pas dans le chiffre d’affaires servant à la prime. */
+      function ptFacturesHorsCA() {
+        var v = [];
+        try { v = payeArr("mdb_factures_hors_prime_ca"); } catch (eH) {}
+        return Array.isArray(v) ? v : [];
+      }
+      /* La facture est-elle hors prime CA ? (comparaison par id ou numéro) */
+      function ptFactureHorsCA(ref) {
+        var r = String(ref === undefined || ref === null ? "" : ref).trim().toLowerCase();
+        if (!r) return false;
+        var l = ptFacturesHorsCA();
+        for (var i = 0; i < l.length; i++) {
+          var e = l[i];
+          if (!e) continue;
+          if (typeof e === "string") { if (e.trim().toLowerCase() === r) return true; continue; }
+          if (e.id && String(e.id).toLowerCase() === r) return true;
+          if (e.numero && String(e.numero).toLowerCase() === r) return true;
+        }
+        return false;
+      }
       function getMontageCAHT(empId, mois) {
         var exFac = ptPrimeProdExclus(mois, "factures_exclus", empId);
         var exFacEmp = ptFacturesExclusEmploye(empId);
@@ -29414,8 +29493,10 @@ if (normalHours > 173.33) {
           if (!p || p.employee_id !== empId) return;
           if (!p.date || String(p.date).indexOf(mois) !== 0) return;
           var fac = String(p.facture || p.facture_id || "").trim().toLowerCase();
-          /* Les factures exclues (globales ou propres à l'employé) ne
-             comptent pas dans le CA de prime. */
+          /* Les factures cochées « hors CA » dans le Journal de vente,
+             puis les exclusions globales / propres à l'employé, ne
+             comptent pas dans le CA servant à la prime. */
+          if (fac && ptFactureHorsCA(fac)) return;
           if (fac && (exFac.indexOf(fac) >= 0 || exFacEmp.indexOf(fac) >= 0)) return;
           var q = parseFloat(p.quantite) || 0;
           if (q <= 0) return;
@@ -29449,19 +29530,22 @@ if (normalHours > 173.33) {
         /* Les deux taux sont en POURCENT : montant = CA × taux / 100.
            Priorité : taux individuel (fiche) > barème de l'employé > global. */
         var tauxCa = ptPrimeProdTauxCa(empId, mois);
-        /* Mode de l'employé : 'articles' → pas de prime CA ; 'ca' → pas de barres. */
+        /* Mode de l'employé : 'articles' → pas de prime CA ; 'ca' → pas de barres.
+           La CASE « droit à la prime » de la grille prime sur tout :
+           décochée, l'employé ne touche ni aux barres ni au taux CA. */
         var mode = ptPrimeProdMode(empId);
+        var _droit = pmePrimeDroitDe(empId);
         return {
           actif: cfg.actif !== false,
           employe_id: empId,
           mois: mois,
           quantite: q.total,
           parArt: q.parArt,
-          montant: mode === "ca" ? 0 : Math.round(montant),
+          montant: !_droit || mode === "ca" ? 0 : Math.round(montant),
           detail: detail,
           ca_ht: ca,
           taux_ca_ht: tauxCa,
-          montant_ca: mode === "articles" ? 0 : Math.round((ca * tauxCa) / 100),
+          montant_ca: !_droit || mode === "articles" ? 0 : Math.round((ca * tauxCa) / 100),
           prime_mode: mode,
           bareme_id: bareme ? bareme.id : "",
           bareme_label: bareme ? String(bareme.label || "") : "",

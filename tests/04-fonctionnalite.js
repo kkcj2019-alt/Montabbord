@@ -6906,6 +6906,161 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+
+r.push({
+    nom: 'Prime production : le droit se decoche par employe dans la grille',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: null, taux: 10 }];
+      cfg.versions = [{ id: 'v-dr', debut: '2000-01', fin: '', label: 'G', bandes: cfg.bandes, taux_ca_ht: 2, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      cfg.factures_exclus_employe = {};
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      setPointageMontage([{ id: 'md-p1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 50, prix: 100 }]);
+      /* Par defaut tout le monde a droit a la prime. */
+      var parDefaut = ptPrimeProdCalcul('e1', '2026-10');
+      var okDefaut = parDefaut.montant === 500 && parDefaut.montant_ca === 100;
+      /* Case decochee : plus aucune prime, meme en mode « les deux ». */
+      var emps = payeArr('mdb_employes');
+      emps[0].prime_droit = false;
+      emps[0].prime_mode = '';
+      DB.setMain('mdb_employes', emps);
+      var sansDroit = ptPrimeProdCalcul('e1', '2026-10');
+      var okSans = sansDroit.montant === 0 && sansDroit.montant_ca === 0;
+      /* La case re-cochee : les primes reviennent. */
+      emps = payeArr('mdb_employes');
+      emps[0].prime_droit = true;
+      DB.setMain('mdb_employes', emps);
+      var avecDroit = ptPrimeProdCalcul('e1', '2026-10');
+      var okAvec = avecDroit.montant === 500 && avecDroit.montant_ca === 100;
+      /* Le mode « sur CA » et le decochage se cumulent. */
+      emps = payeArr('mdb_employes');
+      emps[0].prime_droit = false;
+      emps[0].prime_mode = 'ca';
+      DB.setMain('mdb_employes', emps);
+      var cumule = ptPrimeProdCalcul('e1', '2026-10');
+      var okCumul = cumule.montant === 0 && cumule.montant_ca === 0;
+      (okDefaut && okSans && okAvec && okCumul)
+        ? 'OK : defaut=' + parDefaut.montant + '/' + parDefaut.montant_ca + ' sans droit=' + sansDroit.montant + '/' + sansDroit.montant_ca + ' avec droit=' + avecDroit.montant + '/' + avecDroit.montant_ca + ' cumule=' + cumule.montant + '/' + cumule.montant_ca
+        : 'ECHEC defaut=' + okDefaut + ' sans=' + okSans + ' avec=' + okAvec + ' cumul=' + okCumul
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : la grille propose droit / type / taux pour chaque employe',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var html = renderPrimeEmpMatrix ? (function(){
+        var h = renderPrimeEmpMatrix();
+        return h || '';
+      })() : '';
+      var el = document.getElementById('prime-emp-matrix');
+      var out = (el && el.innerHTML) || html || '';
+      /* La colonne de reglage existe, avec une case a cocher, un choix de type
+         et un taux, pour chaque employe de la grille. */
+      var okColonne = out.indexOf('PRIME PRODUCTION') >= 0;
+      var okCase = out.indexOf('pmePrimeDroit(') >= 0;
+      var okType = out.indexOf('pmePrimeMode(') >= 0 && out.indexOf('sur CA') >= 0 && out.indexOf('sur art.') >= 0;
+      var okTaux = out.indexOf('pmePrimeTaux(') >= 0;
+      /* Les valeurs affichees suivent la fiche : decoche => pas coche. */
+      var emps = payeArr('mdb_employes');
+      emps[0].prime_droit = false;
+      emps[0].prime_mode = 'ca';
+      emps[0].taux_prime_ca = 3.5;
+      DB.setMain('mdb_employes', emps);
+      renderPrimeEmpMatrix();
+      var out2 = (document.getElementById('prime-emp-matrix') || {}).innerHTML || '';
+      var ligne = out2.split(String(emps[0].id)).join('|');
+      var okEtat = ligne.indexOf('checked') >= 0 && out2.indexOf('value="ca" selected') >= 0 && out2.indexOf('value="3.5"') >= 0;
+      /* Les fonctions de lecture renvoient bien la fiche. */
+      var okLect = pmePrimeDroitDe(emps[0].id) === false && pmePrimeModeDe(emps[0].id) === 'ca' && pmePrimeTauxDe(emps[0].id) === 3.5;
+      (okColonne && okCase && okType && okTaux && okEtat && okLect)
+        ? 'OK : colonne, case, type et taux presents et pre-remplis depuis la fiche'
+        : 'ECHEC colonne=' + okColonne + ' case=' + okCase + ' type=' + okType + ' taux=' + okTaux + ' etat=' + okEtat + ' lecture=' + okLect
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime CA : une facture cochee « hors CA » dans le journal sort du calcul',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: null, taux: 10 }];
+      cfg.versions = [{ id: 'v-hc', debut: '2000-01', fin: '', label: 'G', bandes: cfg.bandes, taux_ca_ht: 2, articles_exclus: [], factures_exclus: [] }];
+      cfg.baremes = [];
+      cfg.factures_exclus_employe = {};
+      setPrimeProdConfig(cfg);
+      setArticlesMontage([{ code: 'E2', designation: 'Euro 2', prix: 100 }]);
+      /* Deux lignes de montage, deux factures differentes. */
+      setPointageMontage([
+        { id: 'md-h1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100, facture: 'FA-001' },
+        { id: 'md-h2', employee_id: 'e1', date: '2026-10-06', article_code: 'E2', quantite: 10, prix: 100, facture: 'FA-002' }
+      ]);
+      var caComplet = getMontageCAHT('e1', '2026-10');
+      var okComplet = caComplet === 2000;
+      /* On coche FA-002 « hors CA » dans le journal de vente. */
+      DB.setMain('mdb_factures_hors_prime_ca', [{ id: 'f-2', numero: 'FA-002' }]);
+      var caPartiel = getMontageCAHT('e1', '2026-10');
+      var okPartiel = caPartiel === 1000;
+      /* La prime CA suit : 1000 x 2% = 20. */
+      var prime = ptPrimeProdCalcul('e1', '2026-10');
+      var okPrime = prime.montant_ca === 20 && prime.ca_ht === 1000;
+      /* La production, elle, ne bouge pas : les articles sont toujours_la. */
+      var okProd = prime.quantite === 20 && prime.montant === 200;
+      /* On decoche : le CA complet revient. */
+      DB.setMain('mdb_factures_hors_prime_ca', []);
+      var caRevenu = getMontageCAHT('e1', '2026-10');
+      var okRevenu = caRevenu === 2000;
+      /* La liste se lit aussi par identifiant : une ligne de montage qui
+         porte l'id de la facture est exclue elle aussi. */
+      DB.setMain('mdb_factures_hors_prime_ca', [{ id: 'f-1', numero: '' }]);
+      setPointageMontage([
+        { id: 'md-i1', employee_id: 'e1', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 100, facture_id: 'f-1' },
+        { id: 'md-i2', employee_id: 'e1', date: '2026-10-06', article_code: 'E2', quantite: 10, prix: 100, facture_id: 'f-9' }
+      ]);
+      var okParId = getMontageCAHT('e1', '2026-10') === 1000;
+      (okComplet && okPartiel && okPrime && okProd && okRevenu && okParId)
+        ? 'OK : CA complet=' + caComplet + ' puis ' + caPartiel + ' (prime CA ' + prime.montant_ca + '), production inchangee, decoche=' + caRevenu + ', lecture par id=' + okParId
+        : 'ECHEC complet=' + okComplet + ' partiel=' + okPartiel + ' prime=' + okPrime + ' prod=' + okProd + ' revenu=' + okRevenu + ' parId=' + okParId
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Journal de vente : chaque facture porte sa case « hors CA »',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var f = getFactures();
+      if (!f.length) 'ECHEC aucune facture dans le jeu de donnees';
+      /* La case est presente sur la ligne de la facture (mode edition). */
+      currentUser = { id: 'u-test', isSuperAdmin: true };
+      renderFactures();
+      var hEl = document.getElementById('fjContent') || document.getElementById('content');
+      var h = (hEl && hEl.innerHTML) || '';
+      var okCase = h.indexOf('toggleFacHorsPrimeCA(') >= 0 && h.indexOf('hors CA') >= 0;
+      /* Elle se coche, la facture est marquee et la liste de partage est ecrite. */
+      var id = f[0].id;
+      var okToggle = toggleFacHorsPrimeCA(id, true) === true;
+      var marquee = getFactures().filter(function (x) { return x.id === id; })[0];
+      var okFlag = marquee && marquee.hors_prime_ca === true;
+      var liste = dbArr('mdb_factures_hors_prime_ca');
+      var okListe = liste.length === 1 && liste[0].id === id && liste[0].numero === f[0].numero;
+      var okLecture = facHorsPrimeCA(id) === true && facHorsPrimeCA(f[0].numero) === true;
+      /* Et elle se decoche. */
+      toggleFacHorsPrimeCA(id, false);
+      var okOff = facHorsPrimeCA(id) === false && dbArr('mdb_factures_hors_prime_ca').length === 0;
+      (okCase && okToggle && okFlag && okListe && okLecture && okOff)
+        ? 'OK : case presente, cochee puis decochee, liste de partage a jour'
+        : 'ECHEC case=' + okCase + ' toggle=' + okToggle + ' flag=' + okFlag + ' liste=' + okListe + ' lecture=' + okLecture + ' off=' + okOff
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  return r;
   return r;
 }
 

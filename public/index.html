@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-09-227';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-09-228';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2360,7 +2360,7 @@ function dbObj(key) {
 pruneTombstones();
 
 /* Cross-tab sync: reload shared keys when changed in another tab (e.g., paye.html) */
-var SHARED_SYNC_KEYS = ['mdb_employes', 'mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_acomptesPrets', 'mdb_caisses', 'mdb_entreprise'];
+var SHARED_SYNC_KEYS = ['mdb_employes', 'mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_acomptesPrets', 'mdb_caisses', 'mdb_entreprise', 'mdb_factures_hors_prime_ca'];
 window.addEventListener('storage', function(e) {
   if (!e.key) return;
   if (SHARED_SYNC_KEYS.indexOf(e.key) === -1) return;
@@ -13347,6 +13347,57 @@ window.openCompteTiersClient = function(clientId) {
   }, 250);
 };
 
+/* ============ FACTURES HORS PRIME CA ============
+   La prime se calcule sur le chiffre d'affaires de montage. Certaines
+   factures ne doivent PAS y compter (travail facturé à part, reprise,
+   facture de sous-traitance…). On coche donc la case « hors CA » directly
+   sur la ligne de la facture dans le Journal de vente : la liste des
+   factures exclues vit dans mdb_factures_hors_prime_ca et la paie la lit.
+   On mémorise l'id ET le numéro : le pointage montage ne connaît souvent
+   que le numéro de facture saisi à la main. */
+var KEY_FAC_HORS_CA = 'mdb_factures_hors_prime_ca';
+function facHorsCaListe() {
+  var v = dbArr(KEY_FAC_HORS_CA);
+  return Array.isArray(v) ? v : [];
+}
+function facHorsCaSet() {
+  var l = getFactures() || [];
+  var out = [];
+  for (var i = 0; i < l.length; i++) {
+    if (!l[i] || l[i].hors_prime_ca !== true) continue;
+    if (l[i].id) out.push({ id: l[i].id, numero: String(l[i].numero || '') });
+  }
+  DB.set(KEY_FAC_HORS_CA, out);
+}
+/* La facture est-elle exclue du CA servant à la prime ? */
+function facHorsPrimeCA(ref) {
+  var r = String(ref || '').trim().toLowerCase();
+  if (!r) return false;
+  var l = facHorsCaListe();
+  for (var i = 0; i < l.length; i++) {
+    var e = l[i] || {};
+    if (e.id && String(e.id).toLowerCase() === r) return true;
+    if (e.numero && String(e.numero).toLowerCase() === r) return true;
+  }
+  return false;
+}
+/* Cocher / décocher la case « hors CA » d'une facture. */
+function toggleFacHorsPrimeCA(facId, on) {
+  var list = getFactures() || [];
+  var changed = false;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].id === facId) { list[i].hors_prime_ca = !!on; changed = true; break; }
+  }
+  if (!changed) return false;
+  DB.set('mdb_factures', list);
+  facHorsCaSet();
+  try { markDirty('mdb_factures'); } catch (eD) {}
+  try { markDirty(KEY_FAC_HORS_CA); } catch (eD2) {}
+  try { renderFactures(); } catch (eR) {}
+  try { toast(on ? 'Facture exclue du CA de prime' : 'Facture remise dans le CA de prime'); } catch (eT) {}
+  return true;
+}
+
 function renderFactures() {
   try { migrateFacturesEcheances(); } catch (eMF) {}
   var factures = getFactures();
@@ -13452,8 +13503,13 @@ function renderFactures() {
     var nSub = fpRows.length;
     var fpRowspan = nSub > 1 ? ' rowspan="' + nSub + '"' : '';
     var fpAlt = (i % 2 === 0) ? ' fp-alt' : '';
+    var _facHorsCa = facHorsPrimeCA(f.id) || f.hors_prime_ca === true;
     var fpActionsHtml = '';
     if (!readonly) {
+      /* Exclure cette facture du chiffre d'affaires de la prime. */
+      fpActionsHtml += '<label title="Exclure cette facture du chiffre d\'affaires qui sert à la prime" style="display:inline-flex;align-items:center;gap:3px;margin-right:6px;cursor:pointer;font-size:10px;font-weight:600;color:' + (_facHorsCa ? '#b45309;background:#fef3c7;border-radius:4px;padding:1px 4px' : '#94a3b8') + '">' +
+        '<input type="checkbox" data-id="' + f.id + '" ' + (_facHorsCa ? 'checked' : '') + ' onchange="toggleFacHorsPrimeCA(\'' + f.id + '\',this.checked)" style="width:13px;height:13px;accent-color:#f59e0b">' +
+        'hors CA</label>';
       if (f.statut === 'payee') {
         // Facture réglée : verrouillée + bouton modifier règlement
         var _regsPayee = getReglements().filter(function(r){ return r.factureId === f.id; });
