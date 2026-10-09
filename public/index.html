@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-09-226';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-09-227';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -30835,66 +30835,252 @@ function rhContratsListe() {
         renderContratsPage();
       }
       /* --- IMPRESSION DU CONTRAT (modèle par type) --- */
-      function rhPrintContrat(id) {
-        var item = rhContratsListe().filter(function (x) { return x.e.id === id; })[0];
-        if (!item) { toast('Employé introuvable', 'error'); return; }
-        var c = item.c, e = item.e;
+      /* ===== CONTRAT DE TRAVAIL — corps juridique de l'entreprise =====
+     Le corps est celui de vos contrats (CDD manutentionnaire / machiniste /
+     monteur-cloueur) : seul l'employé, le poste, la catégorie, les dates et
+     la rémunération changent. La rémunération sort de l'app :
+       - salaire de base horaire = grille de la catégorie / 173,33
+       - primes et indemnités de la fiche du travailleur (salissure,
+         transport, et celles que tu coches en plus : sursalaire,
+         responsabilité, tenue, caisse…)
+     Export : PDF (impression) et Word (.doc mis en page, logo inclus). */
+      var RH_CT_NB = { 1: 'un', 2: 'deux', 3: 'trois', 4: 'quatre', 5: 'cinq', 6: 'six', 7: 'sept', 8: 'huit', 9: 'neuf', 10: 'dix', 11: 'onze', 12: 'douze' };
+      function rhNombreEnLettres(n) {
+        n = parseInt(n, 10);
+        if (!n || n < 1) return '';
+        if (n < 13) return RH_CT_NB[n];
+        if (n < 20) return (n === 17 ? 'dix-sept' : 'dix-huit') + (n === 19 ? '' : '');
+        if (n === 20) return 'vingt';
+        if (n < 70) return (n < 40 ? 'trente-' : 'quarante-') + (n % 10 === 0 ? 'dix' : (n % 10 === 1 ? 'et un' : ''));
+        if (n < 80) return (n === 70 ? 'soixante-dix' : 'soixante') + (n === 71 ? ' et un' : '');
+        return String(n);
+      }
+      function rhEcheanceContrat(empId) {
+        var d0 = dateFinContratI(rhEmpById(empId) || {});
+        if (d0) return String(d0).slice(0, 10);
+        var e = rhEmpById(empId) || {};
+        var dd = datePremiereEntree(e);
+        if (!dd) return '';
+        var u = e.type_contrat === 'CDI' ? 0 : (parseInt(e.duree_contrat, 10) || 6);
+        return rhContratFinAuto(dd, u, 'mois');
+      }
+      /* Salaire de base horaire : grille de la catégorie / 173,33 */
+      function rhSalaireHoraire(e) {
+        if (!e) return 0;
+        var cats = (typeof getCategoriesI === 'function') ? getCategoriesI() : [];
+        var c = cats.find(function (x) { return x.code === e.categorie_id; });
+        var mensuel = c ? (parseFloat(c.salaire_min) || 0) : 0;
+        if (!mensuel) mensuel = parseFloat(e.salaire_base) || 0;
+        if (!mensuel) return 0;
+        return Math.round((mensuel / 173.33) * 1000) / 1000;
+      }
+      function rhNum(x) {
+        x = parseFloat(x);
+        if (!x) return '';
+        return String(Math.round(x * 1000) / 1000).replace('.', ',');
+      }
+      /* Les primes cochées sur la fiche du travailleur */
+      function rhPrimesContrat(e) {
+        var out = [];
+        var pairs = [
+          ['ind_salissure', 'Prime de salissure'],
+          ['ind_deplacement', 'Prime de transport'],
+          ['ind_representation', 'Prime de représentation'],
+          ['ind_responsabilite', 'Prime de responsabilité'],
+          ['ind_tenue', 'Prime de tenue'],
+          ['ind_caisse', 'Prime de caisse'],
+        ];
+        pairs.forEach(function (p) {
+          var v = parseFloat(e && e[p[0]]) || 0;
+          if (v > 0) out.push({ cle: p[0], label: p[1], montant: Math.round(v) });
+        });
+        return out;
+      }
+      function rhCatLabel(e) {
+        var cats = (typeof getCategoriesI === 'function') ? getCategoriesI() : [];
+        var c = cats.find(function (x) { return x.code === e.categorie_id; });
+        if (c) return c.libelle || c.code;
+        return e.categorie_id || '';
+      }
+/* Corps du contrat : toutes les clauses de vos modèles, les variables
+   venant de la fiche du travailleur. */
+      function rhContratCorpsHTML(e, c) {
         var ent = {};
         try { ent = getEntreprise() || {}; } catch (eE) {}
-        var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:120px;max-height:62px;object-fit:contain">'
-          : '<div style="font-size:32px;font-weight:900;color:#0b1526;letter-spacing:2px">ACSER</div>';
+        var nomSoc = ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICES (ACSER) SAS';
+        var siege = ent.siege || ent.adresse_siege || 'Cocody Riviera Palmeraie, près de la pharmacie Marthe Robin';
+        var adrBP = ent.adresse || '08 BP 2054 Abidjan 08';
+        var rccm = ent.rccm || 'CI-ABJ-2019-B-16880';
+        var dg = ent.dg || ent.directeur || 'ABOGOU WAWA RICHARD';
         var JL = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
         var JM = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
-        function dfr(d) {
+        function df(d) {
           d = String(d || '').slice(0, 10);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
           var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
-          return JL[dt.getDay()] + ' ' + dt.getDate() + ' ' + JM[dt.getMonth()] + ' ' + dt.getFullYear();
+          return dt.getDate() + '/' + dt.getDate() + '/' + dt.getFullYear();
         }
-        var t = String(c.type || 'CDI').toUpperCase();
-        var _durN = parseInt(c.duree, 10) || 0;
-        var dureeTxt = _durN + ((c.unite === 'ans') ? ' an(s)' : ((c.unite === 'jours') ? ' jour(s)' : ' mois'));
-        var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Contrat ' + escH(t) + '</title>';
-        h += '<style>@page{size:A4;margin:18mm 16mm}body{font-family:"Segoe UI",Calibri,Arial,sans-serif;color:#0f172a;font-size:11pt;line-height:1.7;margin:0;background:#f1f5f9;padding:26px}' +
-          '.feuille{max-width:800px;margin:0 auto;background:#fff;padding:38px 44px;box-shadow:0 10px 40px rgba(15,23,42,.14)}' +
-          '.entete{display:flex;align-items:center;gap:18px;border-bottom:3px solid #0b1526;padding-bottom:14px}' +
-          '.entete .txt{flex:1}.entete h1{font-size:17px;font-weight:800;color:#0b1526;margin:0}' +
-          '.entete p{font-size:9.5px;color:#475569;margin:3px 0 0}' +
-          '.titre{text-align:center;font-size:18px;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin:28px 0 4px}' +
-          '.filet{width:70px;height:3px;background:#ecc95f;margin:0 auto 20px;border-radius:2px}' +
-          '.badge{display:inline-block;border-radius:20px;padding:3px 12px;font-size:9pt;font-weight:800;margin-bottom:12px}' +
-          '.art{margin:14px 0}.art h3{font-size:11pt;margin:0 0 4px;color:#0b1526}' +
-          '.carte{border:1px solid #e2e8f0;border-left:4px solid #0f766e;border-radius:8px;padding:12px 16px;background:#f8fafc;margin:14px 0}' +
-          '.ligne{display:flex;gap:30px;flex-wrap:wrap}.lbl{font-size:8.5pt;text-transform:uppercase;letter-spacing:.8px;color:#64748b;font-weight:700}' +
-          '.val{font-size:11.5pt;font-weight:800;margin-top:2px}' +
-          '.sign{margin-top:40px;display:flex;justify-content:space-between;gap:30px}' +
-          '.sign>div{flex:1;text-align:center;font-size:9.5pt;color:#475569}' +
-          '.sign .trait{margin-top:46px;border-top:1px solid #0f1726;padding-top:6px;font-weight:700;color:#0b1526}' +
-          '.pied{margin-top:40px;border-top:1px solid #e2e8f0;padding-top:8px;font-size:8pt;color:#64748b;text-align:center}' +
-          '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0}.no-print{display:none}}</style></head><body><div class="feuille">';
-        h += '<div class="entete"><div>' + logo + '</div><div class="txt"><h1>' + escH(ent.nom || 'ACSER') + '</h1><p>' + escH(ent.adresse || '') + (ent.telephone ? ' &nbsp;•&nbsp; Tél. ' + escH(ent.telephone) : '') + '</p></div></div>';
-        h += '<div class="titre">Contrat de travail ' + (t === 'CDI' ? 'à durée indéterminée' : t) + '</div><div class="filet"></div>';
-        h += '<div class="badge" style="background:' + (c.remis_le ? '#dcfce7' : '#fef3c7') + ';color:' + (c.remis_le ? '#166534' : '#92400e') + '">' + (c.remis_le ? '✔ Contrat remis le ' + escH(dfr(c.remis_le)) : '⚠ Contrat non remis au travailleur') + '</div>';
-        h += '<div class="carte"><div class="ligne">' +
-          '<div><div class="lbl">Travailleur</div><div class="val">' + escH(((e.nom || '') + ' ' + (e.prenoms || '')).trim()) + '</div></div>' +
-          '<div><div class="lbl">Matricule</div><div class="val">' + escH(e.matricule || '-') + '</div></div></div><div class="ligne" style="margin-top:8px">' +
-          '<div><div class="lbl">Poste occupé</div><div class="val">' + escH(e.fonction || '-') + '</div></div>' +
-          '<div><div class="lbl">Département</div><div class="val">' + escH(e.service || '-') + '</div></div>' +
-          '<div><div class="lbl">Type</div><div class="val">' + escH(t) + '</div></div></div></div>';
-        h += '<div class="art"><h3>Article 1 — Engagement</h3><p>La société engage <strong>' + escH(((e.nom || '') + ' ' + (e.prenoms || '')).trim()) + '</strong> en qualité de <strong>' + escH(e.fonction || '-') + '</strong>, à compter du <strong>' + escH(dfr(c.debut)) + '</strong>.</p></div>';
-        h += '<div class="art"><h3>Article 2 — Durée</h3><p>Le présent contrat est conclu ' + (c.fin ? 'pour une durée de <strong>' + escH(dureeTxt) + '</strong>, soit du <strong>' + escH(dfr(c.debut)) + '</strong> au <strong>' + escH(dfr(c.fin)) + '</strong>.' : 'pour une durée <strong>indéterminée</strong>.') + '</p></div>';
-        h += '<div class="art"><h3>Article 3 — Rémunération</h3><p>Le rémunération est fixée selon les élémentsdefine dans la grille de paie de l\'entreprise et versée mensuellement.</p></div>';
-        h += '<div class="art"><h3>Article 4 — Annexes</h3><p>Les éléments suivants font partie intégrante du présent contrat et sont annexés : <strong>fiche de poste</strong>, <strong>détail de la rémunération</strong> et <strong>primes éventuelles</strong>. Ils peuvent être edited séparément (Word) et remis avec le contrat.</p></div>';
-        h += '<div class="art"><h3>Article 5 — Période d\'essai</h3><p>Le présent contrat est soumis à une période d\'essai de ' + (t === 'CDI' ? 'quatre (04) mois' : 'un (01) mois') + '.</p></div>';
-        h += '<div class="art"><h3>Article 6 — Confidentialité</h3><p>Le travailleur s\'engage à garder confidentiels les informations de l\'entreprise durant et après le contrat.</p></div>';
-        h += '<div class="sign"><div>L\'employeur<div class="trait">' + escH(ent.nom || 'ACSER') + '</div></div><div>Le travailleur<div class="trait">Lu et approuvé</div></div></div>';
-        h += '<div class="pied">Contrat ' + escH(t) + ' — ' + escH(rhEmpLabel(e)) + ' — ' + (c.remis_le ? 'remis le ' + escH(c.remis_le) : 'non remis') + '</div>';
-        h += '<div class="no-print" style="text-align:center;margin-top:20px"><button onclick="window.print()" style="padding:10px 26px;background:#0b1526;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer">Imprimer / PDF</button></div>';
-        h += '</div><script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script></body></html>';
+        function dl(d) {
+          d = String(d || '').slice(0, 10);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
+          var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
+          return dt.getDate() + ' ' + JM[dt.getMonth()] + ' ' + dt.getFullYear();
+        }
+        var N = rhEmpLabel(e);
+        var civil = (String(e.sexe || '').toUpperCase().charAt(0) === 'F') ? 'Mme' : 'M.';
+        var type = String(c.type || 'CDI').toUpperCase();
+        var poste = e.fonction || '-';
+        var service = e.service || 'Production';
+        var cat = rhCatLabel(e);
+        var deb = String(c.debut || (e.date_entree || '')).slice(0, 10);
+        var fin = String(c.fin || '').slice(0, 10);
+        var dureeMois = c.unite === 'ans' ? (parseInt(c.duree, 10) || 0) * 12 : (c.unite === 'jours' ? Math.round((parseInt(c.duree, 10) || 0) / 30) : (parseInt(c.duree, 10) || 0));
+        var phrases = [];
+        var h = '';
+        h += '<p><b>Entre l\'employeur,</b></p>';
+        h += '<p>La Société <b>' + escH(nomSoc) + '</b>, dont le siège social est situé à ' + escH(siege) + '.<br>' +
+          'Adresse : ' + escH(adrBP) + ' — Numéro RCCM : ' + escH(rccm) + '<br>' +
+          'Représentée par, Monsieur <b>' + escH(dg) + '</b>, le Directeur Général</p>';
+        h += '<p><b>D\'une part,</b></p>';
+        h += '<p>Et le salarié,</p>';
+        h += '<p><b>' + escH(civil + ' ' + N) + '</b><br>' +
+          'Matricule : ' + escH(e.matricule || '-') + '<br>' +
+          'De nationalité : ' + escH(e.nationalite || 'Ivoirienne') + '<br>' +
+          'Tél. : ' + escH(e.telephone || '-') + '<br>' +
+          'Né(e) le ' + escH(dl(e.date_naissance)) + (e.lieu_naissance ? ' à ' + escH(e.lieu_naissance) : '') + '<br>' +
+          'CNI N° : ' + escH(e.cni || e.num_cni || '-') + '<br>' +
+          'Demeurant : ' + escH(e.adresse || e.domicile || '-') + '</p>';
+        h += '<p><b>D\'autre part,</b></p>';
+        h += '<p>Il a été convenu ce qui suit :</p>';
+        h += '<p><b>EXPOSÉ DES MOTIFS</b></p>';
+        h += '<p>En vue de la redynamisation de son service de production, l\'entreprise ACSER a décidé du recrutement du personnel technique. Ainsi, il a été décidé de recruter <b>' + escH(civil + ' ' + N) + '</b> au service <b>' + escH(service) + '</b> à compter du <b>' + escH(dl(deb)) + '</b> aux conditions exposées ci-après.</p>';
+        h += '<p><b>EMPLOI ET QUALIFICATION</b></p>';
+        h += '<p>' + escHtml(civil + ' ' + N) + ' exercera à compter du ' + escHtml(dl(deb)) + ' les fonctions de <b>' + escHtml(poste.toUpperCase()) + '</b>' +
+          (cat ? ', Catégorie <b>' + escHtml(cat) + '</b>' : '') + '.</p>';
+        h += '<p>Ses attributions sont déterminées par la fiche de fonction annexée au présent contrat et signée par les deux parties. Elles seront susceptibles d\'évolution. Il exercera ses fonctions sous l\'autorité et dans le cadre des instructions données par son supérieur hiérarchique.</p>';
+        h += '<p>Le lieu de travail est fixé au sein des ateliers de l\'entreprise, aussi appelé site de production et en tout lieu nécessité par les besoins du service. Ses fonctions impliquent des déplacements professionnels qui devront être effectués conformément au planning dûment établi par les chefs de services et porté préalablement à la connaissance du travailleur.</p>';
+        h += '<p>Dans le respect des dispositions légales et conventionnelles applicables, si l\'intérêt de son fonctionnement l\'exige, l\'entreprise pourra à tout moment l\'affecter dans tout établissement où elle exerce ses activités. Elle en informera ' + escHtml(N) + ' 30 jours à l\'avance.</p>';
+        h += '<p><b>DURÉE DU TRAVAIL</b></p>';
+        h += '<p>La durée hebdomadaire du travail est fixée à <b>40 heures</b>. Les horaires de travail sont les horaires collectifs en vigueur dans l\'établissement. Ils sont susceptibles d\'être modifiés par l\'employeur.</p>';
+        h += '<p><b>OBJET ET DURÉE DU CONTRAT</b></p>';
+        h += fin
+          ? '<p>Ce contrat est conclu pour une durée de <b>' + escHtml(rhNombreEnLettres(dureeMois) + (dureeMois > 1 ? ' ( ' + dureeMois + ' )' : ' ( ' + dureeMois + ' )')) + ' mois</b>, du <b>' + escHtml(dl(deb)) + '</b> au <b>' + escHtml(dl(fin)) + '</b>.</p>'
+          : '<p>Ce contrat est conclu pour une durée <b>indéterminée</b>, à compter du <b>' + escHtml(dl(deb)) + '</b>.</p>';
+        h += '<p>Il pourra toujours cesser à l\'initiative de l\'une ou l\'autre des parties conformément aux dispositions légales et conventionnelles en vigueur. Le présent contrat est régi par les dispositions légales, réglementaires et conventionnelles applicables à l\'entreprise, notamment par la convention collective actuellement applicable. Le changement de convention collective ne constituera pas une modification substantielle du contrat de travail.</p>';
+        h += '<p><b>RÉMUNÉRATION</b></p>';
+        h += '<p>En contrepartie de l\'accomplissement de ses fonctions, <b>' + escHtml(civil + ' ' + N) + '</b> percevra un salaire brut établi comme suit :</p><ul>';
+        h += '<li>Salaire de base horaire : <b>' + escHtml(rhNum(rhSalaireHoraire(e))) + ' FCFA</b>' + (cat ? ' (catégorie ' + escHtml(cat) + ')' : '') + '</li>';
+        rhPrimesContrat(e).forEach(function (p) { h += '<li>' + escHtml(p.label) + ' : <b>' + escHtml(rhNum(p.montant)) + ' FCFA</b></li>'; });
+        h += '</ul>';
+        h += '<p>Il pourra être consenti au travailleur, en sus de sa rémunération en numéraires, d\'autres avantages si nécessaire.</p>';
+        if (e.grille_montage_annexe || c.annexe_grille) {
+          h += '<p>La grille de rémunération par montage des articles sera annexée au contrat. <i>(Annexe 2)</i></p>';
+        }
+        h += '<p><b>CONGÉS PAYÉS</b></p>';
+        h += '<p>' + escHtml(civil + ' ' + N) + ' bénéficie d\'un congé annuel payé, conformément aux dispositions en vigueur dans l\'établissement, soit 30 jours ouvrables par an acquis au prorata du temps de présence du salarié dans l\'entreprise, soit 2,5 jours par mois complet travaillé. Les modalités et la période de ce congé seront déterminées par accord avec la direction, compte tenu des nécessités de service.</p>';
+        h += '<p><b>ABSENCE ET INDISPONIBILITÉ</b></p>';
+        h += '<p>En cas d\'absence pour maladie ou accident, il devra immédiatement en aviser l\'employeur et le justifier par la production d\'un certificat médical dans les 48 heures.</p>';
+        h += '<p><b>CLAUSE DE CONFIDENTIALITÉ</b></p>';
+        h += '<p>' + escHtml(civil + ' ' + N) + ' peut être amené à avoir connaissance d\'informations confidentielles, dans le cadre d\'échanges et de travaux communs avec tous les clients et prospects de la société, qu\'ils concernent la société ou ses clients ou ses relations commerciales, et s\'engage, par la présente :</p><ul>' +
+          '<li>À conserver strictement confidentielle toute information de quelque nature qu\'elle soit qui lui serait communiquée dans le cadre de ses fonctions ;</li>' +
+          '<li>À ne communiquer ni laisser communiquer tout ou partie de ces informations en dehors du personnel directement concerné par les travaux couverts par l\'accord de secret ;</li>' +
+          '<li>À restituer, après usage, aux personnes qui seraient désignées et à elles seules, tout document sous quelque forme que ce soit, écrit, électronique… qui lui aurait été communiqué et à ne prendre, ni conserver de copie desdits documents ;</li>' +
+          '<li>À conserver strictement confidentiels les échantillons qui lui seraient confiés.</li></ul>';
+        h += '<p><b>FIN DU CONTRAT</b></p>';
+        h += '<p>Chaque partie peut mettre fin au contrat de travail, conformément aux dispositions légales et conventionnelles applicables à l\'entreprise. Sont exclus de cette disposition conventionnelle les cas de fautes lourdes. Ce droit de résiliation unilatérale ne fait pas échec à la faculté de mettre fin au contrat par accord mutuel, cette résiliation amiable faisant l\'objet d\'une convention particulière.</p>';
+        h += '<p><b>MATÉRIEL ET DOCUMENTS</b></p>';
+        h += '<p>Tous les documents confiés à ' + escHtml(N) + ', quelle qu\'en soit la nature, la forme ou la teneur ainsi que tous les travaux effectués par lui dans le cadre de ses fonctions resteront la propriété de l\'entreprise. Il devra les restituer ainsi que toute copie en sa possession, à la première demande ou dès la cessation de ses fonctions.</p>';
+        h += '<p><b>DISPOSITIONS DIVERSES</b></p>';
+        h += '<p>' + escHtml(civil + ' ' + N) + ' déclare n\'être lié à aucun autre employeur et être libre de tout engagement. Il ne pourra exercer, sous quelque forme que ce soit, une activité concurrente de celle de son employeur pendant l\'exécution du présent contrat. Il s\'engage à faire connaître sans délai tout changement de situation le concernant.</p>';
+        h += '<p><b>ANNEXES</b> — Font partie intégrante du présent contrat : <b>Annexe 1</b> : fiche de poste signée par les deux parties ; <b>Annexe 2</b> : grille de rémunération par montage des articles (le cas échéant).</p>';
+        return h;
+      }
+/* Document complet (entête, corps, signature, pied) : sert au PDF et au Word */
+      function rhContratDocument(e, c) {
+        var ent = {};
+        try { ent = getEntreprise() || {}; } catch (eE) {}
+        var nomSoc = ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICES (ACSER) SAS';
+        var type = String(c.type || 'CDI').toUpperCase();
+        var titre = (type === 'CDI') ? 'CONTRAT DE TRAVAIL À DURÉE INDÉTERMINÉE' : ('CONTRAT DE TRAVAIL ' + type);
+        var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:110px;max-height:56px;object-fit:contain">' : '';
+        var auj = new Date();
+        var d = auj.getDate() + ' ' + ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'][auj.getMonth()] + ' ' + auj.getFullYear();
+        var css =
+          '@page{size:A4;margin:16mm 16mm 18mm}' +
+          'body{font-family:"Segoe UI",Calibri,Arial,sans-serif;color:#111827;font-size:10.5pt;line-height:1.6;margin:0}' +
+          '.entete{display:flex;align-items:center;gap:16px;border-bottom:2.5px solid #0b1526;padding-bottom:10px;margin-bottom:14px}' +
+          '.entete .txt{flex:1}.entete .soc{font-size:14px;font-weight:900;letter-spacing:1px;color:#0b1526}' +
+          '.entete .l1{font-size:8.4pt;color:#374151;margin-top:2px}.entete .l2{font-size:8pt;color:#6b7280}' +
+          '.titre{text-align:center;font-size:15pt;font-weight:800;letter-spacing:1.6px;text-transform:uppercase;margin:10px 0 16px;border:2px solid #0b1526;padding:8px;border-radius:4px}' +
+          '.corps{text-align:justify}.corps p{margin:8px 0}.corps ul{margin:6px 0 6px 22px;padding:0}.corps li{margin:4px 0}' +
+          '.sign{margin-top:26px;display:flex;justify-content:space-between;align-items:flex-end;gap:30px}' +
+          '.sign>div{flex:1;font-size:9.4pt;text-align:center}' +
+          '.sign .trait{margin-top:32px;border-top:1px solid #111827;padding-top:5px;font-weight:700}' +
+          '.pied{margin-top:26px;border-top:1px solid #e5e7eb;padding-top:6px;font-size:8pt;color:#6b7280;text-align:center}';
+        var corps = rhContratCorpsHTML(e, c);
+        var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>' + escHtml(titre) + '</title><style>' + css + '</style></head><body>';
+        h += '<div class="entete">' + logo + '<div class="txt"><div class="soc">' + escHtml(nomSoc) + '</div>' +
+          '<div class="l1">' + escHtml(ent.adresse || '08 BP 2054 Abidjan 08') + (ent.telephone ? ' — Tél. ' + escHtml(ent.telephone) : '') + '</div>' +
+          '<div class="l2">' + (ent.email ? escHtml(ent.email) + ' — ' : '') + (ent.rccm ? 'RCCM ' + escHtml(ent.rccm) : '') + '</div>' +
+          '</div></div>';
+        h += '<div class="titre">' + escHtml(titre) + '</div>';
+        h += '<div class="corps">' + corps + '</div>';
+        h += '<div class="sign"><div>Le travailleur<div class="trait">' + escHtml(rhEmpLabel(e)) + '</div></div>' +
+          '<div>Pour l\'employeur<div class="trait">' + escHtml(nomSoc) + '</div></div></div>';
+        h += '<p style="font-size:9.4pt;margin-top:18px">Fait à Abidjan, le <b>' + escHtml(d) + '</b>, en 2 exemplaires.<br>' +
+          'Ce contrat comporte annexes et sera paraphé par les parties.</p>';
+        h += '<div class="pied">' + escHtml(nomSoc) + ' — ' + escHtml(rhEmpLabel(e)) + ' — ' + escHtml(titre) + '</div>';
+        h += '</body></html>';
+        return h;
+      }
+function rhPrintContrat(id) {
+        var e = rhEmpById(id);
+        if (!e) { toast('Employé introuvable', 'error'); return; }
+        var c = rhContratDe(id) || {};
+        var h = rhContratDocument(e, c);
         var w = window.open('', '_blank');
         if (!w) { toast('Autorisez les popups', 'error'); return; }
-        w.document.write(h);
+        w.document.write('<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Contrat</title>' +
+          '<style>body{background:#eef2f7;padding:22px;font-family:"Segoe UI",Calibri,Arial,sans-serif}' +
+          '.f{max-width:800px;margin:0 auto;background:#fff;padding:34px 40px;box-shadow:0 12px 40px rgba(15,23,42,.16)}' +
+          '@media print{body{background:#fff;padding:0}.f{box-shadow:none;padding:0;max-width:none}}</style></head><body><div class="f">');
+        w.document.write(h.replace(/^[\s\S]*?<body>/, "").replace(/<\/body>[\s\S]*$/, ""));
+        w.document.write('</div><script>window.onload=function(){setTimeout(function(){window.print()},600)}<\/script></body></html>');
         w.document.close();
+      }
+      /* Export WORD : page HTML avec logo au format que Word lit bien.
+         Le fichier s'ouvre dans Word / LibreOffice et se met en page seul. */
+      function rhExportContratWord(id) {
+        var e = rhEmpById(id);
+        if (!e) { toast('Employé introuvable', 'error'); return; }
+        var c = rhContratDe(id) || {};
+        var doc = rhContratDocument(e, c);
+        var wordCss =
+          'body{font-family:Calibri,Georgia,serif;font-size:11pt;color:#000;line-height:1.5}' +
+          '.entete{border-bottom:3px solid #0B1526;padding-bottom:8px;margin-bottom:12px}' +
+          '.soc{font-size:13pt;font-weight:bold;color:#0B1526;letter-spacing:.6px}' +
+          '.l1,.l2{font-size:8.5pt;color:#333}' +
+          '.titre{text-align:center;font-size:13pt;font-weight:bold;text-transform:uppercase;border:2px solid #0B1526;padding:7px;margin:10px 0 14px}' +
+          '.corps p{margin:7pt 0}.corps ul{margin:5pt 0 5pt 18pt}.corps li{margin:3pt 0}' +
+          '.sign{margin-top:20pt}.trait{border-top:1px solid #000;width:45%;padding-top:3pt;font-size:9.5pt}' +
+          '.pied{margin-top:18pt;border-top:1px solid #999;padding-top:4pt;font-size:8pt;color:#555;text-align:center}';
+        var corps = doc.replace(/[\s\S]*?<body>/, "").replace(/<\/body>[\s\S]*$/, "");
+        corps = corps.replace(/<div class="entete">[\s\S]*?<\/div><\/div>/, "");
+        corps = corps.replace(/<div class="titre">[\s\S]*?<\/div>/, "");
+        corps = corps.replace(/<style>[\s\S]*?<\/style>/, "");
+        var html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8">' +
+          '<title>Contrat</title><style>' + wordCss + '</style></head><body>' + corps + '</body></html>';
+        var blob = new Blob(['﻿', html], { type: 'application/msword;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var nom = ((e.nom || 'CONTRAT') + '-' + (e.matricule || '') + '-' + String(c.type || 'CDI')).replace(/[^A-Za-z0-9\-]/g, '_');
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'Contrat_' + nom + '.doc';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+        toast('Contrat Word téléchargé (ouvrez-le dans Word)', 'success');
       }
 
 function renderContratsPage() {
@@ -31899,110 +32085,115 @@ function supprimerConge(id) {
    depart en toutes lettres, duree, reprise effective, signature DRH. */
 /* ATTESTATION DE CONGE — mise en page soignée, logo de la société,
    type de congé explicite. S'ouvre directement (pas de module Paie). */
-function rhCongeAttestation(congeId) {
-  var arr = getRhConges();
-  var c = null;
-  for (var i = 0; i < arr.length; i++) { if (arr[i].id === congeId) { c = arr[i]; break; } }
-  if (!c) { toast('Congé introuvable', 'error'); return; }
-  var emp = rhEmpById(c.employee_id);
-  var nom = rhEmpLabel(emp);
-  var civil = (emp && String(emp.sexe || '').toUpperCase().charAt(0) === 'F') ? 'Mme' : 'M.';
-  var matr = (emp && emp.matricule) || '-';
-  var JL = ['DIMANCHE', 'LUNDI', 'MARDI', 'MERCREDI', 'JEUDI', 'VENDREDI', 'SAMEDI'];
-  var JM = ['JANVIER', 'FÉVRIER', 'MARS', 'AVRIL', 'MAI', 'JUIN', 'JUILLET', 'AOÛT', 'SEPTEMBRE', 'OCTOBRE', 'NOVEMBRE', 'DÉCEMBRE'];
-  function num(d) { d = String(d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-'; return d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4); }
-  function jjl(d) {
-    d = String(d || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
-    var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
-    return JL[dt.getDay()] + ' ' + dt.getDate() + '/' + JM[dt.getMonth()] + '/' + dt.getFullYear();
-  }
-  var t = String(c.type || 'annual');
-  var typeTxt = t === 'annual' ? 'congé annuel'
-    : t === 'exceptionnel' ? 'congé exceptionnel'
-    : t === 'maternite' ? 'congé de maternité'
-    : t === 'maladie' ? 'congé de maladie'
-    : t === 'sans_solde' ? 'congé sans solde'
-    : rhCongeTypeLabel(t).toLowerCase();
-  var duree = parseInt(c.duree, 10);
-  if (!duree && c.date_depart && c.date_retour) { try { duree = rhDayDiff(c.date_depart, c.date_retour); } catch (eD) { duree = 0; } }
-  if (!duree) duree = 0;
-  var dureeTxt = duree >= 14 ? (function () { var s2 = Math.round(duree / 7 * 10) / 10; return s2 + ' semaines'; })()
-    : duree >= 7 ? (function () { var s2 = Math.round(duree / 7); return s2 + ' semaine' + (s2 > 1 ? 's' : ''); })()
-    : duree + ' jour' + (duree > 1 ? 's' : '');
-  var reprise = c.date_reprise || c.date_retour || '';
-  var dep = String(c.date_depart || '').slice(0, 10);
-  var ref = 'DRH/ACSER' + dep.slice(0, 4) + '-' + dep.slice(5, 7) + '-';
-  var seq = String(c.numero || '').match(/(\d+)\s*$/);
-  ref += seq ? seq[1] : '01';
-  var ent = {};
-  try { ent = getEntreprise() || {}; } catch (eE) {}
-  var nomSoc = ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICE (ACSER)';
-  var adrSoc = ent.adresse || '08 BP 2054 Abidjan 08';
-  var telSoc = ent.telephone || '27 23 40 02 48';
-  var mailSoc = ent.email || '';
-  var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:120px;max-height:62px;object-fit:contain">'
-    : '<div style="font-size:34px;font-weight:900;color:#0b1526;letter-spacing:2px">ACSER</div>';
-  var auj = new Date();
-  var aujTxt = auj.getDate() + ' ' + JM[auj.getMonth()] + ' ' + auj.getFullYear();
-  var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Attestation de congé - ' + escH(nom) + '</title>';
-  h += '<style>@page{size:A4;margin:16mm 16mm 14mm}' +
-    'body{font-family:"Segoe UI",Calibri,Arial,sans-serif;color:#0f172a;font-size:11pt;line-height:1.7;margin:0;background:#f1f5f9;padding:26px}' +
-    '.feuille{max-width:800px;margin:0 auto;background:#fff;padding:38px 44px;box-shadow:0 10px 40px rgba(15,23,42,.14);border-radius:4px}' +
-    '.entete{display:flex;align-items:center;gap:18px;border-bottom:3px solid #0b1526;padding-bottom:14px}' +
-    '.entete .txt{flex:1}' +
-    '.entete h1{font-size:17px;font-weight:800;color:#0b1526;margin:0;letter-spacing:.3px}' +
-    '.entete p{font-size:9.5px;color:#475569;margin:3px 0 0}' +
-    '.titre{text-align:center;font-size:19px;font-weight:800;letter-spacing:2.5px;text-transform:uppercase;margin:30px 0 4px;color:#0b1526}' +
-    '.filet{width:70px;height:3px;background:#ecc95f;margin:0 auto 22px;border-radius:2px}' +
-    '.ref{display:inline-block;font-weight:800;font-size:10.5pt;border:1px solid #cbd5e1;border-radius:6px;padding:5px 12px;margin-bottom:18px;background:#f8fafc}' +
-    '.bloc{margin:16px 0;font-size:11pt}' +
-    '.carte{border:1px solid #e2e8f0;border-left:4px solid #0b1526;border-radius:8px;padding:14px 18px;background:#f8fafc;margin:16px 0}' +
-    '.ligne{display:flex;gap:34px;flex-wrap:wrap;margin:8px 0}' +
-    '.lbl{font-size:8.5pt;text-transform:uppercase;letter-spacing:.8px;color:#64748b;font-weight:700}' +
-    '.val{font-size:12pt;font-weight:800;color:#0b1526;margin-top:2px}' +
-    '.sign{margin-top:44px;text-align:right;padding-right:26px}' +
-    '.sign .nom{font-weight:800;text-decoration:underline;font-size:11pt}' +
-    '.sign .role{font-size:9.5pt;color:#475569;margin-top:3px}' +
-    '.pied{margin-top:46px;border-top:1px solid #e2e8f0;padding-top:9px;font-size:8pt;color:#64748b;text-align:center}' +
-    '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0 6px;max-width:none}.no-print{display:none}}</style></head><body>';
-  h += '<div class="feuille">';
-  h += '<div class="entete"><div>' + logo + '</div><div class="txt"><h1>' + escH(nomSoc) + '</h1>' +
-    '<p>' + escH(adrSoc) + (telSoc ? ' &nbsp;•&nbsp; Tél. ' + escH(telSoc) : '') + '</p>' +
-    (mailSoc ? '<p>' + escH(mailSoc) + '</p>' : '') + '</div></div>';
-  h += '<div class="titre">Attestation de congé</div><div class="filet"></div>';
-  h += '<div class="ref">N/Réf : ' + escH(ref) + '</div>';
-  h += '<div class="bloc">Nous soussignés, <strong>' + escH(nomSoc) + '</strong>,represented par sa Direction des Ressources Humaines, attestons par la présente que :</div>';
-  h += '<div class="carte"><div class="ligne">' +
-    '<div><div class="lbl">Travailleur</div><div class="val">' + escH(civil + ' ' + nom) + '</div></div>' +
-    '<div><div class="lbl">Matricule</div><div class="val">' + escH(matr) + '</div></div></div>' +
-    '<div class="ligne"><div><div class="lbl">Type de congé</div><div class="val">' + escH(typeTxt) + '</div></div>' +
-    '<div><div class="lbl">Durée</div><div class="val">' + escH(dureeTxt) + '</div></div></div></div>';
-  h += '<div class="bloc">Part en <strong>' + escH(typeTxt) + '</strong> à compter du <strong>' + escH(jjl(c.date_depart)) + ' après 17H00</strong>, pour une durée de <strong>' + escH(dureeTxt) + '</strong>.</div>';
-  h += '<div class="bloc">La date effective de reprise de service est fixée au <strong>' + escH(jjl(reprise)) + ' à 08h00</strong>.</div>';
-  h += '<div class="bloc">En foi de quoi, la présente attestation lui est délivrée pour servir et valoir ce que de droit.</div>';
-  h += '<div class="sign"><div style="font-size:10pt">Fait à Abidjan, le ' + escH(aujTxt) + '</div>' +
-    '<div style="margin-top:20px"><div class="nom">La Direction des Ressources Humaines</div><div class="role">AFRICAINE DE COMMERCE ET DE SERVICE (ACSER)</div></div></div>';
-  h += '<div class="pied">Document généré le ' + escH(aujTxt) + ' &nbsp;•&nbsp; Réf. ' + escH(ref) + '</div>';
-  h += '<div class="no-print" style="text-align:center;margin-top:22px"><button onclick="window.print()" style="padding:10px 26px;background:#0b1526;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Imprimer / PDF</button></div>';
-  h += '</div><script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script></body></html>';
-  var w = window.open('', '_blank');
-  if (!w) { toast('Autorisez les popups', 'error'); return; }
-  w.document.write(h);
-  w.document.close();
-}
-/* Reprise réelle saisie DIRECTEMENT dans le tableau (pas besoin de Modifier).
-   La date est enregistrée aussitôt : le pointage auto suit
-   (jours de congé C jusqu'à la veille, retard = absent). */
-function rhCongeRepriseDirect(id, el) {
-  var arr = getRhConges();
-  for (var i = 0; i < arr.length; i++) {
-    if (arr[i].id === id) { arr[i].date_reprise = (el && el.value) || ''; break; }
-  }
-  setRhConges(arr);
-  toast('Reprise enregistrée', 'success');
-  try { renderCongesPage(); } catch (eR) {}
-}
+/* ATTESTATION DE CONGÉ — mise en page administrative soignée :
+   logo + raison sociale, référence, titre encadré, fiche du travailleur,
+   corps aéré, signature et pied de page. */
+      function rhCongeAttestation(congeId) {
+        var arr = getRhConges();
+        var c = null;
+        for (var i = 0; i < arr.length; i++) { if (arr[i].id === congeId) { c = arr[i]; break; } }
+        if (!c) { toast('Congé introuvable', 'error'); return; }
+        var emp = rhEmpById(c.employee_id);
+        var nom = rhEmpLabel(emp);
+        var civil = (emp && String(emp.sexe || '').toUpperCase().charAt(0) === 'F') ? 'Mme' : 'M.';
+        var matr = (emp && emp.matricule) || '-';
+        var JL = ['DIMANCHE', 'LUNDI', 'MARDI', 'MERCREDI', 'JEUDI', 'VENDREDI', 'SAMEDI'];
+        var JM = ['JANVIER', 'FÉVRIER', 'MARS', 'AVRIL', 'MAI', 'JUIN', 'JUILLET', 'AOÛT', 'SEPTEMBRE', 'OCTOBRE', 'NOVEMBRE', 'DÉCEMBRE'];
+        function num(d) { d = String(d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-'; return d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4); }
+        function jjl(d) {
+          d = String(d || '').slice(0, 10);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
+          var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
+          return JL[dt.getDay()] + ' ' + dt.getDate() + ' ' + JM[dt.getMonth()] + ' ' + dt.getFullYear();
+        }
+        var t = String(c.type || 'annual');
+        var typeTxt = t === 'annual' ? 'congé annuel'
+          : t === 'exceptionnel' ? 'congé exceptionnel'
+          : t === 'maternite' ? 'congé de maternité'
+          : t === 'maladie' ? 'congé de maladie'
+          : t === 'sans_solde' ? 'congé sans solde'
+          : rhCongeTypeLabel(t).toLowerCase();
+        var duree = parseInt(c.duree, 10);
+        if (!duree && c.date_depart && c.date_retour) { try { duree = rhDayDiff(c.date_depart, c.date_retour); } catch (eD) { duree = 0; } }
+        if (!duree) duree = 0;
+        var dureeTxt = duree >= 14 ? (Math.round(duree / 7 * 10) / 10) + ' semaines'
+          : duree >= 7 ? (Math.round(duree / 7)) + ' semaine' + (Math.round(duree / 7) > 1 ? 's' : '')
+          : duree + ' jour' + (duree > 1 ? 's' : '');
+        var reprise = c.date_reprise || c.date_retour || '';
+        var dep = String(c.date_depart || '').slice(0, 10);
+        var ref = 'DRH/ACSER' + dep.slice(0, 4) + '-' + dep.slice(5, 7) + '-';
+        var seq = String(c.numero || '').match(/(\d+)\s*$/);
+        ref += seq ? seq[1] : '01';
+        var ent = {};
+        try { ent = getEntreprise() || {}; } catch (eE) {}
+        var nomSoc = ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICES (ACSER) SAS';
+        var adrSoc = ent.adresse || 'Cocody Riviera Palmeraie, près de la pharmacie Marthe Robin — 08 BP 2054 Abidjan 08';
+        var telSoc = ent.telephone || '27 23 40 02 32';
+        var mailSoc = ent.email || 'sas.acser@gmail.com';
+        var rccm = ent.rccm || 'CI-ABJ-2019-B-16880';
+        var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:112px;max-height:58px;object-fit:contain">'
+          : '<div style="font-size:30px;font-weight:900;color:#0b1526;letter-spacing:2px">ACSER</div>';
+        var auj = new Date();
+        var aujTxt = auj.getDate() + ' ' + JM[auj.getMonth()] + ' ' + auj.getFullYear();
+        var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Attestation de congé - ' + escH(nom) + '</title>';
+        h += '<style>@page{size:A4;margin:15mm 16mm 16mm}' +
+          'body{font-family:"Segoe UI",Calibri,Arial,sans-serif;color:#111827;font-size:10.5pt;line-height:1.65;margin:0;background:#eef2f7;padding:24px}' +
+          '.feuille{max-width:790px;margin:0 auto;background:#fff;padding:34px 40px 26px;box-shadow:0 12px 40px rgba(15,23,42,.16)}' +
+          '.entete{display:flex;align-items:center;gap:16px;padding-bottom:10px;border-bottom:2.5px solid #0b1526}' +
+          '.entete .txt{flex:1}' +
+          '.entete .soc{font-size:15px;font-weight:900;letter-spacing:1.2px;color:#0b1526}' +
+          '.entete .l1{font-size:8.6pt;color:#374151;margin-top:2px}' +
+          '.entete .l2{font-size:8.2pt;color:#6b7280}' +
+          '.entete .bloc-id{text-align:right;font-size:8pt;color:#6b7280;line-height:1.5}' +
+          '.titre{margin:26px auto 0;display:table;border:2px solid #0b1526;border-radius:4px;padding:7px 26px;font-size:14.5pt;font-weight:800;letter-spacing:2.5px;text-transform:uppercase;text-align:center}' +
+          '.ref{margin:16px 0 4px;font-size:9.6pt}' +
+          '.ref b{font-weight:800}' +
+          '.corps{margin:14px 0 0;font-size:10.6pt;text-align:justify}' +
+          '.corps p{margin:9px 0}' +
+          '.fiche{border:1px solid #d1d5db;border-left:4px solid #b45309;border-radius:6px;padding:12px 16px;margin:14px 0 4px;background:#fffdf7}' +
+          '.fiche table{width:100%;border-collapse:collapse}' +
+          '.fiche td{padding:3px 6px;vertical-align:top}' +
+          '.fiche .k{font-size:8pt;text-transform:uppercase;letter-spacing:.9px;color:#6b7280;font-weight:800;width:118px}' +
+          '.fiche .v{font-size:11pt;font-weight:800;color:#0b1526}' +
+          '.filet{margin-top:22px;border-top:1px solid #e5e7eb;padding-top:6px;font-size:8.2pt;color:#6b7280}' +
+          '.sign{margin-top:26px;display:flex;justify-content:space-between;align-items:flex-end;gap:30px}' +
+          '.sign .gauche{font-size:9.6pt;text-align:right;flex:1}' +
+          '.sign .droite{flex:1.25;text-align:center;font-size:9.4pt}' +
+          '.sign .trait{margin-top:34px;border-top:1px solid #111827;padding-top:5px;font-weight:800;color:#0b1526}' +
+          '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0;max-width:none}.no-print{display:none}}</style></head><body><div class="feuille">';
+        /* entête : logo + société + identité */
+        h += '<div class="entete"><div>' + logo + '</div><div class="txt">' +
+          '<div class="soc">' + escH(nomSoc) + '</div>' +
+          '<div class="l1">' + escH(adrSoc) + '</div>' +
+          '<div class="l2">Tél. ' + escH(telSoc) + ' &nbsp;•&nbsp; ' + escH(mailSoc) + ' &nbsp;•&nbsp; RCCM ' + escH(rccm) + '</div>' +
+          '</div><div class="bloc-id">Attestation de congé<br>' + escH(nom) + '<br>' + escH(matr) + '</div></div>';
+        h += '<div class="titre">Attestation de congé</div>';
+        h += '<div class="ref"><b>N/Réf :</b> ' + escH(ref) + '</div>';
+        h += '<div class="corps">';
+        h += '<p>Nous soussignés, <b>' + escH(nomSoc) + '</b>, <b>représentée</b> par sa Direction des Ressources Humaines, attestons par la présente que :</p>';
+        h += '<div class="fiche"><table>' +
+          '<tr><td class="k">Travailleur</td><td class="v">' + escH(civil + ' ' + nom) + '</td></tr>' +
+          '<tr><td class="k">Matricule</td><td class="v">' + escH(matr) + '</td></tr>' +
+          '<tr><td class="k">Type de congé</td><td class="v">' + escH(typeTxt) + '</td></tr>' +
+          '<tr><td class="k">Durée</td><td class="v">' + escH(dureeTxt) + '</td></tr>' +
+          '</table></div>';
+        h += '<p>Part en <b>' + escH(typeTxt) + '</b> à compter du <b>' + escH(jjl(c.date_depart)) + ' après 17H00</b>, pour une durée de <b>' + escH(dureeTxt) + '</b>.</p>';
+        h += '<p>La date effective de reprise de service est fixée au <b>' + escH(jjl(reprise)) + ' à 08h00</b>.</p>';
+        h += '<p>En foi de quoi, la présente attestation lui est délivrée pour servir et valoir ce que de droit.</p>';
+        h += '</div>';
+        h += '<div class="sign"><div class="gauche">Fait à Abidjan, le ' + escH(aujTxt) + '</div>' +
+          '<div class="droite">La Direction des Ressources Humaines<div class="trait">' + escH(nomSoc) + '</div></div></div>';
+        h += '<div class="filet">Document généré le ' + escH(aujTxt) + ' &nbsp;•&nbsp; Réf. ' + escH(ref) + ' &nbsp;•&nbsp; ' + escH(matr) + '</div>';
+        h += '<div class="no-print" style="text-align:center;margin-top:20px"><button onclick="window.print()" style="padding:10px 26px;background:#0b1526;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Imprimer / PDF</button></div>';    h += '<div class="no-print" style="display:flex;gap:10px;justify-content:center;margin-top:20px">';
+    h += '<button onclick="rhPrintContrat(\'' + escH(id) + '\')" style="padding:10px 20px;background:#0f172a;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer">Imprimer / PDF</button>';
+    h += '<button onclick="rhExportContratWord(\'' + escH(id) + '\')" style="padding:10px 20px;background:#1d4ed8;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer">📤 Télécharger en Word</button>';
+    h += '</div>';
+        h += '</div><script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script></body></html>';
+        var w = window.open('', '_blank');
+        if (!w) { toast('Autorisez les popups', 'error'); return; }
+        w.document.write(h);
+        w.document.close();
+      }
 function printCongeFiche(congeId) {
   var arr = getRhConges();
   var c = null;

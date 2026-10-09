@@ -6061,6 +6061,42 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+r.push({
+    nom: 'R\u00e9cap : montage + heures le m\u00eame jour = R ET les heures',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Cas r\u00e9el signal\u00e9 : un rendement qui monte des palettes ET qui a
+         1 h 12 de point\u00e9 le m\u00eame jour doit afficher « R » + les heures,
+         pas seulement les heures. */
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      emp.rendement = true;
+      setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var dk = mz + '-02';
+      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && r.date === dk); });
+      /* 1 h 12 point\u00e9es \u00e0 la main */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: dk, present: true, h_j_manual: '1.2' });
+      setPayeSection('pointage', pts);
+      /* et 2 palettes mont\u00e9es ce m\u00eame jour */
+      setPointageMontage([
+        { id: DB.id(), employee_id: emp.id, date: dk, article_code: 'E2', quantite: 23 },
+        { id: DB.id(), employee_id: emp.id, date: dk, article_code: 'COUV', quantite: 25 }
+      ]);
+      var montFait = getPointageMontage().some(function (m) {
+        return m && m.employee_id === emp.id && m.date === dk && (m.quantite || 0) > 0;
+      });
+      var rec = getPointageData().filter(function (r) { return r && r.employee_id === emp.id && r.date === dk; })[0];
+      /* Ce que le r\u00e9cap doit retenir : montage = R, et les heures restent l\u00e0s. */
+      var rendReel = ptRecapJourRendement(emp.rendement === true, rec.rendement === true, montFait);
+      var cc = ptCalcDay(rec, rendReel);
+      var ccH = ptCalcDay(rec, false);
+      var ok = montFait === true && rendReel === true && ccH.j === 1.2 && (cc.j === 1.2 || cc.r > 0);
+      (ok) ? 'OK : montage d\u00e9tect\u00e9 -> R + heures conserv\u00e9es (' + ccH.j + ' h, r=' + (cc.r || 0) + ')'
+           : 'ECHEC montFait=' + montFait + ' rendReel=' + rendReel + ' hJ=' + ccH.j + ' cc=' + JSON.stringify(cc);
+    `,
+    attenduPrefixe: 'OK'
+  });
   r.push({
     nom: 'Montage : le bandeau des jours 1 -> 31 est cliquable',
     app: 'paye.html', store: storeRealiste,
