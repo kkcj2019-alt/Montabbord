@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-09-168';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-09-169';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -14616,16 +14616,27 @@ function getDepartementsFromPaye() {
     return Array.from(depts).sort();
   } catch(e) { return ['Production', 'Maintenance', 'Logistique', 'Administration']; }
 }
+/* Les fonctions reellement portees par les employes : c'est la seule
+   source qui marche avec le filtre. */
 function getFonctionsFromPaye() {
+  var set = {};
+  try {
+    (ptPXEmpsActifs() || []).forEach(function (p) {
+      var f = String((p && p.fonction) || '').trim();
+      if (f) set[f.toLowerCase()] = f;
+    });
+  } catch (e) {}
+  var l = Object.keys(set).map(function (k) { return set[k]; });
+  if (l.length) return l.sort();
+  /* Repli : les fonctions declarees dans la paie. */
   try {
     var payeData = lsObj('mdb_paye');
-    var fncs = payeData.fonctions || [];
-    if (fncs.length) return fncs.map(function(f) { return f.nom || f.name || f; }).filter(Boolean).sort();
-    var cats = payeData.categories || [];
-    var funcs = new Set();
-    cats.forEach(function(c) { if (c.fonction) funcs.add(c.fonction); });
-    return Array.from(funcs).sort();
-  } catch(e) { return ['Machiniste', 'Monteur', 'Manutentionnaire', 'Chef d\'équipe', 'Superviseur']; }
+    (payeData.fonctions || []).forEach(function (f) {
+      var n = String((f && (f.nom || f.name)) || f || '').trim();
+      if (n) set[n.toLowerCase()] = n;
+    });
+  } catch (e) {}
+  return Object.keys(set).map(function (k) { return set[k]; }).sort();
 }
 function getPersonnelByFonction(fonction) {
   return getPersonnel().filter(function(e) { return (e.fonction || e.service || '').trim() === fonction; });
@@ -14916,6 +14927,203 @@ function savePointageCell(empId, dateStr, del) {
 }
 
 /* ==================== MODAL POINTAGE GROUPE (identique module Paye) ==================== */
+/* ==== GENERATEUR DE POINTAGE : copie exacte du module Paie ==== */
+      function showModalGenererMois() {
+        var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
+        var emps = getPersonnelActifs().filter(ptEstForfait).sort(function(a,b){
+          return String(a.matricule||"").localeCompare(String(b.matricule||""),undefined,{numeric:true});
+        });
+        window._genPool = emps;
+        window._genChecked = {};
+        emps.forEach(function(p){ window._genChecked[p.id] = true; });
+        var nbActifsPaie = getPersonnelActifs().filter(function(p){ return p && p.en_paie !== false; }).length;
+        var fonctions = ["Toutes les fonctions"];
+        emps.forEach(function(p){ if (p.fonction && fonctions.indexOf(p.fonction) === -1) fonctions.push(p.fonction); });
+        var html = '<div style="padding:20px">' +
+          '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
+          '<p style="font-size:.78rem;color:#666;margin:0 0 4px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
+          '<p style="font-size:.72rem;color:' + (emps.length ? '#16a34a' : '#dc2626') + ';margin:0 0 16px;font-weight:600">' + emps.length + ' au forfait sur ' + nbActifsPaie + ' actif(s) en paie' + (emps.length ? '' : ' — si un employé manque : vérifiez son Mode de pointage ET la case « En paie » dans sa fiche') + '</p>' +
+          '<div class="form-group" style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
+          '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois ('+mois+')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option><option value="range">Plage de jours (du … au …)</option></select></div>' +
+          '<div id="gen-day-wrap" class="form-group" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
+          '<input type="date" id="gen-day" value="'+new Date().toISOString().slice(0,10)+'" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
+          '<div id="gen-range-wrap" class="form-group" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Du / Au — jours ouvrés (lun–ven) uniquement</label>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><input type="date" id="gen-from" value="'+mois+'-01" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><input type="date" id="gen-to" value="'+new Date().toISOString().slice(0,10)+'" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div></div>' +
+          '<div class="form-group" style="margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Rechercher employé</label>' +
+          '<input type="text" id="gen-search" placeholder="Nom, matricule, fonction..." oninput="genRenderList()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
+          '<div class="form-group" style="margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Filtrer par fonction</label>' +
+          '<select id="gen-fonction" onchange="genRenderList()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem">' +
+          fonctions.map(function(f){ return '<option value="'+escH(f)+'">'+escH(f)+'</option>'; }).join("") + '</select></div>' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px">' +
+          '<span style="font-size:.8rem;font-weight:600;color:#334155">Employés concernés</span>' +
+          '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:.75rem;font-weight:700;text-transform:none;letter-spacing:0;color:#334155">' +
+          '<input type="checkbox" id="gen-select-all" checked onchange="genToggleAll()" style="width:14px;height:14px;flex-shrink:0"> Tout sélectionner</label></div>' +
+          '<div id="gen-emp-list" style="max-height:240px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:16px"></div>' +
+          '<div style="display:flex;justify-content:flex-end;gap:10px">' +
+            '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
+            '<button class="btn" onclick="genApply()" id="gen-apply-btn" style="padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">Générer pour '+emps.length+' employé(s)</button>' +
+          '</div></div>';
+        openPtModal(html);
+        genRenderList(true);
+      }
+      function genRenderList(skipSync) {
+        var list = document.getElementById("gen-emp-list");
+        if (!list) return;
+        if (!skipSync) genSync();
+        var search = ((((document.getElementById("gen-search")||{}).value)||"")).toLowerCase().trim();
+        var fonction = (document.getElementById("gen-fonction")||{}).value || "Toutes les fonctions";
+        var set = window._genChecked || {};
+        var emps = (window._genPool || []).filter(function(p){
+          if (fonction !== "Toutes les fonctions" && p.fonction !== fonction) return false;
+          if (search) {
+            var txt = (p.nom||"") + " " + (p.prenoms||"") + " " + (p.matricule||"") + " " + (p.fonction||"");
+            if (txt.toLowerCase().indexOf(search) === -1) return false;
+          }
+          return true;
+        });
+        list.innerHTML = emps.length ? emps.map(function(p){
+          var on = set[p.id] ? " checked" : "";
+          var tag = ptEstForfait(p)
+            ? '<span style="font-size:.62rem;color:#7c3aed;background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:1px 7px">Forfait</span>'
+            : '<span style="font-size:.62rem;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:1px 7px">Jour</span>';
+          return '<label style="display:flex;align-items:center;gap:6px;padding:4px 8px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:.75rem;white-space:nowrap">' +
+            '<input type="checkbox" class="gen-emp-cb" value="'+p.id+'"'+on+' onchange="genToggleOne(this)" style="width:14px;height:14px;flex-shrink:0">' +
+            '<span style="font-weight:700;color:#1e3a8a">'+escH(p.matricule||"")+'</span> ' +
+            '<span style="color:#111827">'+escH(p.nom)+' '+escH(p.prenoms||"")+'</span>' +
+            ' <span style="color:#6b7280;font-size:.65rem">('+escH(p.fonction||"-")+')</span>' +
+            ' ' + tag + '</label>';
+        }).join("") : '<div style="padding:14px 10px;font-size:.75rem;color:#94a3b8;text-align:center">Aucun employé pour ce filtre</div>';
+        var pool = window._genPool || [], n = 0;
+        pool.forEach(function(p){ if (set[p.id]) n++; });
+        var sa = document.getElementById("gen-select-all");
+        if (sa) { sa.checked = (n > 0 && n === pool.length); sa.indeterminate = (n > 0 && n < pool.length); }
+        genUpdateCount();
+      }
+      function genSync() {
+        var set = window._genChecked = window._genChecked || {};
+        document.querySelectorAll(".gen-emp-cb").forEach(function(cb){
+          if (cb.checked) set[cb.value] = true; else delete set[cb.value];
+        });
+      }
+      function genToggleOne(cb) {
+        var set = window._genChecked = window._genChecked || {};
+        if (cb.checked) set[cb.value] = true; else delete set[cb.value];
+        genUpdateCount();
+      }
+      function genTogglePeriode() {
+        var v = (document.getElementById("gen-periode")||{}).value || "all";
+        var w = document.getElementById("gen-day-wrap");
+        if (w) w.style.display = (v === "day") ? "" : "none";
+        var wr = document.getElementById("gen-range-wrap");
+        if (wr) wr.style.display = (v === "range") ? "" : "none";
+      }
+      function genUpdateCount() {
+        var n = Object.keys(window._genChecked || {}).length;
+        var b = document.getElementById("gen-apply-btn");
+        if (b) b.textContent = "Générer pour " + n + " employé(s)";
+      }
+      function genToggleAll() {
+        var on = !!((document.getElementById("gen-select-all")||{}).checked);
+        var set = window._genChecked = {};
+        (window._genPool||[]).forEach(function(p){ if (on) set[p.id] = true; });
+        genRenderList(true);
+      }
+      /* Jours ouvrés (lun-ven) d'une plage, bornée au mois. Fonction pure (testable). */
+      function genPlageJours(mois, from, to) {
+        var out = [];
+        var parts = String(mois || "").split("-");
+        var y = parseInt(parts[0], 10), mi = parseInt(parts[1], 10) - 1;
+        if (isNaN(y) || isNaN(mi) || mi < 0 || mi > 11) return out;
+        var last = new Date(y, mi + 1, 0).getDate();
+        function pad(n) { return (n < 10 ? "0" : "") + n; }
+        var a = String(from || ""), b = String(to || "");
+        var d0 = (a >= mois + "-01" && a <= mois + "-" + pad(last)) ? a : mois + "-01";
+        var d1 = (b >= mois + "-01" && b <= mois + "-" + pad(last)) ? b : mois + "-" + pad(last);
+        if (d1 < d0) return out;
+        var cur = new Date(y, mi, parseInt(d0.slice(8, 10), 10));
+        var end = new Date(y, mi, parseInt(d1.slice(8, 10), 10));
+        while (cur <= end) {
+          var dw = cur.getDay();
+          if (dw !== 0 && dw !== 6) out.push(mois + "-" + pad(cur.getDate()));
+          cur = new Date(y, mi, cur.getDate() + 1);
+        }
+        return out;
+      }
+      function genApply() {
+        var eids = Object.keys(window._genChecked || {});
+        if (!eids.length) { toast("Sélectionnez au moins un employé","error"); return; }
+        var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
+        var periode = (document.getElementById("gen-periode")||{}).value || "all";
+        var day = (document.getElementById("gen-day")||{}).value || "";
+        if (periode === "day" && !day) { toast("Choisissez le jour à générer","error"); return; }
+        var from = "", to = "";
+        if (periode === "range") {
+          from = (document.getElementById("gen-from")||{}).value || "";
+          to = (document.getElementById("gen-to")||{}).value || "";
+          if (!from || !to) { toast("Choisissez le début et la fin de la plage","error"); return; }
+          if (to < from) { toast("La fin doit être après le début","error"); return; }
+        }
+        var year = parseInt(mois.split("-")[0]), mIdx = parseInt(mois.split("-")[1])-1;
+        var daysInMonth = new Date(year,mIdx+1,0).getDate();
+        var pts = getPointageData();
+        var store8 = getFormatHeures()==="hhmm" ? "8:00" : "8";
+        var dks = [];
+        if (periode === "day") {
+          dks.push(day);
+        } else if (periode === "range") {
+          dks = genPlageJours(mois, from, to);
+          if (!dks.length) { toast("Aucun jour ouvré dans cette plage","error"); return; }
+        } else {
+          for (var d=1;d<=daysInMonth;d++){
+            var dk = mois+"-"+(d<10?"0":"")+d;
+            var dw = new Date(year,mIdx,d).getDay();
+            if (dw===0||dw===6) continue;
+            dks.push(dk);
+          }
+        }
+        var count=0, skipped=0, skippedAP=0;
+        eids.forEach(function(eid){
+          dks.forEach(function(dk){
+            var idx = pts.findIndex(function(r){ return r.employee_id===eid && r.date===dk; });
+            if (idx !== -1 && pts[idx].protege === true) { skipped++; return; }
+            if (idx !== -1 && pts[idx].absent_paye === true) { skippedAP++; return; }
+            if (periode==="empty" && idx!==-1) return;
+            if (idx===-1) {
+              pts.push({id:DB.id(), employee_id:eid, date:dk, present:true, h_j_manual:store8, h_n_manual:"",
+                j_arrivee:"08:00", j_pause:"12:00", j_reprise:"13:00", j_fin:"17:00",
+                n_arrivee:"", n_pause:"", n_reprise:"", n_fin:""});
+              count++;
+            } else {
+              pts[idx].present = true;
+              pts[idx].h_j_manual = store8;
+              pts[idx].j_arrivee = "08:00"; pts[idx].j_pause = "12:00";
+              pts[idx].j_reprise = "13:00"; pts[idx].j_fin = "17:00";
+              count++;
+            }
+          });
+        });
+        setPointageData(pts);
+        /* Prestataire externe : le bulletin proratise sur "Jours travaillés".
+           On le renseigne à partir des jours réellement pointés (jamais en baissant). */
+        try {
+          var pers = getPersonnel();
+          var jOuvGen = ptJoursOuvres(mois);
+          eids.forEach(function(eid){
+            var pe = pers.find(function(x){ return x.id === eid; });
+            if (!pe || empCategorie(pe) !== "externe") return;
+            var nbJ = pts.filter(function(r){
+              return r && r.employee_id === eid && r.date && r.date.indexOf(mois) === 0 && r.present === true;
+            }).length;
+            if (nbJ > jOuvGen) nbJ = jOuvGen;
+            if (nbJ > getExternJours(eid, mois)) setExternJours(eid, mois, nbJ);
+          });
+        } catch(eExt){}
+        toast(count+" jour(s) généré(s) pour "+eids.length+" employé(s)"+(skipped ? " — "+skipped+" verrouillé(s) ignoré(s)" : "")+(skippedAP ? " — "+skippedAP+" absent(s) payé(s) conservé(s)" : ""),"success");
+        closePtModal();
+        renderPtRecap();
+      }
+
+      /* --- POINTAGE FACIAL --- */
 function showModalPointageGroupe() {
   var todayStr = today();
   var emps = ptPXEmpsActifs();
@@ -14926,7 +15134,17 @@ function showModalPointageGroupe() {
     '<input type="date" id="pg-date" value="' + todayStr + '" onchange="pgFilterEmps()" style="padding:6px 10px;width:180px;border:1px solid #ddd;border-radius:6px"></div>' +
     '<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem;cursor:pointer;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 10px"><input type="checkbox" id="pg-absent-all" onchange="pgToggleMotif();pgRefreshSummaries()"> Marquer comme absent (pour tous les employés sélectionnés)</label>' +
     '<div id="pg-motif-wrap" style="display:none;margin-bottom:12px"><label style="font-size:.75rem;font-weight:600">Motif d\'absence (sera dans les observations de chacun + fiche)</label>' +
-    '<input type="text" id="pg-motif" placeholder="Ex : Absence non justifiée..." style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.8rem;box-sizing:border-box"></div>' +
+    '<select id="pg-motif" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.8rem;box-sizing:border-box">' +
+      '<option value="">Sans motif</option>' +
+      pgMotifsOptions() +
+    '</select>' +
+    '<label style="font-size:.75rem;font-weight:600;display:block;margin-top:8px">Précision (facultatif)</label>' +
+    '<input type="text" id="pg-precis" placeholder="ex. panne réseau, accord verbal..." style="width:100%;padding:7px;border:1px solid #ddd;border-radius:6px;font-size:.8rem;box-sizing:border-box">' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:.76rem;cursor:pointer">' +
+      '<input type="checkbox" id="pg-faute-entreprise"> À faute entreprise <span style="font-weight:400;color:#64748b">(jour payé, à rattraper)</span></label>' +
+    '<label style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:.76rem;cursor:pointer">' +
+      '<input type="checkbox" id="pg-panier"> 🧭 Prime de panier pour ce jour</label>' +
+    '</div>' +
     '<div style="font-size:.8rem;font-weight:600;margin-bottom:4px">Horaires globaux à appliquer <span style="font-weight:400;font-size:.68rem;color:#666">— cochez la case pour appliquer ce créneau</span></div>' +
     '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">' +
     '<label style="font-size:.75rem"><input type="checkbox" id="pg-arr" checked oninput="pgRefreshSummaries()"> Arrivée<br><input type="time" id="pg-arr-v" value="08:00" oninput="pgRefreshSummaries()" style="width:110px;padding:4px;border:1px solid #ddd;border-radius:4px;margin-top:2px"></label>' +
@@ -14971,11 +15189,34 @@ function showModalPointageGroupe() {
     '<button class="btn" onclick="pgApply()" id="pg-apply-btn" style="padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">Pointer (0)</button>' +
     '</div></div>';
   openPtModal(html, true);
-  pgFilterEmps();
+  /* On remplit les filtres AVANT le premier rendu, sinon la liste des
+     employés arrive vide et rien ne se passe au premier changement. */
   var ff = document.getElementById('pg-fonction');
-  if (ff) { getFonctionsFromPaye().forEach(function(f) { ff.innerHTML += '<option value="' + escH(f) + '">' + escH(f) + '</option>'; }); }
+  if (ff) {
+    getFonctionsFromPaye().forEach(function (f) {
+      var o = document.createElement('option');
+      o.value = f; o.textContent = f;
+      ff.appendChild(o);
+    });
+  }
   var fd = document.getElementById('pg-filtre-departement');
-  if (fd) { getServicesShared().forEach(function(d) { fd.innerHTML += '<option value="' + escH(d) + '">' + escH(d) + '</option>'; }); }
+  if (fd) {
+    getServicesShared().forEach(function (d) {
+      var o2 = document.createElement('option');
+      o2.value = d; o2.textContent = d;
+      fd.appendChild(o2);
+    });
+  }
+  pgFilterEmps();
+}
+/* Les memes motifs que le module Paie : la fiche reste lisible partout. */
+function pgMotifsOptions() {
+  var l = ['Maladie', 'Congé', 'Congé annuel', 'Congé sans solde', 'Permission',
+           'Formation', 'Déplacement', 'Mission', 'Arrêt maladie', 'Accident',
+           'Absence injustifiée', 'Autre'];
+  var h = '';
+  l.forEach(function (m) { h += '<option value="' + escH(m) + '">' + escH(m) + '</option>'; });
+  return h;
 }
 function pgFilterEmps() {
   var prevChecked = {};
@@ -14985,7 +15226,7 @@ function pgFilterEmps() {
   var departement = (document.getElementById('pg-filtre-departement') || {}).value || '';
   search = search.toLowerCase().trim();
   var emps = ptPXEmpsActifs().filter(function(p) {
-    if (fonction !== 'Toutes les fonctions' && p.fonction !== fonction) return false;
+    if (fonction !== 'Toutes les fonctions' && String(p.fonction || '').trim().toLowerCase() !== String(fonction).trim().toLowerCase()) return false;
     if (departement && (p.service || '') !== departement) return false;
     if (search) {
       var name = ((p.nom || '') + ' ' + (p.prenoms || '')).toLowerCase();
@@ -15160,6 +15401,9 @@ function pgApply() {
   if (!dk) { toast('Choisissez une date', 'error'); return; }
   var absentAll = (document.getElementById('pg-absent-all') || {}).checked;
   var motif = ((document.getElementById('pg-motif') || {}).value || '').trim();
+  var precis = ((document.getElementById('pg-precis') || {}).value || '').trim();
+  var fauteEnt = !!(document.getElementById('pg-faute-entreprise') || {}).checked;
+  var primePanier = !!(document.getElementById('pg-panier') || {}).checked;
   var rattrapage = (document.getElementById('pg-rattrapage') || {}).checked;
   var hg = parseFloat((document.getElementById('pg-hg') || {}).value) || 0;
   var hu = parseFloat((document.getElementById('pg-hu') || {}).value) || 0;
@@ -15194,7 +15438,9 @@ function pgApply() {
       r0.j_arrivee = ''; r0.j_pause = ''; r0.j_reprise = ''; r0.j_fin = '';
       r0.n_arrivee = ''; r0.n_pause = ''; r0.n_reprise = ''; r0.n_fin = '';
       r0.h_libres = 0;
-      r0.obs = motif;
+      r0.obs = (motif ? motif : 'Absence') + (precis ? ' — ' + precis : '');
+      r0.faute_societe = fauteEnt;
+      if (fauteEnt) { r0.absent_paye = true; }
       r0.rattrap_gagnees = hg; r0.rattrap_utilisees = hu; r0.jour_rattrapage = rattrapage;
       count++;
     } else {
@@ -15226,133 +15472,12 @@ function pgApply() {
 }
 
 /* ==================== MODAL GENERER MOIS COMPLET (identique module Paye) ==================== */
-function showModalGenererMois() {
-  var mois = ptPXSelMois();
-  var emps = ptPXEmpsActifs().filter(ptPXEstForfait);
-  var html = '<div style="padding:20px">' +
-    '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
-    '<p style="font-size:.78rem;color:#666;margin:0 0 16px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
-    '<div style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
-    '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois (' + mois + ')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option><option value="range">Plage de jours (du … au …)</option></select></div>' +
-    '<div id="gen-day-wrap" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
-    '<input type="date" id="gen-day" value="' + today() + '" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div>' +
-    '<div id="gen-range-wrap" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Du / Au — jours ouvrés (lun–ven) uniquement</label>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><input type="date" id="gen-from" value="' + mois + '-01" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><input type="date" id="gen-to" value="' + today() + '" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"></div></div>' +
-    '<div style="font-size:.8rem;font-weight:600;margin-bottom:8px">Employés concernés</div>' +
-    '<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:.8rem;border-bottom:1px solid #f0f0f0"><input type="checkbox" id="gen-select-all" checked onchange="genToggleAll();genUpdateCount()"> Tout sélectionner</label>' +
-    '<div id="gen-emp-list" style="max-height:260px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:16px"></div>' +
-    '<div style="display:flex;justify-content:flex-end;gap:10px">' +
-    '<button class="btn" onclick="closePtModal()" style="padding:8px 20px">Annuler</button>' +
-    '<button class="btn" onclick="genApply()" id="gen-apply-btn" style="padding:8px 20px;background:#f97316;color:white;border:none;border-radius:6px;font-weight:600">Générer pour ' + emps.length + ' employé(s)</button>' +
-    '</div></div>';
-  openPtModal(html);
-  var list = document.getElementById('gen-emp-list');
-  if (list) {
-    list.innerHTML = emps.map(function(p) {
-      var tag = ptPXEstForfait(p)
-        ? '<span style="font-size:.62rem;color:#7c3aed;background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:1px 7px">Forfait</span>'
-        : '<span style="font-size:.62rem;color:#16a34a;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:1px 7px">Jour</span>';
-      return '<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #f0f0f0;cursor:pointer;font-size:.8rem"><input type="checkbox" class="gen-emp-cb" value="' + p.id + '" checked onchange="genUpdateCount()"><strong>' + escH(p.matricule || '') + '</strong> ' + escH(p.nom) + (p.prenoms ? ' ' + escH(p.prenoms) : '') + ' ' + tag + '</label>';
-    }).join('');
-  }
-}
-function genTogglePeriode() {
-  var v = (document.getElementById('gen-periode') || {}).value || 'all';
-  var w = document.getElementById('gen-day-wrap');
-  if (w) w.style.display = (v === 'day') ? '' : 'none';
-  var wr = document.getElementById('gen-range-wrap');
-  if (wr) wr.style.display = (v === 'range') ? '' : 'none';
-}
-function genUpdateCount() {
-  var n = document.querySelectorAll('.gen-emp-cb:checked').length;
-  var b = document.getElementById('gen-apply-btn');
-  if (b) b.textContent = 'Générer pour ' + n + ' employé(s)';
-}
-function genToggleAll() { var c = (document.getElementById('gen-select-all') || {}).checked; document.querySelectorAll('.gen-emp-cb').forEach(function(cb) { cb.checked = c; }); }
-/* Jours ouvrés (lun-ven) d'une plage, bornée au mois. Fonction pure (testable). */
-function genPlageJours(mois, from, to) {
-  var out = [];
-  var parts = String(mois || '').split('-');
-  var y = parseInt(parts[0], 10), mi = parseInt(parts[1], 10) - 1;
-  if (isNaN(y) || isNaN(mi) || mi < 0 || mi > 11) return out;
-  var last = new Date(y, mi + 1, 0).getDate();
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
-  var a = String(from || ''), b = String(to || '');
-  var d0 = (a >= mois + '-01' && a <= mois + '-' + pad(last)) ? a : mois + '-01';
-  var d1 = (b >= mois + '-01' && b <= mois + '-' + pad(last)) ? b : mois + '-' + pad(last);
-  if (d1 < d0) return out;
-  var cur = new Date(y, mi, parseInt(d0.slice(8, 10), 10));
-  var end = new Date(y, mi, parseInt(d1.slice(8, 10), 10));
-  while (cur <= end) {
-    var dw = cur.getDay();
-    if (dw !== 0 && dw !== 6) out.push(mois + '-' + pad(cur.getDate()));
-    cur = new Date(y, mi, cur.getDate() + 1);
-  }
-  return out;
-}
-function genApply() {
-  var cbs = document.querySelectorAll('.gen-emp-cb:checked');
-  if (cbs.length === 0) { toast('Sélectionnez au moins un employé', 'error'); return; }
-  var mois = ptPXSelMois();
-  var periode = (document.getElementById('gen-periode') || {}).value || 'all';
-  var day = (document.getElementById('gen-day') || {}).value || '';
-  if (periode === 'day' && !day) { toast('Choisissez le jour à générer', 'error'); return; }
-  var from = '', to = '';
-  if (periode === 'range') {
-    from = (document.getElementById('gen-from') || {}).value || '';
-    to = (document.getElementById('gen-to') || {}).value || '';
-    if (!from || !to) { toast('Choisissez le début et la fin de la plage', 'error'); return; }
-    if (to < from) { toast('La fin doit être après le début', 'error'); return; }
-  }
-  var year = parseInt(mois.split('-')[0], 10), mIdx = parseInt(mois.split('-')[1], 10) - 1;
-  var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
-  var pts = getPointagePaye();
-  var dks = [];
-  if (periode === 'day') {
-    dks.push(day);
-  } else if (periode === 'range') {
-    dks = genPlageJours(mois, from, to);
-    if (!dks.length) { toast('Aucun jour ouvré dans cette plage', 'error'); return; }
-  } else {
-    for (var d = 1; d <= daysInMonth; d++) {
-      var dk = mois + '-' + (d < 10 ? '0' : '') + d;
-      var dw = new Date(year, mIdx, d).getDay();
-      if (dw === 0 || dw === 6) continue;
-      dks.push(dk);
-    }
-  }
-  var count = 0, skipped = 0, skippedAP = 0;
-  cbs.forEach(function(cb) {
-    var eid = cb.value;
-    dks.forEach(function(dk) {
-      var idx = -1;
-      for (var i = 0; i < pts.length; i++) { if (pts[i] && pts[i].employee_id === eid && pts[i].date === dk) { idx = i; break; } }
-      if (idx !== -1 && pts[idx].protege === true) { skipped++; return; }
-      if (idx !== -1 && pts[idx].absent_paye === true) { skippedAP++; return; }
-      if (periode === 'empty' && idx !== -1) return;
-      if (idx === -1) {
-        pts.push({
-          id: genId(), employee_id: eid, date: dk, present: true, h_j_manual: '8', h_n_manual: '',
-          j_arrivee: '08:00', j_pause: '12:00', j_reprise: '13:00', j_fin: '17:00',
-          n_arrivee: '', n_pause: '', n_reprise: '', n_fin: ''
-        });
-        count++;
-      } else {
-        pts[idx].present = true;
-        pts[idx].h_j_manual = '8';
-        pts[idx].j_arrivee = '08:00'; pts[idx].j_pause = '12:00';
-        pts[idx].j_reprise = '13:00'; pts[idx].j_fin = '17:00';
-        count++;
-      }
-    });
-  });
-  setPointagePaye(pts);
-  toast(count + ' jour(s) généré(s) pour ' + cbs.length + ' employé(s)' + (skipped ? ' — ' + skipped + ' verrouillé(s) ignoré(s)' : '') + (skippedAP ? ' — ' + skippedAP + ' absent(s) payé(s) conservé(s)' : ''), 'success');
-  closePtModal();
-  renderPage();
-}
 
-/* ==================== MODAL EFFACER POINTAGES (identique module Paye) ==================== */
+
+
+
+
+
 function showModalEffacer() {
   var mois = ptPXSelMois();
   var y = mois.split('-')[0], m = mois.split('-')[1];
