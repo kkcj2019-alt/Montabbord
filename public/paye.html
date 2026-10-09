@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-237";
+      window.__APP_VERSION = "2026-10-09-238";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -3474,6 +3474,7 @@
                 Prime de Production (barres progressives + CA HT)
               </h3>
               <div id="pp-resume" style="font-size:.78rem;color:var(--dim);margin-bottom:.6rem"></div>
+              <div id="pp-baremes-panel" style="font-size:.78rem;margin-bottom:.7rem"></div>
               <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
                 <button class="btn" onclick="showModalPrimeProd()" style="padding:6px 14px;font-size:.78rem">🏆 Barres &amp; taux</button>
                 <span style="font-size:.72rem;color:var(--dim)">Taux individuel (% du CA) : fiche de l'employé, champ « Taux prime sur CA HT ». Chaque employé reçoit une prime sur les <b>articles</b>, sur le <b>chiffre d'affaires</b>, ou les deux.</span>
@@ -7650,6 +7651,190 @@ window._payeVuTs = ts;
         try { pushPayeCloud(); } catch (eP) {}
         try { renderPrimeEmpMatrix(); } catch (eR) {}
       }
+      /* Barème de production retenu pour l'employé. */
+      function pmeBaremeDe(empId) {
+        var e = pmeEmploye(empId);
+        return (e && e.bareme_prime_id) ? String(e.bareme_prime_id) : "";
+      }
+      /* ---------- BARÈMES : nom, période, équipe ---------- */
+      function pmeBarLabel(b) { return String((b && b.label) || "Barème"); }
+      function pmeBarPeriode(b) {
+        if (!b) return "";
+        var d = b.debut || "";
+        var f = b.fin || "";
+        if (!d && !f) return "toute l'année";
+        return (d || "début") + (f ? " → " + f : " → à l'infini");
+      }
+      /* Un barème s'applique-t-il à cet employé ce mois-ci ? */
+      function pmeBarCouvre(b, empId, mois) {
+        if (!b) return false;
+        var l = Array.isArray(b.employes) ? b.employes : [];
+        if (l.length && l.indexOf(String(empId)) === -1) return false;
+        if (b.debut && mois && String(mois) < String(b.debut)) return false;
+        if (b.fin && mois && String(mois) > String(b.fin)) return false;
+        return true;
+      }
+      /* Tous les barèmes, du plus récent au plus ancien. */
+      function pmeBarres() {
+        var l = [];
+        try { l = getPrimeProdBaremes() || []; } catch (e) {}
+        return l;
+      }
+      /* Panneau de gestion des barèmes : c'est ici qu'on dit
+         « Barème X s'applique à ces travailleurs, de telle période à telle période ». */
+      function renderBarresPanel() {
+        var box = document.getElementById('pp-baremes-panel');
+        if (!box) return;
+        var l = pmeBarres();
+        var h = '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:7px">' +
+          '<span style="font-size:.74rem;font-weight:800">Barèmes par équipe</span>' +
+          '<span style="font-size:.68rem;color:#64748b">un barème = un nom + une période + des travailleurs ; ses tranches leur sont propres</span>' +
+          '<span style="flex:1"></span>' +
+          '<button class="btn" onclick="pmeBaremeNouveau()" style="padding:5px 10px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;font-size:.72rem;font-weight:700">+ Nouveau barème</button>' +
+        '</div>';
+        if (!l.length) {
+          box.innerHTML = h + '<div style="font-size:.72rem;color:#94a3b8;padding:6px;border:1px dashed #e2e8f0;border-radius:8px">Aucun barème : tout le monde est sur le barème Général.</div>';
+          return;
+        }
+        h += '<div style="display:flex;flex-direction:column;gap:6px">';
+        l.forEach(function (b) {
+          if (!b) return;
+          var n = (Array.isArray(b.employes) ? b.employes : []).length;
+          var pers = [];
+          try {
+            pers = (getPersonnel() || []).filter(function (p) {
+              return p && (Array.isArray(b.employes) ? b.employes : []).indexOf(String(p.id)) !== -1;
+            }).map(function (p) { return (p.matricule ? p.matricule + ' ' : '') + (p.nom || ''); });
+          } catch (eP) {}
+          h += '<div style="display:flex;gap:8px;align-items:flex-start;border:1px solid #e2e8f0;border-radius:8px;padding:7px 9px;background:#fff">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-weight:800;font-size:.8rem">' + escH(pmeBarLabel(b)) + ' <span style="font-weight:400;color:#64748b;font-size:.68rem">· ' + n + ' travailleur(s)</span></div>' +
+              '<div style="font-size:.68rem;color:#64748b">Période : ' + escH(pmeBarPeriode(b)) + '</div>' +
+              '<div style="font-size:.66rem;color:#94a3b8;margin-top:2px;max-height:34px;overflow:auto">' + escH(pers.join(', ') || '—') + '</div>' +
+            '</div>' +
+            '<button class="btn" onclick="showModalPrimeProd(\'' + escH(b.id) + '\')" style="padding:4px 9px;background:#f59e0b;color:#fff;border:none;border-radius:6px;font-size:.7rem;font-weight:700" title="Tranches et articles exclus">Tranches</button>' +
+            '<button class="btn btn-sec" onclick="pmeBaremeEditer(\'' + escH(b.id) + '\')" style="padding:4px 9px;font-size:.7rem" title="Qui est concerné et sur quelle période">Équipe</button>' +
+          '</div>';
+        });
+        h += '</div>';
+        box.innerHTML = h;
+      }
+      function pmeBaremeNouveau() { pmeBaremeEditer(''); }
+      /* Fiche d'un barème : nom, période, équipe. */
+      function pmeBaremeEditer(id) {
+        var l = pmeBarres();
+        var b = null;
+        for (var i = 0; i < l.length; i++) { if (String(l[i].id) === String(id)) { b = l[i]; break; } }
+        var emps = [];
+        try { emps = (getPersonnelActifs ? getPersonnelActifs() : getPersonnel()) || []; } catch (eE) {}
+        emps = emps.slice().sort(function (x, y) {
+          return String(x.matricule || '').localeCompare(String(y.matricule || ''), undefined, {numeric:true});
+        });
+        var html = '';
+        html += '<div class="form-group"><label>Nom du barème *</label>' +
+          '<input type="text" id="pbx-nom" value="' + escH(b ? pmeBarLabel(b) : '') + '" placeholder="ex. Barème monteurs 2026" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
+        html += '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+          '<div class="form-group" style="flex:1"><label>Valable à partir du mois</label>' +
+            '<input type="month" id="pbx-debut" value="' + escH(b && b.debut ? b.debut : '') + '" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>' +
+          '<div class="form-group" style="flex:1"><label>Jusqu’au mois (vide = sans fin)</label>' +
+            '<input type="month" id="pbx-fin" value="' + escH(b && b.fin ? b.fin : '') + '" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>' +
+        '</div>';
+        html += '<div class="form-group"><label>Travailleurs concernés * ' +
+          '<button class="btn btn-sec" style="padding:2px 8px;font-size:.68rem" onclick="pmeBarTout(1)">Tout cocher</button> ' +
+          '<button class="btn btn-sec" style="padding:2px 8px;font-size:.68rem" onclick="pmeBarTout(0)">Tout décocher</button></label>';
+        var deja = (b && Array.isArray(b.employes)) ? b.employes.map(String) : [];
+        html += '<div id="pbx-emps" style="max-height:210px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px;padding:5px">';
+        emps.forEach(function (p) {
+          if (!p) return;
+          html += '<label style="display:flex;align-items:center;gap:6px;font-size:.76rem;padding:2px 4px;cursor:pointer">' +
+            '<input type="checkbox" class="pbx-emp" value="' + escH(p.id) + '"' + (deja.indexOf(String(p.id)) !== -1 ? ' checked' : '') + ' style="width:14px;height:14px">' +
+            escH((p.matricule ? p.matricule + ' - ' : '') + (p.nom || '') + (p.prenoms ? ' ' + p.prenoms : '')) +
+            ' <span style="color:#94a3b8">' + escH(p.fonction || '') + '</span></label>';
+        });
+        html += '</div></div>';
+        var foot = '<button class="btn btn-sec" onclick="closePtModal()">Annuler</button>';
+        if (b) foot += '<button class="btn btn-sec" style="color:var(--danger)" onclick="pmeBaremeSupprimer(\'' + escH(b.id) + '\')">Supprimer</button>';
+        foot += ' <button class="btn" style="background:#16a34a;color:#fff" onclick="pmeBaremeEnregistrer(\'' + escH(id) + '\')">Enregistrer</button>';
+        openPtModal(html, true);
+        openPtModalFooter(foot);
+      }
+      /* Petit pied de modale : openPtModal ne prend que le corps. */
+      function openPtModalFooter(html) {
+        var content = document.getElementById('pt-modal-content');
+        if (!content) return;
+        var d = document.createElement('div');
+        d.id = 'pt-modal-foot';
+        d.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;padding-top:10px;border-top:1px solid #e2e8f0';
+        d.innerHTML = html;
+        content.appendChild(d);
+      }
+      function pmeBarTout(on) {
+        var box = document.getElementById('pbx-emps');
+        if (!box) return;
+        var cbs = box.querySelectorAll('input.pbx-emp');
+        for (var i = 0; i < cbs.length; i++) cbs[i].checked = !!on;
+      }
+      function pmeBaremeEnregistrer(id) {
+        var nom = String((document.getElementById('pbx-nom') || {}).value || '').trim();
+        if (!nom) { toast('Le nom du barème est obligatoire', 'error'); return; }
+        var debut = String((document.getElementById('pbx-debut') || {}).value || '');
+        var fin = String((document.getElementById('pbx-fin') || {}).value || '');
+        var box = document.getElementById('pbx-emps');
+        var ids = [];
+        if (box && box.querySelectorAll) {
+          box.querySelectorAll('input.pbx-emp').forEach(function (cb) {
+            if (cb.checked) ids.push(String(cb.value));
+          });
+        }
+        if (!ids.length) { toast('Cochez au moins un travailleur', 'error'); return; }
+        var l = pmeBarres();
+        var b = null;
+        for (var i = 0; i < l.length; i++) { if (String(l[i].id) === String(id)) { b = l[i]; break; } }
+        if (!b) {
+          b = { id: 'bp_' + Date.now(), label: nom, debut: debut, fin: fin, employes: ids,
+               bandes: [], articles_exclus: [], taux_ca_ht: 0 };
+          l.push(b);
+        } else {
+          b.label = nom; b.debut = debut; b.fin = fin; b.employes = ids;
+        }
+        if (!Array.isArray(b.bandes) || !b.bandes.length) b.bandes = (getPrimeProdConfig().bandes || []).slice();
+        setPrimeProdBaremes(l);
+        /* La fiche de chaque employé porte le nom du barème : c'est lui qui
+           décide des tranches, même si le barème a été renommé. */
+        ptAffecterBareme(b.id, ids);
+        closePtModal();
+        toast('Barème « ' + nom + ' » : ' + ids.length + ' travailleur(s), ' + pmeBarPeriode(b), 'success');
+        renderBarresPanel();
+        renderPrimeEmpMatrix();
+      }
+      function pmeBaremeSupprimer(id) {
+        if (!confirm('Supprimer ce barème ? Les travailleurs reviennent sur le barème général.')) return;
+        ptBaremeSupprimer(id);
+        closePtModal();
+        renderBarresPanel();
+        renderPrimeEmpMatrix();
+      }
+      function pmeBareme(empId, val) { pmeMajEmploye(empId, "bareme_prime_id", val || ""); }
+      /* Les barèmes sont listés par LEUR NOM : c'est ce nom qui tranche. */
+      function pmeBaremeOptions(empId) {
+        var cur = pmeBaremeDe(empId);
+        var h = '<option value=""' + (cur === "" ? " selected" : "") + '>Général</option>';
+        var l = [];
+        try { l = getPrimeProdBaremes() || []; } catch (eB) {}
+        l.forEach(function (b) {
+          if (!b) return;
+          var n = 0;
+          try {
+            n = (getPersonnel() || []).filter(function (p) {
+              return p && String(p.bareme_prime_id || "") === String(b.id);
+            }).length;
+          } catch (eN) {}
+          var periode = (b.debut || "") + (b.fin ? " → " + b.fin : " → à l\u2019infini");
+          h += '<option value="' + escH(b.id) + '"' + (cur === String(b.id) ? " selected" : "") +
+            ' title="' + escH(periode) + '">' + escH(b.label || "Barème") + (n ? " (" + n + ")" : "") + '</option>';
+        });
+        return h;
+      }
       function pmePrimeDroit(empId, on) { pmeMajEmploye(empId, "prime_droit", !!on); }
       function pmePrimeMode(empId, mode) { pmeMajEmploye(empId, "prime_mode", mode || ""); }
       function pmePrimeTaux(empId, val) {
@@ -7693,9 +7878,8 @@ function renderPrimeEmpMatrix() {
         });
         html += '<th style="position:sticky;top:0;background:#f0fdf4;z-index:2;padding:6px;border:1px solid var(--border)">PANIER</th>';
         html += '<th style="position:sticky;top:0;background:#faf5ff;z-index:2;padding:6px;border:1px solid var(--border)">MONTAGE</th>';
-        html += '<th style="position:sticky;top:0;background:#faf5ff;z-index:2;padding:6px;border:1px solid var(--border)">PRIME PROD.' + (cfg.seuil ? '<div style="font-weight:400;font-size:.6rem">seuil ' + cfg.seuil + '</div>' : '') + '</th>';
-        html += '<th style="position:sticky;top:0;background:#eff6ff;z-index:2;padding:6px;border:1px solid var(--border)">PRIME CA</th>';
-        html += '<th style="position:sticky;top:0;background:#fef3c7;z-index:2;padding:6px;border:1px solid var(--border);min-width:196px">PRIME PRODUCTION<div style="font-weight:400;font-size:.6rem">droit · type · taux %</div></th></tr></thead><tbody>';
+        html += '<th style="position:sticky;top:0;background:#fef3c7;z-index:2;padding:6px;border:1px solid var(--border);min-width:214px">PRIME PRODUCTION<div style="font-weight:400;font-size:.6rem">droit · type · barème · taux CA</div></th>';
+        html += '<th style="position:sticky;top:0;background:#ecfdf5;z-index:2;padding:6px;border:1px solid var(--border);min-width:178px">PRIME CALCULÉE<div style="font-weight:400;font-size:.6rem">montant équivalent du mois</div></th></tr></thead><tbody>';
         emps.forEach(function(e){
           var eff = {};
           try { getPrimesSpecEmp(e.id, mois).forEach(function(x){ eff[x.id] = x; }); } catch(errEff){}
@@ -7714,24 +7898,43 @@ function renderPrimeEmpMatrix() {
               '<input type="number" min="0" step="500" value="' + amt + '" placeholder="' + fmtF(p.montant) + '" title="Montant du mois (vide = montant global)" onchange="pmeMontant(\'' + p.id + '\',\'' + e.id + '\',this.value)" style="width:76px;padding:3px 4px;border:1px solid #ddd;border-radius:4px;font-size:.7rem;text-align:right;margin-left:4px"></td>';
           });
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#16a34a;font-weight:700">' + (pan > 0 ? fmtF(pan) : "—") + '</td>';
-          html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' + (mont.total > 0 ? fmtF(mont.total) : "—") + '</td>';
-          /* La prime n'est AJOUTEE qu'au bulletin (« Prime de Production »).
-             Ici on affiche le montant des barres, sans le verser dans le
-             récap montage. */
-          var _ppM = 0, _ppQ = 0, _ppCA = 0, _ppCaHT = 0;
-          try { var _pp = ptPrimeProdCalcul(e.id, mois); _ppM = _pp.montant; _ppQ = _pp.quantite; _ppCA = _pp.montant_ca; _ppCaHT = _pp.ca_ht; } catch (ePp) {}
-          html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#7c3aed;font-weight:700">' +
-            (pmePrimeDroitDe(e.id) && _ppQ > 0 ? '<span title="' + _ppQ + ' articles — barres">' + fmtF(_ppM) + '</span>' : (pmePrimeDroitDe(e.id) ? "—" : '<span title="Pas de prime">✕</span>')) + '</td>' +
-            '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#1d4ed8;font-weight:700">' +
-            (_ppCA > 0 ? '<span title="CA HT ' + fmtF(_ppCaHT) + '">' + fmtF(_ppCA) + '</span>' : "—") + '</td>' +
-            '<td style="padding:3px;border:1px solid var(--border);text-align:center;white-space:nowrap">' +
-            '<input type="checkbox" ' + (pmePrimeDroitDe(e.id) ? "checked" : "") + ' onchange="pmePrimeDroit(\'' + e.id + '\',this.checked)" title="Cet employé a-t-il droit à la prime de production ?" style="width:14px;height:14px;vertical-align:middle;accent-color:#f59e0b">' +
-            '<select onchange="pmePrimeMode(\'' + e.id + '\',this.value)" title="Sur quoi se calcule sa prime" style="width:82px;padding:2px 3px;margin-left:4px;border:1px solid #ddd;border-radius:4px;font-size:.66rem">' +
-            '<option value=""' + (pmePrimeModeDe(e.id) === "" ? " selected" : "") + '>les deux</option>' +
-            '<option value="ca"' + (pmePrimeModeDe(e.id) === "ca" ? " selected" : "") + '>sur CA</option>' +
-            '<option value="articles"' + (pmePrimeModeDe(e.id) === "articles" ? " selected" : "") + '>sur art.</option>' +
+          /* ---- PRIME PRODUCTION : droit, type, barème, taux CA ---- */
+          /* Le taux saisi ici détermine le montant :
+             montant = chiffre d’affaires HT du mois × taux %. C’est ce
+             montant qui part sur le bulletin. */
+          html += '<td style="padding:3px 4px;border:1px solid var(--border);text-align:center;white-space:nowrap">' +
+            '<input type="checkbox" ' + (pmePrimeDroitDe(e.id) ? "checked" : "") + ' onchange="pmePrimeDroit(\'' + e.id + '\',this.checked)" title="Droit à la prime de production" style="width:14px;height:14px;vertical-align:middle;accent-color:#f59e0b">' +
+            '<select onchange="pmePrimeMode(\'' + e.id + '\',this.value)" title="Sur quoi se calcule sa prime" style="width:70px;padding:2px;margin-left:3px;border:1px solid #ddd;border-radius:4px;font-size:.66rem">' +
+              '<option value=""' + (pmePrimeModeDe(e.id) === "" ? " selected" : "") + '>les deux</option>' +
+              '<option value="ca"' + (pmePrimeModeDe(e.id) === "ca" ? " selected" : "") + '>sur CA</option>' +
+              '<option value="articles"' + (pmePrimeModeDe(e.id) === "articles" ? " selected" : "") + '>sur art.</option>' +
             '</select>' +
-            '<input type="number" min="0" step="0.1" value="' + (pmePrimeTauxDe(e.id) || "") + '" placeholder="%" onchange="pmePrimeTaux(\'' + e.id + '\',this.value)" title="Taux appliqué au total HT du mois (vide ou 0 = taux du barème)" style="width:52px;padding:2px 3px;margin-left:4px;border:1px solid #ddd;border-radius:4px;font-size:.66rem;text-align:right">' +
+            '<select onchange="pmeBareme(\'' + e.id + '\',this.value)" title="Barème : ses tranches s\u2019appliquent à cet employé" style="width:106px;padding:2px;margin-left:3px;border:1px solid #ddd;border-radius:4px;font-size:.66rem">' +
+              pmeBaremeOptions(e.id) +
+            '</select>' +
+            '<div style="display:flex;align-items:center;gap:2px;margin-top:3px;justify-content:flex-end">' +
+              '<span style="font-size:.6rem;color:#64748b">CA</span>' +
+              '<input type="number" min="0" step="0.1" value="' + (pmePrimeTauxDe(e.id) || "") + '" placeholder="" onchange="pmePrimeTaux(\'' + e.id + '\',this.value)" title="Taux appliqué au chiffre d’affaires HT du mois : montant = CA HT × taux %. Vide ou 0 = taux du barème." style="width:44px;padding:2px 3px;border:1px solid #ddd;border-radius:4px;font-size:.66rem;text-align:right">' +
+              '<span style="font-size:.6rem;color:#64748b">%</span>' +
+            '</div>' +
+          '</td>';
+          /* ---- PRIME CALCULÉE : le montant automatique du mois ---- */
+          var _ppM = 0, _ppQ = 0, _ppCA = 0, _ppCaHT = 0, _ppMode = '', _ppDroit = true;
+          try {
+            var _pp = ptPrimeProdCalcul(e.id, mois);
+            _ppM = _pp.montant; _ppQ = _pp.quantite; _ppCA = _pp.montant_ca;
+            _ppCaHT = _pp.ca_ht; _ppMode = _pp.prime_mode;
+          } catch (ePp) {}
+          _ppDroit = pmePrimeDroitDe(e.id);
+          var _ppEq = (parseFloat(_ppM) || 0) + (parseFloat(_ppCA) || 0);
+          var _ppTip = (_ppQ || 0) + ' article(s) posé(s) · CA HT ' + fmtF(_ppCaHT || 0)
+            + ' · calcul sur ' + (_ppMode === 'ca' ? 'CA' : _ppMode === 'articles' ? 'articles' : 'articles + CA');
+          html += '<td style="padding:4px 6px;border:1px solid var(--border);text-align:right;white-space:nowrap;background:' + (_ppDroit ? '#f0fdf4' : '#fef2f2') + '" title="' + _ppTip + '">' +
+            '<div style="font-size:.62rem;font-weight:800;color:' + (_ppDroit ? '#15803d' : '#dc2626') + '">' + (_ppDroit ? '✓ a droit' : '✕ pas de prime') + '</div>' +
+            (_ppDroit
+              ? '<div style="font-weight:800;color:#065f46;font-size:.78rem">' + (_ppEq > 0 ? fmtF(_ppEq) : '—') + '</div>'
+                + '<div style="font-size:.6rem;color:#64748b">art. ' + fmtF(_ppM || 0) + ' · CA ' + fmtF(_ppCA || 0) + '</div>'
+              : '<div style="font-size:.6rem;color:#9ca3af">décoché</div>') +
             "</td></tr>";
         });
         html += '</tbody></table></div>';
@@ -29392,15 +29595,38 @@ if (normalHours > 173.33) {
       }
       /* Barème d'un employé pour un mois : null si aucun, ou si la période du
          barème ne couvre pas ce mois (l'employé retombe alors sur le general). */
+      /* Bareme de production qui s'applique a un employe pour un mois.
+         1) le bareme porte sur sa fiche ;
+         2) sinon un bareme nomme qui le cite dans son equipe, dont la
+            periode couvre le mois (le plus recent gagne). */
       function ptBaremePour(empId, mois) {
-        var id = ptBaremeIdEmploye(empId);
-        if (!id) return null;
-        var b = getPrimeProdBaremes().find(function (x) { return String(x.id) === id; });
-        if (!b) return null;
+        var tous = [];
+        try { tous = getPrimeProdBaremes() || []; } catch (eB) {}
         var m = String(mois || "");
-        if (b.debut && m && m < String(b.debut).slice(0, 7)) return null;
-        if (b.fin && m && m > String(b.fin).slice(0, 7)) return null;
-        return b;
+        function couvre(b) {
+          if (!b) return false;
+          if (b.debut && m && m < String(b.debut).slice(0, 7)) return false;
+          if (b.fin && m && m > String(b.fin).slice(0, 7)) return false;
+          return true;
+        }
+        var id = ptBaremeIdEmploye(empId);
+        if (id) {
+          for (var i = 0; i < tous.length; i++) {
+            if (String(tous[i].id) === String(id)) {
+              if (couvre(tous[i])) return tous[i];
+              break;
+            }
+          }
+        }
+        var choisi = null;
+        for (var j = 0; j < tous.length; j++) {
+          var bb = tous[j];
+          if (!couvre(bb)) continue;
+          var l = Array.isArray(bb.employes) ? bb.employes.map(String) : [];
+          if (l.indexOf(String(empId)) === -1) continue;
+          if (!choisi || String(bb.debut || "") > String(choisi.debut || "")) choisi = bb;
+        }
+        return choisi;
       }
       function ptBaremeNom(baremeId) {
         if (!baremeId) return "";
@@ -29408,6 +29634,21 @@ if (normalHours > 173.33) {
         return b ? String(b.label || "") : "";
       }
       /* Taux sur CA : individuel (fiche) > barème de l'employé > global. */
+      /* Taux sur CA HT deja enregistre pour la periode en cours (global ou
+         barème nommé). Sert quand le champ n'est plus affiche dans la modale. */
+      function ptPrimeProdTauxCActuel(mois, baremeId) {
+        try {
+          var v = (baremeId && String(baremeId) !== '__global__')
+            ? getPrimeProdBaremes().filter(function (b) { return String(b.id) === String(baremeId); })[0]
+            : null;
+          if (v && v.taux_ca_ht !== undefined && v.taux_ca_ht !== null && v.taux_ca_ht !== '')
+            return parseFloat(v.taux_ca_ht) || 0;
+          var ver = ptPrimeProdVersion(mois);
+          if (ver && ver.taux_ca_ht !== undefined && ver.taux_ca_ht !== null && ver.taux_ca_ht !== '')
+            return parseFloat(ver.taux_ca_ht) || 0;
+          return parseFloat((getPrimeProdConfig() || {}).taux_ca_ht) || 0;
+        } catch (eT) { return 0; }
+      }
       function ptPrimeProdTauxCa(empId, mois) {
         var cfg = getPrimeProdConfig();
         var v = ptPrimeProdVersion(mois);
@@ -29639,6 +29880,7 @@ if (normalHours > 173.33) {
       /* ===== MODALE : BARRES DE LA PRIME DE PRODUCTION ===== */
 /* Résumé barème dans Données de Salaire (onglet Articles Montage). */
       function renderPrimeProdResume() {
+        try { renderBarresPanel(); } catch (eB) {}
         var box = document.getElementById("pp-resume");
         if (!box) return;
         var cfg = {};
@@ -29707,30 +29949,12 @@ if (normalHours > 173.33) {
           '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">' +
           '<label style="font-size:.74rem;font-weight:700">À partir du mois</label>' +
           '<input type="month" id="pp-debut" style="padding:5px;border:1px solid #cbd5e1;border-radius:6px">' +
-          '<label style="font-size:.74rem;font-weight:700;margin-left:10px">Taux prime sur CA HT (%)</label>' +
-          '<input type="number" id="pp-ca" min="0" step="0.1" style="width:80px;padding:5px;border:1px solid #cbd5e1;border-radius:6px">' +
           '<span style="flex:1"></span>' +
           '<button class="btn" onclick="ppAjouterBande()" style="padding:6px 12px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;font-weight:700">+ Tranche</button>' +
           '</div>' +
           '<div style="margin-top:10px">' +
           '<label style="font-size:.74rem;font-weight:700">Articles exclus (compteurs des barres — ne comptent pas dans la prime)</label>' +
           '<div id="pp-ex-arts" style="max-height:120px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px;padding:5px;margin-top:4px"></div>' +
-          '</div>' +
-          /* L'exclusion d'une facture du CA de prime ne se programme plus ici :
-             on coche « hors CA » sur la ligne de la facture, dans le Journal de
-             vente. Ici on ne programme QUE les tranches et les articles exclus. */
-          '<div style="margin-top:10px;font-size:.72rem;color:#64748b;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;padding:7px 9px">' +
-          'Pour exclure une facture du chiffre d’affaires de la prime : Journal de vente → case « hors CA » sur la facture.' +
-          '</div>' +
-          /* ---- Affectation des employés ---- */
-          '<div style="margin-top:12px;border-top:1px solid #e2e8f0;padding-top:9px">' +
-          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
-          '<label style="font-size:.78rem;font-weight:800">👥 Appliquer ce barème à</label>' +
-          '<input type="text" id="pp-emp-q" placeholder="rechercher un nom ou matricule" oninput="ppRendreEmps()" style="flex:1;min-width:130px;padding:5px 7px;border:1px solid #cbd5e1;border-radius:6px;font-size:.75rem">' +
-          '<button class="btn" onclick="ppBarAffecter()" style="padding:5px 10px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-size:.72rem;font-weight:700">✓ Appliquer</button>' +
-          '<button class="btn btn-sec" onclick="ppBarRetirer()" style="padding:5px 10px;font-size:.72rem">Retirer</button>' +
-          '</div>' +
-          '<div id="pp-emps" style="max-height:150px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px;padding:5px"></div>' +
           '</div>' +
           '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">' +
           '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 18px">Fermer</button>' +
@@ -30021,7 +30245,10 @@ if (normalHours > 173.33) {
          avant une affectation d'employés (le barème doit exister en dur). */
       function ptPrimeProdEnregistrer(sansFermer) {
         var debut = (document.getElementById("pp-debut") || {}).value || "";
-        var ca = parseFloat((document.getElementById("pp-ca") || {}).value) || 0;
+        /* Le champ « taux sur CA HT » n'est plus dans la modale : le champ
+           absent ne doit pas remettre le taux a zero. */
+        var _elCa = document.getElementById("pp-ca");
+        var ca = _elCa ? (parseFloat(_elCa.value) || 0) : ptPrimeProdTauxCActuel(mois, window._ppCible);
         var ex = Array.isArray(window._ppExArts) ? window._ppExArts.slice() : [];
         if (!Array.isArray(window._ppExArts)) {
           var elExLegacy = document.getElementById("pp-ex");
