@@ -8,7 +8,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-09-225';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-09-226';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -30662,6 +30662,241 @@ function filterConges() {
     rows[i].style.display = (q === '' || s.indexOf(q) !== -1) ? '' : 'none';
   }
 }
+/* ===== CONTRATS DE TRAVAIL — par type, avec renouvellement et statut =====
+     Chaque employé a un contrat (CDI, CDD, Journalier, Externe, Stage,
+     Vacataire…). Le contrat existe dès son enregistrement, mais on suit
+     s'il a été REMIS au travailleur :
+        - « non remis » : créé, pas encore donné
+        - « remis »     : signé et remis (date + n° de pièce)
+     Renouvellement : on repart de la date du jour (ou de la fin du
+     contrat), on saisit la durée (mois ou années) et la date de fin est
+     calculée toute seule. */
+      var RH_CT_TYPES = ['CDI', 'CDD', 'Journalier', 'Externe', 'Stage', 'Vacataire', 'Apprentissage', 'Saisonnier'];
+      function rhContratsStore() {
+        var v = dbArr('mdb_rh_contrats');
+        return Array.isArray(v) ? v : [];
+      }
+      function rhContratsSet(list) {
+        DB.set('mdb_rh_contrats', Array.isArray(list) ? list : []);
+        try { if (typeof schedulePush === 'function') schedulePush(); } catch (e1) {}
+        try { if (window._mdbSyncChannel) window._mdbSyncChannel.postMessage({ type: 'shared_key_updated', key: 'mdb_rh_contrats', value: JSON.stringify(list) }); } catch (e2) {}
+      }
+      function rhContratFinAuto(debutIso, duree, unite) {
+        var d = String(debutIso || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '';
+        var dd = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
+        var n = parseInt(duree, 10);
+        if (!n || n <= 0) return '';
+        if (unite === 'ans' || unite === 'annee' || unite === 'an') dd.setFullYear(dd.getFullYear() + n);
+        else if (unite === 'jours' || unite === 'jour') dd.setDate(dd.getDate() + n - 1);
+        else dd.setMonth(dd.getMonth() + n);   /* mois par défaut */
+        var m = dd.getMonth() + 1, j = dd.getDate();
+        return dd.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (j < 10 ? '0' : '') + j;
+      }
+      /* Statut d'un contrat : remises / à remettre / échu / valide. */
+      function rhContratStatut(c) {
+        var t = getToday();
+        var fin = String(c.fin || '').slice(0, 10);
+        var expire = (fin && fin < t);
+        var dl = null;
+        if (fin) dl = Math.ceil((new Date(fin + 'T00:00:00') - new Date(t + 'T00:00:00')) / 86400000);
+        return {
+          remis: c.remis_le ? true : false,
+          expire: !!expire,
+          jours: dl,
+          alerte: !!expire || (dl !== null && dl <= 30),
+          label: c.remis_le ? (expire ? 'Remis · échu' : 'Remis · valide') : (expire ? 'À remettre · échu' : 'À remettre'),
+          classe: c.remis_le ? (expire ? 'badge-danger' : 'badge-success') : 'badge-warning'
+        };
+      }
+      function rhContratDe(empId) {
+  var recs = rhContratsStore();
+  var c = recs.filter(function (x) { return x && x.employee_id === empId; })[0];
+  if (c) return c;
+  var auto = rhContratsListe().filter(function (x) { return x.e && x.e.id === empId; })[0];
+  return auto ? auto.c : null;
+}
+function rhPrintContratListe() {
+  var emps = getEmployes();
+  if (!emps.length) { toast('Aucun employé', 'error'); return; }
+  var opts = emps.map(function (e) {
+    return '<option value="' + escH(e.id) + '">' + escH(((e.nom || '') + ' ' + (e.prenoms || '')).trim()) + '</option>';
+  }).join('');
+  var h = '<div style="padding:18px 22px;max-width:440px">';
+  h += '<div style="font-weight:800;font-size:1.02rem;margin-bottom:2px">✏️ Imprimer un contrat</div>';
+  h += '<div style="font-size:.78rem;color:#475569;margin-bottom:14px">Le contrat est sorti selon le type de l\'employé (CDI, CDD, journalier…).</div>';
+  h += '<select id="pc-emp" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px;font-size:.85rem">' + opts + '</select>';
+  h += '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec" onclick="closeModal()" style="padding:8px 16px">Annuler</button>';
+  h += '<button class="btn" onclick="var v=(document.getElementById(\'pc-emp\')||{}).value; if(v){closeModal(); rhPrintContrat(v);}" style="padding:8px 20px;background:#0f766e;color:#fff;border:none;border-radius:6px;font-weight:700">Imprimer</button></div></div>';
+  openModal(h);
+}
+
+function rhContratsListe() {
+        var emps = getEmployes();
+        var recs = rhContratsStore();
+        var parEmp = {};
+        recs.forEach(function (c) { if (c && c.employee_id) parEmp[c.employee_id] = c; });
+        var out = [];
+        emps.forEach(function (e) {
+          var c = parEmp[e.id];
+          if (!c) {
+            /* Pas encore de contrat : on le propose avec le type de la fiche. */
+            c = {
+              id: 'auto-' + e.id,
+              employee_id: e.id,
+              type: e.type_contrat || 'CDI',
+              debut: e.date_entree || '',
+              unite: 'mois',
+              duree: e.duree_contrat || (e.type_contrat === 'CDI' ? 0 : 6),
+              fin: '',
+              remis_le: '',
+              nouveau: true
+            };
+            c.fin = rhContratFinAuto(c.debut, c.duree, c.unite);
+          }
+          out.push({ c: c, e: e, st: rhContratStatut(c) });
+        });
+        return out;
+      }
+      function rhContratSauver(c) {
+        var list = rhContratsStore();
+        var i = list.findIndex(function (x) { return x.id === c.id; });
+        c.fin = rhContratFinAuto(c.debut, c.duree, c.unite);
+        if (i === -1) list.push(c); else list[i] = c;
+        rhContratsSet(list);
+      }
+      function rhContratMarquerRemis(id, remise) {
+        var list = rhContratsStore();
+        list.forEach(function (c) { if (c.id === id) c.remis_le = remise ? getToday() : ''; });
+        rhContratsSet(list);
+      }
+      /* --- MODALE D'ÉDITION (création / modification / renouvellement) --- */
+      function rhModalContrat(id, renewal) {
+        var list = rhContratsStore();
+        var c = list.find(function (x) { return x.id === id; }) || (function () {
+          var auto = rhContratsListe().filter(function (x) { return x.e.id === id; })[0];
+          return auto ? auto.c : { id: 'ctr-' + id, employee_id: id, type: 'CDI', debut: getToday(), unite: 'mois', duree: 0, fin: '', remis_le: '' };
+        })();
+        var emp = rhEmpById(id);
+        if (renewal) {
+          /* Renouvellement : on repart du jour (ou de la fin), l'ancienne
+             échéance est perdue mais l'historique reste dans la fiche. */
+          c = JSON.parse(JSON.stringify(c));
+          c.id = 'ctr-' + id + '-' + Date.now();
+          c.debut = getToday();
+          c.fin = '';
+          c.remis_le = '';
+          c.renouvellement = true;
+        }
+        var h = '<div style="padding:18px 22px;max-width:600px">';
+        h += '<div style="font-weight:800;font-size:1.05rem;margin-bottom:2px">' + (renewal ? 'Renouvellement du contrat' : 'Contrat de travail') + '</div>';
+        h += '<div style="font-size:.78rem;color:#475569;margin-bottom:14px">' + escH(rhEmpLabel(emp)) + ' — ' + escH(emp && emp.matricule || '-') + '</div>';
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+        h += '<div><label style="font-size:.72rem;font-weight:700">Type de contrat</label><select id="ct-type" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px">' +
+          RH_CT_TYPES.map(function (t) { return '<option value="' + t + '"' + (c.type === t ? ' selected' : '') + '>' + t + '</option>'; }).join('') + '</select></div>';
+        h += '<div><label style="font-size:.72rem;font-weight:700">Date de début</label><input type="date" id="ct-debut" value="' + escH(c.debut || '') + '" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
+        h += '<div><label style="font-size:.72rem;font-weight:700">Durée</label><input type="number" id="ct-duree" min="0" step="1" value="' + (parseInt(c.duree, 10) || 0) + '" oninput="rhCalcFinContrat()" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
+        h += '<div><label style="font-size:.72rem;font-weight:700">Unité</label><select id="ct-unite" onchange="rhCalcFinContrat()" style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px">' +
+          ['mois', 'ans', 'jours'].map(function (u) { return '<option value="' + u + '"' + (c.unite === u ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select></div>';
+        h += '<div style="grid-column:1/-1"><label style="font-size:.72rem;font-weight:700">Date de fin (calculée)</label><input type="date" id="ct-fin" value="' + escH(c.fin || '') + '" readonly style="width:100%;padding:8px;border:1px dashed #16a34a;border-radius:6px;background:#f0fdf4;color:#166534;font-weight:700"></div>';
+        h += '</div>';
+        h += '<div style="display:flex;align-items:center;gap:8px;margin-top:12px;padding:10px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc">' +
+          '<input type="checkbox" id="ct-remis" ' + (c.remis_le ? 'checked' : '') + ' style="width:16px;height:16px">' +
+          '<span style="font-size:.8rem"><b>Contrat remis au travailleur</b><br><span style="color:#64748b;font-size:.72rem">Décoché = le contrat existe mais n\'a pas encore été donné.</span></span>' +
+          (c.remis_le ? '<span style="margin-left:auto;font-size:.7rem;color:#166534">remis le ' + escH(c.remis_le) + '</span>' : '') + '</div>';
+        h += '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">' +
+          '<button class="btn btn-sec" onclick="rhModalContrat(\'' + escH(id) + '\', true)" style="padding:8px 18px">Renouveler</button>' +
+          '<button class="btn btn-sec" onclick="closeModal()" style="padding:8px 18px">Annuler</button>' +
+          '<button class="btn" onclick="rhSaveContrat(\'' + escH(id) + '\',\'' + escH(c.id) + '\')" style="padding:8px 20px;background:#0f766e;color:#fff;border:none;border-radius:6px;font-weight:700">💾 Enregistrer</button>' +
+          '</div></div>';
+        openModal(h);
+      }
+      function rhCalcFinContrat() {
+        var deb = (document.getElementById('ct-debut') || {}).value || '';
+        var dur = parseInt((document.getElementById('ct-duree') || {}).value, 10) || 0;
+        var uni = (document.getElementById('ct-unite') || {}).value || 'mois';
+        var fin = rhContratFinAuto(deb, dur, uni);
+        var el = document.getElementById('ct-fin');
+        if (el) el.value = fin;
+      }
+      function rhSaveContrat(empId, ctrId) {
+        var g = function (id) { return (document.getElementById(id) || {}).value || ''; };
+        var c = {
+          id: ctrId, employee_id: empId,
+          type: g('ct-type') || 'CDI',
+          debut: g('ct-debut'), unite: g('ct-unite') || 'mois',
+          duree: parseInt(g('ct-duree'), 10) || 0,
+          remis_le: (document.getElementById('ct-remis') || {}).checked ? getToday() : '',
+          maj: getToday()
+        };
+        rhContratSauver(c);
+        closeModal();
+        toast('Contrat enregistré', 'success');
+        renderContratsPage();
+      }
+      /* --- IMPRESSION DU CONTRAT (modèle par type) --- */
+      function rhPrintContrat(id) {
+        var item = rhContratsListe().filter(function (x) { return x.e.id === id; })[0];
+        if (!item) { toast('Employé introuvable', 'error'); return; }
+        var c = item.c, e = item.e;
+        var ent = {};
+        try { ent = getEntreprise() || {}; } catch (eE) {}
+        var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:120px;max-height:62px;object-fit:contain">'
+          : '<div style="font-size:32px;font-weight:900;color:#0b1526;letter-spacing:2px">ACSER</div>';
+        var JL = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+        var JM = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+        function dfr(d) {
+          d = String(d || '').slice(0, 10);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
+          var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
+          return JL[dt.getDay()] + ' ' + dt.getDate() + ' ' + JM[dt.getMonth()] + ' ' + dt.getFullYear();
+        }
+        var t = String(c.type || 'CDI').toUpperCase();
+        var _durN = parseInt(c.duree, 10) || 0;
+        var dureeTxt = _durN + ((c.unite === 'ans') ? ' an(s)' : ((c.unite === 'jours') ? ' jour(s)' : ' mois'));
+        var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Contrat ' + escH(t) + '</title>';
+        h += '<style>@page{size:A4;margin:18mm 16mm}body{font-family:"Segoe UI",Calibri,Arial,sans-serif;color:#0f172a;font-size:11pt;line-height:1.7;margin:0;background:#f1f5f9;padding:26px}' +
+          '.feuille{max-width:800px;margin:0 auto;background:#fff;padding:38px 44px;box-shadow:0 10px 40px rgba(15,23,42,.14)}' +
+          '.entete{display:flex;align-items:center;gap:18px;border-bottom:3px solid #0b1526;padding-bottom:14px}' +
+          '.entete .txt{flex:1}.entete h1{font-size:17px;font-weight:800;color:#0b1526;margin:0}' +
+          '.entete p{font-size:9.5px;color:#475569;margin:3px 0 0}' +
+          '.titre{text-align:center;font-size:18px;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin:28px 0 4px}' +
+          '.filet{width:70px;height:3px;background:#ecc95f;margin:0 auto 20px;border-radius:2px}' +
+          '.badge{display:inline-block;border-radius:20px;padding:3px 12px;font-size:9pt;font-weight:800;margin-bottom:12px}' +
+          '.art{margin:14px 0}.art h3{font-size:11pt;margin:0 0 4px;color:#0b1526}' +
+          '.carte{border:1px solid #e2e8f0;border-left:4px solid #0f766e;border-radius:8px;padding:12px 16px;background:#f8fafc;margin:14px 0}' +
+          '.ligne{display:flex;gap:30px;flex-wrap:wrap}.lbl{font-size:8.5pt;text-transform:uppercase;letter-spacing:.8px;color:#64748b;font-weight:700}' +
+          '.val{font-size:11.5pt;font-weight:800;margin-top:2px}' +
+          '.sign{margin-top:40px;display:flex;justify-content:space-between;gap:30px}' +
+          '.sign>div{flex:1;text-align:center;font-size:9.5pt;color:#475569}' +
+          '.sign .trait{margin-top:46px;border-top:1px solid #0f1726;padding-top:6px;font-weight:700;color:#0b1526}' +
+          '.pied{margin-top:40px;border-top:1px solid #e2e8f0;padding-top:8px;font-size:8pt;color:#64748b;text-align:center}' +
+          '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0}.no-print{display:none}}</style></head><body><div class="feuille">';
+        h += '<div class="entete"><div>' + logo + '</div><div class="txt"><h1>' + escH(ent.nom || 'ACSER') + '</h1><p>' + escH(ent.adresse || '') + (ent.telephone ? ' &nbsp;•&nbsp; Tél. ' + escH(ent.telephone) : '') + '</p></div></div>';
+        h += '<div class="titre">Contrat de travail ' + (t === 'CDI' ? 'à durée indéterminée' : t) + '</div><div class="filet"></div>';
+        h += '<div class="badge" style="background:' + (c.remis_le ? '#dcfce7' : '#fef3c7') + ';color:' + (c.remis_le ? '#166534' : '#92400e') + '">' + (c.remis_le ? '✔ Contrat remis le ' + escH(dfr(c.remis_le)) : '⚠ Contrat non remis au travailleur') + '</div>';
+        h += '<div class="carte"><div class="ligne">' +
+          '<div><div class="lbl">Travailleur</div><div class="val">' + escH(((e.nom || '') + ' ' + (e.prenoms || '')).trim()) + '</div></div>' +
+          '<div><div class="lbl">Matricule</div><div class="val">' + escH(e.matricule || '-') + '</div></div></div><div class="ligne" style="margin-top:8px">' +
+          '<div><div class="lbl">Poste occupé</div><div class="val">' + escH(e.fonction || '-') + '</div></div>' +
+          '<div><div class="lbl">Département</div><div class="val">' + escH(e.service || '-') + '</div></div>' +
+          '<div><div class="lbl">Type</div><div class="val">' + escH(t) + '</div></div></div></div>';
+        h += '<div class="art"><h3>Article 1 — Engagement</h3><p>La société engage <strong>' + escH(((e.nom || '') + ' ' + (e.prenoms || '')).trim()) + '</strong> en qualité de <strong>' + escH(e.fonction || '-') + '</strong>, à compter du <strong>' + escH(dfr(c.debut)) + '</strong>.</p></div>';
+        h += '<div class="art"><h3>Article 2 — Durée</h3><p>Le présent contrat est conclu ' + (c.fin ? 'pour une durée de <strong>' + escH(dureeTxt) + '</strong>, soit du <strong>' + escH(dfr(c.debut)) + '</strong> au <strong>' + escH(dfr(c.fin)) + '</strong>.' : 'pour une durée <strong>indéterminée</strong>.') + '</p></div>';
+        h += '<div class="art"><h3>Article 3 — Rémunération</h3><p>Le rémunération est fixée selon les élémentsdefine dans la grille de paie de l\'entreprise et versée mensuellement.</p></div>';
+        h += '<div class="art"><h3>Article 4 — Annexes</h3><p>Les éléments suivants font partie intégrante du présent contrat et sont annexés : <strong>fiche de poste</strong>, <strong>détail de la rémunération</strong> et <strong>primes éventuelles</strong>. Ils peuvent être edited séparément (Word) et remis avec le contrat.</p></div>';
+        h += '<div class="art"><h3>Article 5 — Période d\'essai</h3><p>Le présent contrat est soumis à une période d\'essai de ' + (t === 'CDI' ? 'quatre (04) mois' : 'un (01) mois') + '.</p></div>';
+        h += '<div class="art"><h3>Article 6 — Confidentialité</h3><p>Le travailleur s\'engage à garder confidentiels les informations de l\'entreprise durant et après le contrat.</p></div>';
+        h += '<div class="sign"><div>L\'employeur<div class="trait">' + escH(ent.nom || 'ACSER') + '</div></div><div>Le travailleur<div class="trait">Lu et approuvé</div></div></div>';
+        h += '<div class="pied">Contrat ' + escH(t) + ' — ' + escH(rhEmpLabel(e)) + ' — ' + (c.remis_le ? 'remis le ' + escH(c.remis_le) : 'non remis') + '</div>';
+        h += '<div class="no-print" style="text-align:center;margin-top:20px"><button onclick="window.print()" style="padding:10px 26px;background:#0b1526;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer">Imprimer / PDF</button></div>';
+        h += '</div><script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script></body></html>';
+        var w = window.open('', '_blank');
+        if (!w) { toast('Autorisez les popups', 'error'); return; }
+        w.document.write(h);
+        w.document.close();
+      }
+
 function renderContratsPage() {
   var el = document.getElementById('content');
   var employes = getEmployes();
@@ -30711,6 +30946,7 @@ function renderContratsPage() {
   var html = '<div class="section"><div class="section-header" style="flex-wrap:wrap;gap:8px"><h3>Contrats & \u00c9ch\u00e9ances</h3>';
   html += '<div style="display:flex;gap:6px;margin-left:auto;flex-wrap:wrap">';
   html += '<button class="btn btn-sm btn-outline" onclick="printContratsPage()" style="font-size:11px">PDF</button>';
+  html += '<button class="btn btn-sm btn-outline" onclick="rhPrintContratListe()" style="font-size:11px">📄 Imprimer un contrat</button>';
   html += '<button class="btn btn-sm btn-outline" onclick="exportContratsExcel()" style="font-size:11px">Export Excel</button>';
   html += '<button class="btn btn-sm btn-outline" onclick="exportContratsCSV()" style="font-size:11px">CSV</button>';
   html += '</div></div>';
@@ -30745,7 +30981,15 @@ function renderContratsPage() {
     var action = '';
     var _histN = (ee.historique_contrats && ee.historique_contrats.length) || 0;
     if (ee.type_contrat !== 'CDI' && (parseInt(ee.duree_contrat) || 0) > 0) action = '<button class="btn btn-sm btn-outline" onclick="renouvelerContratModal(\'' + ee.id + '\')" title="Enregistrer le contrat suivant (l\u2019actuel bascule en historique)" style="font-size:10px;padding:2px 8px">Renouveler</button>';
-    if (_histN > 0 || ee.type_contrat !== 'CDI') action += ' <button class="btn btn-sm btn-outline" onclick="historiqueContratsModal(\'' + ee.id + '\')" title="Voir les contrats pr\u00e9c\u00e9dents" style="font-size:10px;padding:2px 8px">\ud83d\udcdc (' + _histN + ')</button>';
+    if (_histN > 0 || ee.type_contrat !== 'CDI') action += ' <button class="btn btn-sm btn-outline" onclick="historiqueContratsModal(\'' + ee.id + '\')" title="Voir les contrats précédents" style="font-size:10px;padding:2px 8px">📜 (' + _histN + ')</button>';
+    /* Statut de remise + création / impression directe du contrat */
+    var _ctr = rhContratDe(ee.id);
+    var _stR = _ctr ? rhContratStatut(_ctr) : null;
+    var _remis = !!(_stR && _stR.remis);
+    var _titr = _remis ? 'Contrat remis au travailleur' : 'Contrat créé mais NON remis : cochez-le dans l\'édition';
+    action += ' <span class="badge ' + (_remis ? 'badge-success' : 'badge-warning') + '" title="' + escH(_titr) + '">' + (_remis ? '✔ remis' : '⚠ non remis') + '</span>';
+    action += ' <button class="btn btn-sm btn-outline" onclick="rhModalContrat(\'' + ee.id + '\',false)" title="Contrat : dates, durée, fin calculée, remis ou non" style="font-size:10px;padding:2px 8px">✏️</button>';
+    action += ' <button class="btn btn-sm btn-outline" onclick="rhPrintContrat(\'' + ee.id + '\')" title="Imprimer le contrat de cet employé" style="font-size:10px;padding:2px 8px">📄</button>'; ' <button class="btn btn-sm btn-outline" onclick="historiqueContratsModal(\'' + ee.id + '\')" title="Voir les contrats pr\u00e9c\u00e9dents" style="font-size:10px;padding:2px 8px">\ud83d\udcdc (' + _histN + ')</button>';
     html += '<tr data-search="' + escH(list[ci2].q) + '"><td class="fw-600">' + escH(ee.nom) + (ee.prenoms ? ' ' + escH(ee.prenoms) : '') + '<br><span style="font-size:10px;color:var(--dim)">' + escH(ee.matricule || '') + '</span></td><td>' + deptFoncCellI(ee) + '</td><td>' + escH(ee.type_contrat || '-') + '</td><td>' + fmtDate(ee.date_entree) + '</td><td>' + (ee.duree_contrat ? ee.duree_contrat + ' mois' : '-') + '</td><td class="fw-600">' + fmtDate(ech) + '</td><td>' + (dl === null ? '-' : (dl < 0 ? Math.abs(dl) + ' j retard' : dl + ' j')) + '</td><td><span class="badge ' + stBadge + '">' + stLbl + '</span></td><td>' + action + '</td></tr>';
   }
   html += '</tbody></table></div></div></div>';
@@ -31653,39 +31897,38 @@ function supprimerConge(id) {
    Mise en page du modele papier de l'entreprise : reference DRH/ACSER,
    type de conge explicite (conge annuel, exceptionnel, maternite...),
    depart en toutes lettres, duree, reprise effective, signature DRH. */
+/* ATTESTATION DE CONGE — mise en page soignée, logo de la société,
+   type de congé explicite. S'ouvre directement (pas de module Paie). */
 function rhCongeAttestation(congeId) {
   var arr = getRhConges();
   var c = null;
   for (var i = 0; i < arr.length; i++) { if (arr[i].id === congeId) { c = arr[i]; break; } }
-  if (!c) { toast('Cong\u00e9 introuvable', 'error'); return; }
+  if (!c) { toast('Congé introuvable', 'error'); return; }
   var emp = rhEmpById(c.employee_id);
   var nom = rhEmpLabel(emp);
   var civil = (emp && String(emp.sexe || '').toUpperCase().charAt(0) === 'F') ? 'Mme' : 'M.';
   var matr = (emp && emp.matricule) || '-';
   var JL = ['DIMANCHE', 'LUNDI', 'MARDI', 'MERCREDI', 'JEUDI', 'VENDREDI', 'SAMEDI'];
-  function jj(d) {
-    d = String(d || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
-    return d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4);
-  }
+  var JM = ['JANVIER', 'FÉVRIER', 'MARS', 'AVRIL', 'MAI', 'JUIN', 'JUILLET', 'AOÛT', 'SEPTEMBRE', 'OCTOBRE', 'NOVEMBRE', 'DÉCEMBRE'];
+  function num(d) { d = String(d || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-'; return d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4); }
   function jjl(d) {
     d = String(d || '').slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return '-';
     var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
-    return JL[dt.getDay()] + ' ' + jj(d);
+    return JL[dt.getDay()] + ' ' + dt.getDate() + '/' + JM[dt.getMonth()] + '/' + dt.getFullYear();
   }
   var t = String(c.type || 'annual');
-  var typeTxt = t === 'annual' ? 'cong\u00e9 annuel'
-    : t === 'exceptionnel' ? 'cong\u00e9 exceptionnel'
-    : t === 'maternite' ? 'cong\u00e9 de maternit\u00e9'
-    : t === 'maladie' ? 'cong\u00e9 de maladie'
-    : t === 'sans_solde' ? 'cong\u00e9 sans solde'
+  var typeTxt = t === 'annual' ? 'congé annuel'
+    : t === 'exceptionnel' ? 'congé exceptionnel'
+    : t === 'maternite' ? 'congé de maternité'
+    : t === 'maladie' ? 'congé de maladie'
+    : t === 'sans_solde' ? 'congé sans solde'
     : rhCongeTypeLabel(t).toLowerCase();
   var duree = parseInt(c.duree, 10);
   if (!duree && c.date_depart && c.date_retour) { try { duree = rhDayDiff(c.date_depart, c.date_retour); } catch (eD) { duree = 0; } }
   if (!duree) duree = 0;
-  var dureeTxt = duree >= 7
-    ? (function () { var s2 = Math.round(duree / 7); return s2 + ' semaine' + (s2 > 1 ? 's' : ''); })()
+  var dureeTxt = duree >= 14 ? (function () { var s2 = Math.round(duree / 7 * 10) / 10; return s2 + ' semaines'; })()
+    : duree >= 7 ? (function () { var s2 = Math.round(duree / 7); return s2 + ' semaine' + (s2 > 1 ? 's' : ''); })()
     : duree + ' jour' + (duree > 1 ? 's' : '');
   var reprise = c.date_reprise || c.date_retour || '';
   var dep = String(c.date_depart || '').slice(0, 10);
@@ -31697,36 +31940,68 @@ function rhCongeAttestation(congeId) {
   var nomSoc = ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICE (ACSER)';
   var adrSoc = ent.adresse || '08 BP 2054 Abidjan 08';
   var telSoc = ent.telephone || '27 23 40 02 48';
+  var mailSoc = ent.email || '';
+  var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:120px;max-height:62px;object-fit:contain">'
+    : '<div style="font-size:34px;font-weight:900;color:#0b1526;letter-spacing:2px">ACSER</div>';
   var auj = new Date();
-  var aujTxt = (auj.getDate() < 10 ? '0' : '') + auj.getDate() + '/' + ((auj.getMonth() + 1 < 10 ? '0' : '') + (auj.getMonth() + 1)) + '/' + auj.getFullYear();
-  var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Attestation de cong\u00e9 - ' + escH(nom) + '</title>';
-  h += '<style>body{font-family:Arial,sans-serif;color:#111;padding:48px 56px;font-size:14px;line-height:1.75}' +
-    '.titre{text-align:center;font-size:20px;font-weight:800;text-decoration:underline;margin:26px 0 18px;letter-spacing:1px}' +
-    '.ref{font-weight:800;margin:6px 0 14px}' +
-    '.ligne-nom{display:flex;justify-content:flex-start;gap:60px;margin:10px 0}' +
-    '.sig{margin-top:56px;text-align:right;padding-right:40px}' +
-    '.sig u{font-weight:800}' +
-    '.foot{margin-top:70px;border-top:1px solid #999;padding-top:6px;font-size:10px;color:#555}' +
-    '@media print{.no-print{display:none}}' +
-    '</style></head><body>';
-  h += '<div class="titre">ATTESTATION DE CONGE</div>';
-  h += '<div class="ref">N/R\u00e9f : ' + escH(ref) + '</div>';
-  h += '<div>Nous soussign\u00e9s soci\u00e9t\u00e9 ' + escH(nomSoc) + ' Adresse : ' + escH(adrSoc) + ',</div>';
-  h += '<div>Si\u00e8ge : Abidjan Zone industrielle de Yopougon, Tel :' + escH(telSoc) + ',</div>';
-  h += '<div style="margin-top:10px">Attestons par la pr\u00e9sente que :</div>';
-  h += '<div class="ligne-nom" style="margin-top:14px"><span><strong>' + escH(civil) + ' ' + escH(nom) + '</strong></span><span>Matricule <strong>' + escH(matr) + '</strong></span></div>';
-  h += '<div>Part en ' + escH(typeTxt) + ' \u00e0 compter du <strong>' + escH(jjl(c.date_depart)) + ' apr\u00e8s 17H00</strong></div>';
-  h += '<div>Pour une dur\u00e9e de <strong>' + escH(dureeTxt) + '</strong>.</div>';
-  h += '<div>La date effective de reprise de service est fix\u00e9e au <strong>' + escH(jjl(reprise)) + ' \u00e0 08h00</strong>.</div>';
-  h += '<div style="margin-top:10px">En foi de quoi, la pr\u00e9sente attestation lui est d\u00e9livr\u00e9e pour servir et valoir ce que de droit.</div>';
-  h += '<div style="margin-top:26px;text-align:right;padding-right:40px">Fait \u00e0 Abidjan, Le ' + escH(aujTxt) + '</div>';
-  h += '<div class="sig"><u>La Direction des Ressources Humaines</u></div>';
-  h += '<div class="no-print" style="margin-top:26px;text-align:center"><button onclick="window.print()" style="padding:8px 22px;font-size:14px">Imprimer / PDF</button></div>';
-  h += '<script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script></body></html>';
+  var aujTxt = auj.getDate() + ' ' + JM[auj.getMonth()] + ' ' + auj.getFullYear();
+  var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Attestation de congé - ' + escH(nom) + '</title>';
+  h += '<style>@page{size:A4;margin:16mm 16mm 14mm}' +
+    'body{font-family:"Segoe UI",Calibri,Arial,sans-serif;color:#0f172a;font-size:11pt;line-height:1.7;margin:0;background:#f1f5f9;padding:26px}' +
+    '.feuille{max-width:800px;margin:0 auto;background:#fff;padding:38px 44px;box-shadow:0 10px 40px rgba(15,23,42,.14);border-radius:4px}' +
+    '.entete{display:flex;align-items:center;gap:18px;border-bottom:3px solid #0b1526;padding-bottom:14px}' +
+    '.entete .txt{flex:1}' +
+    '.entete h1{font-size:17px;font-weight:800;color:#0b1526;margin:0;letter-spacing:.3px}' +
+    '.entete p{font-size:9.5px;color:#475569;margin:3px 0 0}' +
+    '.titre{text-align:center;font-size:19px;font-weight:800;letter-spacing:2.5px;text-transform:uppercase;margin:30px 0 4px;color:#0b1526}' +
+    '.filet{width:70px;height:3px;background:#ecc95f;margin:0 auto 22px;border-radius:2px}' +
+    '.ref{display:inline-block;font-weight:800;font-size:10.5pt;border:1px solid #cbd5e1;border-radius:6px;padding:5px 12px;margin-bottom:18px;background:#f8fafc}' +
+    '.bloc{margin:16px 0;font-size:11pt}' +
+    '.carte{border:1px solid #e2e8f0;border-left:4px solid #0b1526;border-radius:8px;padding:14px 18px;background:#f8fafc;margin:16px 0}' +
+    '.ligne{display:flex;gap:34px;flex-wrap:wrap;margin:8px 0}' +
+    '.lbl{font-size:8.5pt;text-transform:uppercase;letter-spacing:.8px;color:#64748b;font-weight:700}' +
+    '.val{font-size:12pt;font-weight:800;color:#0b1526;margin-top:2px}' +
+    '.sign{margin-top:44px;text-align:right;padding-right:26px}' +
+    '.sign .nom{font-weight:800;text-decoration:underline;font-size:11pt}' +
+    '.sign .role{font-size:9.5pt;color:#475569;margin-top:3px}' +
+    '.pied{margin-top:46px;border-top:1px solid #e2e8f0;padding-top:9px;font-size:8pt;color:#64748b;text-align:center}' +
+    '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0 6px;max-width:none}.no-print{display:none}}</style></head><body>';
+  h += '<div class="feuille">';
+  h += '<div class="entete"><div>' + logo + '</div><div class="txt"><h1>' + escH(nomSoc) + '</h1>' +
+    '<p>' + escH(adrSoc) + (telSoc ? ' &nbsp;•&nbsp; Tél. ' + escH(telSoc) : '') + '</p>' +
+    (mailSoc ? '<p>' + escH(mailSoc) + '</p>' : '') + '</div></div>';
+  h += '<div class="titre">Attestation de congé</div><div class="filet"></div>';
+  h += '<div class="ref">N/Réf : ' + escH(ref) + '</div>';
+  h += '<div class="bloc">Nous soussignés, <strong>' + escH(nomSoc) + '</strong>,represented par sa Direction des Ressources Humaines, attestons par la présente que :</div>';
+  h += '<div class="carte"><div class="ligne">' +
+    '<div><div class="lbl">Travailleur</div><div class="val">' + escH(civil + ' ' + nom) + '</div></div>' +
+    '<div><div class="lbl">Matricule</div><div class="val">' + escH(matr) + '</div></div></div>' +
+    '<div class="ligne"><div><div class="lbl">Type de congé</div><div class="val">' + escH(typeTxt) + '</div></div>' +
+    '<div><div class="lbl">Durée</div><div class="val">' + escH(dureeTxt) + '</div></div></div></div>';
+  h += '<div class="bloc">Part en <strong>' + escH(typeTxt) + '</strong> à compter du <strong>' + escH(jjl(c.date_depart)) + ' après 17H00</strong>, pour une durée de <strong>' + escH(dureeTxt) + '</strong>.</div>';
+  h += '<div class="bloc">La date effective de reprise de service est fixée au <strong>' + escH(jjl(reprise)) + ' à 08h00</strong>.</div>';
+  h += '<div class="bloc">En foi de quoi, la présente attestation lui est délivrée pour servir et valoir ce que de droit.</div>';
+  h += '<div class="sign"><div style="font-size:10pt">Fait à Abidjan, le ' + escH(aujTxt) + '</div>' +
+    '<div style="margin-top:20px"><div class="nom">La Direction des Ressources Humaines</div><div class="role">AFRICAINE DE COMMERCE ET DE SERVICE (ACSER)</div></div></div>';
+  h += '<div class="pied">Document généré le ' + escH(aujTxt) + ' &nbsp;•&nbsp; Réf. ' + escH(ref) + '</div>';
+  h += '<div class="no-print" style="text-align:center;margin-top:22px"><button onclick="window.print()" style="padding:10px 26px;background:#0b1526;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Imprimer / PDF</button></div>';
+  h += '</div><script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script></body></html>';
   var w = window.open('', '_blank');
   if (!w) { toast('Autorisez les popups', 'error'); return; }
   w.document.write(h);
   w.document.close();
+}
+/* Reprise réelle saisie DIRECTEMENT dans le tableau (pas besoin de Modifier).
+   La date est enregistrée aussitôt : le pointage auto suit
+   (jours de congé C jusqu'à la veille, retard = absent). */
+function rhCongeRepriseDirect(id, el) {
+  var arr = getRhConges();
+  for (var i = 0; i < arr.length; i++) {
+    if (arr[i].id === id) { arr[i].date_reprise = (el && el.value) || ''; break; }
+  }
+  setRhConges(arr);
+  toast('Reprise enregistrée', 'success');
+  try { renderCongesPage(); } catch (eR) {}
 }
 function printCongeFiche(congeId) {
   var arr = getRhConges();
@@ -31801,7 +32076,7 @@ function printCongesFicheEmploye(empId) {
     cgs.forEach(function(c) {
       var remp = c.remplacant_id ? rhEmpLabel(rhEmpById(c.remplacant_id)) : '-';
       var duree = c.duree || (c.date_depart && c.date_retour ? rhDayDiff(c.date_depart, c.date_retour) + 1 : 0);
-      w.document.write('<tr><td><strong>' + escH(c.numero || '-') + '</strong></td><td>' + escH(rhCongeTypeLabel(c.type)) + '</td><td>' + (c.date_depart ? fmtDate(c.date_depart) : '-') + '</td><td>' + (c.date_retour ? fmtDate(c.date_retour) : '-') + '</td><td>' + (c.date_reprise ? fmtDate(c.date_reprise) : '-') + '</td><td class="num">' + duree + '</td><td>' + escH(remp) + '</td><td>' + rhCongeStatut(c) + '</td></tr>');
+      w.document.write('<tr><td><strong>' + escH(c.numero || '-') + '</strong></td><td>' + escH(rhCongeTypeLabel(c.type)) + '</td><td>' + (c.date_depart ? fmtDate(c.date_depart) : '-') + '</td><td>' + (c.date_retour ? fmtDate(c.date_retour) : '-') + '</td><td>' + '<input type="date" value="' + (c.date_reprise || '') + '" onchange="rhCongeRepriseDirect(\'' + c.id + '\',this)" title="Reprise réelle : saisie directe, sans Modifier" style="padding:2px 4px;border:1px solid var(--gray-300);border-radius:6px;font-size:.72rem;max-width:132px">' + '</td><td class="num">' + duree + '</td><td>' + escH(remp) + '</td><td>' + rhCongeStatut(c) + '</td></tr>');
     });
     w.document.write('</tbody></table>');
   }
