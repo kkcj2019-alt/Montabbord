@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-09-229";
+      window.__APP_VERSION = "2026-10-09-230";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6510,6 +6510,9 @@ function payeObj(key) {
           _payeMergeTombstonesFromCloud(data.mdb_tombstones);
         [
           "mdb_employes",
+          /* Congés planifiés (index) : la paie doit voir les AJOUTS *et* les
+             SUPPRESSIONS, sinon le pointage garde des « C » après effacement. */
+          "mdb_rh_conges",
           "mdb_acomptesPrets",
           "mdb_salairesPaiements",
           "mdb_caisses",
@@ -6689,6 +6692,9 @@ function payeObj(key) {
             if (mp && Object.keys(mp).length > 0) payload[PAYE_KEY] = mp;
             var simpleKeys = [
               "mdb_employes",
+              /* Congés planifiés : envoyés pour que l’index et les autres
+                 postes voient la même chose. */
+              "mdb_rh_conges",
               "mdb_acomptesPrets",
               "mdb_salairesPaiements",
               "mdb_caisses",
@@ -16862,6 +16868,29 @@ html +=
         if (String(r.observation || r.obs || r.pst_observation || "").trim()) return false;
         return true;
       }
+      /* Jours de congé VIVANTS (d'après la liste des congés planifiés).
+         Sert à l'AFFICHAGE : un « C » n'apparaît que si le congé existe
+         encore, même si une ancienne ligne traînait en base. */
+      function ptCongeJoursVivants(mois) {
+        var m = String(mois || "");
+        var map = {};
+        if (!/^\d{4}-\d{2}$/.test(m)) return map;
+        var y = parseInt(m.slice(0, 4), 10), mi = parseInt(m.slice(5, 7), 10);
+        var nd = new Date(y, mi, 0).getDate();
+        ptRhCongesActifs().forEach(function (c) {
+          if (!c || !c.employee_id) return;
+          var d1 = String(c.date_depart || ""), d2 = ptCongeDernierJour(c);
+          if (!d1 || !d2) return;
+          for (var d = 1; d <= nd; d++) {
+            var dk = m + "-" + (d < 10 ? "0" : "") + d;
+            if (dk < d1 || dk > d2) continue;
+            var dow = new Date(y, mi - 1, d).getDay();
+            if (dow === 0 || dow === 6) continue; /* week-end */
+            map[c.employee_id + "|" + dk] = true;
+          }
+        });
+        return map;
+      }
       function ptCongePointageAuto(mois) {
         var m = String(mois || "");
         if (!/^\d{4}-\d{2}$/.test(m)) return 0;
@@ -16880,7 +16909,7 @@ html +=
             var dk = m + "-" + (d < 10 ? "0" : "") + d;
             if (dk < d1 || dk > d2) continue;
             var dow = new Date(y, mi - 1, d).getDay();
-            if (dow === 0) continue; /* dimanche : jamais pointé */
+            if (dow === 0 || dow === 6) continue; /* week-end : jamais pointé en congé */
             voulu[c.employee_id + "|" + dk] = true;
             motifsVoulus[c.employee_id + "|" + dk] = motif;
           }
@@ -16895,7 +16924,7 @@ html +=
               var dk3 = m + "-" + (d3 < 10 ? "0" : "") + d3;
               if (dk3 < retPrev || dk3 >= reprReel) continue;
               var dow3 = new Date(y, mi - 1, d3).getDay();
-              if (dow3 === 0) continue;
+              if (dow3 === 0 || dow3 === 6) continue;
               retardVoulu[c.employee_id + "|" + dk3] = true;
             }
           }
@@ -16979,8 +17008,10 @@ html +=
         var year = parseInt(mois.split("-")[0]),
           mIdx = parseInt(mois.split("-")[1]) - 1;
         var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
-        /* Congés planifiés : on remplit les jours de congé manquants. */
+        /* Congés planifiés : on remplit les jours de congé manquants et on
+           retire ceux qui ne sont plus justifiés. */
         try { ptCongePointageAuto(mois); } catch (eCg) {}
+        var congeVifMap = ptCongeJoursVivants(mois);
         var ff = document.getElementById("pt-fonction-filter");
         var fsel = ff && ff.value ? ff.value : "Toutes les fonctions";
         var deptEl = document.getElementById("pt-dept-filter");
@@ -17121,6 +17152,11 @@ html +=
             var we2 = dw2 === 0 || dw2 === 6;
             var rec = dayRec(p.id, dk);
             var montFait = montSet[p.id + "|" + dk] === true;
+            /* Congé VIVANT : si la ligne est une ancienne ligne auto dont
+               le congé n’existe plus, on l’ignore (elle ne peut plus
+               faire de « C »). */
+            var congeVif = congeVifMap[p.id + "|" + dk] === true;
+            if (rec && rec.conge_auto === true && !congeVif) rec = null;
             var cell = '<span style="color:#94a3b8">-</span>',
               bg = "";
             if (rec) {
@@ -17199,6 +17235,10 @@ html +=
                     ptFmtHShort(hN) +
                     "</span>";
                 bg = "background:#f0fdf4;border-color:#bbf7d0;";
+              } else if (rec.present === false && congeVif) {
+                /* Congé planifié : « C » bleu (comme les jours sans ligne). */
+                cell = '<span style="color:#1d4ed8;font-weight:700">C</span>';
+                bg = "background:#eff6ff;border-color:#bfdbfe;";
               } else if (rec.present === false) {
                 var _mot = ptAbsMotifShort(rec.motif);
                 if (_mot === "X" && rec.absent_paye) _mot = "P";
