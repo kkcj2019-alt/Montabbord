@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-09-171';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-09-172';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -569,7 +569,13 @@ var _lastActivityProd = Date.now();
 var _idleTimerProd = null;
 var _idleStartedProd = false;
 function persistIdleActivityProd() {
-  try { localStorage.setItem('mdb_lastActivity', String(_lastActivityProd)); } catch(e) {}
+  try {
+    /* L'iframe pointage (paye.html) écrit aussi mdb_lastActivity : ne jamais
+       écraser une activité plus récente que la nôtre. */
+    var stored = parseInt(localStorage.getItem('mdb_lastActivity'), 10) || 0;
+    if (stored > _lastActivityProd) _lastActivityProd = stored;
+    localStorage.setItem('mdb_lastActivity', String(_lastActivityProd));
+  } catch(e) {}
 }
 function resetIdleTimerProd() {
   _lastActivityProd = Date.now();
@@ -586,6 +592,10 @@ function startIdleTrackingProd() {
     window.addEventListener(evts[i], onActivity, {passive: true});
   }
   document.addEventListener('visibilitychange', function() {
+    try {
+      var stored = parseInt(localStorage.getItem('mdb_lastActivity'), 10) || 0;
+      if (stored > _lastActivityProd) _lastActivityProd = stored;
+    } catch(e) {}
     if (document.visibilityState === 'visible' && isLoggedInProd() && (Date.now() - _lastActivityProd) > _idleTimeoutMs) {
       window.location.href = 'index.html';
     }
@@ -6866,6 +6876,8 @@ function _prodAutoRRun() {
 function prodShouldRender() {
   try {
     if (document.getElementById('modalOverlay')) return false;
+    /* Pointage Paie en iframe : jamais de re-rendu parent (perdrait l'iframe) */
+    if (document.getElementById('ptPayeIframe')) return false;
     var ae = document.activeElement;
     if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return false;
     return true;
@@ -14760,25 +14772,26 @@ function getPersonnelByDepartement(dept) {
 
 /* ==================== RH - NOUVEAU POINTAGE GROUPÉ ==================== */
 function render_presence() {
-  var personnel = getPersonnel();
-  var presences = getPresence();
-  var depts = getDepartementsFromPaye();
-  var funcs = getFonctionsFromPaye();
-  var h = '<div class="tabs" style="margin-bottom:1rem">';
-  h += '<div class="tab active" onclick="setSection(\'presenceSubTab\',\'pointage\');renderPage()">⏱️ Pointage Groupé</div>';
-  h += '<div class="tab" onclick="setSection(\'presenceSubTab\',\'conges\');renderPage()">🏖️ Congés (lecture)</div>';
-  h += '<div class="tab" onclick="setSection(\'presenceSubTab\',\'sanctions\');renderPage()">⚠️ Sanctions (lecture)</div>';
-  h += '</div>';
   var subTab = getSection('presenceSubTab', 'pointage');
+  var h = '<div class="tabs" style="margin-bottom:1rem">';
+  h += '<div class="tab' + (subTab === 'pointage' ? ' active' : '') + '" onclick="setSection(\'presenceSubTab\',\'pointage\');renderPage()">⏱️ Pointage Groupé</div>';
+  h += '<div class="tab' + (subTab === 'conges' ? ' active' : '') + '" onclick="setSection(\'presenceSubTab\',\'conges\');renderPage()">🏖️ Congés (lecture)</div>';
+  h += '<div class="tab' + (subTab === 'sanctions' ? ' active' : '') + '" onclick="setSection(\'presenceSubTab\',\'sanctions\');renderPage()">⚠️ Sanctions (lecture)</div>';
+  h += '</div>';
 
   if (subTab === 'pointage') {
-    h += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.5rem">' +
-      '<button class="btn btn-accent" onclick="showMarkPresence()" title="Pointer un employé isolément" style="font-size:.75rem">⏱️ Pointer un employé</button>' +
-      '</div>';
-    h += renderPointageGrouped();
+    /* Le pointage est le module Paie lui-même (iframe same-origin) :
+       affichage, calculs, onglets, boutons et modaux 100% identiques. */
+    h += '<div id="ptPayeHost" style="border-radius:10px;overflow:hidden;border:1.5px solid var(--border);background:#fff">';
+    h += '<iframe id="ptPayeIframe" src="paye.html#pointage" style="width:100%;height:calc(100vh - 140px);min-height:480px;border:none;display:block" title="Pointage"></iframe>';
+    h += '</div>';
   } else if (subTab === 'conges') h += renderLeavesReadOnly();
   else if (subTab === 'sanctions') h += renderSanctionsReadOnly();
   return h;
+}
+/* Appelé par paye.html (iframe) via le bouton Retour de la sidebar */
+function closePayeOverlay() {
+  try { setSection('presenceSubTab', 'conges'); renderPage(); } catch(e) {}
 }
 
 
@@ -14828,7 +14841,7 @@ function renderPointageGrouped() {
   h += '<select id="ptYear" onchange="renderPage()" style="min-width:80px">';
   for (var y = new Date().getFullYear() - 2; y <= new Date().getFullYear() + 1; y++) h += '<option value="' + y + '"' + (y === selYear ? ' selected' : '') + '>' + y + '</option>';
   h += '</select>';
-  h += '<select id="ptFilterFonction" onchange="renderPage()" style="min-width:160px"><option value="">Toutes fonctions</option>';
+  h += '<select id="ptFilterFonction" onchange="setSection(\'ptFilterFonction\',this.value);renderPage()" style="min-width:160px"><option value="">Toutes fonctions</option>';
   funcs.forEach(function(f) { h += '<option value="' + escH(f) + '"' + (foncFilter === f ? ' selected' : '') + '>' + escH(f) + '</option>'; });
   h += '</select>';
   h += '<input type="text" id="ptSearch" placeholder="Nom ou matricule..." oninput="renderPage()" class="search-box" value="' + escH(searchQ) + '" style="min-width:150px">';
@@ -17785,6 +17798,9 @@ maybeInitACSERData();
 window.addEventListener('storage', function(ev) {
   var key = ev.key || '';
   if (key.indexOf('mdb_production') === 0 || key.indexOf('mdb_paye') === 0 || key === 'mdb_employes') {
+    /* L'iframe pointage (paye.html#pointage) se re-dessine lui-même :
+       un renderPage ici détruirait l'iframe en pleine saisie. */
+    if (document.getElementById('ptPayeIframe')) return;
     renderNav();
     renderPage();
   }

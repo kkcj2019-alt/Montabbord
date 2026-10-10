@@ -28,14 +28,14 @@ function controles() {
 
   /* ---------- Exploitation : le pointage doit rester accessible ---------- */
   r.push({
-    nom: 'Pointage : la grille horaire porte son id et son bouton d\'impression dediee',
+    nom: 'Pointage : la page pointage embarque le module Paie (iframe identique)',
     app: 'production.html', store: storeRealiste,
     code: `
-      CURRENT_PAGE = 'presence'; renderPage();
+      CURRENT_PAGE = 'presence'; setSection('presenceSubTab', 'pointage'); renderPage();
       var h = document.getElementById('content').innerHTML || '';
-      var okTable = h.indexOf('id="ptGrilleTable"') !== -1;
-      var okBtn = h.indexOf('printPointageGrille()') !== -1;
-      (okTable && okBtn) ? 'OK : grille imprimable branchee' : 'ECHEC table=' + okTable + ' bouton=' + okBtn
+      var okFrame = h.indexOf('id="ptPayeIframe"') !== -1;
+      var okSrc = h.indexOf('paye.html#pointage') !== -1;
+      (okFrame && okSrc) ? 'OK : pointage Paie embarque dans Exploitation' : 'ECHEC frame=' + okFrame + ' src=' + okSrc
     `,
     attenduPrefixe: 'OK'
   });
@@ -588,12 +588,15 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Exploitation : le bouton « Marquer une présence » est présent',
+    nom: 'Exploitation : le pointage est le module Paie (iframe + onglets Congés/Sanctions)',
     app: 'production.html', store: storeRealiste,
     code: `
-      CURRENT_PAGE = 'presence'; renderPage();
+      CURRENT_PAGE = 'presence'; setSection('presenceSubTab', 'pointage'); renderPage();
       var h = document.getElementById('content').innerHTML || '';
-      (h.indexOf('showMarkPresence()') !== -1) ? 'OK' : 'ABSENT'
+      var okFrame = h.indexOf('ptPayeIframe') !== -1;
+      var okConges = h.indexOf('Congés (lecture)') !== -1;
+      var okSanc = h.indexOf('Sanctions (lecture)') !== -1;
+      (okFrame && okConges && okSanc) ? 'OK' : 'ECHEC frame=' + okFrame + ' conges=' + okConges + ' sanctions=' + okSanc
     `,
     attendu: 'OK'
   });
@@ -6412,7 +6415,16 @@ attenduPrefixe: 'OK'
       var an = parseInt(mz.substring(0,4),10), mo = parseInt(mz.substring(5,7),10) - 1;
       var ndays = new Date(an, mo + 1, 0).getDate();
       var today = now.getDate();
-      /* Pointage tous les jours ouvr\u00e9s, SAUF : J (absence injustifi\u00e9e)
+      /* L'absence injustifi\u00e9e tombe sur le DERNIER jour ouvr\u00e9 <= today
+         (le test tourne aussi le week-end : today peut \u00eatre samedi/dimanche).
+         Jamais le jour 1 (r\u00e9serv\u00e9 \u00e0 la maladie justifi\u00e9e). */
+      var absDay = today;
+      while (absDay > 2) {
+        var adw = new Date(an, mo, absDay).getDay();
+        if (adw !== 0 && adw !== 6) break;
+        absDay--;
+      }
+      /* Pointage tous les jours ouvr\u00e9s, SAUF : absDay (absence injustifi\u00e9e)
          et le jour 1 (absence maladie, justifi\u00e9e) */
       var recs = [], nTrav = 0;
       for (var d = 1; d <= ndays; d++) {
@@ -6421,7 +6433,7 @@ attenduPrefixe: 'OK'
         if (dow === 0 || dow === 6) continue;
         var dk = mz + '-' + (d < 10 ? '0' : '') + d;
         if (d === 1) recs.push({ id: 's2', employee_id: 'e1', date: dk, present: false, motif: 'Maladie' });
-        else if (d === today) recs.push({ id: 's1', employee_id: 'e1', date: dk, present: false });
+        else if (d === absDay) recs.push({ id: 's1', employee_id: 'e1', date: dk, present: false });
         else { recs.push({ id: 'p' + d, employee_id: 'e1', date: dk, present: true }); nTrav++; }
       }
       var cur = getPointageData().filter(function (p) { return p.employee_id !== 'e1'; });
