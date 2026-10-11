@@ -6866,9 +6866,15 @@ attenduPrefixe: 'OK'
       emps[0].prime_mode = 'n_importe_quoi';
       DB.setMain('mdb_employes', emps);
       var okDefaut = ptPrimeProdCalcul('e1', '2026-10').montant === 500;
-      (okDeux && okArt && okCa && okDefaut)
-        ? 'OK : les deux=' + lesDeux.montant + '/' + lesDeux.montant_ca + ' articles=' + rArt.montant + '/' + rArt.montant_ca + ' ca=' + rCa.montant + '/' + rCa.montant_ca
-        : 'ECHEC deux=' + lesDeux.montant + '/' + lesDeux.montant_ca + ' art=' + rArt.montant + '/' + rArt.montant_ca + ' ca=' + rCa.montant + '/' + rCa.montant_ca + ' defaut=' + okDefaut
+      /* Mode aucun : ni barres ni CA. */
+      emps = payeArr('mdb_employes');
+      emps[0].prime_mode = 'aucun';
+      DB.setMain('mdb_employes', emps);
+      var rAucun = ptPrimeProdCalcul('e1', '2026-10');
+      var okAucun = rAucun.montant === 0 && rAucun.montant_ca === 0 && ptPrimeProdMode('e1') === 'aucun';
+      (okDeux && okArt && okCa && okDefaut && okAucun)
+        ? 'OK : les deux=' + lesDeux.montant + '/' + lesDeux.montant_ca + ' articles=' + rArt.montant + '/' + rArt.montant_ca + ' ca=' + rCa.montant + '/' + rCa.montant_ca + ' aucun=' + rAucun.montant + '/' + rAucun.montant_ca
+        : 'ECHEC deux=' + lesDeux.montant + '/' + lesDeux.montant_ca + ' art=' + rArt.montant + '/' + rArt.montant_ca + ' ca=' + rCa.montant + '/' + rCa.montant_ca + ' defaut=' + okDefaut + ' aucun=' + rAucun.montant + '/' + rAucun.montant_ca
     `,
     attenduPrefixe: 'OK'
   });
