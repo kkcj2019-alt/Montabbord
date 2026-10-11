@@ -6880,6 +6880,38 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Prime production : le 2000 saisi dans les barres persiste apres enregistrement (pas de retour a 3000)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.bandes = [{ jusqu_a: 3000, taux: 0 }, { jusqu_a: 4000, taux: 25 }, { jusqu_a: null, taux: 75 }];
+      cfg.versions = [{ id: 'v-old', debut: '2000-01', fin: '', label: 'Origine', bandes: cfg.bandes, taux_ca_ht: 0, articles_exclus: [], factures_exclus: [] }];
+      setPrimeProdConfig(cfg);
+      /* Comme l'utilisateur : 2000 tapé dans la 1re tranche du barème général, puis ENREGISTRER. */
+      document.getElementById('pp-debut').value = '2026-01';
+      document.getElementById('pt-mois').value = '2026-10';
+      window._ppCible = '__global__';
+      window._ppBandes = [{ jusqu_a: 2000, taux: 0 }, { jusqu_a: 4000, taux: 25 }, { jusqu_a: null, taux: 75 }];
+      window._ppExArts = [];
+      window._ppExFacs = [];
+      ptPrimeProdEnregistrer(true);
+      /* Relecture fraîche comme à la réouverture du modal. */
+      var v = ptPrimeProdVersion('2026-10');
+      var okPlafond = v && v.bandes && v.bandes[0] && v.bandes[0].jusqu_a === 2000;
+      var cfg2 = getPrimeProdConfig();
+      var old = null;
+      for (var oi = 0; oi < cfg2.versions.length; oi++) { if (cfg2.versions[oi].id === 'v-old') old = cfg2.versions[oi]; }
+      var okClose = old && old.fin === '2026-01';
+      var vAvant = ptPrimeProdVersion('2025-06');
+      var okAvant = vAvant && vAvant.bandes && vAvant.bandes[0] && vAvant.bandes[0].jusqu_a === 3000;
+      (okPlafond && okClose && okAvant)
+        ? 'OK : 2000 persiste en 2026-10, ancienne close à 2026-01, 3000 intact avant'
+        : 'ECHEC plafond=' + (v && v.bandes && v.bandes[0] && v.bandes[0].jusqu_a) + ' close=' + (old && old.fin)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Prime production : facture exclue du CA pour un employé précis',
     app: 'paye.html', store: storeRealiste,
     code: `

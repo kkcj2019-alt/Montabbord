@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-11-251";
+      window.__APP_VERSION = "2026-10-11-252";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -30447,12 +30447,22 @@ function panierVerserJour() {
         var cfg = getPrimeProdConfig();
         var d = String(debutIso || "").slice(0, 7);
         if (!/^\d{4}-\d{2}$/.test(d)) return false;
-        var jourPrec = d + "-01";
-        /* on clôture la version qui s'applique la veille */
-        var prec = ptPrimeProdVersion(jourPrec);
-        if (prec && !prec.fin) prec.fin = d;
+        /* Clôture la version couverte — sur CE cfg (chaque getPrimeProdConfig()
+           retourne une copie indépendante : muter l'objet d'un autre appel,
+           comme avant via ptPrimeProdVersion(), ne persistait jamais). */
+        try {
+          var _vs = (cfg.versions || []).filter(function (v) {
+            if (!v) return false;
+            if (v.debut && d && d < v.debut) return false;
+            if (v.fin && d && d > v.fin) return false;
+            return true;
+          });
+          _vs.sort(function (a, b) { return String(b.debut || "").localeCompare(String(a.debut || "")); });
+          if (_vs[0] && !_vs[0].fin) _vs[0].fin = d;
+        } catch (eV) {}
+        var _nvId = DB.id();
         cfg.versions.push({
-          id: DB.id(), debut: d, fin: "",
+          id: _nvId, debut: d, fin: "",
           label: label || ("Barres " + d),
           bandes: (bandes || []).map(function (b) { return { jusqu_a: b.jusqu_a, taux: parseFloat(b.taux) || 0 }; }),
           taux_ca_ht: parseFloat(tauxCa) || 0,
@@ -30460,7 +30470,7 @@ function panierVerserJour() {
           factures_exclus: (cfg.factures_exclus || []).slice(),
         });
         setPrimeProdConfig(cfg);
-        return true;
+        return _nvId;
       }
       /* === CRUD DES BARÈMES === */
       function ptBaremeCopier(b, label, debutIso) {
@@ -30863,15 +30873,16 @@ function panierVerserJour() {
         }
         ppRendreBandes();
       }
-      /* La colonne « De » vaut toujours le plafond de la ligne du dessus. */
+      /* La colonne « De » vaut toujours le plafond de la ligne du dessus
+         (donc celui de la ligne qu'on vient de modifier, pas la précédente). */
       function ppMajDeLigne(i) {
         var box = document.getElementById("pp-bandes");
         if (!box || !box.querySelectorAll) return;
         var bb = window._ppBandes || [];
         var lignes = box.querySelectorAll("tbody tr");
         if (!lignes[i + 1] || !lignes[i + 1].cells || !lignes[i + 1].cells[0]) return;
-        var dep = i === 0 ? 0 : (bb[i - 1].jusqu_a === null || bb[i - 1].jusqu_a === undefined ? "\u221e" : bb[i - 1].jusqu_a);
-        lignes[i + 1].cells[0].innerHTML = dep;
+        var _j = (bb[i] && bb[i].jusqu_a !== null && bb[i].jusqu_a !== undefined) ? bb[i].jusqu_a : "";
+        lignes[i + 1].cells[0].innerHTML = (_j === "" ? "∞" : _j);
       }
 
       function ppSupprimerBande(i) {
@@ -30939,11 +30950,24 @@ function panierVerserJour() {
           if (debut) cible.debut = String(debut).slice(0, 7);
           ptBaremeEnregistrer(cible);
         } else {
+          /* Barème général : versionné par mois. ORDRE CRITIQUE — NouvelleVersion
+             persiste d'abord (elle relit le store), puis on relit FRAIS avant
+             d'écrire : sauvegarder ici l'ancienne copie lue en tête de fonction
+             écrasait la version tout juste créée (le 2000 retombait à 3000). */
+          var _nvId = ptPrimeProdNouvelleVersion(debut, bandes, ca, "Barres " + debut);
           var cfg = getPrimeProdConfig();
           cfg.bandes = bandes;
           cfg.articles_exclus = ex;
           cfg.factures_exclus = exf;
-          ptPrimeProdNouvelleVersion(debut, bandes, ca, "Barres " + debut);
+          try {
+            for (var _vi = 0; _vi < (cfg.versions || []).length; _vi++) {
+              if (String(cfg.versions[_vi].id) === String(_nvId)) {
+                cfg.versions[_vi].articles_exclus = ex.slice();
+                cfg.versions[_vi].factures_exclus = exf.slice();
+                break;
+              }
+            }
+          } catch (eVE) {}
           setPrimeProdConfig(cfg);
         }
         try { renderPrimeProdResume(); } catch (eR) {}
