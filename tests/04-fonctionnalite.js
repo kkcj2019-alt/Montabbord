@@ -6880,6 +6880,42 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Mois intelligent paie : livre/grilles ignorent les entrés après et les sortis avant',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var okUnit = empVisibleMois({ date_entree: '2026-03-10' }, '2026-01') === false
+        && empVisibleMois({ date_entree: '2026-03-10' }, '2026-03') === true
+        && empVisibleMois({ date_sortie: '2025-12-20', status: 'inactif' }, '2026-01') === false
+        && empVisibleMois({}, '2026-01') === true;
+      var emps = payeArr('mdb_employes');
+      emps.push({ id: 'futur1', nom: 'FUTUR', matricule: 'FU-001', fonction: 'M', service: 'Prod', type_contrat: 'CDI', status: 'actif', en_paie: true, date_entree: '2026-03-10' });
+      emps.push({ id: 'parti1', nom: 'PARTI', matricule: 'PA-001', fonction: 'M', service: 'Prod', type_contrat: 'CDI', status: 'inactif', en_paie: true, date_entree: '2025-01-05', date_sortie: '2025-12-20' });
+      DB.setMain('mdb_employes', emps);
+      function ids(m) { return getPersonnelActifs(m).map(function (p) { return p.id; }); }
+      var jan = ids('2026-01'), mar = ids('2026-03');
+      var okListe = jan.indexOf('futur1') === -1 && mar.indexOf('futur1') !== -1 && jan.indexOf('parti1') === -1 && mar.indexOf('parti1') === -1;
+      (okUnit && okListe)
+        ? 'OK : entré mars absent de janvier présent en mars, sorti décembre absent partout'
+        : 'ECHEC unit=' + okUnit + ' liste=' + okListe + ' jan=' + jan.join(',') + ' mar=' + mar.join(',')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Mois intelligent production : grille ignore les entrés après et les sortis avant',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var ok = ptPXVisible({ date_entree: '2026-03-10' }, '2026-01') === false
+        && ptPXVisible({ date_entree: '2026-03-10' }, '2026-03') === true
+        && ptPXVisible({ date_sortie: '2025-12-20', status: 'inactif' }, '2026-01') === false
+        && ptPXVisible({}, '2026-01') === true;
+      ok ? 'OK : même règle côté Exploitation'
+         : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Prime production : + nouveau barème = intervalles vides, id unique, modifs persistées',
     app: 'paye.html', store: storeRealiste,
     code: `
