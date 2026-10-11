@@ -6880,6 +6880,35 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Prime production : + nouveau barème = intervalles vides, id unique, modifs persistées',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      cfg.baremes = [];
+      setPrimeProdConfig(cfg);
+      /* + NOUVEAU : démarre vide (à remplir librement), pas un clone du général. */
+      var b1 = ptBaremeNouveau('EQUIPE A', '2026-08');
+      var b2 = ptBaremeNouveau('EQUIPE B', '2026-08');
+      var okVide = Array.isArray(b1.bandes) && b1.bandes.length === 0;
+      var okIds = b1.id && b2.id && b1.id !== b2.id;
+      var stockes = getPrimeProdBaremes();
+      var okStock = stockes.length === 2;
+      /* Remplissage + enregistrement : persiste tel quel. */
+      b1.bandes = [{ jusqu_a: 2000, taux: 5 }, { jusqu_a: null, taux: 50 }];
+      ptBaremeEnregistrer(b1);
+      var relu = getPrimeProdBaremes().find(function (x) { return String(x.id) === String(b1.id); });
+      var okRelu = relu && relu.bandes.length === 2 && relu.bandes[0].jusqu_a === 2000 && relu.label === 'EQUIPE A';
+      /* DUPLIQUER : reprend les intervalles sources. */
+      var cp = ptBaremeDupliquer(b1.id, 'EQUIPE A (copie)', '2026-08');
+      var okCp = cp && cp.id !== b1.id && cp.bandes.length === 2 && cp.bandes[0].jusqu_a === 2000;
+      (okVide && okIds && okStock && okRelu && okCp)
+        ? 'OK : nouveau=vide, ids uniques, modifs relues, copie conforme'
+        : 'ECHEC vide=' + okVide + ' ids=' + okIds + ' stock=' + stockes.length + ' relu=' + okRelu + ' copie=' + okCp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Prime production : le 2000 saisi dans les barres persiste apres enregistrement (pas de retour a 3000)',
     app: 'paye.html', store: storeRealiste,
     code: `

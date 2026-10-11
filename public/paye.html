@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-11-252";
+      window.__APP_VERSION = "2026-10-11-253";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -7358,19 +7358,24 @@ window._payeVuTs = ts;
         DB.setMain("mdb_employes", _normalizeWorkerNamesP(v));
         pushPayeCloud();
       }
-      /* Employé visible pour un mois donné : actif OU sorti APRÈS la fin du mois */
+      /* Employé visible pour un mois donné : présent sur le mois —
+         entré au plus tard ce mois-ci ET (actif OU sorti APRÈS la fin du mois).
+         Sans date d'entrée on ne peut pas juger : visible (comme avant). */
       function empVisibleMois(emp, mois) {
         if (!emp) return false;
         var ds = emp.date_sortie || "";
         if (emp.status === "inactif" && !ds) return false;
         if (ds && mois && ds.substring(0, 7) < mois) return false;
+        var de = emp.date_entree || "";
+        if (de && mois && de.substring(0, 7) > mois) return false;
         return true;
       }
-      /* Employés actifs à la date du jour (pour sélecteurs) */
-      function getPersonnelActifs() {
-        var mois = getPayeMonth();
+      /* Employés actifs à la date du jour (pour sélecteurs) ;
+         avec un mois : présents sur CE mois (vues mois : récap, livre, assiduité). */
+      function getPersonnelActifs(mois) {
+        var mm = mois || getPayeMonth();
         return getPersonnel().filter(function (p) {
-          return empVisibleMois(p, mois);
+          return empVisibleMois(p, mm);
         });
       }
       /* Catégories / pointage / services / fonctions / société : dans mdb_paye (cloud) */
@@ -17370,7 +17375,9 @@ html +=
         var searchQ = searchEl ? searchEl.value : (window._ptEmpSearch || "");
         window._ptEmpSearch = searchQ;
         window._ptSearchPos = cursorPos;
-        var emps = getPersonnelActifs()
+        /* Grille du MOIS AFFICHÉ (pas du mois courant) : un entré en mars
+           n'apparaît pas en janvier, un sorti en mai n'apparaît plus en juin. */
+        var emps = getPersonnelActifs(mois)
           .filter(function (p) {
             if (p.en_paie === false) return false;
             if (fsel !== "Toutes les fonctions" && p.fonction !== fsel) return false;
@@ -17795,7 +17802,8 @@ html +=
         var fsel = ff && ff.value ? ff.value : "Toutes les fonctions";
         var tf = document.getElementById("pt-type-filter");
         var tsel = tf && tf.value ? tf.value : "Tous";
-        return getPersonnelActifs().filter(function (p) {
+        var gm = String(_ptGroupDate() || "").substring(0, 7);
+        return getPersonnelActifs(gm).filter(function (p) {
           if (p.en_paie === false) return false;
           if (empCategorie(p) === "externe") return false;
           if (fsel !== "Toutes les fonctions" && p.fonction !== fsel) return false;
@@ -21956,7 +21964,8 @@ items.push({
         var today = String(td.getFullYear()) + '-' + String(td.getMonth() + 1).padStart(2, '0') + '-' + String(td.getDate()).padStart(2, '0');
         var feries = {};
         (getFeries() || []).forEach(function (f) { var d = f && f.date; if (d) feries[String(d)] = true; });
-        var emps = getPersonnelActifs().filter(function (p) { return p.en_paie !== false; });
+        /* Rapport du MOIS DEMANDÉ (pas du mois courant). */
+        var emps = getPersonnelActifs(mois).filter(function (p) { return p.en_paie !== false; });
         emps.sort(function (a, b) {
           var ra = (a.rendement === true) ? 0 : 1, rb = (b.rendement === true) ? 0 : 1;
           if (ra !== rb) return ra - rb;
@@ -30479,9 +30488,11 @@ function panierVerserJour() {
           label: label || ((b && b.label) ? b.label + " (copie)" : "Nouveau barème"),
           debut: debutIso ? String(debutIso).slice(0, 7) : "",
           fin: "",
-          bandes: ((b && b.bandes) || getPrimeProdConfig().bandes || []).map(function (x) {
+          /* Nouveau barème (b == null) : intervalles VIDES à remplir librement.
+             Dupliquer (b fourni) : reprend les intervalles sources. */
+          bandes: b ? ((b.bandes || []).map(function (x) {
             return { jusqu_a: x.jusqu_a, taux: parseFloat(x.taux) || 0 };
-          }),
+          })) : [],
           taux_ca_ht: parseFloat(b && b.taux_ca_ht) || 0,
           articles_exclus: ((b && b.articles_exclus) || []).slice(),
           factures_exclus: ((b && b.factures_exclus) || []).slice(),
@@ -30654,6 +30665,13 @@ function panierVerserJour() {
         }) || null;
       }
       function ppChoisirBar(id) {
+        /* Modifs non enregistrées : proposer de les garder au lieu de les perdre
+           en silence (c'était le « ça revient sur même chose »). */
+        if (window._ppDirty) {
+          if (window.confirm("Enregistrer les tranches modifiées avant de changer de barème ?")) {
+            if (ptPrimeProdEnregistrer(true) !== true) { ppRendreSelectBar(); return; }
+          } else { ppRendreSelectBar(); return; }
+        }
         window._ppCible = id || "__global__";
         ppRendreSelectBar();
         ppChargerCible();
@@ -30668,6 +30686,7 @@ function panierVerserJour() {
           src = { bandes: v.bandes || cfg.bandes, taux_ca_ht: v.taux_ca_ht, debut: mz, articles_exclus: v.articles_exclus || cfg.articles_exclus, factures_exclus: v.factures_exclus || cfg.factures_exclus };
         }
         window._ppBandes = (src.bandes || []).slice();
+        window._ppDirty = false;
         var elDebut = document.getElementById("pp-debut");
         if (elDebut) elDebut.value = src.debut || mz || "";
         var elCa = document.getElementById("pp-ca");
@@ -30866,6 +30885,7 @@ function panierVerserJour() {
         var bb = window._ppBandes || [];
         if (!bb[i]) return;
         bb[i][champ] = (val === "" || val === null) ? null : parseFloat(val);
+        window._ppDirty = true;
         if (redessiner === false) {
           ppMajDeLigne(i);
           ppApercu();
@@ -30888,12 +30908,14 @@ function panierVerserJour() {
       function ppSupprimerBande(i) {
         var b = window._ppBandes || [];
         b.splice(i, 1);
+        window._ppDirty = true;
         ppRendreBandes();
       }
       function ppAjouterBande() {
         var b = window._ppBandes || [];
         var dernier = b.length ? b[b.length - 1].jusqu_a : null;
         b.push({ jusqu_a: (dernier === null || dernier === undefined) ? null : parseFloat(dernier) + 1000, taux: 0 });
+        window._ppDirty = true;
         ppRendreBandes();
       }
       function ptPrimeProdMontant(quantite) {
@@ -30971,6 +30993,7 @@ function panierVerserJour() {
           setPrimeProdConfig(cfg);
         }
         try { renderPrimeProdResume(); } catch (eR) {}
+        window._ppDirty = false;
         if (!sansFermer) {
           closePtModal();
           toast(cible ? "Barème « " + (cible.label || "") + " » enregistré" : "Barres de prime enregistrées", "success");
