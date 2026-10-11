@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-11-247";
+      window.__APP_VERSION = "2026-10-11-248";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -19314,21 +19314,36 @@ function peTogglePst() {
         var v = String(p.mode_pointage || "journalier").toLowerCase().replace(/[\s_\-.,]/g, "");
         return v === "forfait" || v === "forfait173" || v === "forfait17333" || v === "17333";
       }
+      /* Entré APRÈS le mois à générer ? (fonction pure, testable)
+         Ex. génération du pointage de février pour un employé entré en avril :
+         il n'a rien à faire dans la liste ni dans les jours générés. */
+      function ptEntreeApresMois(p, mois) {
+        if (!p) return false;
+        var ent = String(p.date_entree || "").substring(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(ent)) return false;
+        if (!/^\d{4}-\d{2}$/.test(String(mois || ""))) return false;
+        return ent > mois;
+      }
       function showModalGenererMois() {
         var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
-        var emps = getPersonnelActifs().filter(ptEstForfait).sort(function(a,b){
+        /* Éligibles du MOIS GÉNÉRÉ (pas du mois courant) : forfait + visible
+           sur le mois (sortie) + entré au plus tard ce mois-ci. Avant, un
+           entré en avril apparaissait à tort pour une génération de février. */
+        var allForfait = getPersonnel().filter(ptEstForfait);
+        var emps = allForfait.filter(function(p){ return empVisibleMois(p, mois) && !ptEntreeApresMois(p, mois); }).sort(function(a,b){
           return String(a.matricule||"").localeCompare(String(b.matricule||""),undefined,{numeric:true});
         });
+        var nbExclusPeriode = allForfait.length - emps.length;
         window._genPool = emps;
         window._genChecked = {};
         emps.forEach(function(p){ window._genChecked[p.id] = true; });
-        var nbActifsPaie = getPersonnelActifs().filter(function(p){ return p && p.en_paie !== false; }).length;
+        var nbActifsPaie = getPersonnel().filter(function(p){ return p && p.en_paie !== false && empVisibleMois(p, mois); }).length;
         var fonctions = ["Toutes les fonctions"];
         emps.forEach(function(p){ if (p.fonction && fonctions.indexOf(p.fonction) === -1) fonctions.push(p.fonction); });
         var html = '<div style="padding:20px">' +
           '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
           '<p style="font-size:.78rem;color:#666;margin:0 0 4px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
-          '<p style="font-size:.72rem;color:' + (emps.length ? '#16a34a' : '#dc2626') + ';margin:0 0 16px;font-weight:600">' + emps.length + ' au forfait sur ' + nbActifsPaie + ' actif(s) en paie' + (emps.length ? '' : ' — si un employé manque : vérifiez son Mode de pointage ET la case « En paie » dans sa fiche') + '</p>' +
+          '<p style="font-size:.72rem;color:' + (emps.length ? '#16a34a' : '#dc2626') + ';margin:0 0 16px;font-weight:600">' + emps.length + ' au forfait sur ' + nbActifsPaie + ' actif(s) en paie' + (nbExclusPeriode ? ' — ' + nbExclusPeriode + ' exclu(s) : entré(s) après ' + mois + ' ou sorti(s) avant' : '') + (emps.length ? '' : ' — si un employé manque : vérifiez son Mode de pointage ET la case « En paie » dans sa fiche') + '</p>' +
           '<div class="form-group" style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
           '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois ('+mois+')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option><option value="range">Plage de jours (du … au …)</option></select></div>' +
           '<div id="gen-day-wrap" class="form-group" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
@@ -19449,16 +19464,32 @@ function peTogglePst() {
           if (!from || !to) { toast("Choisissez le début et la fin de la plage","error"); return; }
           if (to < from) { toast("La fin doit être après le début","error"); return; }
         }
+        /* Anti double-clic + jamais de clic mort : tout échec affiche un message */
+        var _genBtn = document.getElementById("gen-apply-btn");
+        if (_genBtn) { _genBtn.disabled = true; _genBtn.style.opacity = ".55"; _genBtn.textContent = "Génération en cours…"; }
+        try {
         var year = parseInt(mois.split("-")[0]), mIdx = parseInt(mois.split("-")[1])-1;
         var daysInMonth = new Date(year,mIdx+1,0).getDate();
         var pts = getPointageData();
+        /* Index employé|jour des pointages existants : le findIndex à chaque
+           case figeait l'écran plusieurs secondes sur les gros volumes. */
+        var _ptIdxMap = {};
+        for (var _pii = 0; _pii < pts.length; _pii++) {
+          var _pr = pts[_pii];
+          if (_pr && _pr.employee_id && _pr.date) {
+            var _pk = _pr.employee_id + "|" + _pr.date;
+            if (!(_pk in _ptIdxMap)) _ptIdxMap[_pk] = _pii;
+          }
+        }
+        var _empByIdGen = {};
+        try { getPersonnel().forEach(function(_pe){ if (_pe && _pe.id) _empByIdGen[_pe.id] = _pe; }); } catch(eEB){}
         var store8 = getFormatHeures()==="hhmm" ? "8:00" : "8";
         var dks = [];
         if (periode === "day") {
           dks.push(day);
         } else if (periode === "range") {
           dks = genPlageJours(mois, from, to);
-          if (!dks.length) { toast("Aucun jour ouvré dans cette plage","error"); return; }
+          if (!dks.length) { if (_genBtn) { _genBtn.disabled = false; _genBtn.style.opacity = ""; genUpdateCount(); } toast("Aucun jour ouvré dans cette plage","error"); return; }
         } else {
           for (var d=1;d<=daysInMonth;d++){
             var dk = mois+"-"+(d<10?"0":"")+d;
@@ -19467,14 +19498,22 @@ function peTogglePst() {
             dks.push(dk);
           }
         }
-        var count=0, skipped=0, skippedAP=0;
+        var count=0, skipped=0, skippedAP=0, skippedEntree=0, skippedSortie=0;
         eids.forEach(function(eid){
+          var _pe0 = _empByIdGen[eid] || null;
+          var _entJ = (_pe0 && _pe0.date_entree) || "";
+          var _sorJ = (_pe0 && _pe0.date_sortie) || "";
           dks.forEach(function(dk){
-            var idx = pts.findIndex(function(r){ return r.employee_id===eid && r.date===dk; });
+            /* Jour hors présence (embauché en cours de mois / déjà sorti) : on ne génère rien */
+            if (_entJ && dk < _entJ) { skippedEntree++; return; }
+            if (_sorJ && dk > _sorJ) { skippedSortie++; return; }
+            var idx = _ptIdxMap[eid + "|" + dk];
+            if (idx === undefined) idx = -1;
             if (idx !== -1 && pts[idx].protege === true) { skipped++; return; }
             if (idx !== -1 && pts[idx].absent_paye === true) { skippedAP++; return; }
             if (periode==="empty" && idx!==-1) return;
             if (idx===-1) {
+              _ptIdxMap[eid + "|" + dk] = pts.length;
               pts.push({id:DB.id(), employee_id:eid, date:dk, present:true, h_j_manual:store8, h_n_manual:"",
                 j_arrivee:"08:00", j_pause:"12:00", j_reprise:"13:00", j_fin:"17:00",
                 n_arrivee:"", n_pause:"", n_reprise:"", n_fin:""});
@@ -19504,9 +19543,14 @@ function peTogglePst() {
             if (nbJ > getExternJours(eid, mois)) setExternJours(eid, mois, nbJ);
           });
         } catch(eExt){}
-        toast(count+" jour(s) généré(s) pour "+eids.length+" employé(s)"+(skipped ? " — "+skipped+" verrouillé(s) ignoré(s)" : "")+(skippedAP ? " — "+skippedAP+" absent(s) payé(s) conservé(s)" : ""),"success");
+        toast(count+" jour(s) généré(s) pour "+eids.length+" employé(s)"+(skipped ? " — "+skipped+" verrouillé(s) ignoré(s)" : "")+(skippedAP ? " — "+skippedAP+" absent(s) payé(s) conservé(s)" : "")+(skippedEntree ? " — "+skippedEntree+" jour(s) avant embauche ignoré(s)" : "")+(skippedSortie ? " — "+skippedSortie+" jour(s) après sortie ignoré(s)" : ""),"success");
         closePtModal();
         renderPtRecap();
+        } catch(_genErr) {
+          var _gb = document.getElementById("gen-apply-btn");
+          if (_gb) { _gb.disabled = false; _gb.style.opacity = ""; genUpdateCount(); }
+          toast("Erreur pendant la génération : " + ((_genErr && _genErr.message) || _genErr), "error");
+        }
       }
 
       /* --- POINTAGE FACIAL --- */

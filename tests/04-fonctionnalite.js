@@ -5057,6 +5057,34 @@ r.push({
   });
 
   r.push({
+    nom: 'Pointage paie : g\u00e9n\u00e9ration exclut les employ\u00e9s entr\u00e9s apr\u00e8s le mois (f\u00e9vrier vs entr\u00e9e avril)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var eFev = { date_entree: '2026-02-10' };
+      var eAvr = { date_entree: '2026-04-03' };
+      var eVide = {};
+      var eNul = null;
+      var ok = ptEntreeApresMois(eAvr, '2026-02') === true && ptEntreeApresMois(eFev, '2026-02') === false && ptEntreeApresMois(eAvr, '2026-04') === false && ptEntreeApresMois(eAvr, '2026-03') === true && ptEntreeApresMois(eVide, '2026-02') === false && ptEntreeApresMois(eNul, '2026-02') === false && ptEntreeApresMois(eAvr, 'oups') === false;
+      ok ? 'OK : avril exclu de f\u00e9vrier/mars, inclus en avril, sans date inclus, mois invalide=false'
+         : 'ECHEC avr/fev=' + ptEntreeApresMois(eAvr, '2026-02') + ' fev/fev=' + ptEntreeApresMois(eFev, '2026-02')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage production : g\u00e9n\u00e9ration exclut les employ\u00e9s entr\u00e9s apr\u00e8s le mois (f\u00e9vrier vs entr\u00e9e avril)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var eAvr = { date_entree: '2026-04-03' };
+      var eFev = { date_entree: '2026-02-10' };
+      var ok = ptEntreeApresMois(eAvr, '2026-02') === true && ptEntreeApresMois(eFev, '2026-02') === false && ptEntreeApresMois(eAvr, '2026-04') === false && typeof ptGenMois === 'function' && typeof empVisibleMois === 'function' && typeof ptEstForfait === 'function';
+      ok ? 'OK : avril exclu de f\u00e9vrier, f\u00e9vrier inclus, helpers pr\u00e9sents'
+         : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Pointage paie : ptHImpr = manuel jour/nuit, creneaux, repli si mal pointe, vide=0',
     app: 'paye.html', store: storeRealiste,
     code: `
