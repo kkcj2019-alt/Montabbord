@@ -6880,6 +6880,22 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Fiche employé : pas de doublon taux journalier pour un Journalier',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('type_contrat').value = 'Journalier';
+      try { updateEmpTypeFields(); } catch (e1) {}
+      var cacheJ = document.getElementById('tj-standalone-group').style.display === 'none';
+      document.getElementById('type_contrat').value = 'CDI';
+      try { updateEmpTypeFields(); } catch (e2) {}
+      var visibleCdi = document.getElementById('tj-standalone-group').style.display !== 'none';
+      (cacheJ && visibleCdi) ? 'OK : champ isolé masqué en Journalier, visible en CDI'
+         : 'ECHEC journalier=' + document.getElementById('tj-standalone-group').style.display
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Mois intelligent paie : livre/grilles ignorent les entrés après et les sortis avant',
     app: 'paye.html', store: storeRealiste,
     code: `
