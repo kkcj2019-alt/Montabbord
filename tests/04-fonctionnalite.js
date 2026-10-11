@@ -5085,6 +5085,36 @@ r.push({
   });
 
   r.push({
+    nom: 'Pointage paie : filtre type = forfait / journalier / variantes de saisie',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var f1 = { mode_pointage: 'Forfait', en_paie: true };
+      var f2 = { mode_pointage: 'forfait_173', en_paie: true };
+      var f3 = { mode_pointage: '173.33', en_paie: true };
+      var j1 = { mode_pointage: 'journalier', en_paie: true };
+      var j2 = { en_paie: true };
+      var fOff = { mode_pointage: 'Forfait', en_paie: false };
+      var ok = ptEstForfait(f1) === true && ptEstForfait(f2) === true && ptEstForfait(f3) === true && ptEstForfait(j1) === false && ptEstForfait(j2) === false && ptEstForfait(fOff) === false;
+      ok ? 'OK : Forfait/forfait_173/173.33=true, journalier/absent=false, hors paie=false'
+         : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage production : filtre type = forfait / journalier',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var f1 = { mode_pointage: 'Forfait', en_paie: true };
+      var j1 = { mode_pointage: 'journalier', en_paie: true };
+      var ok = ptEstForfait(f1) === true && ptEstForfait(j1) === false;
+      ok ? 'OK : Forfait=true, journalier=false'
+         : 'ECHEC'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Pointage paie : ptHImpr = manuel jour/nuit, creneaux, repli si mal pointe, vide=0',
     app: 'paye.html', store: storeRealiste,
     code: `
