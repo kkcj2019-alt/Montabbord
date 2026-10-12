@@ -1073,6 +1073,31 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Soldes : le ✕ du modal groupe supprime vraiment la piece (plus de piece fantome)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', login:'admin', nom:'Admin', isAdmin:true, caisseCentralisee:true };
+      var ops = getOperationsCaisse();
+      ops.push({ id:'opG1', numeroPiece:'G-1', date:'2026-09-15', code:'SOLDE_INDEMNITE', codeId:'cid1', libelle:'Solde indemnité : Gahie', periode:'2026-09', montant:5472, sens:'sortie', moyenPaiement:'Espèce', beneficiaireType:'employe', beneficiaireId:'e1', beneficiaireNom:'Gahie R', caisseId:'c1', apType:'solde', apMoisDeduction:'2026-09' });
+      ops.push({ id:'opG2', numeroPiece:'G-2', date:'2026-09-15', code:'SOLDE_INDEMNITE', codeId:'cid1', libelle:'Solde indemnité : Autre', periode:'2026-09', montant:3000, sens:'sortie', moyenPaiement:'Espèce', beneficiaireType:'employe', beneficiaireId:'e2', beneficiaireNom:'Autre X', caisseId:'c1', apType:'solde', apMoisDeduction:'2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      window._sdgCode = 'SOLDE_INDEMNITE'; window._sdgCodeId = 'cid1';
+      window._sdgPeriod = '2026-09'; window._sdgFullDate = '2026-10-02'; window._sdgCaisseId = 'c1';
+      window._sdgRemoved = ['opG2'];
+      var err = '';
+      try { saveSoldeGroupeEdits(); } catch (e) { err = String((e && e.message) || e); }
+      var ops2 = getOperationsCaisse(), g1 = false, g2 = false;
+      for (var i = 0; i < ops2.length; i++) {
+        if (ops2[i] && ops2[i].id === 'opG1') g1 = true;
+        if (ops2[i] && ops2[i].id === 'opG2') g2 = true;
+      }
+      (!err && g1 && !g2) ? 'OK : opG2 supprimee, opG1 gardee'
+        : 'ECHEC err=' + err + ' g1=' + g1 + ' g2present=' + g2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Soldes : le bouton Orphelins ne supprime que les lignes caisse sans piece (les manuelles restent)',
     app: 'index.html', store: storeRealiste,
     code: `

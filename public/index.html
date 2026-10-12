@@ -16,7 +16,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-11-251';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-252';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -19741,7 +19741,7 @@ function openSoldeGroupeEdit(opId) {
   html += '<datalist id="sdgMoyenList"><option value="Espèce"><option value="Wave"><option value="Orange Money"><option value="MTN Money"><option value="Moov Money"><option value="Virement"><option value="Chèque"></datalist>';
   html += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
   html += '<button type="button" class="btn btn-outline btn-sm" onclick="sdgAddRow()" style="font-size:12px;font-weight:700;color:var(--primary);border-color:var(--primary)">+ Ajouter un employé</button>';
-  html += '<span style="font-size:11px;color:var(--gray-500);margin-left:8px">💡 Cochez les lignes à enregistrer. Saisissez ou choisissez un employé par autocomplétion.</span>';
+  html += '<span style="font-size:11px;color:var(--gray-500);margin-left:8px">💡 Cochez les lignes à enregistrer. Saisissez ou choisissez un employé par autocomplétion. Le ✕ supprime la ligne.</span>';
   html += '</div>';
 
   window._sdgRelated = related;
@@ -19750,6 +19750,9 @@ function openSoldeGroupeEdit(opId) {
   window._sdgPeriod = period;
   window._sdgFullDate = fullDate;
   window._sdgCaisseId = caisseId;
+  /* Lignes retirees via ✕ : supprimees pour de vrai a l'enregistrement
+     (avant, le ✕ ne retirait que la ligne a l'ecran, la piece restait). */
+  window._sdgRemoved = [];
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-primary" onclick="saveSoldeGroupeEdits()">Enregistrer</button>';
   /* Nom de la caisse dans le titre : l'utilisateur voit d'où viennent les lignes. */
@@ -19840,8 +19843,15 @@ function sdgAddRow() {
 }
 
 function sdgRemoveRow(btn) {
-  var tr = btn.closest('tr');
-  if (tr) tr.remove();
+  var tr = (btn && btn.closest) ? btn.closest('tr') : null;
+  if (tr) {
+    var opId = (tr.getAttribute ? (tr.getAttribute('data-opid') || '') : '');
+    if (opId) {
+      window._sdgRemoved = window._sdgRemoved || [];
+      if (window._sdgRemoved.indexOf(opId) === -1) window._sdgRemoved.push(opId);
+    }
+    tr.remove();
+  }
   sdgRecalcTotal();
 }
 
@@ -19958,7 +19968,54 @@ function saveSoldeGroupeEdits() {
   var empMap = {};
   for (var i = 0; i < employes.length; i++) empMap[employes[i].id] = employes[i];
   var rows = document.querySelectorAll('#sdgTableBody tr');
-  var updated = 0, created = 0, total = 0;
+  var updated = 0, created = 0, deleted = 0, total = 0;
+  /* Lignes retirees via ✕ : suppression reelle, avec les memes gardes et la
+     meme cascade que la suppression normale (deleteCaisse). */
+  var _rem = window._sdgRemoved || [];
+  if (_rem.length) {
+    var _rops = [];
+    for (var _ri = 0; _ri < _rem.length; _ri++) {
+      for (var _rj = 0; _rj < ops.length; _rj++) {
+        if (ops[_rj].id === _rem[_ri]) { _rops.push(ops[_rj]); break; }
+      }
+    }
+    for (var _rk = 0; _rk < _rops.length; _rk++) {
+      var _ro = _rops[_rk];
+      if (!_requireAdminValidationForReversed(_ro)) return;
+      if (_ro && !canUserAccessCaisse(currentUser, _ro.caisseId)) {
+        var _ok = false;
+        for (var _rl = 0; _rl < ops.length; _rl++) {
+          if (ops[_rl].id === _ro.id && canUserAccessCaisse(currentUser, ops[_rl].caisseId)) { _ok = true; break; }
+        }
+        if (!_ok) { toast('Opération non autorisée', 'error'); return; }
+      }
+    }
+    var _delSet = {}, _feeSet = {}, _apIds = {}, _delItems = [];
+    for (var _rm = 0; _rm < _rops.length; _rm++) {
+      _delSet[_rops[_rm].id] = true;
+      if (_rops[_rm].linkedOpId) _feeSet[_rops[_rm].linkedOpId] = true;
+      if (_rops[_rm].acomptePretId) _apIds[_rops[_rm].acomptePretId] = true;
+      _delItems.push(_rops[_rm]);
+      deleted++;
+    }
+    var _ops2 = [];
+    for (var _rn = 0; _rn < ops.length; _rn++) {
+      if (!_delSet[ops[_rn].id] && !_feeSet[ops[_rn].id]) _ops2.push(ops[_rn]);
+    }
+    ops = _ops2;
+    try {
+      var _apD = dbArr('mdb_acomptesPrets'), _apN = [];
+      for (var _ap = 0; _ap < _apD.length; _ap++) {
+        if (_apIds[_apD[_ap].id] || (_apD[_ap].caisseOpId && _delSet[_apD[_ap].caisseOpId])) continue;
+        _apN.push(_apD[_ap]);
+      }
+      if (_apN.length !== _apD.length) {
+        DB.set('mdb_acomptesPrets', _apN);
+        try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (eApD) {}
+      }
+    } catch (eAp) {}
+    try { if (typeof rememberDeletedOperations === 'function' && _delItems.length) rememberDeletedOperations(_delItems); } catch (eR) {}
+  }
   rows.forEach(function(tr) {
     var cb = tr.querySelector('.sdg-cb');
     if (!cb || !cb.checked) return;
@@ -20052,7 +20109,7 @@ function saveSoldeGroupeEdits() {
       created++;
     }
   });
-  if (updated === 0 && created === 0) {
+  if (updated === 0 && created === 0 && deleted === 0) {
     toast('Aucune ligne cochée ou montant invalide', 'error');
     return;
   }
@@ -20061,9 +20118,12 @@ function saveSoldeGroupeEdits() {
   var msg = [];
   if (updated) msg.push(updated + ' modifiée(s)');
   if (created) msg.push(created + ' créée(s)');
+  if (deleted) msg.push(deleted + ' supprimée(s)');
   toast(msg.join(' — ') + ' | Total: ' + fmtMoney(total) + ' FCFA');
   closeModal();
-  renderCaisseIn(document.getElementById('tresorerieContent'));
+  /* Re-rendu best-effort : la sauvegarde est déjà faite au-dessus, un
+     widget qui échouerait ne doit pas la masquer. */
+  try { renderCaisseIn(document.getElementById('tresorerieContent')); } catch (eR) { try { console.warn('[Solde groupe] re-rendu:', eR); } catch (eW) {} }
 }
 function enregistrerRemboursementAcompte(id) {
   var list = dbArr('mdb_acomptesPrets');
