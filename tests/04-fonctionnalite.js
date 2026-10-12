@@ -5700,6 +5700,22 @@ r.push({
   });
 
   r.push({
+    nom: 'Saisie rapide : le motif choisi survit au basculement faute/absence',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var s1 = { value: 'B', innerHTML: '', options: [{ value: 'A' }, { value: 'B' }] };
+      ptMotifGarderChoix(s1, '<option value="A">A</option><option value="B">B</option>');
+      var ok1 = s1.value === 'B' && s1.innerHTML === '<option value="A">A</option><option value="B">B</option>';
+      var s2 = { value: 'Z', innerHTML: '', options: [{ value: 'A' }] };
+      ptMotifGarderChoix(s2, '<option value="A">A</option>');
+      var ok2 = s2.value === 'Z' && s2.innerHTML.indexOf('value="Z" selected') !== -1;
+      (ok1 && ok2) ? 'OK : choix garde si present, conserve sinon'
+         : 'ECHEC garde=' + ok1 + ' conserve=' + ok2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Faute entreprise : jour à rattraper sans heures saisies compte les heures dues',
     app: 'paye.html', store: storeRealiste,
     code: `
