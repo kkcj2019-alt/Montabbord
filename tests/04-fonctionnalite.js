@@ -7622,6 +7622,19 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Caisse transfert : la destination exclut la source active, pas ma caisse',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var cas1 = csDestExclureId('kkcj', 'ABOGOU', '');
+      var cas2 = csDestExclureId('kkcj', '', '');
+      var cas3 = csDestExclureId('kkcj', '', 'KM23');
+      (cas1 === 'ABOGOU' && cas2 === 'kkcj' && cas3 === 'KM23')
+        ? 'OK : source ABOGOU exclue (kkcj proposée), défaut ma caisse'
+        : 'ECHEC cas1=' + cas1 + ' cas2=' + cas2 + ' cas3=' + cas3
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 
