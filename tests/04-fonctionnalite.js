@@ -7594,6 +7594,34 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Bon de commande : montants masques = cellules vides, sans tirets',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_bonsCommandeFournisseurs', [{ id: 'bc_t2', numero: 'BCP-T2', date: '2026-10-12', fournisseurId: 'f_x', objet: 'Bois', masquerSousMontants: true, lignes: [{ isTitle: true, titre: 'PALETTES', sousLignes: [{ designation: '9 lattes', unite: 'PIECE', qte: 9, prixUnitaire: 100, montant: 900 }] }], totalHT: 900, totalTTC: 900 }]);
+      var d = buildBcFournisseurDoc('bc_t2');
+      var i1 = d ? d.body.indexOf('<tr class="sous-ligne">') : -1;
+      var i2 = i1 !== -1 ? d.body.indexOf('</tr>', i1) : -1;
+      var html = (i1 !== -1 && i2 !== -1) ? d.body.slice(i1, i2) : '';
+      (html.indexOf('9 lattes') !== -1 && html.indexOf('\u2014') === -1 && html.indexOf('<td></td>') !== -1)
+        ? 'OK : designation gardee, montants vides, aucun tiret'
+        : 'ECHEC row=' + html
+    `,
+    attenduPrefixe: 'OK'
+  });
+  r.push({
+    nom: 'Bon de commande : une nouvelle sous-ligne descriptive nait vide, sans 1 auto',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      _bcfLignes = [{ sousLignes: [] }];
+      try { addBcfSousLigne(0); } catch (e) {}
+      var sl = (_bcfLignes[0].sousLignes || [])[0] || {};
+      (_bcfLignes[0].sousLignes.length === 1 && sl.qte === '')
+        ? 'OK : sous-ligne creee avec quantite vide'
+        : 'ECHEC qte=' + sl.qte
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 
