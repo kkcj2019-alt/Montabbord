@@ -7756,6 +7756,51 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Compte fournisseur : le detail deroule affiche Moyen, N deg. transaction et Observations',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = toggleFournisseurSimpleDetail.toString();
+      (/_oo\.moyen \|\| _oo\.moyenPaiement/.test(src) && /_oo\.numeroTransaction/.test(src) && /_oo\.observations/.test(src)
+        && /N\u00b0 trans\./.test(src) && /Observations/.test(src) && /colspan=\\"9\\"/.test(src))
+        ? 'OK : les 3 colonnes sont dans le tableau du detail (9 colonnes au total)'
+        : 'ECHEC : colonnes moyen / transaction / observations absentes'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Compte fournisseur : un detail ouvert reste ouvert apres re-rendu du tableau',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      window._cfOpenDetails = [];
+      cfMemoDetail('frn1', true);
+      var ouvert = (window._cfOpenDetails.length === 1 && window._cfOpenDetails[0] === 'frn1');
+      cfMemoDetail('frn1', true);
+      var pasDoublon = (window._cfOpenDetails.length === 1);
+      cfMemoDetail('frn1', false);
+      var referme = (window._cfOpenDetails.length === 0);
+      var srcRend = renderComptesFournisseursSection.toString();
+      (ouvert && pasDoublon && referme && /cfReouvrirDetails/.test(srcRend))
+        ? 'OK : ouvert memorize (sans doublon), fermeture effective, reouverture apres chaque rendu'
+        : 'ECHEC : ouvert=' + ouvert + ' doublon=' + !pasDoublon + ' referme=' + referme + ' rappel=' + /cfReouvrirDetails/.test(srcRend)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Compte fournisseur : l impression n\'ecarte pas les details deja ouverts a l ecran',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = toggleFournisseurSimpleDetail.toString();
+      (/sansMemo/.test(src) && src.indexOf('if (!sansMemo) cfMemoDetail(fournisseurId, true);') !== -1
+        && src.indexOf('if (!sansMemo) cfMemoDetail(fournisseurId, false);') !== -1)
+        ? 'OK : ouverture/fermeture temporaires d impression hors memoire (sansMemo)'
+        : 'ECHEC : garde sansMemo absente'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse transfert : la destination exclut la source active, pas ma caisse',
     app: 'index.html', store: storeRealiste,
     code: `
