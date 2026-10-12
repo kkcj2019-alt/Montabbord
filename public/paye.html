@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-11-271";
+      window.__APP_VERSION = "2026-10-11-272";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6626,9 +6626,10 @@ function payeObj(key) {
           }
         } catch (e) {}
       }
-      /* Multi-postes : jamais plus d'un gros envoi toutes les 20 s pendant la saisie.
-         Chaque case pointee = ~1,5 Mo aller-retour ; a 2 postes simultanes la base
-         sature (verrous Postgres -> timeouts 57014 -> badges 'Serveur occupe').
+      /* Multi-postes : delai adaptatif au poids du dernier envoi (petit = ~3 s,
+         moyen = ~8 s, gros = 20 s). Avec l'envoi differentiel, la plupart des
+         saisies sont legeres et partent quasi immediatement ; seul le gros blob
+         reste bride pour ne pas saturer la base a 2 postes simultanes.
          Les appels intermediaires sont regroupes (trailing unique) : le dernier etat
          part toujours. force=true = sortie (section, onglet masque, fermeture). */
       window._payeDernierPushReel = window._payeDernierPushReel || 0;
@@ -6642,9 +6643,12 @@ function payeObj(key) {
         pushPayeCloud._t = setTimeout(function () {
           pushPayeCloud._t = null;
           try {
-            if (!force && (Date.now() - (window._payeDernierPushReel || 0)) < 20000) {
+            var _dm = 20000;
+            try { _dm = _payeDelaiMini(); } catch (eDM) {}
+            if (!_dm || _dm < 2000) _dm = 2000;
+            if (!force && (Date.now() - (window._payeDernierPushReel || 0)) < _dm) {
               try { if (pushPayeCloud._trail) clearTimeout(pushPayeCloud._trail); } catch (eTR) {}
-              var _att = 20000 - (Date.now() - (window._payeDernierPushReel || 0)) + 500;
+              var _att = _dm - (Date.now() - (window._payeDernierPushReel || 0)) + 500;
               pushPayeCloud._trail = setTimeout(function () { pushPayeCloud._trail = null; _payePushCloudRun(); }, Math.max(1000, _att));
               return;
             }
@@ -6669,6 +6673,16 @@ function payeObj(key) {
          = {cle: valeur}, base = {cle: hash}. updated_at/maj_par partent toujours.
          Si le cloud est incertain (lecture impossible), les cles vides ne partent
          pas : on ne doit jamais ecraser du plein par du vide a l'aveugle. */
+      /* Delai mini entre deux envois selon le poids du dernier (Ko) : les petits
+         envois partent quasi immediatement, seuls les gros sont brides. */
+      function _payeDelaiMini() {
+        try {
+          var ko = window._payeDerniereChargeKo || 0;
+          if (ko > 0 && ko < 150) return 3000;
+          if (ko > 0 && ko < 600) return 8000;
+        } catch (eD) {}
+        return 20000;
+      }
       function payeFiltrerChargeUtile(charge, base, incertain) {
         var out = {}, hashes = {}, k, raw, h;
         base = base || {};
@@ -6878,7 +6892,20 @@ function payeObj(key) {
             var _pJson = "";
             try { _pJson = JSON.stringify(payload); } catch (eJ) {}
             try {
-              if (_pJson) console.log("[Paye] push payload ~" + Math.round(_pJson.length / 1024) + " Ko");
+              if (_pJson) { console.log("[Paye] push payload ~" + Math.round(_pJson.length / 1024) + " Ko");
+                try {
+                  window._payeDerniereChargeKo = Math.round(_pJson.length / 1024);
+                  var _dk = [];
+                  for (var _kk in payload) {
+                    if (payload.hasOwnProperty(_kk)) {
+                      var _ks = 0;
+                      try { _ks = Math.round(JSON.stringify(payload[_kk]).length / 1024); } catch (eKS) {}
+                      _dk.push(_kk + "=" + _ks + "Ko");
+                    }
+                  }
+                  console.log("[Paye] push cles: " + _dk.join(", "));
+                } catch (eDK) {}
+              }
             } catch (eL3) {}
             var _pHash = _payeStrHash(_pJson);
             if (_pHash && _pHash === window._payeLastPushHash) {

@@ -7444,6 +7444,24 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Synchro paie : delai adaptatif au poids du dernier envoi',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var d0 = _payeDelaiMini();
+      window._payeDerniereChargeKo = 50;
+      var dPetit = _payeDelaiMini();
+      window._payeDerniereChargeKo = 400;
+      var dMoyen = _payeDelaiMini();
+      window._payeDerniereChargeKo = 1554;
+      var dGros = _payeDelaiMini();
+      window._payeDerniereChargeKo = 0;
+      (d0 === 20000 && dPetit === 3000 && dMoyen === 8000 && dGros === 20000)
+        ? 'OK : inconnu=20s, 50Ko=3s, 400Ko=8s, 1554Ko=20s'
+        : 'ECHEC defaut=' + d0 + ' petit=' + dPetit + ' moyen=' + dMoyen + ' gros=' + dGros
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 
