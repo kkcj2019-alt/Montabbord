@@ -855,6 +855,63 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Tableau de bord : la carte STOCK BL compte les BL et les colis (pas l inverse)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var dbs = getDB();
+      dbs.achats = [{ id:'a1', category:'raw-materials', date:'2026-10-08', reference:'BL-000131',
+        fournisseur:'SMI', items:[], item_count:25, total_volume:47.179, montant_total:4359220 }];
+      localStorage.setItem('mdb_production', JSON.stringify(dbs));
+      setStockRaw([
+        { id:'s1', code:'7454', colis_number:'7454', quantite:26, volume:2.243 },
+        { id:'s2', code:'7452', colis_number:'7452', quantite:27, volume:2.744 }
+      ]);
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      (h.indexOf('1 BL | 2 colis') !== -1 && h.indexOf('2 BL |') === -1)
+        ? 'OK : 1 BL et 2 colis affiches'
+        : 'ECHEC : carte STOCK BL fausse'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : supprimer un code retire toutes ses lignes (donnees de test)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm = function(){ return true; };
+      setStockSemi([
+        { id: 1762000000000.123, code: 'L114*9*2', designation: 'L114*9*2', quantite: -700 },
+        { id: 'abc123', code: 'L114*9*2', designation: 'L114*9*2', quantite: 1000 },
+        { id: 'autre1', code: 'AUTRE', designation: 'Autre', quantite: 5 }
+      ]);
+      var err = '';
+      try { deleteStockSemiCode('L114*9*2'); } catch (e) { err = String((e && e.message) || e); }
+      var rest = getStockSemi(), nTest = 0, nAutre = 0;
+      for (var i = 0; i < rest.length; i++) {
+        if (String(rest[i].code) === 'L114*9*2') nTest++;
+        if (String(rest[i].code) === 'AUTRE') nAutre++;
+      }
+      (!err && nTest === 0 && nAutre === 1) ? 'OK : 2 lignes test supprimees, AUTRE garde'
+        : 'ECHEC err=' + err + ' test=' + nTest + ' autre=' + nAutre
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : la fiche affiche un bouton supprimer par code',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [{ code:'TEST-LAT', designation:'Latte test', type:'LATTE', length:114, width:9, thickness:2 }]);
+      setStockSemi([{ id: 1, code:'TEST-LAT', designation:'Latte test', quantite:10 }]);
+      var h = render_stock_semi();
+      (h.indexOf("deleteStockSemiCode('TEST-LAT')") !== -1) ? 'OK : bouton poubelle sur la ligne TEST-LAT'
+        : 'ECHEC : bouton absent'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
@@ -7876,12 +7933,16 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     app: 'production.html', store: storeRealiste,
     code: `
       var src = prodGoMainDashboard.toString();
-      var okIframe = (src.indexOf('window.parent.closeProductionOverlay') !== -1);
-      var okOnglet = (src.indexOf("window.opener.navigateTo('dashboard')") !== -1);
+      var okIframe = (src.indexOf('closeProductionOverlay') !== -1);
+      var okOnglet = (src.indexOf("op.navigateTo('dashboard')") !== -1);
+      var okCheck = (src.indexOf('isMain') !== -1 && src.indexOf("index.html') !== -1") !== -1);
+      var okNew = (src.indexOf("window.open('index.html', '_blank')") !== -1);
       var okFilet = (src.indexOf("location.replace('index.html')") !== -1);
-      (typeof prodGoMainDashboard === 'function' && okIframe && okOnglet && okFilet)
-        ? 'OK : iframe -> fenetre mere, onglet -> onglet principal, sinon index.html'
-        : 'ECHEC : iframe=' + okIframe + ' onglet=' + okOnglet + ' filet=' + okFilet
+      var err = '';
+      try { prodGoMainDashboard(); } catch (e) { err = String((e && e.message) || e); }
+      (typeof prodGoMainDashboard === 'function' && !err && okIframe && okOnglet && okCheck && okNew && okFilet)
+        ? 'OK : iframe -> mere, onglet principal verifie, sinon nouvel onglet, filet direct'
+        : 'ECHEC : err=' + err + ' iframe=' + okIframe + ' onglet=' + okOnglet + ' check=' + okCheck + ' new=' + okNew + ' filet=' + okFilet
     `,
     attenduPrefixe: 'OK'
   });
