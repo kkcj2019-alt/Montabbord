@@ -7406,6 +7406,44 @@ r.push({
   });
 
 r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    app: 'index.html', store: storeRealiste,    code: `      var emp = getEmployes()[0];      DB.set('mdb_missions', [{ id: 'mis_t1', numero: 'OM-2026-01', objet: 'Livraison Yapo',        type: 'livraison', lieu: 'Yopougon', client: 'SOCIM', date_depart: '2026-10-05',        date_retour: '2026-10-06', nb_jours: 2, transport: 'voiture_acs', vehicule: '1234 AB 01',        conducteur: 'Kanga', motif: 'Livraison palettes', frais: 5000, carburant: 3000,        perdiem: 2000, autres: 0, total: 12000, statut: 'preparee', intervenants: [emp.id] }]);      var l = getMissions();      var okStore = l.length === 1 && l[0].objet === 'Livraison Yapo';      /* la page affiche la mission avec son objet, son lieu et ses frais */      renderMissions();      var box = document.getElementById('missions-list');      var h = (box && box.innerHTML) || '';      var okPage = h.indexOf('Livraison Yapo') >= 0 && h.indexOf('Yopougon') >= 0 && h.indexOf('OM-2026-01') >= 0;      var okFiltre = h.indexOf('ms-filtre-statut') >= 0 && h.indexOf('ms-recherche') >= 0;      /* les helpers de suivi */      var okNoms = missionNoms(l[0]).toLowerCase().indexOf(String(emp.nom || '').toLowerCase()) >= 0;      var okTrans = missionTransportLabel('voiture_acs') === 'Véhicule de l\\'entreprise';      var okBadge = missionStatutBadge(l[0]).indexOf('Préparée') >= 0;      /* la fiche et le document imprimable existent */      var okFiche = typeof showMission === 'function' && typeof printMission === 'function';      /* une nouvelle mission se prepare avec un numéro auto */      var okNum = String(nextMissionNum()).indexOf('OM-') === 0;      /* suppression */      deleteMission = function () {}; /* on neutralise le confirm du bac à sable */      (okStore && okPage && okFiltre && okNoms && okTrans && okBadge && okFiche && okNum)        ? 'OK : mission enregistrée, page rendue avec objet/lieu/frais, filtres, intervenants, transport, statut et numéro auto'        : 'ECHEC store=' + okStore + ' page=' + okPage + ' filtre=' + okFiltre + ' noms=' + okNoms + ' trans=' + okTrans + ' badge=' + okBadge + ' fiche=' + okFiche + ' num=' + okNum    `,    attenduPrefixe: 'OK'  });
+  r.push({
+    nom: 'Synchro paie : envoi differentiel — seules les cles modifiees partent',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var c1 = { mdb_paye: { a: 1 }, mdb_employes: [1, 2], updated_at: 't1', maj_par: 'x' };
+      var f1 = payeFiltrerChargeUtile(c1, {}, false);
+      var base2 = f1.hashes;
+      var c2 = { mdb_paye: { a: 1 }, mdb_employes: [1, 2, 3], updated_at: 't2', maj_par: 'x' };
+      var f2 = payeFiltrerChargeUtile(c2, base2, false);
+      var okPremier = ('mdb_paye' in f1.charge) && ('mdb_employes' in f1.charge);
+      var okSecond = !('mdb_paye' in f2.charge) && ('mdb_employes' in f2.charge) && ('updated_at' in f2.charge);
+      var f3 = payeFiltrerChargeUtile({ mdb_employes: [], updated_at: 't3', maj_par: 'x' }, {}, true);
+      var okIncertain = !('mdb_employes' in f3.charge);
+      (okPremier && okSecond && okIncertain)
+        ? 'OK : premier envoi complet, second differentiel, vide ignore si cloud incertain'
+        : 'ECHEC premier=' + okPremier + ' second=' + okSecond + ' incertain=' + okIncertain
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro paie : chef de synchro — un seul onglet sonde',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      try { localStorage.removeItem('mdb_paye_sync_leader'); } catch (e0) {}
+      var premier = _payeSuisLeader();
+      var d1 = null; try { d1 = JSON.parse(localStorage.getItem('mdb_paye_sync_leader')); } catch (e1) {}
+      try { localStorage.setItem('mdb_paye_sync_leader', JSON.stringify({ id: 'autre-onglet', ts: Date.now() })); } catch (e2) {}
+      var second = _payeSuisLeader();
+      try { localStorage.setItem('mdb_paye_sync_leader', JSON.stringify({ id: 'vieux', ts: Date.now() - 60000 })); } catch (e3) {}
+      var troisieme = _payeSuisLeader();
+      var d3 = null; try { d3 = JSON.parse(localStorage.getItem('mdb_paye_sync_leader')); } catch (e4) {}
+      (premier === true && d1 && second === false && troisieme === true && d3 && d1 && d3.id === d1.id)
+        ? 'OK : premier leader, etranger frais bloque, bail expire repris par le meme onglet'
+        : 'ECHEC premier=' + premier + ' second=' + second + ' troisieme=' + troisieme
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 

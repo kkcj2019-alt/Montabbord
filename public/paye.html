@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-11-270";
+      window.__APP_VERSION = "2026-10-11-271";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6626,7 +6626,13 @@ function payeObj(key) {
           }
         } catch (e) {}
       }
-      function pushPayeCloud() {
+      /* Multi-postes : jamais plus d'un gros envoi toutes les 20 s pendant la saisie.
+         Chaque case pointee = ~1,5 Mo aller-retour ; a 2 postes simultanes la base
+         sature (verrous Postgres -> timeouts 57014 -> badges 'Serveur occupe').
+         Les appels intermediaires sont regroupes (trailing unique) : le dernier etat
+         part toujours. force=true = sortie (section, onglet masque, fermeture). */
+      window._payeDernierPushReel = window._payeDernierPushReel || 0;
+      function pushPayeCloud(force) {
         /* Anti-martèlement : chaque push envoie le document ENTREPRISE ENTIER
            (gros jsonb) puis joue un upsert avec fusion côté serveur. Sans
            coalescence, une rafale de saisies = N upserts lourds qui se
@@ -6635,8 +6641,16 @@ function payeObj(key) {
         try { if (pushPayeCloud._t) clearTimeout(pushPayeCloud._t); } catch (eD) {}
         pushPayeCloud._t = setTimeout(function () {
           pushPayeCloud._t = null;
+          try {
+            if (!force && (Date.now() - (window._payeDernierPushReel || 0)) < 20000) {
+              try { if (pushPayeCloud._trail) clearTimeout(pushPayeCloud._trail); } catch (eTR) {}
+              var _att = 20000 - (Date.now() - (window._payeDernierPushReel || 0)) + 500;
+              pushPayeCloud._trail = setTimeout(function () { pushPayeCloud._trail = null; _payePushCloudRun(); }, Math.max(1000, _att));
+              return;
+            }
+          } catch (eMI) {}
           _payePushCloudRun();
-        }, 2500);
+        }, force ? 300 : 2500);
       }
       function _payeStrHash(s) {
         var h = 0;
@@ -6650,6 +6664,64 @@ function payeObj(key) {
    (lire avant d'écrire) ne doit pas télécharger le dossier entier à chaque
    sauvegarde. Sans ce cache, chaque push = 1 téléchargement complet du
    dossier entreprise : c'est ce qui saturait la bande passante (20 To). */
+      /* Envoi differentiel : decide quelles cles partent, par comparaison avec ce
+         qui a ete envoye au dernier succes. Fonction pure (testee dans 04) : charge
+         = {cle: valeur}, base = {cle: hash}. updated_at/maj_par partent toujours.
+         Si le cloud est incertain (lecture impossible), les cles vides ne partent
+         pas : on ne doit jamais ecraser du plein par du vide a l'aveugle. */
+      function payeFiltrerChargeUtile(charge, base, incertain) {
+        var out = {}, hashes = {}, k, raw, h;
+        base = base || {};
+        for (k in charge) {
+          if (!charge.hasOwnProperty(k)) continue;
+          if (k === "updated_at" || k === "maj_par") { out[k] = charge[k]; continue; }
+          try { raw = JSON.stringify(charge[k]); } catch (eJ) { try { raw = String(charge[k]); } catch (eJ2) { raw = ""; } }
+          if (raw === undefined) raw = "";
+          if (incertain && (raw === "[]" || raw === "{}" || raw === "")) continue;
+          try { h = _payeStrHash(raw); } catch (eH) { h = null; }
+          if (h !== null && h !== "" && base[k] !== undefined && base[k] === h) continue;
+          out[k] = charge[k];
+          if (h !== null && h !== "") hashes[k] = h;
+        }
+        return { charge: out, hashes: hashes };
+      }
+      /* Chef de synchro : un seul onglet par navigateur fait le sondage + temps
+         reel. Election par battement local (15 s) : a la fermeture sans menage,
+         un autre onglet reprend sous ~15 s. Fonction pure d'effets bornee,
+         testee dans 04. */
+      function _payeSuisLeader() {
+        try {
+          if (typeof localStorage === "undefined") return true;
+          var k = "mdb_paye_sync_leader", now = Date.now(), raw = null, d = null;
+          try { raw = localStorage.getItem(k); } catch (eG) { return true; }
+          try { d = raw ? JSON.parse(raw) : null; } catch (eJ3) { d = null; }
+          window._payeTabId = window._payeTabId || ("t" + Math.random().toString(36).slice(2) + now.toString(36));
+          if (!d || !d.ts || (now - d.ts) > 15000 || d.id === window._payeTabId) {
+            try { localStorage.setItem(k, JSON.stringify({ id: window._payeTabId, ts: now })); } catch (eS3) {}
+            return true;
+          }
+          return false;
+        } catch (e) { return true; }
+      }
+      function _payeLeaderRenonce() {
+        try {
+          var k = "mdb_paye_sync_leader", raw = null, d = null;
+          try { raw = localStorage.getItem(k); } catch (eG2) { return; }
+          try { d = raw ? JSON.parse(raw) : null; } catch (eJ4) { return; }
+          if (d && d.id && d.id === window._payeTabId) { try { localStorage.removeItem(k); } catch (eR2) {} }
+        } catch (e2) {}
+      }
+      /* Sortie d'onglet : envoi force immediat (pas d'attente 20 s) + liberation
+         du leadership pour qu'un autre onglet prenne le relais. */
+      try {
+        if (!window._payeHideHook && typeof document !== "undefined" && document.addEventListener) {
+          window._payeHideHook = true;
+          document.addEventListener("visibilitychange", function () {
+            if (document.hidden) { try { pushPayeCloud(true); } catch (eH2) {} }
+          });
+          window.addEventListener("beforeunload", function () { try { _payeLeaderRenonce(); } catch (eL2) {} });
+        }
+      } catch (eHH) {}
       function _payeLireCloud(uid, force) {
         try {
           /* force = on sait que le cloud a changé (sonde updated_at) :
@@ -6700,13 +6772,26 @@ function payeObj(key) {
           window._payeCircuitJusqua = 0;
           _payeRealtimeReprendre();
         } catch (eCB) {}
+        try { window._payeDernierPushReel = Date.now(); } catch (eDR) {}
         payePushBusy = true;
         var _lance = function () {
         /* Convergence : lire le cloud AVANT d'écrire et fusionner (union par id),
            pour qu'une copie locale périmée ne puisse plus écraser des données récentes. */
-        return _payeLireCloud(uid)
+        var _lecP = _payeLireCloud(uid).then(function (dL) {
+          window._payeCloudIncertain = false;
+          return dL;
+        }, function (eLec) {
+          /* Lecture impossible (sonde/cloud 500, coupure...) : on pousse quand meme
+             avec le dernier etat connu au lieu de rester bloque en echec. Le filtre
+             ci-dessous refuse les cles vides quand le cloud est incertain. */
+          window._payeCloudIncertain = true;
+          try { console.warn("[Paye] lecture cloud impossible, envoi avec le cache:", (eLec && eLec.message) || eLec); } catch (eW) {}
+          return { exists: !!(window._payeCloudCache), data: function () { return window._payeCloudCache || {}; } };
+        });
+        return _lecP
           .then(function (doc) {
             var cloud = doc && doc.exists ? doc.data() : {};
+            var _incertain = !!window._payeCloudIncertain;
             var payload = {};
             var p = getPayeData();
             var cp =
@@ -6769,8 +6854,25 @@ function payeObj(key) {
               payload.mdb_tombstones = _pTom;
             var ent = DB.getMain("mdb_entreprise");
             if (ent && ent.nom) payload.mdb_entreprise = ent;
+            /* Envoi differentiel : seules les cles modifiees depuis le dernier succes
+               partent (multi-postes : chacun ecrit ses cles, la fusion serveur au
+               niveau des cles fait le reste). Rien de change = zero octet envoye. */
+            try {
+              var _flt = payeFiltrerChargeUtile(payload, window._payePushBase || {}, _incertain);
+              payload = _flt.charge;
+              window._payeChargePrete = _flt.hashes;
+            } catch (eF) { window._payeChargePrete = null; }
             if (Object.keys(payload).length === 0) {
               payePushBusy = false;
+              payePushQueued = false;
+              /* Rien a envoyer = rien en attente : le badge d'echec n'a plus lieu
+                 d'etre, le sondage reprend et detectera les changements distants. */
+              try {
+                window._payeSyncEtat = window._payeSyncEtat || {};
+                window._payeSyncEtat.echec = 0;
+                window._payeSyncEtat.serveurOccupe = false;
+                if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
+              } catch (eN) {}
               return;
             }
             var _pJson = "";
@@ -6835,6 +6937,16 @@ function payeObj(key) {
               window._payeSyncEtat.serveurOccupe = false;
               if (typeof _payeSyncAfficher === "function") _payeSyncAfficher();
             } catch (eS) {}
+            try {
+              if (window._payeChargePrete) {
+                window._payePushBase = window._payePushBase || {};
+                for (var _bk in window._payeChargePrete) {
+                  if (window._payeChargePrete.hasOwnProperty(_bk)) window._payePushBase[_bk] = window._payeChargePrete[_bk];
+                }
+                window._payeChargePrete = null;
+              }
+              if (window._payeRepriseTimer) { clearInterval(window._payeRepriseTimer); window._payeRepriseTimer = null; }
+            } catch (eB) {}
             if (payePushQueued) {
               payePushQueued = false;
               pushPayeCloud();
@@ -6900,6 +7012,24 @@ function payeObj(key) {
             } else {
               payePushQueued = false;
             }
+            /* Reprise douce : tant que la synchro est en echec, on retente toutes
+               les 60 s (timer unique). Sans saisie l'envoi est vide et ne coute
+               rien ; des que le cloud repond, tout repart et le badge s'efface.
+               Fini le badge colle 'sans cesse' sans nouvelle saisie. */
+            try {
+              if (!window._payeRepriseTimer) {
+                window._payeRepriseTimer = setInterval(function () {
+                  try {
+                    if (!_payeSynchroEnEchec()) {
+                      clearInterval(window._payeRepriseTimer);
+                      window._payeRepriseTimer = null;
+                      return;
+                    }
+                    pushPayeCloud();
+                  } catch (eRT2) {}
+                }, 60000);
+              }
+            } catch (eRT) {}
           });
         }; /* fin _lance */
         /* Exclusion mutuelle entre onglets : 2 upserts concurrents sur la même
@@ -6931,7 +7061,7 @@ function payeObj(key) {
               if (typeof _ptPushTimer !== "undefined" && _ptPushTimer) {
                 try { clearTimeout(_ptPushTimer); } catch (eC) {}
                 _ptPushTimer = null;
-                try { pushPayeCloud(); } catch (eP2) {}
+                try { pushPayeCloud(true); } catch (eP2) {}
               }
               if (pushPayeCloud._t) {
                 clearTimeout(pushPayeCloud._t);
@@ -7101,6 +7231,7 @@ function payeObj(key) {
         _payeStopPoll();
         payePollTimer = setInterval(function () {
           if (document.hidden) return;
+          try { if (!_payeSuisLeader()) return; } catch (eLD) {}
 if (!firebaseDbP) return;
           /* Sonde LÉGÈRE (le coût est 1 ligne, pas le dossier entier) :
              elle reste à 6 s même quand le temps réel est actif, sinon
@@ -7115,9 +7246,13 @@ if (!firebaseDbP) return;
           try {
             var sbL = window.SB_CLIENT;
             if (sbL && sbL.from) {
+              /* Sonde en echec repetee (cloud 500) : on l'espace (1x/10) au lieu de
+                 marteler un endpoint en souffrance. */
+              if ((window._payeSondeEchecs || 0) > 3 && ((window._payePollTick || 0) % 10) !== 0) return;
               sbL.from("enterprises").select("updated_at").eq("id", uid).limit(1).then(function (res) {
                 try {
-                  if (res && res.error) return;
+                  if (res && res.error) { window._payeSondeEchecs = (window._payeSondeEchecs || 0) + 1; return; }
+                  window._payeSondeEchecs = 0;
                   var row = res && res.data && res.data[0];
                   if (!row) return;
                   var ts = String(row.updated_at || "");
@@ -7156,6 +7291,15 @@ window._payeVuTs = ts;
         var uid = getEnterpriseUid();
         if (!uid || !firebaseDbP) return;
         _payeStartPoll(uid);
+        /* Un seul chef de synchro par navigateur : les autres onglets (ex. l'iframe
+           Exploitation qui embarque cette page) poussent a la saisie mais ne
+           s'abonnent pas — sinon chaque onglet = 1 requete/s qui sature la base. */
+        if (!_payeSuisLeader()) {
+          firebaseDbP.collection("enterprises").doc(uid).get().then(function (docL) {
+            if (docL && docL.exists) { try { _payeApplyRemote(docL.data()); } catch (eN1) {} }
+          }).catch(function () {});
+          return;
+        }
         payeSnapshotUnsub = firebaseDbP
           .collection("enterprises")
           .doc(uid)
