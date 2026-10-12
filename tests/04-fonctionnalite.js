@@ -7577,6 +7577,23 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Bon de commande : les retours a la ligne de la designation sont gardes a l\u2019impression',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var r1 = nl2brH('PALETTES 180X140' + String.fromCharCode(10) + 'COMPOSITION: 9 lattes' + String.fromCharCode(10,10) + 'Pointes N8');
+      var okBr = r1.indexOf('<br>') !== -1 && r1.indexOf('COMPOSITION') !== -1;
+      var r2 = nl2brH('<script>' + String.fromCharCode(10) + 'x');
+      var okEsc = r2.indexOf('<script>') === -1 && r2.indexOf('&lt;') !== -1 && r2.indexOf('<br>') !== -1;
+      DB.set('mdb_bonsCommandeFournisseurs', [{ id: 'bc_t1', numero: 'BCP-T1', date: '2026-10-12', fournisseurId: 'f_x', objet: 'Bois', lignes: [{ designation: 'Ligne une' + String.fromCharCode(10) + 'Ligne deux', unite: 'PIECE', qte: 1, prixUnitaire: 100, montant: 100 }], totalHT: 100, totalTTC: 100 }]);
+      var d = buildBcFournisseurDoc('bc_t1');
+      var okDoc = d && d.body.indexOf('Ligne une<br>Ligne deux') !== -1;
+      (okBr && okEsc && okDoc)
+        ? 'OK : Entree = <br>, double Entree = <br><br>, HTML echappe'
+        : 'ECHEC br=' + okBr + ' esc=' + okEsc + ' doc=' + okDoc
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 
