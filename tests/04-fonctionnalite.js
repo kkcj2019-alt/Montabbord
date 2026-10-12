@@ -7709,6 +7709,53 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     attenduPrefixe: 'OK'
   });
   r.push({
+    nom: 'Bon de commande : le detail d\'un bon est genere sous la ligne (objet, titres, sous-lignes)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var bc = { id: 'bc1', numero: 'BC-001', objet: 'Reprise stock', reference: 'F-9', delaiLivraison: '15j',
+        lignes: [{ isTitle: true, titre: 'Lattes', sousLignes: [{ designation: 'Latte 9', unite: 'pcs', qte: 10, prixUnitaire: 100, montant: 1000 }] }] };
+      var h = bcfDetailRowHtml(bc);
+      (h.indexOf('id="bcfDetail_bc1"') !== -1 && h.indexOf('data-bcfdetail="bc1"') !== -1
+        && h.indexOf('display:none') !== -1 && h.indexOf('Objet : Reprise stock') !== -1
+        && h.indexOf('Lattes') !== -1 && h.indexOf('Latte 9') !== -1 && h.indexOf('Livraison : 15j') !== -1)
+        ? 'OK : ligne detail complete (cachee, objet, titre, sous-ligne, livraison)'
+        : 'ECHEC : ' + h.slice(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Bon de commande : le deroulage s\'ouvre au 1er clic et se REPLIE au 2e (fleche comprise)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var d = document.getElementById('bcfDetail_abc');
+      d.style.display = 'none'; d.setAttribute('data-open', '0');
+      var a = document.getElementById('bcfArrow_abc');
+      a.textContent = '\u25b8';
+      toggleBcfDetail('abc');
+      var ouvert = (d.style.display !== 'none' && d.getAttribute('data-open') === '1' && a.textContent === '\u25be');
+      toggleBcfDetail('abc');
+      var referme = (d.style.display === 'none' && d.getAttribute('data-open') === '0' && a.textContent === '\u25b8');
+      (ouvert && referme)
+        ? 'OK : ouvert au 1er clic, referme au 2e, fleche follow'
+        : 'ECHEC : ouvert=' + ouvert + ' referme=' + referme
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Bon de commande : la recherche porte aussi sur les designations des lignes',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = renderBonsCommandeFournisseurs.toString();
+      (/bcfLSearch/.test(src) && /data-bcfid/.test(src) && /toggleBcfDetail/.test(src))
+        ? 'OK : la liste indexe les designations et porte un deroulant par bon'
+        : 'ECHEC : renderBonsCommandeFournisseurs incomplet'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse transfert : la destination exclut la source active, pas ma caisse',
     app: 'index.html', store: storeRealiste,
     code: `
