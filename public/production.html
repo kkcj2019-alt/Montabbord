@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-180';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-182';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -11447,7 +11447,75 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
      l'applique au stock produit par produit, sous forme de lignes tracees
      (« Modification <ref> »). Ainsi une ligne AJOUTEE en modification arrive
      bien au stock, et une ligne RETIREE en sort. */
-  function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) {
+  /* Matiere premiere : le stock est cale sur le NUMERO DE COLIS (une ligne = un
+   colis). On raisonne donc colis par colis, comme _reporterEcartAchatConso
+   raisonne produit par produit pour les consommables :
+     - colis ajoute en modification  -> il entre au stock ;
+     - colis retire en modification  -> il en sort, SAUF s'il a deja ete
+       produit (colisSorties non vide) : on refuse alors plutot que d'effacer
+       un colis deja consomme ;
+     - colis modifie                 -> la ligne stock est corrigee sur place.
+   Sans cela une modification d'achat n'ajustait JAMAIS le stock : un achat
+   de 47 m3 pouvait rester invisible (le stock n'affichait que le 1er colis). */
+function _reporterEcartAchatRaw(anciennes, nouvelles, ref, date, fournisseur) {
+  function cleColis(it) { return String((it && it.colis_number) || '').trim(); }
+  function memeColis(l, k) { return String((l && (l.colis_number || l.code)) || '').trim() === k; }
+  var A = {}, N = {};
+  (anciennes || []).forEach(function(it) { var k = cleColis(it); if (k) A[k] = it; });
+  (nouvelles || []).forEach(function(it) { var k = cleColis(it); if (k) N[k] = it; });
+  var stock = getStockRaw();
+  var touches = 0, refuses = [];
+  Object.keys(N).forEach(function(k) {
+    if (A[k]) return;
+    var it = N[k];
+    stock.unshift({
+      id: Date.now() + Math.random(),
+      code: it.colis_number,
+      colis_number: it.colis_number,
+      designation: it.essence + ' (' + it.type + ')',
+      essence: it.essence,
+      type: it.type,
+      fournisseur: fournisseur || it.fournisseur || '',
+      longueur: it.length,
+      largeur: it.width,
+      epaisseur: it.thickness,
+      volume: it.volume,
+      quantite: it.quantity,
+      zone: it.zone,
+      created_at: date || today()
+    });
+    touches++;
+  });
+  Object.keys(A).forEach(function(k) {
+    var it = N[k];
+    if (it) {
+      var i = -1;
+      for (var j = 0; j < stock.length; j++) { if (memeColis(stock[j], k)) { i = j; break; } }
+      if (i !== -1) {
+        stock[i].designation = it.essence + ' (' + it.type + ')';
+        stock[i].essence = it.essence;
+        stock[i].type = it.type;
+        stock[i].longueur = it.length;
+        stock[i].largeur = it.width;
+        stock[i].epaisseur = it.thickness;
+        stock[i].volume = it.volume;
+        var q = parseFloat(it.quantity);
+        if (!isNaN(q)) stock[i].quantite = q;
+        stock[i].zone = it.zone;
+        touches++;
+      }
+      return;
+    }
+    if (colisSorties(k).length > 0) { refuses.push(k); return; }
+    for (var y = stock.length - 1; y >= 0; y--) {
+      if (memeColis(stock[y], k)) { stock.splice(y, 1); touches++; }
+    }
+  });
+  if (touches) setStockRaw(stock);
+  return { touches: touches, refuses: refuses };
+}
+
+function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) {
     function cle(it) { return String((it && (it.code || it.designation)) || '').trim().toUpperCase(); }
     function somme(lignes) {
       var m = {}, o = [];
@@ -19155,6 +19223,15 @@ function saveAchatByCategory(e, category) {
       });
     });
     setStockRaw(rawStock);
+  } else if (category === 'raw-materials' && existing) {
+    /* Modification d'un achat matiere : on reporte l'ecart sur le stock
+       colis par colis au lieu de ne rien faire du tout. */
+    try {
+      var _repRaw = _reporterEcartAchatRaw(_anciennesLignes, _tempAchatItems, ref, date, fournisseur);
+      if (_repRaw && _repRaw.refuses && _repRaw.refuses.length) {
+        toast('Colis deja produit, conserve au stock : ' + _repRaw.refuses.join(', '), 'error');
+      }
+    } catch(e) {}
   } else if (category === 'semi' && !existing) {
     var semiStock = getStockSemi();
     _tempAchatItems.forEach(function(it) {
@@ -19408,6 +19485,28 @@ function achatExtraireLignesBL(lines) {
   }
   return out;
 }
+/* PDF natif : toute la page arrive sur UNE seule ligne (items joints par espaces),
+   donc le parseur ligne-a-ligne ne voit rien. On re-decoupe le texte continu
+   devant chaque motif 'colis qte long larg ep cubage'. */
+function achatDecouperTexteContinu(full) {
+  var segs = [];
+  try {
+    var txt = String(full || '');
+    var re = /(?=\b\d{2,7}\s+\d{1,4}\s+\d{2,4}\s+\d{2,6}\s+\d{1,3}(?:[.,]\d+)?\s+\d{1,4}[.,]\d{1,3}\s)/g;
+    var pos = [], m;
+    while ((m = re.exec(txt)) !== null) { pos.push(m.index); if (pos.length > 500) break; }
+    for (var i = 0; i < pos.length; i++) segs.push(txt.slice(pos[i], pos[i + 1]).trim());
+  } catch (eD) {}
+  return segs;
+}
+/* Pipeline complet : lignes (OCR) + texte continu (PDF natif), deduplique par colis. */
+function achatLignesBLCompletes(lines, full) {
+  var segs = achatDecouperTexteContinu(full || (lines || []).join(' '));
+  var brut = achatExtraireLignesBL((lines || []).concat(segs));
+  var vu = {}, out = [];
+  for (var i = 0; i < brut.length; i++) { if (!vu[brut[i].colis_number]) { vu[brut[i].colis_number] = true; out.push(brut[i]); } }
+  return out;
+}
 function applyExtractedAchatData(text) {
   var lines = text.split(/\r?\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
   var full = lines.join(' ');
@@ -19552,7 +19651,7 @@ function applyExtractedAchatData(text) {
   try {
     var _catBL = window._newAchatCat || 'raw-materials';
     if (_catBL === 'raw-materials') {
-      var _lignesBL = achatExtraireLignesBL(lines);
+      var _lignesBL = achatLignesBLCompletes(lines, full);
       if (_lignesBL.length >= 2) {
         _tempAchatItems = (_tempAchatItems || []).filter(function (x) { return x && !x._auto; });
         for (var _li = 0; _li < _lignesBL.length; _li++) _tempAchatItems.push(_lignesBL[_li]);
@@ -19590,7 +19689,7 @@ function applyExtractedAchatData(text) {
       status.style.color = koF.length ? '#b45309' : '#166534';
       status.textContent = (koF.length ? '⚠ À compléter : ' + koF.join(', ') + ' — ' : '✅ ')
         + 'extrait : ' + okF.join(', ')
-        + (lines.length < 3 ? ' (texte très court : extraction peu fiable)' : '');
+        + (String(full || '').length < 120 ? ' (texte très court : extraction peu fiable)' : '');
     }
   }
 }

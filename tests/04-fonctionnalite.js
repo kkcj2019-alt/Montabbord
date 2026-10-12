@@ -3151,6 +3151,92 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Matiere premiere : un colis AJOUTE en modification d\'achat entre au stock (47 m3 invisibles)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockRaw = [{ id: 'rw1', code: 'C10', colis_number: 'C10', essence: 'DAB', type: 'DAB', quantite: 160, volume: 24, zone: 'A' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* BL cree avec 1 colis, puis modifie pour en ajouter un 2e : avant, le
+         2e colis n'arrivait jamais au stock (seul le 1er etait visible). */
+      var avant = [{ colis_number: 'C10', essence: 'DAB', type: 'DAB', volume: 24, quantity: 160, zone: 'A' }];
+      var apres = avant.concat([{ colis_number: 'C11', essence: 'DAB', type: 'DAB', volume: 23, quantity: 150, zone: 'A' }]);
+      _reporterEcartAchatRaw(avant, apres, 'BL-2810', '2026-09-30', 'TIJANI');
+      var st = getStockRaw();
+      var c11 = st.filter(function (x) { return x.colis_number === 'C11'; })[0] || {};
+      (st.length === 2 && c11.volume === 23 && c11.quantite === 150)
+        ? 'OK : le colis ajoute en modification entre au stock (C11, 23 m3 / 150)'
+        : 'ECHEC : stock=' + JSON.stringify(st)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Matiere premiere : un colis MODIFIE en modification est corrige sur place au stock',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockRaw = [{ id: 'rw1', code: 'C10', colis_number: 'C10', essence: 'DAB', type: 'DAB', quantite: 160, volume: 24, zone: 'A' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var avant = [{ colis_number: 'C10', essence: 'DAB', type: 'DAB', volume: 24, quantity: 160, zone: 'A' }];
+      var apres = [{ colis_number: 'C10', essence: 'Rouge', type: 'Rouge', volume: 26.5, quantity: 180, zone: 'B' }];
+      _reporterEcartAchatRaw(avant, apres, 'BL-2811', '2026-09-30', 'TIJANI');
+      var st = getStockRaw();
+      (st.length === 1 && st[0].volume === 26.5 && st[0].quantite === 180 && st[0].essence === 'Rouge' && st[0].zone === 'B')
+        ? 'OK : le colis modifie est corrige sur place (26.5 m3 / 180, Rouge, zone B, une seule ligne)'
+        : 'ECHEC : stock=' + JSON.stringify(st)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Matiere premiere : un colis RETIRE deja produit est refuse (il reste au stock)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockRaw = [
+        { id: 'rw1', code: 'C10', colis_number: 'C10', essence: 'DAB', quantite: 160, volume: 24 },
+        { id: 'rw2', code: 'C11', colis_number: 'C11', essence: 'DAB', quantite: 150, volume: 23 }
+      ];
+      p.productions = [{ id: 'pp1', numero: '2609001', date: '2026-09-01', statut: 'validated', sortie_bois: [{ code: 'C11', qte: 150, volume: 23 }], encours: [] }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* Retirer C11 alors qu'il a deja servi en production : effacer sa ligne
+         stock fausserait l'historique, on refuse et on le signale. */
+      var avant = [{ colis_number: 'C10', volume: 24, quantity: 160 }, { colis_number: 'C11', volume: 23, quantity: 150 }];
+      var apres = [{ colis_number: 'C10', volume: 24, quantity: 160 }];
+      var rep = _reporterEcartAchatRaw(avant, apres, 'BL-2812', '2026-09-30', 'TIJANI');
+      var st = getStockRaw();
+      (rep.refuses.length === 1 && rep.refuses[0] === 'C11' && st.length === 2)
+        ? 'OK : colis deja produit refuse (C11 signale) et conserve au stock'
+        : 'ECHEC : refuses=' + JSON.stringify(rep.refuses) + ' stock=' + JSON.stringify(st)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Matiere premiere : une modification d\'achat DECLENCHE bien le report sur le stock',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Garde-fou de cablage : la branche de modification doit exister dans
+         saveAchatByCategory, sinon le helper n'est jamais appele. */
+      var src = saveAchatByCategory.toString();
+      (/raw-materials' && existing/.test(src) && /_reporterEcartAchatRaw/.test(src))
+        ? 'OK : saveAchatByCategory reporte lecart matiere en modification'
+        : 'ECHEC : branche de modification absente de saveAchatByCategory'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Tableau de bord : la carte MARGES PAR ARTICLE a disparu',
     app: 'production.html', store: storeRealiste,
     code: `
