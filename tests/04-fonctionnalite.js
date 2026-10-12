@@ -912,6 +912,86 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Inventaire : l inventaire de septembre exclut les lignes d octobre (achat SMI)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockRaw([
+        { id:'s1', code:'SEPT', colis_number:'SEPT', quantite:10, volume:1, created_at:'2026-09-20' },
+        { id:'s2', code:'OCT', colis_number:'OCT', quantite:26, volume:2.243, created_at:'2026-10-08' },
+        { id:'s3', code:'NODATE', colis_number:'NODATE', quantite:5, volume:0.5 }
+      ]);
+      var items = calcInventoryItems('2026-09');
+      var has = function(c){ for (var i = 0; i < items.length; i++) if (items[i] && items[i].code === c) return true; return false; };
+      (!has('OCT') && has('SEPT') && has('NODATE'))
+        ? 'OK : septembre + indatable gardes, octobre exclu'
+        : 'ECHEC : OCT=' + has('OCT') + ' SEPT=' + has('SEPT') + ' NODATE=' + has('NODATE')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock BL : l onglet suit le mois global (BL d octobre cache en septembre)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._globalMonth = '2026-09';
+      var dbs = getDB();
+      dbs.achats = [
+        { id:'a1', category:'raw-materials', date:'2026-09-05', reference:'BL-SEPT', fournisseur:'X',
+          items:[{ colis_number:'C1', quantity:10, volume:1, essence:'K', type:'B', length:100, width:10, thickness:2 }] },
+        { id:'a2', category:'raw-materials', date:'2026-10-08', reference:'BL-000131', fournisseur:'SMI',
+          items:[{ colis_number:'C2', quantity:26, volume:2.243, essence:'KAP', type:'Blanc', length:250, width:34, thickness:10 }] }
+      ];
+      localStorage.setItem('mdb_production', JSON.stringify(dbs));
+      setStockRaw([
+        { id:'s1', code:'C1', colis_number:'C1', quantite:10, volume:1, created_at:'2026-09-05' },
+        { id:'s2', code:'C2', colis_number:'C2', quantite:26, volume:2.243, created_at:'2026-10-08' }
+      ]);
+      var h = renderStockBLTab();
+      (h.indexOf('BL-SEPT') !== -1 && h.indexOf('BL-000131') === -1)
+        ? 'OK : BL septembre visible, BL octobre masque'
+        : 'ECHEC : SEPT=' + (h.indexOf('BL-SEPT') !== -1) + ' OCT=' + (h.indexOf('BL-000131') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : l agregat exclut les lignes posterieures au mois (septembre)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [{ code:'C-SEMI', designation:'Semi test', type:'LATTE', length:100, width:10, thickness:2 }]);
+      setStockSemi([
+        { id:1, code:'C-SEMI', quantite:10, created_at:'2026-09-10' },
+        { id:2, code:'C-SEMI', quantite:7, created_at:'2026-10-05' }
+      ]);
+      var agg = semiAggregate('2026-09');
+      var q = null;
+      for (var i = 0; i < agg.length; i++) if (agg[i] && agg[i].code === 'C-SEMI') q = agg[i].quantite;
+      (q === 10) ? 'OK : 10 en septembre (les 7 d octobre exclus)'
+        : 'ECHEC qte=' + q
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : la date au jour commande (30-10 inventorie jusqu au 30-10)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockRaw([
+        { id:'s1', code:'AVANT', colis_number:'AVANT', quantite:10, volume:1, created_at:'2026-10-10' },
+        { id:'s2', code:'APRES', colis_number:'APRES', quantite:26, volume:2.243, created_at:'2026-10-20' },
+        { id:'s3', code:'SEPT', colis_number:'SEPT', quantite:5, volume:0.5, created_at:'2026-09-25' }
+      ]);
+      var items = calcInventoryItems('2026-10', '2026-10-15');
+      var has = function(c){ for (var i = 0; i < items.length; i++) if (items[i] && items[i].code === c) return true; return false; };
+      var lbl = jourLabel('2026-10-30');
+      (has('AVANT') && !has('APRES') && has('SEPT') && lbl === '30 Octobre 2026')
+        ? 'OK : avant+septembre gardes, apres-15 exclu, libelle jour'
+        : 'ECHEC : AVANT=' + has('AVANT') + ' APRES=' + has('APRES') + ' SEPT=' + has('SEPT') + ' lbl=' + lbl
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',

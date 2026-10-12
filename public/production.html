@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-187';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-188';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -511,6 +511,13 @@ function monthLabel(ym) {
   var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
   var mIdx = parseInt((ym || '').slice(5, 7), 10) - 1;
   return mIdx >= 0 ? _mn[mIdx] + ' ' + (ym || '').slice(0, 4) : ym || '';
+}
+/* Libellé jour : '2026-10-30' -> '30 Octobre 2026'. C'est la DATE choisie
+   (au jour près) qui commande les données inventoriées. */
+function jourLabel(j) {
+  var d = String(j || '').match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!d) return monthLabel(String(j || '').slice(0, 7));
+  return parseInt(d[3], 10) + ' ' + monthLabel(d[1] + '-' + d[2]);
 }
 function fmt(n) { return new Intl.NumberFormat('fr-FR').format(Math.floor(n || 0)); }
 function fmtF(n) { return fmt(n) + ' F'; }
@@ -10230,7 +10237,7 @@ function render_stock_finished() { syncCatalogueToStock(); return renderStockFic
 function render_stock_semi() {
   syncCatalogueToStock();
   var etat = getSection('stockSemiEtat', 'tout');
-  var list = semiAggregate().filter(function (e) {
+  var list = semiAggregate(getGlobalMonth()).filter(function (e) {
     return etat === 'tout' ? true : (parseFloat(e.quantite) || 0) > 0;
   });
   var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
@@ -10571,7 +10578,15 @@ function renderStockBLTab() {
   var vue = getSection('stockBLVue', 'actifs');
   if (vue !== 'actifs' && vue !== 'termines') vue = 'actifs';
   var fourFilter = getSection('stockBLFour', '');
-  var achats = getAchats().filter(function(a) { return (a.category || a.type) === 'raw-materials'; });
+  var _gmBL = '';
+  try { _gmBL = getGlobalMonth() || ''; } catch (eGM) {}
+  var achats = getAchats().filter(function(a) {
+    if ((a.category || a.type) !== 'raw-materials') return false;
+    /* Mois sélectionné (ex : inventaire de septembre) : on ne voit pas les
+       BL postérieurs (ex : l'achat SMI du 08-10). */
+    if (_gmBL && String(a.date || '').slice(0, 7) > _gmBL) return false;
+    return true;
+  });
   var stock = getStockRaw();
   var fours = {};
   achats.forEach(function(a) { if (a.fournisseur) fours[a.fournisseur] = true; });
@@ -10787,7 +10802,7 @@ function cleanOrphanMovements() {
    nomenclature, et non les seules lignes de stock (qui n'existent que si
    on en a produit). « Tout (y compris 0) » affiche donc tous les
    composants, avec 0 pour ceux sans stock. */
-function semiAggregate() {
+function semiAggregate(moisMax) {
   var map = {}, ordre = [];
   defCatalog().forEach(function (c) {
     var t = String(c.type || '').toUpperCase();
@@ -10801,6 +10816,7 @@ function semiAggregate() {
   });
   getStockSemi().forEach(function (s) {
     if (!s) return;
+    if (moisMax && !stockVisibleMois(moisMax, s)) return;
     var key = String(s.code || '').trim().toUpperCase();
     if (!key && s.article_id) {
       var a = getArticles().find(function (x) { return x.id === s.article_id; }) || {};
@@ -11078,7 +11094,7 @@ function render_stock_raw() {
 
 
   if (tab === 'semi') {
-    var semiL = semiAggregate().filter(function (e) { return etatOk(e.quantite); });
+    var semiL = semiAggregate(getGlobalMonth()).filter(function (e) { return etatOk(e.quantite); });
     var totSQ = 0, totSV = 0;
     semiL.forEach(function (e) { totSQ += parseFloat(e.quantite) || 0; totSV += parseFloat(e.volumeTotal) || 0; });
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
@@ -11106,6 +11122,9 @@ function render_stock_raw() {
     var o = mpOrigin(s);
     if (tab === 'bl' && o !== 'BL') return false;
     if (tab === 'spe' && o !== 'SPECIFIC') return false;
+    /* Mois sélectionné : les colis entrés après (ex : octobre pour un
+       inventaire de septembre) ne s'affichent pas. */
+    try { if (!stockVisibleMois(getGlobalMonth(), s)) return false; } catch (eGM2) {}
     return etatOk(s.quantite);
   });
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
@@ -13081,9 +13100,11 @@ function launchInventory() {
   /* Le catalogue = les produits finis : s'assurer que chaque article a son entrée stock avant de lister */
   try { if (typeof syncCatalogueToStock === 'function') syncCatalogueToStock(); } catch (e) {}
   var dateEl = document.getElementById('inv_date');
-  var month = (dateEl && dateEl.value) ? dateEl.value.slice(0, 7) : thisMonth();
+  var dateJour = (dateEl && dateEl.value) ? String(dateEl.value).slice(0, 10) : today();
+  var month = dateJour.slice(0, 7);
   _invMonthCache = month;
-  var items = calcInventoryItems(month);
+  window._invDateCache = dateJour;
+  var items = calcInventoryItems(month, dateJour);
   var target = document.getElementById('invContent');
   if (!target) return;
 
@@ -13115,7 +13136,7 @@ function launchInventory() {
 
   var h = '<div class="card">';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem">';
-  h += '<h3 style="margin:0">Stock théorique au 31 ' + monthLabel(month) + ' — Saisissez le stock réel</h3>';
+  h += '<h3 style="margin:0">Stock théorique au ' + jourLabel(dateJour) + ' — Saisissez le stock réel</h3>';
   h += '<div style="display:flex;gap:.5rem"><button class="btn" onclick="printInventory()" title="Imprimer l\u2019inventaire en cours">🖨️ Imprimer</button><button class="btn btn-accent" onclick="saveInventory(\'' + month + '\')">✅ Enregistrer</button></div>';
   h += '</div>';
   h += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.6rem">Le stock réel saisi deviendra le stock initial du mois suivant.</div>';
@@ -13184,14 +13205,38 @@ function launchInventory() {
   calcInvEcart();
 }
 
-function calcInventoryItems(month) {
+/* Une ligne de stock est-elle visible pour un mois donné ? Oui si elle a été
+   créée au plus tard ce mois-là (ou si elle est indatable : on la garde).
+   Sans cela, l'inventaire de septembre listait aussi les achats d'octobre. */
+function stockVisibleMois(mois, s) {
+  if (!mois) return true;
+  var c = String((s && (s.created_at || s.date)) || '');
+  var m = c.match(/(\d{4})-(\d{2})/);
+  if (!m) return true;
+  return (m[1] + '-' + m[2]) <= mois;
+}
+
+function calcInventoryItems(month, dateMax) {
   var items = [];
   /* Résout l'article catalogue lié (les entrées stock ne portent que article_id) */
   function invArt(s) {
     if (!s || !s.article_id) return {};
     try { return getArticles().find(function(a) { return a.id === s.article_id; }) || {}; } catch (e) { return {}; }
   }
+  /* Visible pour l'inventaire : créée au plus tard le mois (et, si une date
+     précise est donnée, au plus tard ce jour-là : taper 30-10-26 inventorie
+     les données jusqu'au 30-10-2026). */
+  function visible(s) {
+    if (!stockVisibleMois(month, s)) return false;
+    if (dateMax) {
+      var c = String((s && (s.created_at || s.date)) || '');
+      var d = c.match(/(\d{4})-(\d{2})-(\d{2})/);
+      if (d && (d[1] + '-' + d[2] + '-' + d[3]) > dateMax) return false;
+    }
+    return true;
+  }
   (getStockRaw() || []).forEach(function(s) {
+    if (!visible(s)) return;
     var src = mpOrigin(s) || 'BL';
     var dims = '';
     var vol = 0;
@@ -13202,6 +13247,7 @@ function calcInventoryItems(month) {
     items.push({ code: s.code || s.colis_number || '-', nom: s.essence || s.designation || s.name || '-', categorie: 'MP - ' + src, source: src, emplacement: s.emplacement || s.origin || '', dimensions: dims, volume: vol, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || s.colis_number, store: 'stockRaw', storeIdx: items.length });
   });
   (getStockSemi() || []).forEach(function(s) {
+    if (!visible(s)) return;
     var _a = invArt(s);
     var dims = '';
     var vol = 0;
@@ -13213,10 +13259,12 @@ function calcInventoryItems(month) {
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Semi-fini', source: 'Semi-fini', emplacement: '', dimensions: dims, volume: vol, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockSemi', storeIdx: items.length });
   });
   (getStockPalettes() || []).forEach(function(s) {
+    if (!visible(s)) return;
     var _a = invArt(s);
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Palette', source: 'Palette', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockPalettes', storeIdx: items.length });
   });
   (getStockFinished() || []).forEach(function(s) {
+    if (!visible(s)) return;
     var _a = invArt(s);
     var _dims = s.dimensions || _a.dimensions || '';
     var _l = parseFloat(s.length) || parseFloat(_a.length) || 0;
@@ -13226,14 +13274,17 @@ function calcInventoryItems(month) {
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Produit fini', source: 'Produit fini', emplacement: s.emplacement || '', dimensions: _dims, volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockFinished', storeIdx: items.length });
   });
   (getStockMerch() || []).forEach(function(s) {
+    if (!visible(s)) return;
     var _a = invArt(s);
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Marchandise', source: 'Marchandise', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockMerch', storeIdx: items.length });
   });
   (getStockConsum() || []).forEach(function(s) {
+    if (!visible(s)) return;
     var _a = invArt(s);
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.nom_complet || s.designation || _a.designation || '-', type: s.ctype || s.type || '', categorie: 'Consommable', source: 'Consommable', emplacement: s.emplacement || s.type || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockConsum', storeIdx: items.length });
   });
   (getEpiItems() || []).forEach(function(s) {
+    if (!visible(s)) return;
     items.push({ code: s.code || '-', nom: s.designation || '-', categorie: 'EPI', source: 'EPI', emplacement: s.categorie || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite_stock) || 0, real_qte: parseFloat(s.quantite_stock) || 0, ref: s.code, store: 'epiItems', storeIdx: items.length });
   });
   /* Consommables : UNE ligne par produit (code), pas une par fiche. Les fiches
@@ -13465,9 +13516,11 @@ function deleteInventory(id) {
 
 function printInventory() {
   var dateEl = document.getElementById('inv_date');
-  var month = (dateEl && dateEl.value) ? dateEl.value.slice(0, 7) : (_invMonthCache || thisMonth());
+  var dateJ = (dateEl && dateEl.value) ? String(dateEl.value).slice(0, 10) : (_invMonthCache || thisMonth());
+  var month = dateJ.slice(0, 7);
   _invMonthCache = month;
-  var items = window._invItems || calcInventoryItems(month);
+  window._invDateCache = dateJ;
+  var items = window._invItems || calcInventoryItems(month, dateJ);
   var supervisor = (document.getElementById('inv_supervisor') || {}).value || '';
   var executants = (document.getElementById('inv_executants') || {}).value || '';
   var heureDebut = (document.getElementById('inv_heure_debut') || {}).value || '';
@@ -13475,9 +13528,9 @@ function printInventory() {
   var typeLabel = '';
   var selType = document.getElementById('inv_type');
   if (selType) typeLabel = selType.options[selType.selectedIndex].text;
-  var html = '<html><head><title>Inventaire ' + monthLabel(month) + '</title>';
+  var html = '<html><head><title>Inventaire ' + jourLabel(dateJ) + '</title>';
   html += '<style>body{font-family:Arial;font-size:9pt}table{width:100%;border-collapse:collapse}th,td{border:1px solid #94a3b8;padding:4px 6px}th{background:#f1f5f9;font-weight:700}td{text-align:center}.total{font-weight:700;background:#e2e8f0}h2{text-align:center}h3{margin-top:1rem}</style></head><body>';
-  html += '<h2>INVENTAIRE AU 31 ' + monthLabel(month).toUpperCase() + '</h2>';
+  html += '<h2>INVENTAIRE AU ' + jourLabel(dateJ).toUpperCase() + '</h2>';
   html += '<p><strong>Date :</strong> ' + new Date().toLocaleDateString('fr-FR') + '</p>';
   html += '<p><strong>Type :</strong> ' + escH(typeLabel) + '</p>';
   if (supervisor) html += '<p><strong>Superviseur :</strong> ' + escH(supervisor) + '</p>';
