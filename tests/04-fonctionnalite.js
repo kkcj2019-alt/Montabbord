@@ -5731,6 +5731,20 @@ r.push({
   });
 
   r.push({
+    nom: 'Montage : bouton Defaut vide l ordre manuel memorise',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      ptMontSetOrdre(['c', 'a']);
+      var avant = ptMontOrdre().join(',');
+      ptMontOrdreDefautGrid();
+      var apres = ptMontOrdre().length;
+      (avant === 'c,a' && apres === 0) ? 'OK : ordre pose puis efface par Defaut'
+         : 'ECHEC avant=' + avant + ' apres=' + apres
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Montage : permutation de deux travailleurs dans l ordre manuel',
     app: 'paye.html', store: storeRealiste,
     code: `
