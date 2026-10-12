@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-188';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-189';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -11475,6 +11475,32 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       }
       if (a.emplacement === '-' && n.emplacement && n.emplacement !== '-') a.emplacement = n.emplacement;
     });
+    /* Catalogue : un consommable defini mais jamais achete doit quand meme
+       apparaitre a 0 (sinon il disparait des fiches et de l'inventaire). */
+    function _ajouteCat(code, des, type) {
+      var k = String(code || '').trim().toUpperCase();
+      if (!k || map[k]) return;
+      map[k] = { key: k, code: code, des: des || code, type: type || 'DIVERS', emplacement: '',
+                 cond: 0, unites: 0, paquets: 0, _cartonsSaisis: 0, _nbSaisis: 0, nbFiches: 0, ids: [] };
+      ordre.push(k);
+    }
+    try {
+      getDefinitions().forEach(function(c) {
+        if (!c || !c.code) return;
+        var t = String(c.type || '').toUpperCase();
+        if (t === 'LATTE' || t === 'PLOT' || t === 'CP' || t === 'SEMI') return;
+        _ajouteCat(c.code, c.designation || c.code, t === 'POINTE' ? 'POINTE' : 'DIVERS');
+      });
+    } catch (eD) {}
+    try {
+      getArticles().forEach(function(a) {
+        if (!a || !a.code) return;
+        var cat = String(a.categorie || '').toLowerCase();
+        if (!(cat === 'consum' || cat === 'consommable' || cat === 'consommables'
+              || String(a.type || '').toUpperCase() === 'POINTE')) return;
+        _ajouteCat(a.code, a.designation || a.code, 'POINTE');
+      });
+    } catch (eA) {}
     return ordre.map(function (k) {
       var a = map[k];
       /* On additionne les cartons saisis ; sinon on les deduit UNE seule fois
@@ -13307,10 +13333,56 @@ function calcInventoryItems(month, dateMax) {
     var _a = invArt(s);
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Marchandise', source: 'Marchandise', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockMerch', storeIdx: items.length });
   });
+  /* Consommables : on part du CATALOGUE, pas seulement des lignes de stock.
+     Deux manques corrigés ici :
+       - un produit jamais acheté n'a AUCUNE ligne de stock : il disparaissait
+         de l'inventaire alors que « Tous (y compris stock nul) » doit le lister ;
+       - une ligne créée APRÈS la date d'inventaire (ex : les lignes à zéro
+         semées le jour de l'ouverture de l'app) ne doit plus faire disparaître
+         le produit : il reste listé à 0, puisque son stock était 0 ce jour-là.
+     Les quantités, elles, ne comptent que les lignes visibles (date respectée). */
+  var _consoVus = {}, _consoOrdre = [];
+  function _consoAjoute(code, nom, type) {
+    var k = String(code || '').trim().toUpperCase();
+    if (!k) return null;
+    if (!_consoVus[k]) {
+      _consoVus[k] = { code: code, nom: nom || code, type: type || '', emplacement: '', theo: 0 };
+      _consoOrdre.push(k);
+    } else if (nom && (!_consoVus[k].nom || _consoVus[k].nom === _consoVus[k].code)) _consoVus[k].nom = nom;
+    return _consoVus[k];
+  }
   (getStockConsum() || []).forEach(function(s) {
-    if (!visible(s)) return;
     var _a = invArt(s);
-    items.push({ code: s.code || _a.code || '-', nom: s.nom || s.nom_complet || s.designation || _a.designation || '-', type: s.ctype || s.type || '', categorie: 'Consommable', source: 'Consommable', emplacement: s.emplacement || s.type || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockConsum', storeIdx: items.length });
+    var _code = s.code || _a.code;
+    var _g = _consoAjoute(_code, s.nom || s.nom_complet || s.designation || _a.designation || '-', s.ctype || s.type || '');
+    if (_g && !_g.emplacement && (s.emplacement || s.zone)) _g.emplacement = s.emplacement || s.zone;
+    if (!visible(s)) return;
+    if (!_g) return;
+    _g.theo += parseFloat(s.quantite_stock) || parseFloat(s.quantite) || 0;
+  });
+  /* Catalogue : definitions (Pointes/Divers) + articles categorie 'consum'. */
+  try {
+    getDefinitions().forEach(function(c) {
+      if (!c || !c.code) return;
+      var t = String(c.type || '').toUpperCase();
+      if (t === 'LATTE' || t === 'PLOT' || t === 'CP' || t === 'SEMI') return;
+      _consoAjoute(c.code, c.designation || c.code, t === 'POINTE' ? 'POINTE' : 'DIVERS');
+    });
+  } catch (eDef) {}
+  try {
+    getArticles().forEach(function(a) {
+      if (!a || !a.code) return;
+      var cat = String(a.categorie || '').toLowerCase();
+      var estConso = (cat === 'consum' || cat === 'consommable' || cat === 'consommables'
+        || String(a.type || '').toUpperCase() === 'POINTE');
+      if (!estConso) return;
+      _consoAjoute(a.code, a.designation || a.code, 'POINTE');
+    });
+  } catch (eArt) {}
+  _consoOrdre.forEach(function(k) {
+    var g = _consoVus[k];
+    if (!g || String(g.code).toUpperCase() === '-') return;
+    items.push({ code: g.code, nom: g.nom, type: g.type || '', categorie: 'Consommable', source: 'Consommable', emplacement: g.emplacement || '', dimensions: '', volume: 0, theo_qte: g.theo || 0, real_qte: g.theo || 0, ref: g.code, store: 'stockConsum', storeIdx: items.length });
   });
   (getEpiItems() || []).forEach(function(s) {
     if (!visible(s)) return;

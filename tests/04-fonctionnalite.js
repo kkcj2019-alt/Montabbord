@@ -1028,6 +1028,107 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Inventaire consommables : les produits catalogue sortent meme a zero (jamais achetes)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockConsum([{ id:'sc1', code:'P5', designation:'POINTE5', ctype:'POINTE', cond:200, quantite:0, created_at:'2026-10-12' }]);
+      setDefinitions([{ id:'d1', code:'P5', designation:'POINTE5', type:'POINTE', qty_per_packet:200 },
+                      { id:'d2', code:'ENCRE', designation:'ENCRE', type:'POINTE' },
+                      { id:'d3', code:'LAT1', designation:'Latte', type:'LATTE' }]);
+      var items = calcInventoryItems('2026-09', '2026-09-30');
+      var conso = [], latte = 0;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] && items[i].store === 'stockConsum') conso.push(items[i].code);
+        if (items[i] && items[i].code === 'LAT1') latte++;
+      }
+      (conso.indexOf('P5') !== -1 && conso.indexOf('ENCRE') !== -1 && latte === 0)
+        ? 'OK : P5 (ligne d octobre) a 0 + ENCRE jamais achete, pas de lattes'
+        : 'ECHEC : conso=' + conso.join('/') + ' latte=' + latte
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche consommables : le catalogue liste les produits jamais achetes a zero',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockConsum([{ id:'sc1', code:'P5', designation:'POINTE5', ctype:'POINTE', cond:200, quantite:400, created_at:'2026-09-10' }]);
+      setDefinitions([{ id:'d1', code:'P5', designation:'POINTE5', type:'POINTE', qty_per_packet:200 },
+                      { id:'d2', code:'COLLE', designation:'COLLE A BOIS', type:'DIVERS' }]);
+      var agg = consoAggregate();
+      var p5 = null, colle = null;
+      for (var i = 0; i < agg.length; i++) {
+        if (agg[i] && agg[i].code === 'P5') p5 = agg[i];
+        if (agg[i] && agg[i].code === 'COLLE') colle = agg[i];
+      }
+      (p5 && p5.unites === 400 && colle && colle.unites === 0)
+        ? 'OK : P5 = 400, COLLE listee a 0'
+        : 'ECHEC : p5=' + (p5 ? p5.unites : 'absent') + ' colle=' + (colle ? colle.unites : 'absent')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Soldes : une piece SOLDE_INDEMNITE a identifiant numerique reste modifiable',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      currentUser = { id:'u1', login:'admin', nom:'Admin', isAdmin:true, caisseCentralisee:true };
+      var emps = getEmployes();
+      DB.set('mdb_employes', emps);
+      var ops = getOperationsCaisse();
+      /* id numerique : c'est le cas des pieces creees avant DB.genId() */
+      ops.push({ id: 1762200000000, numeroPiece:'KICJ261000037', date:'2026-10-02', heure:'09:00',
+        codeId:'cid_ind', code:'SOLDE_INDEMNITE', libelle:"Solde indemnité : GAMIE", periode:'2026-09',
+        montant:5472, sens:'sortie', moyenPaiement:'Espèce', beneficiaireType:'employe',
+        beneficiaireId: emps[0] && emps[0].id, beneficiaireNom:(emps[0] && emps[0].nom) || 'X',
+        remettant:'Kanga', caisseId:'c1', apType:'solde', apMoisDeduction:'2026-09', collective:false });
+      DB.set('mdb_operationsCaisse', ops);
+      /* Le clic passe par le DOM : l'id arrive en chaine. */
+      openSoldeGroupeEdit('1762200000000');
+      var mb = document.getElementById('formModalBody');
+      var h = mb ? (mb.innerHTML || '') : '';
+      var trouvee = h.indexOf('data-opid="1762200000000"') !== -1;
+      /* Le harnais ne fait pas l'analyse du HTML : on simule la ligne. */
+      function fakeInput(v, disp) {
+        return { value: v, style: { display: disp || '' }, attrs: {},
+                 getAttribute: function (k) { return this.attrs[k] === undefined ? null : this.attrs[k]; },
+                 setAttribute: function (k, val) { this.attrs[k] = val; } };
+      }
+      var row = {
+        _m: fakeInput('7000'),
+        getAttribute: function (k) { return k === 'data-opid' ? '1762200000000' : null; },
+        querySelector: function (sel) {
+          if (sel === '.sdg-cb') return { checked: true };
+          if (sel === '.sdg-employe') return { value: emps[0] && emps[0].id };
+          if (sel === '.sdg-montant') return this._m;
+          if (sel === '.sdg-date') return fakeInput('2026-10-02');
+          if (sel === '.sdg-mois') return fakeInput('2026-09');
+          if (sel === '.sdg-frais') return fakeInput('0');
+          if (sel === '.sdg-remettant') return fakeInput('Kanga');
+          if (sel === '.sdg-moyen') return fakeInput('Espèce');
+          if (sel === '.sdg-numtx') return fakeInput('', 'none');
+          if (sel === '.sdg-obs') return fakeInput('');
+          if (sel === '.sdg-employe-input') return { value: (emps[0] && emps[0].nom) || 'X' };
+          return null;
+        }
+      };
+      var origQSA = document.querySelectorAll;
+      document.querySelectorAll = function (sel) {
+        if (sel === '#sdgTableBody tr') return [row];
+        return origQSA ? origQSA.call(document, sel) : [];
+      };
+      try { saveSoldeGroupeEdits(); } catch (e) { trouvee = 'ERR:' + (e && e.message); }
+      document.querySelectorAll = origQSA;
+      var ops2 = getOperationsCaisse(), maj = null;
+      for (var j = 0; j < ops2.length; j++) if (String(ops2[j].id) === '1762200000000') maj = ops2[j];
+      (trouvee === true && maj && maj.montant === 7000)
+        ? 'OK : modal ouverte sur id numerique et montant enregistre (7000)'
+        : 'ECHEC trouvee=' + trouvee + ' maj=' + (maj ? maj.montant : 'absent')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
@@ -2164,9 +2265,12 @@ attenduPrefixe: 'OK'
       var items = calcInventoryItems('2026-09');
       var conso = items.filter(function(it) { return it && it.store === 'stockConsum'; });
       var p5 = conso.filter(function(it) { return String(it.code || '').toUpperCase() === 'P5'; });
-      (conso.length === 2 && p5.length === 1 && parseFloat(p5[0].theo_qte) === 150)
+      var p6 = conso.filter(function(it) { return String(it.code || '').toUpperCase() === 'P6'; });
+      /* Le catalogue ajoute aussi ses produits a 0 : on verifie donc P5/P6,
+         pas le nombre total de lignes. */
+      (p5.length === 1 && parseFloat(p5[0].theo_qte) === 150 && p6.length === 1)
         ? 'OK : P5 une fois (theo 150), P6 une fois'
-        : 'ECHEC conso=' + conso.length + ' p5=' + p5.length + ' theo=' + (p5[0] && p5[0].theo_qte)
+        : 'ECHEC conso=' + conso.length + ' p5=' + p5.length + ' theo=' + (p5[0] && p5[0].theo_qte) + ' p6=' + p6.length
     `,
     attenduPrefixe: 'OK'
   });
@@ -7808,9 +7912,14 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       var agg = consoAggregate();
       var toutZero = agg.every(function (a) { return a.unites === 0 && a.paquets === 0 && a.cartons === 0; });
       var ajust = getStockConsum().filter(function (s) { return s && s._ajustInv; });
-      (toutZero && ajust.length === 3 && agg.length === 4)
-        ? 'OK : 3 ajustements, 4 produits a 0/0/0 (dont le cas 3000/180 sans -1 paquet)'
-        : 'ECHEC zero=' + toutZero + ' ajust=' + ajust.length + ' agg=' + JSON.stringify(agg.map(function (a) { return [a.code, a.unites, a.paquets, a.cartons]; }))
+      /* Les 4 lignes de stock doivent rester listees a 0/0/0. Le catalogue
+         ajoute d'autres produits a 0 : c'est voulu (produits jamais achetes). */
+      var vus = {};
+      agg.forEach(function (a) { vus[a.code] = true; });
+      var quatre = ['P5', 'P7', 'COLLE', 'VIDE'].every(function (c) { return !!vus[c]; });
+      (toutZero && ajust.length === 3 && quatre)
+        ? 'OK : 3 ajustements, P5/P7/COLLE/VIDE a 0/0/0 (3000/180 sans -1 paquet), produits catalogue aussi'
+        : 'ECHEC zero=' + toutZero + ' ajust=' + ajust.length + ' quatre=' + quatre + ' agg=' + JSON.stringify(agg.map(function (a) { return [a.code, a.unites, a.paquets, a.cartons]; }))
     `,
     attenduPrefixe: 'OK'
   });
