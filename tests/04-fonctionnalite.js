@@ -7484,6 +7484,80 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Synchro exploitation : un achat distant arrive meme si le poste est sale',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var A = { id: 'a1', code: 'X', montant: 100 };
+      var B = { id: 'b1', code: 'Y', montant: 200 };
+      localStorage.setItem('mdb_production', JSON.stringify({ __prodUpdatedAt: 100, achats: [A] }));
+      prodBaseHashMaj({ achats: [A] });
+      _prodDirty = true;
+      var r = prodApplyCloud({ __prodUpdatedAt: 200, achats: [A, B] }, true);
+      var apres = getAchats();
+      _prodDirty = false; _prodDirtySections = {};
+      (r === true && apres.length === 2)
+        ? 'OK : B ajoute sans ecraser A, poste sale quand meme a jour'
+        : 'ECHEC r=' + r + ' nb=' + apres.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro exploitation : une suppression locale n\u2019est jamais ressuscitee',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var A = { id: 'a1', code: 'X', montant: 100 };
+      var B = { id: 'b1', code: 'Y', montant: 200 };
+      localStorage.setItem('mdb_production', JSON.stringify({ __prodUpdatedAt: 100, achats: [A] }));
+      prodBaseHashMaj({ achats: [A, B] });
+      _prodDirty = true;
+      var r = prodApplyCloud({ __prodUpdatedAt: 200, achats: [A, B] }, true);
+      var apres = getAchats();
+      _prodDirty = false; _prodDirtySections = {};
+      (apres.length === 1 && apres[0].id === 'a1')
+        ? 'OK : B supprime localement ne revient pas du cloud'
+        : 'ECHEC r=' + r + ' nb=' + apres.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro exploitation : une suppression distante retire l\u2019element intact',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var A = { id: 'a1', code: 'X', montant: 100 };
+      var B = { id: 'b1', code: 'Y', montant: 200 };
+      localStorage.setItem('mdb_production', JSON.stringify({ __prodUpdatedAt: 100, achats: [A, B] }));
+      prodBaseHashMaj({ achats: [A, B] });
+      var r = prodApplyCloud({ __prodUpdatedAt: 200, achats: [A] }, true);
+      var apres = getAchats();
+      _prodDirty = false; _prodDirtySections = {};
+      (r === true && apres.length === 1 && apres[0].id === 'a1')
+        ? 'OK : B supprime ailleurs disparait ici'
+        : 'ECHEC r=' + r + ' nb=' + apres.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro exploitation : en conflit, la saisie locale en attente gagne',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var Aloc = { id: 'a1', code: 'X', montant: 150 };
+      var Abase = { id: 'a1', code: 'X', montant: 100 };
+      var Adist = { id: 'a1', code: 'X', montant: 999 };
+      localStorage.setItem('mdb_production', JSON.stringify({ __prodUpdatedAt: 100, achats: [Aloc] }));
+      prodBaseHashMaj({ achats: [Abase] });
+      var r = prodApplyCloud({ __prodUpdatedAt: 200, achats: [Adist] }, true);
+      var apres = getAchats();
+      _prodDirty = false; _prodDirtySections = {};
+      (apres.length === 1 && apres[0].montant === 150)
+        ? 'OK : 150 local conserve face au 999 distant (sera pousse)'
+        : 'ECHEC montant=' + (apres[0] && apres[0].montant)
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 
