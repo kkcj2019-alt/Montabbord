@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-11-258";
+      window.__APP_VERSION = "2026-10-11-259";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -16112,6 +16112,13 @@ html +=
             ')" onkeydown="ptRapideEnter(event)" placeholder="H. nuit" style="max-width:64px;text-align:center;font-weight:700;padding:2px 4px;border:1px solid #c4b5fd;border-radius:6px;background:#faf5ff;font-size:.75rem' +
             (rawN !== "" ? "" : ";display:none") +
             '"></td>';
+          /* Faute déjà posée (n'importe quel écran) : case cochée + menu des
+             causes entreprise (pas celui des absences), cause mémorisée. */
+          var _fautJ = (rec.absent_paye === true || rec.paye_sans_travail === true);
+          var _motOpts = _fautJ ? ptMotifFauteOptions(rec.motif || "") : ptMotifOptions(rec.motif || "");
+          if (rec.motif && _motOpts.indexOf('value="' + escH(rec.motif) + '"') === -1) {
+            _motOpts = '<option value="' + escH(rec.motif) + '" selected>' + escH(rec.motif) + '</option>' + _motOpts;
+          }
           _rh +=
             '<td><select data-r="' +
             d +
@@ -16119,14 +16126,14 @@ html +=
             d +
             ');this.dataset.dirty=\'1\';ptRapideAutoSave(' +
             d +
-            ')" title="Motif de l\'absence" style="width:88px;padding:2px;border:1px solid #fcd34d;border-radius:6px;font-size:.68rem;background:#fffbeb">' +
-            ptMotifOptions(rec.motif || "") +
+            ')" title="' + (_fautJ ? "Cause de la faute d'entreprise" : "Motif de l\'absence") + '" style="width:88px;padding:2px;border:1px solid ' + (_fautJ ? "#d97706" : "#fcd34d") + ';border-radius:6px;font-size:.68rem;background:' + (_fautJ ? "#fef3c7" : "#fffbeb") + '">' +
+            _motOpts +
             '</select></td>';
           _rh +=
             '<td style="text-align:center"><input type="checkbox" data-r="' +
             d +
             '" data-field="faute"' +
-            (rec.absent_paye === true ? " checked" : "") +
+            (_fautJ ? " checked" : "") +
             ' onchange="ptRapideFaute(' +
             d +
             ');this.dataset.dirty=\'1\';ptRapideAutoSave(' +
@@ -16278,6 +16285,21 @@ html +=
         } catch (eU) {}
         ptRapideTotal(d);
         ptRapideTint(d);
+      }
+      /* Normalise un jour « faute entreprise » : les DEUX drapeaux
+         (absent_paye + paye_sans_travail) + heures à rattraper par défaut.
+         C'est elle qui garantit que la faute se voit PARTOUT pareil
+         (grille, saisie rapide, modale jour, groupé) quel que soit l'écran
+         qui l'a posée. Fonction pure (testable). */
+      function ptNormaliserFaute(rec, heuresPayees) {
+        if (!rec) return rec;
+        rec.absent_paye = true;
+        rec.paye_sans_travail = true;
+        if (!(parseFloat(rec.rattrap_gagnees) > 0)) {
+          var h = parseFloat(heuresPayees) || 0;
+          rec.rattrap_gagnees = h > 0 ? Math.round(h * 100) / 100 : 8;
+        }
+        return rec;
       }
       /* Faute entreprise cochée : on force l'absence, on paye la journée
          (8h, comme dans la modale de pointage) et on renseigne l'observation
@@ -16466,6 +16488,8 @@ html +=
           /* Motif d'absence + faute entreprise (absence pay\u00e9e). */
           if (motif) rec.motif = motif; else delete rec.motif;
           rec.absent_paye = vPaye;
+          if (vPaye) rec.paye_sans_travail = true;
+          else { delete rec.paye_sans_travail; delete rec.pst_a_rattraper; }
           if (vPaye) {
             /* Les heures pay\u00e9es sont celles saisies (8 par d\u00e9faut),
                pas une valeur fig\u00e9e. */
@@ -16497,10 +16521,28 @@ html +=
             delete rec.h_n_manual;
           }
           if (rec && rec.present === false) delete rec.present;
-          /* Des heures = présent : plus d'absence, plus de motif ni de
-             faute entreprise sur ce jour. */
+          /* Jour vidé (ni coché ni heures) : rien à garder des absences. */
+          if (!caseCochee && hrsSaisies <= 0 && rec) {
+            delete rec.motif; rec.absent_paye = false;
+            delete rec.paye_sans_travail; delete rec.pst_a_rattraper;
+          }
+          /* Des heures saisies = présent... SAUF si la case faute est cochée
+             (les heures sont alors les heures PAYÉES du jour faute) ; et on
+             ne touche pas à un jour déjà faute que l'utilisateur n'a pas
+             retouché (fini l'effacement silencieux au simple survol). */
+          var fChecked = !!(iF && iF.checked);
+          var fDirty = !!(iF && iF.dataset && iF.dataset.dirty === "1");
           if (hrsSaisies > 0) {
-            if (rec) { delete rec.motif; rec.absent_paye = false; }
+            if (rec) {
+              if (fChecked) {
+                rec.present = false;
+                ptNormaliserFaute(rec, hrsSaisies);
+                if (motif) rec.motif = motif;
+              } else if (fDirty || !rec.paye_sans_travail) {
+                delete rec.motif; rec.absent_paye = false;
+                if (fDirty) { delete rec.paye_sans_travail; delete rec.pst_a_rattraper; }
+              }
+            }
           }
         }
         if (obs !== "") {
@@ -18038,7 +18080,8 @@ html +=
           var hJ = rec && rec.h_j_manual ? parseHeure(rec.h_j_manual) : 0;
           var hN = rec && rec.h_n_manual ? parseHeure(rec.h_n_manual) : 0;
           var marked = rec && (rec.present===true || hJ>0 || hN>0);
-          var status = marked ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:700;color:#15803d;background:#dcfce7;border:1px solid #bbf7d0;border-radius:20px;padding:2px 10px;white-space:nowrap">● Pointé</span>' : '<span style="display:inline-flex;align-items:center;font-size:.7rem;font-weight:600;color:#94a3b8;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:2px 10px;white-space:nowrap">En attente</span>';
+          var isFauteJ = rec && (rec.absent_paye === true || rec.paye_sans_travail === true);
+          var status = isFauteJ ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:700;color:#b45309;background:#fffbeb;border:1px solid #fcd34d;border-radius:20px;padding:2px 10px;white-space:nowrap">⚠ Faute entreprise</span>' : marked ? '<span style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:700;color:#15803d;background:#dcfce7;border:1px solid #bbf7d0;border-radius:20px;padding:2px 10px;white-space:nowrap">● Pointé</span>' : '<span style="display:inline-flex;align-items:center;font-size:.7rem;font-weight:600;color:#94a3b8;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:20px;padding:2px 10px;white-space:nowrap">En attente</span>';
           var rendChip = (p.rendement === true)
             ? ' <span style="display:inline-flex;align-items:center;gap:3px;font-size:.62rem;font-weight:700;color:#ea580c;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:1px 7px;vertical-align:middle;white-space:nowrap"><input type="checkbox" checked disabled style="accent-color:#ea580c;width:11px;height:11px">Rendement</span>' : '';
           return '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:.8rem;min-width:0;box-shadow:0 1px 3px rgba(15,23,42,.06)">' +
@@ -18234,8 +18277,11 @@ html +=
             r0.j_arrivee = ""; r0.j_pause = ""; r0.j_reprise = ""; r0.j_fin = "";
             r0.n_arrivee = ""; r0.n_pause = ""; r0.n_reprise = ""; r0.n_fin = "";
             r0.h_libres = 0;
-            /* Motif d'absence + faute entreprise (absence payée 8h, à rattraper) */
+            /* Motif d'absence + faute entreprise (absence payée 8h, à rattraper) :
+               les DEUX drapeaux, comme la modale jour et la saisie rapide. */
             r0.absent_paye = fauteEnt;
+            if (fauteEnt) r0.paye_sans_travail = true;
+            else { delete r0.paye_sans_travail; delete r0.pst_a_rattraper; }
             if (motifSel) r0.motif = motifSel; else delete r0.motif;
             if (fauteEnt) {
               r0.h_j_manual = storeH(8);

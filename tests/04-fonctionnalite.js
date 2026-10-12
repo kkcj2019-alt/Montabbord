@@ -6932,6 +6932,24 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Faute entreprise synchro : normaliseur pose les deux drapeaux + rattraper par défaut',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var r1 = ptNormaliserFaute({ id: 'x' }, 0);
+      var ok1 = r1.absent_paye === true && r1.paye_sans_travail === true && r1.rattrap_gagnees === 8;
+      var r2 = ptNormaliserFaute({ id: 'y', rattrap_gagnees: 6 }, 8);
+      var ok2 = r2.absent_paye === true && r2.paye_sans_travail === true && r2.rattrap_gagnees === 6;
+      var r3 = ptNormaliserFaute({ id: 'z' }, 7.5);
+      var ok3 = r3.rattrap_gagnees === 7.5;
+      var r4 = ptNormaliserFaute(null, 8);
+      var ok4 = r4 === null;
+      (ok1 && ok2 && ok3 && ok4) ? 'OK : deux drapeaux, 8 par défaut, existant respecté, nul toléré'
+         : 'ECHEC d1=' + ok1 + ' d2=' + ok2 + ' d3=' + ok3 + ' nul=' + ok4
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Prime production : + nouveau barème = intervalles vides, id unique, modifs persistées',
     app: 'paye.html', store: storeRealiste,
     code: `
