@@ -992,6 +992,42 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Stock : le filtre Mois affiche un bandeau au lieu de faire croire a une suppression',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._globalMonth = '2026-09';
+      setSection('stockRawTab', 'actif');
+      setStockRaw([
+        { id:'s1', code:'C1', colis_number:'C1', designation:'K', quantite:10, volume:1, created_at:'2026-09-05' },
+        { id:'s2', code:'C2', colis_number:'C2', designation:'K', quantite:26, volume:2.243, created_at:'2026-10-08' }
+      ]);
+      var h = render_stock_raw();
+      var okCache = (h.indexOf('C2') === -1);
+      var okBanner = (h.indexOf('masquée(s)') !== -1 && h.indexOf('pas supprimées') !== -1);
+      (okCache && okBanner) ? 'OK : octobre masque + bandeau anti-panique'
+        : 'ECHEC cache=' + okCache + ' banner=' + okBanner
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Semi-finis : le bandeau Mois apparait quand des lignes sont masquees',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._globalMonth = '2026-09';
+      setSection('composants', [{ code:'C-SEMI', designation:'Semi test', type:'LATTE', length:100, width:10, thickness:2 }]);
+      setStockSemi([
+        { id:1, code:'C-SEMI', quantite:10, created_at:'2026-09-10' },
+        { id:2, code:'C-SEMI', quantite:7, created_at:'2026-10-05' }
+      ]);
+      var h = render_stock_semi();
+      (h.indexOf('masquée(s)') !== -1) ? 'OK : bandeau present sur la fiche semi'
+        : 'ECHEC : bandeau absent'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
