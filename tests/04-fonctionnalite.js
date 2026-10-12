@@ -7462,6 +7462,28 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Stock consommables : remise a zero — chaque produit affiche 0/0/0 avec ajustement trace',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockConsum([
+        { id: 'l1', code: 'P5', designation: 'POINTE5', ctype: 'POINTE', cond: 180, quantite: 3000 },
+        { id: 'l2', code: 'P7', designation: 'POINTE7', ctype: 'POINTE', cond: 150, quantite: 22500, cartons: 3 },
+        { id: 'l3', code: 'COLLE', designation: 'COLLE', ctype: 'DIVERS', quantite: 12 },
+        { id: 'l4', code: 'VIDE', designation: 'VIDE', ctype: 'POINTE', cond: 100, quantite: 0 }
+      ]);
+      confirm2 = function () { return true; };
+      renderPage = function () {};
+      remettreZeroStockConso();
+      var agg = consoAggregate();
+      var toutZero = agg.every(function (a) { return a.unites === 0 && a.paquets === 0 && a.cartons === 0; });
+      var ajust = getStockConsum().filter(function (s) { return s && s._ajustInv; });
+      (toutZero && ajust.length === 3 && agg.length === 4)
+        ? 'OK : 3 ajustements, 4 produits a 0/0/0 (dont le cas 3000/180 sans -1 paquet)'
+        : 'ECHEC zero=' + toutZero + ' ajust=' + ajust.length + ' agg=' + JSON.stringify(agg.map(function (a) { return [a.code, a.unites, a.paquets, a.cartons]; }))
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 

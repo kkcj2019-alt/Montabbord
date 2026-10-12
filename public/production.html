@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-177';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-178';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -11241,6 +11241,9 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       a.cartons = a.type === 'POINTE'
         ? (a._nbSaisis > 0 ? a._cartonsSaisis : Math.ceil(a.paquets / ppc))
         : 0;
+      /* Stock nul = paquets nuls : les arrondis par ligne (floor) ne doivent
+         jamais afficher -1 paquet quand il ne reste rien (ex. 3000/180). */
+      if (Math.abs(a.unites) < 0.0001) { a.unites = 0; a.paquets = 0; }
       if (a.emplacement === '-') a.emplacement = '';
       delete a._cartonsSaisis; delete a._nbSaisis;
       return a;
@@ -12042,6 +12045,46 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     if (n > 0) { toast(n + ' fiche(s) en double fusionnee(s) — stock par produit'); renderPage(); }
     else toast('Aucune fiche en double : le stock est deja par produit', 'success');
   }
+  /* Remise a zero d'inventaire : ajoute UN ajustement par produit qui annule
+     exactement son stock (unites, paquets, cartons). Trace (motif date) et
+     conserve a la reconstruction (les _ajustInv survivent), contrairement a
+     l'effacement des lignes. Apres l'operation chaque produit affiche 0/0/0. */
+  function remettreZeroStockConso() {
+    var lignes = getStockConsum() || [];
+    if (!lignes.length) return toast('Stock deja vide', 'success');
+    var parProduit = {}, ordre = [];
+    lignes.forEach(function (st) {
+      var n = consoNorm(st);
+      if (!n) return;
+      var key = (n.code || n.des || '?').toUpperCase();
+      if (!parProduit[key]) { parProduit[key] = { code: n.code, des: n.des, type: n.type, cond: 0, empl: '', u: 0, csaisis: 0, nbSaisis: 0 }; ordre.push(key); }
+      var g = parProduit[key];
+      g.u += (n.unites || 0);
+      if (n.cond > 0) g.cond = n.cond;
+      if (n.emplacement && n.emplacement !== '-' && !g.empl) g.empl = n.emplacement;
+      if (st && st.cartons !== undefined && st.cartons !== null && st.cartons !== '') { g.csaisis += (parseFloat(st.cartons) || 0); g.nbSaisis++; }
+    });
+    var aZero = ordre.filter(function (k) { return Math.abs(parProduit[k].u) >= 0.0001 || Math.abs(parProduit[k].csaisis) >= 0.0001; });
+    if (!aZero.length) return toast('Stock deja a zero', 'success');
+    var _auj = ''; try { _auj = today(); } catch (eT) {}
+    var _d = ''; try { _d = _auj ? _auj.split('-').reverse().join('/') : ''; } catch (eT2) {}
+    if (!confirm2('Remettre le stock consommables a ZERO ?\n\n' + aZero.length + ' produit(s) : ' + aZero.slice(0, 8).join(', ') + (aZero.length > 8 ? '...' : '') + '\nUn ajustement d\u2019inventaire annule chaque produit (trace, conserve a la reconstruction).')) return;
+    var obs = 'Inventaire \u2014 remise a zero' + (_d ? ' du ' + _d : '');
+    aZero.forEach(function (k) {
+      var g = parProduit[k];
+      lignes.unshift({
+        id: Date.now() + Math.random(),
+        code: g.code, designation: g.des, ctype: g.type, cond: g.cond || 0,
+        emplacement: g.empl || '', quantite: -(g.u || 0), paquets: -(g.u || 0),
+        cartons: g.nbSaisis > 0 ? -(g.csaisis || 0) : '',
+        prix_carton: 0, prix_unitaire: 0, motif: obs, obs: obs,
+        created_at: _auj, _ajustInv: true
+      });
+    });
+    setStockConsum(lignes);
+    toast('Stock remis a zero : ' + aZero.length + ' produit(s) ajuste(s)', 'success');
+    renderPage();
+  }
   function render_stock_consum() {
     var tab = getSection('stockConsoTab', 'tous');
     if (tab !== 'tous' && tab !== 'pointes' && tab !== 'divers') tab = 'tous';
@@ -12070,6 +12113,7 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     h += '<button class="btn" onclick="reconstruireStockConsum()" title="Recreer le stock a partir des achats (BL)">🔄 Reconstruire le stock</button>';
     h += '<button class="btn btn-accent" onclick="showAddConsumDirect()">+ Nouveau Consommable</button>';
     h += '<button class="btn" onclick="fusionnerFichesConso()" title="Regrouper les fiches en double : une seule fiche par produit">🧹 Fusionner les fiches en double</button>';
+    h += '<button class="btn" onclick="remettreZeroStockConso()" title="Inventaire : ramener chaque produit a zero (ajustement trace, conserve a la reconstruction)">↺ Remettre à zéro</button>';
     h += '</div></div>';
     h += '<div class="card"><table id="consoTable">';
     if (tab === 'divers') {
