@@ -6950,6 +6950,21 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Pointage jour : heures héritées sans créneaux gardées sauf saisie (dernière saisie gagne)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ok1 = ptHeuresGardees(false, 0, false, '8', '') === '8';
+      var ok2 = ptHeuresGardees(true, 0, false, '13', '8') === '8';
+      var ok3 = ptHeuresGardees(false, 6, true, '13', '6') === '6';
+      var ok4 = ptHeuresGardees(false, 0, true, '13', '') === '';
+      var ok5 = ptHeuresGardees(false, 0, false, '', '') === '';
+      (ok1 && ok2 && ok3 && ok4 && ok5) ? 'OK : héritage gardé, créneaux/libres gagnent, zéro manuel efface'
+         : 'ECHEC g1=' + ok1 + ' g2=' + ok2 + ' g3=' + ok3 + ' g4=' + ok4 + ' g5=' + ok5
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Prime production : + nouveau barème = intervalles vides, id unique, modifs persistées',
     app: 'paye.html', store: storeRealiste,
     code: `
