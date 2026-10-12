@@ -5716,6 +5716,20 @@ r.push({
   });
 
   r.push({
+    nom: 'Saisie rapide : decocher Nuit retire aussi la prime de panier du jour',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var on = ptPanierJour('eX', '2026-09-05', true);
+      var okOn = on === true && ptPanierJourEtat('eX', '2026-09-05') === true;
+      ptPanierJour('eX', '2026-09-05', false);
+      var okOff = ptPanierJourEtat('eX', '2026-09-05') === false;
+      (okOn && okOff) ? 'OK : panier pose puis retire'
+         : 'ECHEC on=' + okOn + ' off=' + okOff
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Faute entreprise : jour à rattraper sans heures saisies compte les heures dues',
     app: 'paye.html', store: storeRealiste,
     code: `
