@@ -7816,6 +7816,108 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Generation pointage : les jours de conge sont reperes, hors week-end et jusqu au retour exclu',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_employes = JSON.stringify([{ id: 'e1', nom: 'ABOGOU', prenoms: 'Koffi', matricule: 'M001', fonction: 'Cariste', mode_pointage: 'forfait', date_entree: '2020-01-01', en_paie: true }]);
+      s.mdb_rh_conges = JSON.stringify([{ id: 'cg1', employee_id: 'e1', type: 'annual', date_depart: '2026-10-07', date_retour: '2026-10-13' }]);
+      const p = JSON.parse(s.mdb_paye);
+      p.pointage = [];
+      s.mdb_paye = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var map = ptGenCongeMap('2026-10');
+      var cles = Object.keys(map).sort();
+      /* 07/10 (mercredi) au 12/10 (lundi) : 4 jours ouvres seulement
+         (10 et 11 = week-end), le 13 = jour de reprise, donc pas un conge */
+      (cles.length === 4
+        && map['e1|2026-10-07'] === 'Cong\u00e9 annuel'
+        && map['e1|2026-10-09'] === 'Cong\u00e9 annuel'
+        && map['e1|2026-10-12'] === 'Cong\u00e9 annuel'
+        && !map['e1|2026-10-10'] && !map['e1|2026-10-11'] && !map['e1|2026-10-13'])
+        ? 'OK : 4 jours ouvres reperes, week-end et jour de reprise exclus'
+        : 'ECHEC : ' + JSON.stringify(map)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Generation pointage : l alerte des conges liste qui est en conge, combien de jours et quel motif',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_employes = JSON.stringify([{ id: 'e1', nom: 'ABOGOU', prenoms: 'Koffi', matricule: 'M001', fonction: 'Cariste', mode_pointage: 'forfait', date_entree: '2020-01-01', en_paie: true }]);
+      s.mdb_rh_conges = JSON.stringify([{ id: 'cg1', employee_id: 'e1', type: 'annual', date_depart: '2026-10-07', date_retour: '2026-10-13' }]);
+      const p = JSON.parse(s.mdb_paye);
+      p.pointage = [];
+      s.mdb_paye = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var a = ptGenCongesAlerte('2026-10', [{ id: 'e1', nom: 'ABOGOU', matricule: 'M001' }]);
+      var vide = ptGenCongesAlerte('2026-10', [{ id: 'e9', nom: 'AUTRE', matricule: 'M009' }]);
+      (a.length === 1 && a[0].nom === 'ABOGOU' && a[0].jours.length === 4 && /annuel/.test(a[0].motifs)
+        && vide.length === 0)
+        ? 'OK : ABOGOU signale (4 jours, Cong\u00e9 annuel), aucun autre employe signale'
+        : 'ECHEC : ' + JSON.stringify(a) + ' vide=' + JSON.stringify(vide)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Generation pointage : un employe en conge est genere en CONGE, pas en 8 h (et la modale previent)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_employes = JSON.stringify([{ id: 'e1', nom: 'ABOGOU', prenoms: 'Koffi', matricule: 'M001', fonction: 'Cariste', mode_pointage: 'forfait', date_entree: '2020-01-01', en_paie: true }]);
+      s.mdb_rh_conges = JSON.stringify([{ id: 'cg1', employee_id: 'e1', type: 'annual', date_depart: '2026-10-07', date_retour: '2026-10-13' }]);
+      const p = JSON.parse(s.mdb_paye);
+      p.pointage = [];
+      s.mdb_paye = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* genApply sans la case « pointer quand meme » (absente = decochee) */
+      document.getElementById('pt-mois').value = '2026-10';
+      window._genChecked = { e1: true };
+      try { genApply(); } catch (e) {}
+      var pts = getPointagePaye();
+      var f = function (dk) { return pts.filter(function (r) { return r.employee_id === 'e1' && r.date === dk; })[0] || {}; };
+      var c07 = f('2026-10-07'), c08 = f('2026-10-08'), c06 = f('2026-10-06');
+      var src = showModalGenererMois.toString();
+      var alerte = (src.indexOf('gen-conge-forcer') !== -1 && src.indexOf('ptGenCongesAlerte') !== -1);
+      (c07.present === false && c07.motif === 'Cong\u00e9 annuel' && c07.conge_auto === true
+        && c08.present === false && c08.motif === 'Cong\u00e9 annuel'
+        && c06.present === true && String(c06.h_j_manual) === '8' && alerte)
+        ? 'OK : 07 et 08 en Conge (non presents), 06 en presence 8 h, alerte presente dans la modale'
+        : 'ECHEC : 07=' + JSON.stringify(c07) + ' 06=' + JSON.stringify(c06) + ' alerte=' + alerte
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Generation pointage : une saisie manuelle laite le conge — jamais d ecrasement',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_employes = JSON.stringify([{ id: 'e1', nom: 'ABOGOU', prenoms: 'Koffi', matricule: 'M001', fonction: 'Cariste', mode_pointage: 'forfait', date_entree: '2020-01-01', en_paie: true }]);
+      s.mdb_rh_conges = JSON.stringify([{ id: 'cg1', employee_id: 'e1', type: 'annual', date_depart: '2026-10-07', date_retour: '2026-10-13' }]);
+      const p = JSON.parse(s.mdb_paye);
+      p.pointage = [{ id: 'pt1', employee_id: 'e1', date: '2026-10-07', present: false, h_j_manual: '6', j_arrivee: '08:00', j_fin: '15:00' }];
+      s.mdb_paye = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      document.getElementById('pt-mois').value = '2026-10';
+      window._genChecked = { e1: true };
+      try { genApply(); } catch (e) {}
+      var r07 = getPointagePaye().filter(function (r) { return r.employee_id === 'e1' && r.date === '2026-10-07'; })[0] || {};
+      (String(r07.h_j_manual) === '6' && r07.j_arrivee === '08:00' && r07.motif === undefined)
+        ? 'OK : la saisie manuelle du 07 est conservee (6 h, 08:00-15:00)'
+        : 'ECHEC : ' + JSON.stringify(r07)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse transfert : la destination exclut la source active, pas ma caisse',
     app: 'index.html', store: storeRealiste,
     code: `

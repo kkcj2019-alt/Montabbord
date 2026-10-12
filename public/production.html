@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-184';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-185';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -15419,6 +15419,7 @@ function ptGenMois() {
           return String(a.matricule||"").localeCompare(String(b.matricule||""),undefined,{numeric:true});
         });
         var nbExclusPeriode = allForfait.length - emps.length;
+        var congesAlerte = ptGenCongesAlerte(mois, emps);
         window._genPool = emps;
         window._genChecked = {};
         emps.forEach(function(p){ window._genChecked[p.id] = true; });
@@ -15429,6 +15430,19 @@ function ptGenMois() {
           '<h3 style="font-size:1rem;font-weight:700;margin:0 0 4px">Générer pointage (8h par jour)</h3>' +
           '<p style="font-size:.78rem;color:#666;margin:0 0 4px">Uniquement les employés au forfait 173.33h/mois (Mode de pointage = Forfait dans leur fiche).</p>' +
           '<p style="font-size:.72rem;color:' + (emps.length ? '#16a34a' : '#dc2626') + ';margin:0 0 16px;font-weight:600">' + emps.length + ' au forfait sur ' + nbActifsPaie + ' actif(s) en paie' + (nbExclusPeriode ? ' — ' + nbExclusPeriode + ' exclu(s) : entré(s) après ' + mois + ' ou sorti(s) avant' : '') + (emps.length ? '' : ' — si un employé manque : vérifiez son Mode de pointage ET la case « En paie » dans sa fiche') + '</p>' +
+          (congesAlerte.length ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px 12px;margin:0 0 14px">' +
+          '<div style="font-weight:800;color:#9a3412;font-size:.82rem;margin-bottom:6px">⚠ ' + congesAlerte.length + ' employé(s) en congé sur ' + mois + '</div>' +
+          '<div style="font-size:.72rem;color:#7c2d12;max-height:110px;overflow-y:auto;margin-bottom:8px">' +
+          congesAlerte.map(function (a) {
+            var dj = a.jours[0], fj = a.jours[a.jours.length - 1];
+            var fdj = dj.slice(8) + "/" + dj.slice(5, 7), ffj = fj.slice(8) + "/" + fj.slice(5, 7);
+            return '<div style="margin-bottom:3px">• <b>' + escH(a.nom || "") + '</b> <span style="opacity:.7">(' + escH(a.matricule || "") + ')</span> — ' + a.jours.length + ' jour(s), ' + escH(a.motifs) + ' : ' + fdj + ' → ' + ffj + '</div>';
+          }).join("") +
+          '</div>' +
+          '<label style="display:flex;align-items:flex-start;gap:7px;cursor:pointer;font-size:.74rem;font-weight:600;color:#9a3412;background:#fff;border:1px solid #fdba74;border-radius:8px;padding:7px 9px">' +
+          '<input type="checkbox" id="gen-conge-forcer" style="width:14px;height:14px;margin-top:1px;flex-shrink:0">' +
+          '<span>Pointer quand même ces jours en 8 h. Sans cette case (défaut), ces jours passent en <b>Congé</b> : ils ne sont pas comptés comme présents.</span></label>' +
+          '</div>' : '') +
           '<div class="form-group" style="margin-bottom:8px"><label style="font-weight:600;font-size:.8rem">Période à générer</label>' +
           '<select id="gen-periode" onchange="genTogglePeriode()" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:.8rem"><option value="all">Tout le mois ('+mois+')</option><option value="empty">Jours vides uniquement</option><option value="day">Jour spécifique seulement</option><option value="range">Plage de jours (du … au …)</option></select></div>' +
           '<div id="gen-day-wrap" class="form-group" style="display:none;margin-bottom:12px"><label style="font-weight:600;font-size:.8rem">Jour à générer (8h)</label>' +
@@ -15451,6 +15465,84 @@ function ptGenMois() {
           '</div></div>';
         openPtModal(html);
         genRenderList(true);
+      }
+      /* Libelle de conge : MEME referentiel que l'app Paie (ptCongeMotifAuto),
+         pour qu'un jour pose en conge ici s'affiche la pareil la-bas. */
+      function ptGenCongeMotif(type) {
+        var t = String(type || "");
+        if (t === "annual") return "Congé annuel";
+        if (t === "maladie") return "Maladie";
+        if (t === "maternite") return "Maternité";
+        if (t === "sans_solde") return "Congé sans solde";
+        if (t === "exceptionnel") return "Autorisation exceptionnelle";
+        return t || "Congé";
+      }
+      /* employe|jour -> motif, sur les jours OUVRES du mois. Meme calcul de
+         borne que ptPXCongeMap / ptCongeJoursVivants (la date saisie est le
+         jour de REPRISE : le conge s'arrete la veille ; week-ends exclus). */
+      function ptGenCongeMap(mois) {
+        var map = {};
+        try {
+          var m = String(mois || "");
+          if (!/^\d{4}-\d{2}$/.test(m)) return map;
+          var mi = parseInt(m.slice(5, 7), 10), an = parseInt(m.slice(0, 4), 10);
+          var nd = new Date(an, mi, 0).getDate();
+          var maxJ = m + "-" + (nd < 10 ? "0" : "") + nd;
+          getRhCongesShared().forEach(function (c) {
+            if (!c || !c.employee_id) return;
+            var d0 = String(c.date_depart || "").slice(0, 10);
+            var retP = String(c.date_retour || "").slice(0, 10);
+            var repP = String(c.date_reprise || "").slice(0, 10);
+            var finSaisie = retP || d0;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(repP) && /^\d{4}-\d{2}-\d{2}$/.test(retP) && repP < retP) finSaisie = repP;
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(d0) || !/^\d{4}-\d{2}-\d{2}$/.test(finSaisie)) return;
+            var _d = new Date(parseInt(finSaisie.slice(0, 4), 10), parseInt(finSaisie.slice(5, 7), 10) - 1, parseInt(finSaisie.slice(8, 10), 10));
+            _d.setDate(_d.getDate() - 1);
+            var _m = _d.getMonth() + 1, _j = _d.getDate();
+            var dFin = _d.getFullYear() + "-" + (_m < 10 ? "0" : "") + _m + "-" + (_j < 10 ? "0" : "") + _j;
+            var motif = ptGenCongeMotif(c.type);
+            var cur = d0 < m + "-01" ? m + "-01" : d0;
+            var fin = dFin > maxJ ? maxJ : dFin;
+            var guard = 0;
+            while (cur <= fin && guard < 32) {
+              var dw = new Date(an, mi - 1, parseInt(cur.slice(8, 10), 10)).getDay();
+              if (dw !== 0 && dw !== 6) map[c.employee_id + "|" + cur] = motif;
+              cur = ptPXAddDay(cur); guard++;
+            }
+          });
+        } catch (eCg) {}
+        return map;
+      }
+      /* Resume pour l'alerte de la modale : qui est en conge, combien de
+         jours, quel motif, de quand a quand. */
+      function ptGenCongesAlerte(mois, emps) {
+        var map = ptGenCongeMap(mois);
+        var out = [];
+        (emps || []).forEach(function (p) {
+          var prefixe = p.id + "|";
+          var jours = [], motifs = {};
+          Object.keys(map).forEach(function (cle) {
+            if (cle.lastIndexOf(prefixe, 0) !== 0) return;
+            jours.push(cle.slice(prefixe.length));
+            motifs[map[cle]] = true;
+          });
+          if (!jours.length) return;
+          jours.sort();
+          out.push({ id: p.id, nom: p.nom, matricule: p.matricule, jours: jours, motifs: Object.keys(motifs).join(", ") });
+        });
+        return out;
+      }
+      /* Une ligne auto encore INTACTE : personne ne l'a retouchee, on peut
+         donc la repasser en conge sans ecraser une saisie manuelle. */
+      function ptGenLigneIntacte(r) {
+        if (!r) return false;
+        if (r.present === true) return false;
+        if (parseFloat(r.h_j_manual || 0) > 0 || parseFloat(r.h_n_manual || 0) > 0) return false;
+        if (parseFloat(r.h_libres || 0) > 0) return false;
+        if (r.j_arrivee || r.j_pause || r.j_reprise || r.j_fin) return false;
+        if (r.n_arrivee || r.n_pause || r.n_reprise || r.n_fin) return false;
+        if (String(r.observation || r.obs || r.pst_observation || "").trim()) return false;
+        return true;
       }
       function genRenderList(skipSync) {
         var list = document.getElementById("gen-emp-list");
@@ -15568,6 +15660,8 @@ function ptGenMois() {
         }
         var _empByIdGen = {};
         try { getPersonnel().forEach(function(_pe){ if (_pe && _pe.id) _empByIdGen[_pe.id] = _pe; }); } catch(eEB){}
+        var _congeMap = ptGenCongeMap(mois);
+        var pointerConge = !!((document.getElementById("gen-conge-forcer")||{}).checked);
         var store8 = "8";
         var dks = [];
         if (periode === "day") {
@@ -15583,7 +15677,7 @@ function ptGenMois() {
             dks.push(dk);
           }
         }
-        var count=0, skipped=0, skippedAP=0, skippedEntree=0, skippedSortie=0;
+        var count=0, skipped=0, skippedAP=0, skippedEntree=0, skippedSortie=0, conges=0, congesManuels=0;
         eids.forEach(function(eid){
           var _pe0 = _empByIdGen[eid] || null;
           var _entJ = (_pe0 && _pe0.date_entree) || "";
@@ -15597,6 +15691,26 @@ function ptGenMois() {
             if (idx !== -1 && pts[idx].protege === true) { skipped++; return; }
             if (idx !== -1 && pts[idx].absent_paye === true) { skippedAP++; return; }
             if (periode==="empty" && idx!==-1) return;
+            /* Jour de conge : par defaut on pose « Conge » au lieu de 8 h,
+               SAUF si l'utilisateur a coche « pointer quand meme ».
+               Une saisie manuelle (heures, creneaux, observation) n'est jamais
+               ecrasée : elle est compteée separement et laissee telle quelle. */
+            var _ck = eid + "|" + dk;
+            var _cg = _congeMap[_ck] || null;
+            if (_cg && !pointerConge) {
+              if (idx !== -1 && !ptGenLigneIntacte(pts[idx])) { congesManuels++; return; }
+              var _rec = (idx !== -1) ? pts[idx] : null;
+              if (!_rec) { _ptIdxMap[_ck] = pts.length; _rec = { id: genId(), employee_id: eid, date: dk }; pts.push(_rec); }
+              _rec.present = false;
+              _rec.motif = _cg;
+              _rec.conge_auto = true;
+              _rec.conge_id = "";
+              _rec.h_j_manual = ""; _rec.h_n_manual = "";
+              _rec.j_arrivee = ""; _rec.j_pause = ""; _rec.j_reprise = ""; _rec.j_fin = "";
+              _rec.n_arrivee = ""; _rec.n_pause = ""; _rec.n_reprise = ""; _rec.n_fin = "";
+              conges++;
+              return;
+            }
             if (idx===-1) {
               _ptIdxMap[eid + "|" + dk] = pts.length;
               pts.push({id:genId(), employee_id:eid, date:dk, present:true, h_j_manual:store8, h_n_manual:"",
@@ -15613,7 +15727,7 @@ function ptGenMois() {
           });
         });
         setPointagePaye(pts);
-        toast(count+" jour(s) généré(s) pour "+eids.length+" employé(s)"+(skipped ? " — "+skipped+" verrouillé(s) ignoré(s)" : "")+(skippedAP ? " — "+skippedAP+" absent(s) payé(s) conservé(s)" : "")+(skippedEntree ? " — "+skippedEntree+" jour(s) avant embauche ignoré(s)" : "")+(skippedSortie ? " — "+skippedSortie+" jour(s) après sortie ignoré(s)" : ""),"success");
+        toast(count+" jour(s) généré(s) pour "+eids.length+" employé(s)"+(skipped ? " — "+skipped+" verrouillé(s) ignoré(s)" : "")+(skippedAP ? " — "+skippedAP+" absent(s) payé(s) conservé(s)" : "")+(skippedEntree ? " — "+skippedEntree+" jour(s) avant embauche ignoré(s)" : "")+(skippedSortie ? " — "+skippedSortie+" jour(s) après sortie ignoré(s)" : "")+(conges ? " — "+conges+" jour(s) en congé posés en Congé" : "")+(congesManuels ? " — "+congesManuels+" jour(s) en congé déjà saisis, conservés" : ""),"success");
         closePtModal();
         renderPage();
         } catch(_genErr) {
