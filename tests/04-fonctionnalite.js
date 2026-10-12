@@ -5731,6 +5731,23 @@ r.push({
   });
 
   r.push({
+    nom: 'Montage : ordre manuel des travailleurs (defaut matricule, perso memorise)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var L = [{ id: 'b', matricule: '02' }, { id: 'a', matricule: '01' }, { id: 'c', matricule: '03' }];
+      var d0 = ptMontTrierParOrdre(L, []).map(function (x) { return x.id; }).join('');
+      var d1 = ptMontTrierParOrdre(L, ['c', 'a']).map(function (x) { return x.id; }).join('');
+      ptMontSetOrdre(['c', 'a']);
+      var d2 = ptMontOrdre().join(',');
+      ptMontSetOrdre([]);
+      var d3 = ptMontOrdre().length;
+      (d0 === 'abc' && d1 === 'cab' && d2 === 'c,a' && d3 === 0) ? 'OK : defaut=abc, perso=cab, stocke=c,a, reset vide'
+         : 'ECHEC defaut=' + d0 + ' perso=' + d1 + ' stock=' + d2 + ' reset=' + d3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Saisie rapide : decocher Nuit retire aussi la prime de panier du jour',
     app: 'paye.html', store: storeRealiste,
     code: `
@@ -6858,7 +6875,7 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Montage : la grille affiche la case « Prime CA % » devant chaque nom',
+    nom: 'Montage : la grille saisie sans case Prime CA, taux via la fiche',
     app: 'paye.html', store: storeRealiste,
     code: `
       var emps = payeArr('mdb_employes');
@@ -6869,18 +6886,12 @@ attenduPrefixe: 'OK'
       var wk = getPersonnel().filter(function (p) { return p.id === 'gr1'; })[0];
       buildMontageModalGrid('2026-10-05', ['E2'], [wk]);
       var html = String(document.getElementById('wiz-step-3').innerHTML || '');
-      /* La case est dans la colonne figee du nom, AVANT le nom du travailleur. */
-      var posCase = html.indexOf('class="pt-mont-tx"');
-      var posNom = html.indexOf('pt-mont-name');
-      var okAvance = posCase !== -1 && posNom !== -1 && posCase < posNom;
-      var okValeur = html.indexOf('data-emp-tx="gr1" value="2.5"') !== -1;
-      var okHandler = html.indexOf('ptMontTauxCa(this)') !== -1;
-      var okEntete = html.indexOf('Prime CA %') !== -1;
-      /* Les autres travailleurs gardent la case vide (= taux du bareme). */
-      var okVide = html.indexOf('data-emp-tx="gr1" value=""') === -1;
-      (okAvance && okValeur && okHandler && okEntete && okVide)
-        ? 'OK : case Prime CA % (2.5) avant le nom, taux reel repris, vide pour les autres'
-        : 'ECHEC avance=' + okAvance + ' valeur=' + okValeur + ' handler=' + okHandler + ' entete=' + okEntete
+      var sansCase = html.indexOf('pt-mont-tx') === -1 && html.indexOf('Prime CA %') === -1;
+      var nomPresent = html.indexOf('pt-mont-name') !== -1 && html.indexOf('GRILLEUN') !== -1;
+      var r = ptPrimeProdCalcul('gr1', '2026-10');
+      var okTaux = r && r.taux_ca_ht === 2.5;
+      (sansCase && nomPresent && okTaux) ? 'OK : grille sans case, nom present, taux fiche 2.5 actif'
+         : 'ECHEC case=' + (!sansCase) + ' nom=' + nomPresent + ' taux=' + (r && r.taux_ca_ht)
     `,
     attenduPrefixe: 'OK'
   });
