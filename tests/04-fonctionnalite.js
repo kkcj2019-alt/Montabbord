@@ -5716,6 +5716,21 @@ r.push({
   });
 
   r.push({
+    nom: 'Montage : le récap garde son identifiant de scroll (pas de retour au début)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      document.getElementById('pt-mois').value = '2026-09';
+      setPointageMontage([{ id: 'ms1', employee_id: 'e1', date: '2026-09-05', article_code: 'E2', quantite: 10, prix: 100 }]);
+      ptMontShowEtat();
+      var h = document.getElementById('pt-montage-etat').innerHTML || '';
+      var ok = h.indexOf('pt-mont-scroll') !== -1;
+      ok ? 'OK : conteneur scroll identifié, position conservée au re-rendu'
+         : 'ECHEC id scroll absent'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Saisie rapide : decocher Nuit retire aussi la prime de panier du jour',
     app: 'paye.html', store: storeRealiste,
     code: `
