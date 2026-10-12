@@ -809,6 +809,52 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Achat bois : les colis manquants sont récupérés ---------- */
+  r.push({
+    nom: 'Achat bois : un colis manquant au stock est recupere a la modification (cas 47 m3)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockRaw([{ id:'s1', code:'C1', colis_number:'C1', designation:'KAP (Blanc)',
+        essence:'KAP', type:'Blanc', longueur:250, largeur:34, epaisseur:10,
+        volume:2.243, quantite:26, zone:'', created_at:'2026-10-08' }]);
+      setProductions([]);
+      var lignes = [
+        { colis_number:'C1', essence:'KAP', type:'Blanc', length:250, width:34, thickness:10, volume:2.243, quantity:26, zone:'' },
+        { colis_number:'C2', essence:'KAP', type:'Blanc', length:330, width:30, thickness:10, volume:2.744, quantity:27, zone:'' }
+      ];
+      var rep = _reporterEcartAchatRaw(lignes, lignes, 'BL-000131', '2026-10-08', 'SMI');
+      var st = getStockRaw(), l2 = null;
+      for (var i = 0; i < st.length; i++) if (String(st[i].colis_number) === 'C2') l2 = st[i];
+      (rep.touches >= 1 && l2 && parseFloat(l2.quantite) === 27 && Math.abs(parseFloat(l2.volume) - 2.744) < 0.001)
+        ? 'OK : colis C2 recupere avec ses quantites'
+        : 'ECHEC touches=' + rep.touches + ' l2=' + JSON.stringify(l2)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat bois : le colis recupere deduit ses sorties deja enregistrees',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockRaw([{ id:'s1', code:'C1', colis_number:'C1', designation:'KAP (Blanc)',
+        essence:'KAP', type:'Blanc', longueur:250, largeur:34, epaisseur:10,
+        volume:2.243, quantite:26, zone:'', created_at:'2026-10-08' }]);
+      setProductions([{ id:'p1', numero:'F1', date:'2026-10-09',
+        sortie_bois:[{ code:'C2', qte:5, volume:0.5 }] }]);
+      var lignes = [
+        { colis_number:'C1', essence:'KAP', type:'Blanc', length:250, width:34, thickness:10, volume:2.243, quantity:26, zone:'' },
+        { colis_number:'C2', essence:'KAP', type:'Blanc', length:330, width:30, thickness:10, volume:2.744, quantity:27, zone:'' }
+      ];
+      _reporterEcartAchatRaw(lignes, lignes, 'BL-000131', '2026-10-08', 'SMI');
+      var st = getStockRaw(), l2 = null;
+      for (var i = 0; i < st.length; i++) if (String(st[i].colis_number) === 'C2') l2 = st[i];
+      (l2 && parseFloat(l2.quantite) === 22 && Math.abs(parseFloat(l2.volume) - 2.244) < 0.001)
+        ? 'OK : C2 recupere a 22 (27-5) et 2.244 m3'
+        : 'ECHEC l2=' + JSON.stringify(l2)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
