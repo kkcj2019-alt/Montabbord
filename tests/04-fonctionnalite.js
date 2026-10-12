@@ -7558,6 +7558,25 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  r.push({
+    nom: 'Import BL scierie : 24 colis deviennent 24 lignes (cubage controle)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var _bl = ['BL N° 000131/2026 SMI 08/10/2026', 'N° COLIS NBRE LONG LARG EP CUBAGE OBSER',
+        '7454 26 250 896 100 2,24 Kapokier(plot)', '7452 27 330 832 100 2,746 Kapokier(plot)',
+        '4147 336 105 5232 25 1,373 Fraké Frais', '5060 141 260 2200 50 2,86 Samba Frais',
+        '9999 10 250 896 100 9,99 Bidon', 'Facture totale 999'];
+      var _r = achatExtraireLignesBL(_bl);
+      var _a = _r[0], _b = _r[2];
+      var okN = _r.length === 4;
+      var okA = _a && _a.colis_number === '7454' && _a.quantity === 26 && _a.length === 250 && _a.width === 34.5 && _a.thickness === 10 && _a.volume === 2.24 && (_a.essence === 'KAPOKIER' || _a.essence === 'KAP') && _a.obs === 'plot';
+      var okB = _b && _b.colis_number === '4147' && _b.quantity === 336 && _b.width === 15.6 && _b.thickness === 2.5 && _b.volume === 1.373 && _b.essence === 'FRAKÉ' && _b.obs === 'Frais';
+      (okN && okA && okB)
+        ? 'OK : 4 lignes (larg cumulée ramenée au colis, cubage imprimé gardé, ligne incohérente rejetée)'
+        : 'ECHEC n=' + _r.length + ' a=' + JSON.stringify(_a) + ' b=' + JSON.stringify(_b)
+    `,
+    attenduPrefixe: 'OK'
+  });
   return r;
 }
 

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-179';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-180';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -19370,6 +19370,44 @@ function _motEntier(texte, mot) {
   try { return new RegExp('(^|[^A-Z0-9])' + esc + '([^A-Z0-9]|$)', 'i').test(texte); }
   catch (e) { return String(texte || '').toUpperCase().indexOf(m) >= 0; }
 }
+/* Parseur de tableau BL scierie : "7454 26 250 896 100 2,24 Kapokier(plot)".
+   N° colis, nb elmts, long(cm), larg CUMULEE(cm), ep(mm), cubage(m3), observation.
+   La larg cumulee se ramene au colis : l = largCumul/qte (comme la saisie :
+   l = lglob/qte). Le cubage imprime fait foi, apres controle de coherence
+   (long*largCumul*ep/1e7) : une ligne incoherente (>15%) est ignoree (OCR douteux).
+   Essence = premier mot, obs = reste : "Kapokier(plot)" -> Kapokier / plot. */
+function achatExtraireLignesBL(lines) {
+  var out = [];
+  for (var i = 0; i < (lines || []).length; i++) {
+    var m = String(lines[i] || '').trim().match(/^(\d{2,7})\s+(\d{1,4})\s+(\d{2,4})\s+(\d{2,6})\s+(\d{1,3}(?:[.,]\d+)?)\s+(\d{1,4}[.,]\d{1,3})\s+(.+)$/);
+    if (!m) continue;
+    var qte = parseInt(m[2], 10);
+    var L = parseFloat(m[3]), largC = parseFloat(m[4]);
+    var ep = parseFloat(String(m[5]).replace(',', '.'));
+    var vol = parseFloat(String(m[6]).replace(',', '.'));
+    if (!(qte > 0) || !(L > 0) || !(largC > 0) || !(ep > 0) || !(vol > 0)) continue;
+    var calc = L * largC * ep / 10000000;
+    if (calc > 0 && Math.abs(calc - vol) / vol > 0.15) continue;
+    var lMoy = Math.round((largC / qte) * 10) / 10;
+    var epCm = Math.round((ep / 10) * 10) / 10;
+    var obsRaw = m[7].trim();
+    var essM = obsRaw.match(/^([A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff'\-]*)[\s(]+(.*)$/);
+    var essence = ((essM ? essM[1] : obsRaw) || '').toUpperCase();
+    var obs = essM ? essM[2].replace(/\)\s*$/g, '').trim() : '';
+    try {
+      var species = (typeof getSpecies === 'function') ? getSpecies() : [];
+      for (var si = 0; si < species.length; si++) {
+        var cd = String(species[si].code || ''), nm = String(species[si].nom || '');
+        if (cd && essence === cd.toUpperCase()) break;
+        if (nm && essence === nm.toUpperCase()) { essence = (cd || nm).toUpperCase(); break; }
+      }
+    } catch (eSp) {}
+    out.push({ colis_number: m[1], quantity: qte, length: L, width: lMoy, lglob: largC,
+      thickness: epCm, volume: vol, essence: essence, type: 'Rouge', zone: '',
+      unit_price: 0, prix_base: 'm3', total_price: 0, obs: obs, _auto: true });
+  }
+  return out;
+}
 function applyExtractedAchatData(text) {
   var lines = text.split(/\r?\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
   var full = lines.join(' ');
@@ -19414,6 +19452,35 @@ function applyExtractedAchatData(text) {
     if (rm) refVal = rm[1].replace(/[.\-]+$/, '');
   }
   if (refVal && /\d/.test(refVal)) document.getElementById('ach_ref').value = refVal;
+  /* 2 ter. Fournisseur colle au n° de BL (« BL N° 000131/2026 SMI ... ») : le jeton
+     qui suit le numero, match EXACT (code ou nom, insensible a la casse) contre les
+     fournisseurs connus. Sans match exact on ne touche a rien (pas de bruit). */
+  try {
+    var _fEl = document.getElementById('ach_fournisseur');
+    if (_fEl && !String(_fEl.value || '').trim() && refVal) {
+      var _hl = '';
+      for (var _hi = 0; _hi < lines.length; _hi++) { if (lines[_hi].indexOf(refVal) !== -1) { _hl = lines[_hi]; break; } }
+      if (_hl) {
+        var _toks = _hl.replace(refVal, ' ').split(/\s+/);
+        for (var _ti = 0; _ti < _toks.length; _ti++) {
+          var _tk = _toks[_ti].replace(/^[^A-Za-z\u00c0-\u00ff]+|[^A-Za-z\u00c0-\u00ff]+$/g, '');
+          if (_tk.length < 2) continue;
+          var _up = _tk.toUpperCase();
+          for (var _sj = 0; _sj < suppliers.length; _sj++) {
+            var _np = [String(suppliers[_sj].code || ''), String(suppliers[_sj].company_name || ''), String(suppliers[_sj].name || ''), String(suppliers[_sj].nom || '')];
+            for (var _ni = 0; _ni < _np.length; _ni++) {
+              if (_np[_ni] && _np[_ni].toUpperCase() === _up) {
+                _fEl.value = _np[1] || _np[2] || _np[3] || _np[0];
+                break;
+              }
+            }
+            if (String(_fEl.value || '').trim()) break;
+          }
+          if (String(_fEl.value || '').trim()) break;
+        }
+      }
+    }
+  } catch (eF2) {}
 
   // 2 bis. Date — elle n'etait pas extraite du tout, le champ restait sur
   //     la date du jour. D'abord une date etiquetee, sinon la 1re date
@@ -19479,6 +19546,23 @@ function applyExtractedAchatData(text) {
 
   calcItemVolLive();
 
+  /* 8. Tableau de BL : une ligne d'article PAR COLIS (au lieu du seul formulaire).
+     Remplace les lignes auto-importees d'un precedent import. */
+  window._achatTableImportN = 0;
+  try {
+    var _catBL = window._newAchatCat || 'raw-materials';
+    if (_catBL === 'raw-materials') {
+      var _lignesBL = achatExtraireLignesBL(lines);
+      if (_lignesBL.length >= 2) {
+        _tempAchatItems = (_tempAchatItems || []).filter(function (x) { return x && !x._auto; });
+        for (var _li = 0; _li < _lignesBL.length; _li++) _tempAchatItems.push(_lignesBL[_li]);
+        renderAchatItemsTable(_catBL);
+        try { apAchatResetInputs(_catBL); } catch (eRST) {}
+        window._achatTableImportN = _lignesBL.length;
+      }
+    }
+  } catch (eTBL) {}
+
   /* Le message disait « ✅ Données extraites » meme quand rien n'avait ete
      trouve : c'est ce qui a laisse passer des lignes fausses. On dit
      exactement ce qui a ete rempli et ce qui reste a saisir. */
@@ -19491,11 +19575,18 @@ function applyExtractedAchatData(text) {
   if (qteVal) okF.push('quantité'); else koF.push('quantité');
   if (dimMatch) okF.push('dimensions'); else koF.push('dimensions');
   var status = document.getElementById('ach_doc_status');
+  if ((window._achatTableImportN || 0) >= 2) {
+    var _manqBL = [];
+    if (!f('ach_fournisseur')) _manqBL.push('fournisseur');
+    status.style.color = _manqBL.length ? '#b45309' : '#166534';
+    status.textContent = '\u2705 ' + window._achatTableImportN + ' article(s) import\u00e9(s) du BL \u2014 v\u00e9rifiez les lignes, compl\u00e9tez'
+      + (_manqBL.length ? ' ' + _manqBL.join(', ') + ' +' : '') + ' P.U puis Enregistrez';
+  }
   if (status) {
     if (!okF.length) {
       status.style.color = '#b45309';
       status.textContent = '⚠ Rien de lisible dans ce document. Saisissez les champs à la main (photo ou scan peu lisible).';
-    } else {
+    } else if (!((window._achatTableImportN || 0) >= 2)) {
       status.style.color = koF.length ? '#b45309' : '#166534';
       status.textContent = (koF.length ? '⚠ À compléter : ' + koF.join(', ') + ' — ' : '✅ ')
         + 'extrait : ' + okF.join(', ')
