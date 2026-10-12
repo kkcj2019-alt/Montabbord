@@ -7801,6 +7801,21 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Bandeau fige Exploitation : l icone 4 carres ramene au tableau de bord de l app principale',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var src = prodGoMainDashboard.toString();
+      var okIframe = (src.indexOf('window.parent.closeProductionOverlay') !== -1);
+      var okOnglet = (src.indexOf("window.opener.navigateTo('dashboard')") !== -1);
+      var okFilet = (src.indexOf("location.replace('index.html')") !== -1);
+      (typeof prodGoMainDashboard === 'function' && okIframe && okOnglet && okFilet)
+        ? 'OK : iframe -> fenetre mere, onglet -> onglet principal, sinon index.html'
+        : 'ECHEC : iframe=' + okIframe + ' onglet=' + okOnglet + ' filet=' + okFilet
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse transfert : la destination exclut la source active, pas ma caisse',
     app: 'index.html', store: storeRealiste,
     code: `
@@ -7842,6 +7857,32 @@ function run(rapport) {
     }
   } catch (eSt) {
     rapport.ko('Prime production : placement carte illisible (' + eSt.message + ')');
+  }
+  /* Controle statique : l icone 4 carres du bandeau fige d'Exploitation doit
+     exister et renvoyer au tableau de bord PRINCIPAL, distincte de la maison
+     qui reste sur le dashboard d'Exploitation. */
+  try {
+    const fsB = require('fs');
+    const pathB = require('path');
+    const srcB = fsB.readFileSync(pathB.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const iBarreB = srcB.indexOf('class="topbar"');
+    const segB = iBarreB >= 0 ? srcB.slice(iBarreB, iBarreB + 3000) : '';
+    const i4 = segB.indexOf('id="prodMainDashBtn"');
+    const seg4 = i4 >= 0 ? segB.slice(i4, i4 + 900).split('</button>')[0] : '';
+    const ok4 = i4 !== -1
+      && seg4.indexOf('prodGoMainDashboard()') !== -1
+      && seg4.split('<rect ').length - 1 === 4
+      && /width="7" height="7"/.test(seg4);
+    const iMaison = segB.indexOf('id="dashHomeBtn"');
+    const segMaison = iMaison >= 0 ? segB.slice(iMaison, iMaison + 300) : '';
+    const okMaison = iMaison !== -1 && segMaison.indexOf("navigate('dashboard')") !== -1;
+    if (ok4 && okMaison) {
+      rapport.ok('Bandeau figé Exploitation : icône 4 carrés vers le tableau de bord principal, distincte de la maison (dashboard Exploitation)');
+    } else {
+      rapport.ko('Bandeau figé Exploitation : icône 4 carrés — bouton=' + ok4 + ' maison=' + okMaison);
+    }
+  } catch (eBd) {
+    rapport.ko('Bandeau figé Exploitation : bandeau illisible (' + eBd.message + ')');
   }
 
   const liste = controles();
