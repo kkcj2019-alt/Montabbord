@@ -5731,6 +5731,19 @@ r.push({
   });
 
   r.push({
+    nom: 'Montage : permutation de deux travailleurs dans l ordre manuel',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var p1 = ptMontPermuter(['a', 'b', 'c'], 'c', 'a').join(',');
+      var p2 = ptMontPermuter(['a', 'b'], 'x', 'a').join(',');
+      var p3 = ptMontPermuter(null, 'a', 'b').join(',');
+      (p1 === 'c,b,a' && p2 === 'x,b,a' && p3 === 'b,a') ? 'OK : milieu, absent ajoute, vide demarre'
+         : 'ECHEC p1=' + p1 + ' p2=' + p2 + ' p3=' + p3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Montage : ordre manuel des travailleurs (defaut matricule, perso memorise)',
     app: 'paye.html', store: storeRealiste,
     code: `
