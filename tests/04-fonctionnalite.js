@@ -5660,7 +5660,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Pointage : le r\u00e9sum\u00e9 (bulletin + impression) montre les sup pay\u00e9es',
+    nom: 'Pointage : le résumé (bulletin + impression) montre les sup payées',
     app: 'paye.html', store: storeRealiste,
     code: `
       var okH = ptHsDetailTxt({ hs15: 6, hs50: 2, hs75: 0, hs100: 0 }) === '15% : 6h \u00b7 50% : 2h' && ptHsDetailTxt({}) === '';
@@ -5674,6 +5674,51 @@ r.push({
       var okM = h.indexOf('H. Normales') !== -1 && h.indexOf('64.0h') !== -1 && h.indexOf('Sup. pay\u00e9es') !== -1 && h.indexOf('15%') !== -1;
       (okH && okM) ? 'OK : helper + m\u00e9mo bulletin (64.0h normales, sup 15%/50%)'
                    : 'ECHEC helper=' + okH + ' memo=' + okM
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Faute entreprise : les heures payées comptent dans les normales comme une présence',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var P = function (id) { return getPersonnel().filter(function (p) { return p.id === id; })[0]; };
+      var jours = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-07'];
+      var recs = jours.map(function (dk, i) { return { id: 'ft' + i, employee_id: 'e1', date: dk, h_j_manual: '8' }; });
+      setPointageData(recs);
+      var n1 = getMonthStats(P('e1'), '2026-09').normalHours;
+      recs[2].present = false; recs[2].absent_paye = true; recs[2].paye_sans_travail = true;
+      recs[2].motif = 'Panne machine'; recs[2].rattrap_gagnees = 8;
+      recs[4].present = false; recs[4].absent_paye = true; recs[4].paye_sans_travail = true;
+      recs[4].motif = 'Panne machine'; recs[4].rattrap_gagnees = 8;
+      setPointageData(recs);
+      var n2 = getMonthStats(P('e1'), '2026-09').normalHours;
+      (n1 === 40 && n2 === 40) ? 'OK : 5x8h = 40 normales, inchangé avec 2 jours faute-payés'
+         : 'ECHEC sans-faute=' + n1 + ' avec-faute=' + n2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Faute entreprise : jour à rattraper sans heures saisies compte les heures dues',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var P = function (id) { return getPersonnel().filter(function (p) { return p.id === id; })[0]; };
+      var jours = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-07'];
+      var recs = jours.map(function (dk, i) { return { id: 'fg' + i, employee_id: 'e1', date: dk, h_j_manual: '8' }; });
+      setPointageData(recs);
+      var n1 = getMonthStats(P('e1'), '2026-09').normalHours;
+      /* 2 jours faute SANS heures saisies (badge ✔ via rattrap_gagnees seul). */
+      delete recs[2].h_j_manual;
+      recs[2].present = false; recs[2].absent_paye = true; recs[2].paye_sans_travail = true;
+      recs[2].motif = 'Panne machine'; recs[2].rattrap_gagnees = 8;
+      delete recs[4].h_j_manual;
+      recs[4].present = false; recs[4].absent_paye = true; recs[4].paye_sans_travail = true;
+      recs[4].motif = 'Panne machine'; recs[4].rattrap_gagnees = 8;
+      setPointageData(recs);
+      var n2 = getMonthStats(P('e1'), '2026-09').normalHours;
+      (n1 === 40 && n2 === 40) ? 'OK : 40 normales meme sans heures saisies, les heures dues comptent'
+         : 'ECHEC sans-faute=' + n1 + ' faute-sans-heures=' + n2
     `,
     attenduPrefixe: 'OK'
   });
