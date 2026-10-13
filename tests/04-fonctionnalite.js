@@ -1037,14 +1037,17 @@ attenduPrefixe: 'OK'
                       { id:'d2', code:'ENCRE', designation:'ENCRE', type:'POINTE' },
                       { id:'d3', code:'LAT1', designation:'Latte', type:'LATTE' }]);
       var items = calcInventoryItems('2026-09', '2026-09-30');
-      var conso = [], latte = 0;
+      var conso = [], latteEnConso = false;
       for (var i = 0; i < items.length; i++) {
-        if (items[i] && items[i].store === 'stockConsum') conso.push(items[i].code);
-        if (items[i] && items[i].code === 'LAT1') latte++;
+        if (items[i] && items[i].store === 'stockConsum') {
+          conso.push(items[i].code);
+          if (items[i].code === 'LAT1') latteEnConso = true;
+        }
       }
-      (conso.indexOf('P5') !== -1 && conso.indexOf('ENCRE') !== -1 && latte === 0)
-        ? 'OK : P5 (ligne d octobre) a 0 + ENCRE jamais achete, pas de lattes'
-        : 'ECHEC : conso=' + conso.join('/') + ' latte=' + latte
+      /* LAT1 est une LATTE : c'est un semi-fini, pas un consommable. */
+      (conso.indexOf('P5') !== -1 && conso.indexOf('ENCRE') !== -1 && !latteEnConso)
+        ? 'OK : P5 (ligne d octobre) a 0 + ENCRE jamais achete, LAT1 pas en consommable'
+        : 'ECHEC : conso=' + conso.join('/') + ' latteEnConso=' + latteEnConso
     `,
     attenduPrefixe: 'OK'
   });
@@ -1170,6 +1173,51 @@ attenduPrefixe: 'OK'
       var okTout = (h2.indexOf('SP-A') !== -1 && h2.indexOf('SP-B') !== -1 && h2.indexOf('BL-C') === -1);
       (okActif && okBanner && okTout) ? 'OK : Actif = 1 ligne + bandeau, Tout = 2 lignes specifiques (BL exclu)'
         : 'ECHEC actif=' + okActif + ' banner=' + okBanner + ' tout=' + okTout
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire semi-finis : UNE ligne par composant avec le stock, pas les mouvements',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [{ code:'L114*8*2', designation:'L114*8*2', type:'LATTE', length:250, width:23, thickness:10 }]);
+      setStockSemi([
+        { id:1, code:'L114*8*2', quantite:-700, created_at:'2026-09-01' },
+        { id:2, code:'L114*8*2', quantite:-300, created_at:'2026-09-02' },
+        { id:3, code:'L114*8*2', quantite:-800, created_at:'2026-09-03' },
+        { id:4, code:'L114*8*2', quantite:1000, created_at:'2026-09-04' },
+        { id:5, code:'L114*8*2', quantite: 800, created_at:'2026-09-05' }
+      ]);
+      var items = calcInventoryItems('2026-09', '2026-09-30');
+      var semi = [];
+      for (var i = 0; i < items.length; i++) if (items[i] && items[i].store === 'stockSemi') semi.push([items[i].code, items[i].theo_qte]);
+      var nbL = 0, total = null;
+      for (var j = 0; j < semi.length; j++) {
+        if (semi[j][0] === 'L114*8*2') { nbL++; total = semi[j][1]; }
+      }
+      /* -700-300-800+1000+800 = 0 : une seule ligne a 0, comme la fiche. */
+      (nbL === 1 && total === 0) ? 'OK : 1 ligne, stock 0 (au lieu de 5 mouvements)'
+        : 'ECHEC lignes=' + nbL + ' total=' + total + ' detail=' + JSON.stringify(semi)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire semi-finis : enregistrer applique l ecart, il ne fige plus chaque mouvement',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [{ code:'L-TEST', designation:'Latte test', type:'LATTE', length:100, width:10, thickness:2 }]);
+      setStockSemi([
+        { id:1, code:'L-TEST', quantite:-50, created_at:'2026-09-01' },
+        { id:2, code:'L-TEST', quantite:-30, created_at:'2026-09-02' },
+        { id:3, code:'L-TEST', quantite:100, created_at:'2026-09-03' }
+      ]);
+      applyInventoryAsInitial('2026-09', [{ code:'L-TEST', ref:'L-TEST', store:'stockSemi', real_qte:20 }]);
+      var st = getStockSemi(), tot = 0, lignes = 0;
+      for (var i = 0; i < st.length; i++) if (String(st[i].code) === 'L-TEST') { tot += parseFloat(st[i].quantite) || 0; lignes++; }
+      (tot === 20 && lignes === 3) ? 'OK : stock total 20 (real 20), 3 lignes conservees'
+        : 'ECHEC total=' + tot + ' lignes=' + lignes
     `,
     attenduPrefixe: 'OK'
   });
