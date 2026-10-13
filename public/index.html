@@ -13102,8 +13102,85 @@ function harmoniserNomenclature() {
   try { toast('Nomenclature harmonisée : ' + varFusion.join(', ') + ' — même liste que l’Exploitation.'); } catch (e4) {}
   return varFusion;
 }
+/* Articles d'EXPLOITATION absents de la nomenclature.
+   - Semi-finis : l'exploitation en est la source (ils y sont fabriques avec
+     leur nomenclature) — ils doivent etre repris ici.
+   - Produits finis : c'est l'inverse, l'index est la source ; ils ne sont
+     proposes que sur demande explicite.
+   Renvoie { ajoutes: [codes], semi: n, produits: n }. */
+function importerArticlesExploitation(options) {
+  var opt = options || {};
+  var arts = getArticles() || [];
+  var deja = {};
+  arts.forEach(function (a) { if (a && a.code) deja[String(a.code).trim().toUpperCase()] = true; });
+  var p = null;
+  try { p = apProdGet(); } catch (e) {}
+  var expl = ((p && p.articles) || []);
+  /* Les semi-finis peuvent aussi n'exister que dans le stock (lignes de
+     stockSemi) : on les ajoute a la volee pour ne rien rater. */
+  try {
+    var stockSemi = ((p && p.stockSemi) || []);
+    stockSemi.forEach(function (s) {
+      if (!s || !s.code) return;
+      var c = String(s.code).trim().toUpperCase();
+      if (deja[c]) return;
+      /* On NE marque pas `deja` ici : la boucle principale le fera apres
+         ajout, sinon la ligne qu'on vient de pousser serait sautee. */
+      expl.push({ code: s.code, designation: s.designation || s.code, categorie: 'semi' });
+    });
+  } catch (e2) {}
+  var ajoute = [];
+  var nSemi = 0, nPf = 0;
+  expl.forEach(function (a) {
+    if (!a || !a.code) return;
+    var cat = String(a.categorie || '').toLowerCase();
+    var estSemi = (cat === 'semi' || cat === 'semi_fini' || cat === 'semifini');
+    var estPf = (cat === 'finished' || cat === 'produit_fini');
+    if (!estSemi && !(opt.produitsFinis && estPf)) return;
+    var code = String(a.code).trim().toUpperCase();
+    if (deja[code]) return;
+    var px0 = parseFloat(a.prix_vente) || 0;
+    var an = new Date().getFullYear();
+    arts.push({ id: DB.genId(), code: a.code, designation: a.designation || a.code,
+      typeArticle: estSemi ? 'semi_fini' : 'produit_fini', commercialise: true,
+      longueur: parseFloat(a.length) || 0, largeur: parseFloat(a.width) || 0, epaisseur: parseFloat(a.thickness) || 0,
+      prixPeriodes: px0 > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: px0 }] : [] });
+    deja[code] = true;
+    ajoute.push(a.code);
+    if (estSemi) nSemi++; else nPf++;
+  });
+  if (ajoute.length) {
+    DB.set('mdb_nomenclature', arts);
+    toast(ajoute.length + ' article(s) ajouté(s) depuis l\u2019Exploitation : ' + ajoute.join(', '));
+  } else {
+    toast('Rien à ajouter : tout ce que l\u2019Exploitation produit est déjà dans la nomenclature.', 'info');
+  }
+  renderNomenclature();
+  return { ajoutes: ajoute, semi: nSemi, produits: nPf };
+}
+/* Les semi-finis de l'exploitation sont repris automatiquement : sans cela
+   la nomenclature en etait vide alors qu'ils sont fabriques la-bas. */
+function syncSemiFinisFromExploitation() {
+  try {
+    return importerArticlesExploitation({ produitsFinis: false });
+  } catch (e) { return { ajoutes: [] }; }
+}
+/* Choix avant import : semi-finis (source Exploitation) et, si demande,
+   produits finis (l'index reste la source, l'import est explicite). */
+function demanderImportExploitation() {
+  openConfirm('Que faut-il ajouter depuis l\u2019Exploitation ?\n\n'
+    + '• Semi-finis : ils sont toujours repris automatiquement.\n'
+    + '• Produits finis : ils ne sont ajoutés que si vous le demandez.', function () {
+      if (confirm2('Ajouter aussi les PRODUITS FINIS qui ne sont pas encore dans la nomenclature ?')) {
+        importerArticlesExploitation({ produitsFinis: true });
+      } else {
+        importerArticlesExploitation({ produitsFinis: false });
+      }
+    });
+}
 function renderNomenclature() {
   try { harmoniserNomenclature(); } catch (eH) {}
+  try { syncSemiFinisFromExploitation(); } catch (eS1) {}
   try { syncProduitsFinisFromExploitation(); } catch (eSy) {}
   var articles = getArticles();
   var readonly = isReadonly('nomenclature');
@@ -13115,6 +13192,9 @@ function renderNomenclature() {
     for (_k = 0; _k < articles.length; _k++) { if (articles[_k].typeArticle === 'produit_fini') _nbPF++; }
     html += '<span style="font-size:12px;font-weight:800;color:var(--primary)">' + articles.length + ' article(s) · ' + _nbPF + ' produit(s) fini(s)</span>';
     html += '<button class="btn btn-sm btn-outline" onclick="importerDimensionsExploitation()" title="Reprendre les dimensions saisies dans Exploitation et les enregistrer ici" style="font-size:11px">📐 Reprendre les dimensions</button>';
+  if (!readonly) {
+    html += '<button class="btn btn-sm btn-primary" onclick="demanderImportExploitation()" title="Ajouter dans la nomenclature les articles qui n\u2019existent que dans l\u2019Exploitation" style="font-size:11px">⬇ Ajouter depuis l\u2019Exploitation</button>';
+  }
     html += '<span id="nomSelInfo" style="font-size:11px;color:var(--gray-500)"></span>';
   if (!readonly) html += '<button class="btn btn-outline" onclick="supprimerNomenclatureSelection()" title="Supprimer tous les articles cochés" style="font-size:12px">🗑 Supprimer la sélection</button>';
   } catch (eC) {}

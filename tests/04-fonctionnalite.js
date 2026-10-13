@@ -4739,6 +4739,58 @@ r.push({
   });
 
   r.push({
+    nom: 'Index : les semi-finis d\u2019Exploitation remontent automatiquement dans la nomenclature',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_nomenclature', []);
+      apProdGet = function () {
+        return { articles: [
+                  { id:'s1', code:'LATTES', designation:'Lattes', categorie:'semi', prix_vente: 200 },
+                  { id:'p1', code:'PAL114', designation:'PALETTES', categorie:'finished', prix_vente: 6000 }
+                ],
+                 stockSemi: [{ id:'st1', code:'PLOTS', designation:'Plots', quantite: 5 }],
+                 pfLinks: [], pfIgnores: [] };
+      };
+      var r = importerArticlesExploitation({ produitsFinis: false });
+      var arts = DB.get('mdb_nomenclature');
+      var codes = arts.map(function (a) { return a.code + ':' + a.typeArticle; });
+      (r.semi === 2 && codes.indexOf('LATTES:semi_fini') !== -1 && codes.indexOf('PLOTS:semi_fini') !== -1
+        && codes.indexOf('PAL114:produit_fini') === -1)
+        ? 'OK : LATTES et PLOTS repris comme semi-finis, et le produit fini NON ajoute (l\u2019index reste sa source)'
+        : 'ECHEC r=' + JSON.stringify(r) + ' codes=' + JSON.stringify(codes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Index : le bouton d\u2019import peut ajouter aussi les produits finis, sur demande',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_nomenclature', []);
+      apProdGet = function () {
+        return { articles: [
+                  { id:'p1', code:'PAL114', designation:'PALETTES 114', categorie:'finished', prix_vente: 6000 },
+                  { id:'s1', code:'LATTES', designation:'Lattes', categorie:'semi', prix_vente: 200 }
+                ], stockSemi: [], pfLinks: [], pfIgnores: [] };
+      };
+      /* Sans produits finis */
+      importerArticlesExploitation({ produitsFinis: false });
+      var sansPf = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
+      /* Avec produits finis */
+      importerArticlesExploitation({ produitsFinis: true });
+      var avecPf = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
+      var h = '';
+      try { isReadonly = function () { return false; }; renderNomenclature(); h = (document.getElementById('facturationContent') || document.getElementById('content') || { innerHTML: '' }).innerHTML || ''; } catch (e) {}
+      if (!h) h = (document.getElementById('content') || { innerHTML: '' }).innerHTML || '';
+      var okBouton = h.indexOf('demanderImportExploitation') !== -1;
+      (sansPf === 0 && avecPf === 1 && okBouton)
+        ? 'OK : rien ajoute par defaut, produit fini ajoute sur demande, et le bouton est present'
+        : 'ECHEC sansPf=' + sansPf + ' avecPf=' + avecPf + ' bouton=' + okBouton + ' len=' + h.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Nomenclature : les doublons 112/PAL112 et NES/Nest sont fusionnés automatiquement',
     app: 'index.html', store: storeRealiste,
     code: `
