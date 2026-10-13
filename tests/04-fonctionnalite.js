@@ -4842,7 +4842,46 @@ r.push({
   });
 
   r.push({
-    nom: 'Catalogue : le diagnostic d\u2019écart nomme le produit manquant et les doublons',
+    nom: 'Stockage plein : la purge ne se relance pas a chaque écriture (c\u2019est ce qui figeait l\u2019appareil)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Deux ecritures qui echouent doivent declencher UNE seule purge, pas
+         une a chaque fois. */
+      var gros = '';
+      for (var g = 0; g < 900; g++) gros += 'x'.repeat(4000);
+      try { localStorage.setItem('mdb_test_saturant', gros); } catch (eW) {}
+      window._quotaDernierPurge = 0;
+      var p1 = _quotaPurgeUrgence();
+      var p2 = _quotaPurgeUrgence();
+      try { localStorage.removeItem('mdb_test_saturant'); } catch (e2) {}
+      (p1 >= 0 && p2 === 0)
+        ? 'OK : purge 1 = ' + p1 + ' element(s), purge 2immediatee = 0 (pas de rescann inutile)'
+        : 'ECHEC p1=' + p1 + ' p2=' + p2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stockage plein : le nettoyage manuel libere de la place sans toucher aux donnees',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_article_test', { code: 'X', nom: 'essai' });
+      localStorage.setItem('mdb_backup_0', '{\"gros\":1}');
+      localStorage.setItem('mdb_backup_1', '{\"gros\":2}');
+      window._quotaDernierPurge = 0;
+      var avant = _quotaEtat();
+      var r = nettoyerStockageLocal();
+      var apres = _quotaEtat();
+      var garde = JSON.parse(localStorage.getItem('mdb_article_test') || 'null');
+      (r.supprimes >= 2 && r.gainKo >= 0 && apres.totalKo <= avant.totalKo && garde && garde.code === 'X')
+        ? 'OK : ' + r.supprimes + ' temporaires supprime(s), ' + r.gainKo + ' Ko liberes, donnees intactes'
+        : 'ECHEC r=' + JSON.stringify(r) + ' garde=' + JSON.stringify(garde)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stockage plein : le diagnostic d\u2019écart nomme le produit manquant et les doublons',
     app: 'production.html', store: storeRealiste,
     code: `
       /* L'index porte CAFE (absent d'exploitation) et deux doublons :
