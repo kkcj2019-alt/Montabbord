@@ -4711,6 +4711,60 @@ r.push({
   });
 
   r.push({
+    nom: 'Catalogue : le diagnostic d\u2019écart nomme le produit manquant et les doublons',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* L'index porte CAFE (absent d'exploitation) et deux doublons :
+         112/PAL112 et NES/Nest. */
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n1', code:'112', designation:'PALETTE 112', typeArticle:'produit_fini' },
+        { id:'n2', code:'PAL112', designation:'PALETTES 112', typeArticle:'produit_fini' },
+        { id:'n3', code:'NES', designation:'NESTLE', typeArticle:'produit_fini' },
+        { id:'n4', code:'Nest', designation:'Nestle 120x10x20', typeArticle:'produit_fini' },
+        { id:'n5', code:'CAFE', designation:'Café Cacao', typeArticle:'produit_fini' }
+      ]));
+      setSection('articles', [
+        { id:'e1', code:'PAL112', designation:'PALETTES 112', categorie:'finished' },
+        { id:'e2', code:'NES', designation:'NESTLE', categorie:'finished' }
+      ]);
+      setSection('pfIgnores', []); setSection('pfLinks', []);
+      renderPage = function () {};
+      var d = diagnosticEcartsPF();
+      /* CAFE et 114 sont bien signales comme absents d'exploitation */
+      (d.indexSeulement.indexOf('CAFE') !== -1
+        && d.indexSeulement.indexOf('Nest') !== -1
+        && d.doublonsPossibles.length === 2)
+        ? 'OK : CAFE absent, et 2 doublons entre codes différents (' + d.doublonsPossibles.join(' ; ') + ')'
+        : 'ECHEC ' + JSON.stringify(d)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Catalogue : « Resynchroniser » réintègre un produit supprim\u00e9 puis bloqu\u00e9',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n5', code:'CAFE', designation:'Café Cacao', typeArticle:'produit_fini' }
+      ]));
+      setSection('articles', []);
+      setSection('pfIgnores', ['CAFE']); setSection('pfLinks', []);
+      try { localStorage.setItem('mdb_prod_supprimes', JSON.stringify(['CAFE'])); } catch (e) {}
+      renderPage = function () {};
+      /* 1) bloque : il ne revient pas tout seul */
+      syncProduitsFinisFromIndex();
+      var avant = getArticlesActifs().filter(function (a) { return a.code === 'CAFE'; }).length;
+      /* 2) resynchroniser : il revient */
+      resynchroniserCatalogue();
+      var apres = getArticlesActifs().filter(function (a) { return a.code === 'CAFE'; }).length;
+      (avant === 0 && apres === 1)
+        ? 'OK : CAFE bloqué (ne revient pas seul), reintegr\u00e9 par « Resynchroniser »'
+        : 'ECHEC avant=' + avant + ' apres=' + apres
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Suppression refus\u00e9e clairement si l\u2019article est li\u00e9 \u00e0 une facture ou une livraison',
     app: 'production.html', store: storeRealiste,
     code: `

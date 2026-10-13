@@ -15147,6 +15147,7 @@ function render_articles() {
   h += '</select></div>';
   h += '<div style="display:flex;gap:.5rem">';
   h += '<button class="btn" onclick="catImprimerSelection()" title="Imprimer les fiches techniques cochées">🖨 Fiches cochées</button>';
+  h += '<button class="btn" onclick="resynchroniserCatalogue()" title="Comparer avec la Nomenclature (app principale) et reintegrer les produits manquants" style="font-size:.72rem">🔄 Resynchroniser</button>';
   h += '<button class="btn btn-red" onclick="supprimerArticlesSelectionnes()" title="Supprimer tous les produits cochés" style="font-size:.72rem">🗑 Supprimer la sélection</button>';
   h += '<button class="btn btn-accent" onclick="showNewArticle()">+ Nouvel Article</button>';
   h += '</div></div>';
@@ -15661,6 +15662,95 @@ function articleBloquePar(art) {
       || verif('mdb_bl', 'un bon de livraison')
       || verif('mdb_bc', 'un bon de commande')
       || verif('mdb_prefinancement', 'un pré-financement');
+}
+/* Comparaison des deux listes : ce que l'index a et pas ici, l'inverse, et
+   les doublons (le meme produit sous deux codes). Rien n'est modifie : c'est
+   un diagnostic. Renvoie le detail et l'affiche en console. */
+function diagnosticEcartsPF() {
+  var arts = getArticlesActifs();
+  var codesExpl = arts.filter(function(a) { return String(a.categorie || '') === 'finished'; })
+    .map(function(a) { return String(a.code || '').trim(); });
+  var nExpl = {};
+  codesExpl.forEach(function (c) { nExpl[c.toUpperCase()] = (nExpl[c.toUpperCase()] || 0) + 1; });
+  var idx = idxNomenclature().filter(function (a) { return a && String(a.typeArticle || '') === 'produit_fini'; });
+  var nIdx = {};
+  idx.forEach(function (a) { var c = String(a.code || '').trim().toUpperCase(); nIdx[c] = (nIdx[c] || 0) + 1; });
+  var indexSeulement = [], doublonsIndex = [], doublonsExpl = [], exploitsSeulement = [];
+  Object.keys(nIdx).forEach(function (c) {
+    if (nIdx[c] > 1) doublonsIndex.push(c + ' (x' + nIdx[c] + ')');
+    if (!nExpl[c]) indexSeulement.push(idx.filter(function (a) { return String(a.code || '').trim().toUpperCase() === c; })[0].code);
+  });
+  Object.keys(nExpl).forEach(function (c) {
+    if (nExpl[c] > 1) doublonsExpl.push(c + ' (x' + nExpl[c] + ')');
+    if (!nIdx[c]) exploitsSeulement.push(codesExpl.filter(function (x) { return x.toUpperCase() === c; })[0]);
+  });
+  var bloques = indexSeulement.filter(function (c) { return pfEstIgnore(c) || pfEstSupprime(c); });
+  /* Doublons entre codes differents (112 / PAL112, NES / Nest) : meme produit
+     porte sous deux noms — c'est ce qui fait que les comptes divergent. */
+  var parSui = {};
+  idx.forEach(function (a) {
+    var s = pfSigDes(a.designation);
+    if (!s) return;
+    if (!parSui[s]) parSui[s] = [];
+    parSui[s].push(String(a.code || '').trim());
+  });
+  var doublonsPossibles = [];
+  Object.keys(parSui).forEach(function (s) {
+    var g = parSui[s];
+    var uniq = [];
+    for (var i = 0; i < g.length; i++) if (uniq.indexOf(g[i].toUpperCase()) === -1) uniq.push(g[i]);
+    if (uniq.length > 1) doublonsPossibles.push(uniq.join(' = '));
+  });
+  /* Memes chiffres (112 / PAL112) ou codes qui se ressemblent (NES / Nest) :
+     meme produit porte sous deux noms. */
+  var codesIdxUniq = [];
+  idx.forEach(function (a) {
+    var c = String(a.code || '').trim();
+    if (c && codesIdxUniq.indexOf(c.toUpperCase()) === -1) codesIdxUniq.push(c);
+  });
+  var paires = [];
+  for (var i = 0; i < codesIdxUniq.length; i++) {
+    for (var j = i + 1; j < codesIdxUniq.length; j++) {
+      var A = codesIdxUniq[i].toUpperCase(), B = codesIdxUniq[j].toUpperCase();
+      if (A === B) continue;
+      var memesChiffres = pfSigCode(A) && pfSigCode(A) === pfSigCode(B);
+      var prefixe = (A.length !== B.length && A.length >= 2 && B.length >= 2
+        && (A.indexOf(B) === 0 || B.indexOf(A) === 0));
+      if (memesChiffres || prefixe) paires.push(codesIdxUniq[i] + ' = ' + codesIdxUniq[j]);
+    }
+  }
+  doublonsPossibles = doublonsPossibles.concat(paires);
+  var r = {
+    totalIndex: idx.length, totalExploitation: codesExpl.length,
+    indexSeulement: indexSeulement,
+    bloquesParUneSuppression: bloques,
+    doublonsIndex: doublonsIndex,
+    doublonsPossibles: doublonsPossibles,
+    doublonsExploitation: doublonsExpl,
+    exploitationSeulement: exploitsSeulement
+  };
+  console.log('[Catalogue PF] ecart entre les deux listes :', r);
+  return r;
+}
+/* Resynchronise le catalogue sur la Nomenclature, en levant le blocage des
+   codes supprimes localement : c'est la seule facon de les reintegrer. */
+function resynchroniserCatalogue() {
+  var avant = diagnosticEcartsPF();
+  var ig = getPfIgnores();
+  var cibles = avant.indexSeulement || [];
+  var n = 0;
+  cibles.forEach(function (code) {
+    if (pfEstSupprime(code)) { pfOublierSupprime(code); n++; }
+  });
+  if (n) { try { setPfIgnores(ig.filter(function (c) { return cibles.indexOf(c) === -1; })); } catch (e) {} }
+  var r = syncProduitsFinisFromIndex();
+  var apres = diagnosticEcartsPF();
+  var msg = 'Catalogue resynchronisé : ' + (apres.totalExploitation) + ' produits finis';
+  if (apres.indexSeulement.length) msg += ' — encore absents : ' + apres.indexSeulement.join(', ');
+  if (apres.doublonsPossibles && apres.doublonsPossibles.length) msg += ' · Doublons dans la Nomenclature : ' + apres.doublonsPossibles.join(', ');
+  toast(msg, apres.indexSeulement.length ? 'info' : 'success');
+  renderPage();
+  return apres;
 }
 /* Suppression effective. `dejaConfirme` = suppression groupée (une seule
    confirmation pour toute la sélection). */
