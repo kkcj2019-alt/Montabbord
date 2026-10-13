@@ -7050,6 +7050,19 @@ function prodPushNow() {
        (mdb_employes, mdb_paye, mdb_operationsCaisse...) restent intactes. */
     var payload = {};
     payload.mdb_production = getDB();
+    /* La Nomenclature est la SOURCE UNIQUE des produits finis et la cle est
+       partagee avec l'app principale. Quand Exploitation la modifie ( suppression
+       d'un produit fini ), il faut l'envoyer aussi, sinon la modification reste
+       locale et l'index la recree au prochain chargement. */
+    try {
+      if (window._prodNomModifie) {
+        var _nomm = JSON.parse(localStorage.getItem('mdb_nomenclature') || 'null');
+        if (Array.isArray(_nomm)) {
+          payload.mdb_nomenclature = _nomm;
+          window._prodNomEnAttente = true;
+        }
+      }
+    } catch (eNM) {}
     try {
       var localDettes = [];
       try { localDettes = lsArr('mdb_dettesFournisseurs'); } catch(e) { localDettes = []; }
@@ -7064,7 +7077,11 @@ function prodPushNow() {
        le serveur fusionne le reste, donc une saisie concurrente sur une autre section survit. */
     var sectionPayload = prodBuildSectionPayload();
     try { window._prodSectionsEnvoyees = payload.mdb_production || null; window._prodSectionsPartielles = null; } catch (eSE) {}
-    if (_prodMergedRpc === false || !sectionPayload) {
+    /* La Nomenclature doit partir : on force alors l'envoi complet (la RPC
+       par sections n'enverrait que mdb_production et perdrait la suppression). */
+    var _nomEnAttente = !!window._prodNomEnAttente;
+    if (_nomEnAttente) { window._prodNomEnAttente = false; window._prodNomModifie = false; }
+    if (_prodMergedRpc === false || !sectionPayload || _nomEnAttente) {
       return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
     }
     var prodArgs = { p_id: uid, p_prod: sectionPayload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom };
@@ -11781,6 +11798,11 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     var t = s.ctype || s.type || ((cu === 'P5' || cu === 'P6' || cu === 'P7' || du.indexOf('POINTE') === 0) ? 'POINTE' : 'DIVERS');
     if (t !== 'POINTE') t = 'DIVERS';
     var cond = parseFloat(s.cond != null ? s.cond : s.qty_per_packet) || 0;
+    /* Conditionnement absent sur les anciennes lignes : on le reprend du
+       catalogue, sinon 0 paquet partout (stock initial d'inventaire sans cond). */
+    if (!(cond > 0)) {
+      try { cond = parseFloat(acPointesParPaquet(code)) || 0; } catch (eCd) {}
+    }
     var unites = parseFloat(s.quantite) || 0;
     var paq = t === 'POINTE' ? (cond > 0 ? Math.floor(unites / cond) : unites) : unites;
     var _ppc = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
@@ -14362,17 +14384,23 @@ function infoProduitConso(code) {
       if ((!info.emplacement || info.emplacement === '-') && s.emplacement && s.emplacement !== '-') info.emplacement = s.emplacement;
     }
   } catch (eS) {}
-  if ((!info.designation || info.designation === info.code)) {
-    try {
-      var cat = defCatalog();
-      for (var j = 0; j < cat.length; j++) {
-        if (String(cat[j].code || '').trim().toUpperCase() !== K) continue;
-        if (cat[j].designation) info.designation = cat[j].designation;
-        if (!(info.cond > 0) && cat[j].qty_per_packet > 0) info.cond = cat[j].qty_per_packet;
-        if (String(cat[j].type || '').toUpperCase() === 'DIVERS') info.ctype = 'DIVERS';
-        break;
-      }
-    } catch (eC) {}
+  /* Catalogue : on le consulte TOUJOURS (designation, mais surtout le
+     CONDITIONNEMENT). Avant, il n'etait lu que si la designation manquait :
+     une fiche avec un nom mais sans cond demarrait a 0 paquet (P5 : 89
+     paquets saisis a l'inventaire, affiche 0). */
+  try {
+    var cat = defCatalog();
+    for (var j = 0; j < cat.length; j++) {
+      if (String(cat[j].code || '').trim().toUpperCase() !== K) continue;
+      if ((!info.designation || info.designation === info.code) && cat[j].designation) info.designation = cat[j].designation;
+      if (!(info.cond > 0) && cat[j].qty_per_packet > 0) info.cond = cat[j].qty_per_packet;
+      if (String(cat[j].type || '').toUpperCase() === 'DIVERS') info.ctype = 'DIVERS';
+      break;
+    }
+  } catch (eC) {}
+  /* Dernier recours : le conditionnement connu pour ce code. */
+  if (!(info.cond > 0)) {
+    try { var _cd = acPointesParPaquet(code); if (_cd > 0) info.cond = _cd; } catch (eCd) {}
   }
   return info;
 }
@@ -14712,7 +14740,7 @@ function render_articles() {
      coût, ni marge — tout ça se gère dans la Nomenclature de l'appli
      principale). Reste la technique : code, désignation, destination,
      composants. */
-  h += '<div class="card"><table id="artTable"><tr><th style="width:28px"><input type="checkbox" onclick="catToggleAll(this)" title="Tout cocher"></th><th>Code</th><th>Désignation</th><th>Destination</th><th>Composants</th><th>Actions</th></tr>';
+  h += '<div class="card"><table id="artTable"><tr><th style="width:28px"><input type="checkbox" onclick="catToggleAll(this)" title="Tout cocher"></th><th>Code</th><th>Désignation</th><th>Destination</th><th title="Longueur x Largeur x Epaisseur (cm)">Dimension (cm)</th><th>Composants</th><th>Actions</th></tr>';
   articles.forEach(function(a) {
     var comp = composants.filter(function(c) { return c.article_id === a.id; });
     var lattes = comp.filter(function(c) { return c.type === 'LATTE'; });
@@ -14724,6 +14752,7 @@ function render_articles() {
     h += '<td style="font-weight:600">' + escH(a.code) + '</td>';
     h += '<td>' + escH(a.designation) + '</td>';
     h += '<td style="font-size:.75rem;color:var(--dim)">' + escH(a.destination || '') + '</td>';
+    h += '<td style="font-size:.75rem;font-weight:600;color:var(--blue);white-space:nowrap" title="Longueur x Largeur x Epaisseur (cm)">' + escH(pfDimTxt(a)) + '</td>';
     h += '<td style="font-size:.75rem">' + comp.length + ' composant(s)';
     if (lattes.length) h += '<br><span style="color:var(--accent)">-latte(s):' + lattes.length + '</span>';
     if (plots.length) h += ' <span style="color:var(--blue)">plot(s):' + plots.length + '</span>';
@@ -14806,6 +14835,8 @@ function printFichesTechniques(ids, titre) {
     for (var k = 0; k < articles.length; k++) { if (articles[k].id === id) { a = articles[k]; break; } }
     if (!a) return;
     h += '<h2>' + (i + 1) + '. ' + escH(a.code || '') + ' — ' + escH(a.designation || '') + (a.destination ? ' (' + escH(a.destination) + ')' : '') + '</h2>';
+    var _dim = pfDimTxt(a);
+    if (_dim !== '-') h += '<p style="margin:.1rem 0"><strong>Dimensions :</strong> ' + escH(_dim) + ' cm</p>';
     h += ficheTechCorpsHtml(id);
     h += '<div class="saut"></div>';
   });
@@ -15182,12 +15213,35 @@ function deleteArticle(id) {
   if (inStock) msg += '\n\n⚠️ Cet article a du stock enregistré !\nSa suppression impactera les stocks liés.';
   msg += '\n\nConfirmer ?';
   if (!confirm2(msg)) return;
-  /* Produit fini : mémorisé comme refusé pour la synchro (sinon l'autre
-     appli le recrée à l'affichage suivant). Réintégrable via console. */
+  /* Produit fini : la SOURCE UNIQUE est la Nomenclature de l'index
+     (mdb_nomenclature, cle partagee par les deux applis). Supprimer ici
+     doit donc supprimer la-bas aussi, sinon la synchronisation le recreait
+     a l'affichage suivant — c'est ce qui se passait (« supprimé » mais
+     toujours present). */
   if (art.categorie === 'finished') {
+    var _n = pfNormCode(art.code);
     try {
+      /* tous les codes index Lies a cet article (lui-meme + ses alias) */
+      var _codes = [_n];
+      try {
+        var _liens = getPfLinks();
+        for (var _i = 0; _i < _liens.length; _i++) {
+          if (pfNormCode(_liens[_i].expl) === _n) _codes.push(pfNormCode(_liens[_i].idx));
+        }
+      } catch (eL) {}
+      try {
+        var _idx = idxNomenclature();
+        var _gardeIdx = _idx.filter(function (ia) {
+          if (!ia || String(ia.typeArticle || '') !== 'produit_fini') return true;
+          for (var _j = 0; _j < _codes.length; _j++) { if (pfNormCode(ia.code) === _codes[_j]) return false; }
+          return true;
+        });
+        if (_gardeIdx.length !== _idx.length) {
+          localStorage.setItem('mdb_nomenclature', JSON.stringify(_gardeIdx));
+          try { window._prodNomModifie = true; } catch (eM) {}
+        }
+      } catch (eI2) {}
       var _ig = getPfIgnores();
-      var _n = pfNormCode(art.code);
       if (_n && _ig.indexOf(_n) === -1) _ig.push(_n);
       setPfIgnores(_ig);
       setPfLinks(getPfLinks().filter(function(l) { return pfNormCode(l.expl) !== _n; }));
@@ -15250,6 +15304,22 @@ function idxPrixActuel(a) {
     return parseFloat(a.prixUnitaire) || 0;
   } catch (e) { return 0; }
 }
+/* ---------- SIGNATURES pour réconcilier les deux listes ----------
+   Les deux applications nommaient parfois le meme produit differemment
+   (114 <-> PAL114, BBAG <-> Bbag, COUV114 <-> COUVERCLE 114). Sans
+   correspondance automatique, chaque applik affichait sa propre liste :
+   30 produits finis d'un cote, 32 de l'autre. On rapproche donc sur :
+     - le code normalise (identique) ;
+     - la DESIGNATION normalisee (PALETTES 114*114*12 = PALETTE 114*114*12) ;
+     - les CHIFFRES du code (PAL114 et 114 partagent « 114 »).
+   Chaque rapprochement doit etre unique des deux cotes, sinon on ne lie
+   rien : mieux vaut deux lignes qu'une fusion erronee. */
+function pfSigDes(d) {
+  return String(d || '').toUpperCase()
+    .normalize ? String(d || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]/g, '').replace(/S$/, '')
+    : String(d || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/S$/, '');
+}
+function pfSigCode(c) { return String(c || '').toUpperCase().replace(/[^0-9]/g, ''); }
 /* Code exploitation correspondant à un code index (mapping sinon tel quel). */
 function pfExplDe(idxCode) {
   var n = pfNormCode(idxCode);
@@ -15262,34 +15332,140 @@ function pfExplDe(idxCode) {
 /* Sens Index -> Exploitation : crée les manquants, suit les prix.
    Idempotent : ne réécrit que si quelque chose change. */
 function syncProduitsFinisFromIndex() {
-  var res = { crees: 0, prixMaj: 0 };
+  var res = { crees: 0, prixMaj: 0, supprimes: 0, liens: 0 };
   try {
     var arts = getArticles();
     var idxArts = idxNomenclature();
     var change = false;
-    for (var j = 0; j < idxArts.length; j++) {
-      var ia = idxArts[j];
-      if (!ia || String(ia.typeArticle || '') !== 'produit_fini') continue;
-      if (pfEstIgnore(ia.code)) continue;
-      var codeExp = pfExplDe(ia.code);
-      if (pfEstIgnore(codeExp)) continue;
-      var ex = null;
-      for (var k = 0; k < arts.length; k++) {
-        if (arts[k].categorie === 'finished' && pfNormCode(arts[k].code) === pfNormCode(codeExp)) { ex = arts[k]; break; }
-      }
+    /* Index = source unique des produits finis. On travaille donc sur la
+       liste EXACTE de l'index : creations, mise a jour (designation,
+       dimensions, prix) ET suppression de ce qui n'existe plus. */
+    var pfIdx = [];
+    for (var p = 0; p < idxArts.length; p++) {
+      var ic = idxArts[p];
+      if (ic && String(ic.typeArticle || '') === 'produit_fini' && !pfEstIgnore(ic.code)) pfIdx.push(ic);
+    }
+    /* Index des articles locaux finis, par code normalise */
+    var locaux = {};
+    for (var a0 = 0; a0 < arts.length; a0++) {
+      if (arts[a0] && arts[a0].categorie === 'finished') locaux[pfNormCode(arts[a0].code)] = arts[a0];
+    }
+    /* 1) Rapprochement automatique des codes differents */
+    var links = getPfLinks();
+    var lieIdx = {};
+    for (var l = 0; l < links.length; l++) lieIdx[pfNormCode(links[l].idx)] = links[l].expl;
+    var vus = {};
+    for (var p2 = 0; p2 < pfIdx.length; p2++) {
+      var ia = pfIdx[p2];
+      var inN = pfNormCode(ia.code);
+      if (locaux[inN]) { vus[inN] = true; continue; }
+      var codeExpl = lieIdx[inN] || ia.code;
+      var ex = locaux[pfNormCode(codeExpl)] || null;
       if (!ex) {
-        arts.push({ id: genId(), code: ia.code, designation: ia.designation || ia.code,
-          categorie: 'finished', prix_vente: idxPrixActuel(ia), prix_revient: 0,
+        /* designations identiques ? */
+        var sd = pfSigDes(ia.designation);
+        var candidats = [];
+        for (var k2 = 0; k2 < arts.length; k2++) {
+          var c2 = arts[k2];
+          if (!c2 || c2.categorie !== 'finished' || vus[pfNormCode(c2.code)]) continue;
+          if (sd && pfSigDes(c2.designation) === sd) candidats.push(c2);
+        }
+        if (candidats.length === 1) ex = candidats[0];
+        else if (candidats.length > 1) ex = null;
+        else {
+          /* chiffres communs (PAL114 <-> 114) */
+          var sc = pfSigCode(ia.code);
+          var cands = [];
+          if (sc) {
+            for (var k3 = 0; k3 < arts.length; k3++) {
+              var c3 = arts[k3];
+              if (!c3 || c3.categorie !== 'finished' || vus[pfNormCode(c3.code)]) continue;
+              if (pfSigCode(c3.code) === sc) cands.push(c3);
+            }
+          }
+          if (cands.length === 1) ex = cands[0];
+        }
+        if (ex) {
+          links.push({ expl: ex.code, idx: ia.code });
+          res.liens++; change = true;
+        }
+      }
+      if (ex) vus[pfNormCode(ex.code)] = true;
+    }
+    if (res.liens > 0) setPfLinks(links);
+
+    /* 2) Creation / mise a jour */
+    for (var j = 0; j < pfIdx.length; j++) {
+      var ia2 = pfIdx[j];
+      if (pfEstIgnore(ia2.code)) continue;
+      var codeExp = pfExplDe(ia2.code);
+      if (pfEstIgnore(codeExp)) continue;
+      var ex2 = null;
+      for (var k = 0; k < arts.length; k++) {
+        if (arts[k].categorie === 'finished' && pfNormCode(arts[k].code) === pfNormCode(codeExp)) { ex2 = arts[k]; break; }
+      }
+      if (!ex2) {
+        arts.push({ id: genId(), code: ia2.code, designation: ia2.designation || ia2.code,
+          categorie: 'finished', prix_vente: idxPrixActuel(ia2), prix_revient: 0,
           unite: 'pcs', statut: 'active', created_at: new Date().toISOString(), _fromIndex: true });
         res.crees++; change = true;
       } else {
-        var px = idxPrixActuel(ia);
-        if (px > 0 && parseFloat(ex.prix_vente) !== px) { ex.prix_vente = px; res.prixMaj++; change = true; }
+        var chg = false;
+        var px = idxPrixActuel(ia2);
+        if (px > 0 && parseFloat(ex2.prix_vente) !== px) { ex2.prix_vente = px; res.prixMaj++; chg = true; }
+        /* La designation et les dimensions viennent de l'index : une seule
+           source de verite, sinon les deux listes divergent sur la fiche. */
+        if (ia2.designation && ex2.designation !== ia2.designation) { ex2.designation = ia2.designation; chg = true; }
+        var dims = idxDimDe(ia2);
+        if (dims && (parseFloat(ex2.length) !== dims.l || parseFloat(ex2.width) !== dims.w || parseFloat(ex2.thickness) !== dims.t)) {
+          ex2.length = dims.l; ex2.width = dims.w; ex2.thickness = dims.t; chg = true;
+        }
+        if (chg) change = true;
       }
     }
+    /* 3) Suppression des produits finis locaux qui n'existent plus dans
+       l'index (crees par la synchro). Sans ca, une suppression faite dans
+       l'index laissait le produit visible ici pour toujours. */
+    var codesIdx = {};
+    for (var q = 0; q < pfIdx.length; q++) {
+      var cc = pfNormCode(pfIdx[q].code);
+      codesIdx[cc] = true;
+      var ce = pfNormCode(pfExplDe(pfIdx[q].code));
+      codesIdx[ce] = true;
+    }
+    var avant = arts.length;
+    arts = arts.filter(function (a) {
+      if (!a || a.categorie !== 'finished' || !a._fromIndex) return true;
+      var n = pfNormCode(a.code);
+      if (codesIdx[n]) return true;
+      if (pfEstIgnore(n)) return true;
+      return false;
+    });
+    res.supprimes = avant - arts.length;
+    if (res.supprimes > 0) change = true;
+
     if (change) setArticles(arts);
   } catch (eS) {}
   return res;
+}
+/* Dimensions d'un article index : longueur / largeur / epaisseur. */
+function idxDimDe(ia) {
+  var l = parseFloat(ia.longueur || ia.length) || 0;
+  var w = parseFloat(ia.largeur || ia.width) || 0;
+  var t = parseFloat(ia.epaisseur || ia.thickness) || 0;
+  if (!(l > 0 && w > 0 && t > 0)) return null;
+  return { l: l, w: w, t: t };
+}
+/* Chaine dimensionnelle affichable : « 114 × 114 × 12 ». */
+function pfDimTxt(a) {
+  try {
+    var l = parseFloat(a && (a.length || a.longueur)) || 0;
+    var w = parseFloat(a && (a.width || a.largeur)) || 0;
+    var t = parseFloat(a && (a.thickness || a.epaisseur)) || 0;
+    if (l > 0 && w > 0 && t > 0) return fmt(l) + ' × ' + fmt(w) + ' × ' + fmt(t);
+    if (l > 0 && w > 0) return fmt(l) + ' × ' + fmt(w);
+  } catch (e) {}
+  return '-';
 }
 /* Lier deux codes existants qui désignent le même produit (ex : PAL114 <-> 114).
    La doublure éventuelle côté exploitation est supprimée si elle est sans

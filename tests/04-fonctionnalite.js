@@ -4698,6 +4698,115 @@ r.push({
   });
 
   r.push({
+    nom: 'Source unique PF : supprimer dans la Nomenclature retire aussi la fiche en Exploitation',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n1', code:'114', designation:'PALETTE 114', typeArticle:'produit_fini' },
+        { id:'n2', code:'NEST', designation:'NESTLE 120x10x20', typeArticle:'produit_fini' }
+      ]));
+      setSection('articles', []);
+      setSection('pfLinks', []);
+      setSection('pfIgnores', []);
+      renderPage = function () {};
+      syncProduitsFinisFromIndex();
+      var avant = getArticles().length;            /* 2 fiches creees */
+      /* L'index supprime « 114 » -> Exploitation doit l abandonner */
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n2', code:'NEST', designation:'NESTLE 120x10x20', typeArticle:'produit_fini' }
+      ]));
+      syncProduitsFinisFromIndex();
+      var codes = getArticles().map(function (a) { return a.code; });
+      (avant === 2 && codes.length === 1 && codes[0] === 'NEST')
+        ? 'OK : 114 disparait d Exploitation quand la Nomenclature le supprime (source unique)'
+        : 'ECHEC avant=' + avant + ' codes=' + JSON.stringify(codes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Suppression d’un produit fini : elle part aussi dans la Nomenclature (plus de retour)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n1', code:'114', designation:'PALETTE 114', typeArticle:'produit_fini' },
+        { id:'n2', code:'NEST', designation:'NESTLE', typeArticle:'produit_fini' }
+      ]));
+      setSection('articles', []);
+      setSection('pfLinks', []); setSection('pfIgnores', []);
+      renderPage = function () {};
+      window.confirm2 = function () { return true; };
+      syncProduitsFinisFromIndex();
+      var cible = getArticles().filter(function (a) { return a.code === '114'; })[0];
+      deleteArticle(cible.id);
+      var idxRestants = JSON.parse(localStorage.getItem('mdb_nomenclature'));
+      var codesIdx = idxRestants.filter(function (x) { return x.typeArticle === 'produit_fini'; }).map(function (x) { return x.code; });
+      var codesLoc = getArticles().map(function (a) { return a.code; });
+      /* Et surtout : une synchro ne doit PAS le recreer */
+      syncProduitsFinisFromIndex();
+      var codesApres = getArticles().map(function (a) { return a.code; });
+      (codesIdx.length === 1 && codesIdx[0] === 'NEST' && codesLoc.indexOf('114') === -1
+        && codesApres.indexOf('114') === -1 && window._prodNomModifie === true)
+        ? 'OK : 114 supprime des DEUX cotes, la synchro ne le recree pas, envoi cloud arme'
+        : 'ECHEC idx=' + JSON.stringify(codesIdx) + ' loc=' + JSON.stringify(codesLoc) + ' apres=' + JSON.stringify(codesApres)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Catalogue : colonne Dimension (Longueur x Largeur x Epaisseur)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a1', code: 'PAL114', designation: 'PALETTES 114*114*12', categorie: 'finished', destination: 'MONDI ABIDJAN', length: 114, width: 114, thickness: 12 }
+      ];
+      p.composants = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      CURRENT_PAGE = 'cat-produits-finis'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var okCol = h.indexOf('Dimension') !== -1;
+      var dim = pfDimTxt({ length: 114, width: 114, thickness: 12 });
+      (okCol && h.indexOf(dim) !== -1 && dim.indexOf('114') !== -1 && dim.indexOf('12') !== -1 && pfDimTxt({}) === '-')
+        ? 'OK : colonne Dimension presente, « ' + dim + ' » affiche'
+        : 'ECHEC col=' + okCol + ' dim=' + dim
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock initial d’inventaire sans conditionnement : les paquets retombent (P5 : 89 paquets)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* P5 est dans le catalogue avec cond. 180, mais sa ligne de base
+         d'inventaire a ete ecrite SANS cond : l affichage tombait a 0 paquet. */
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.stockConsum = [
+        { id: 'b1', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 0, quantite: 16020, date: '2026-10-01', obs: 'Stock initial', _invBase: true, _invId: 'i1' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var lignes = _consoLignes('P5');
+      var mvt = buildConsoMovements(lignes);
+      var final = 0;
+      mvt.forEach(function (m) { if (typeof m.final === 'number') final = m.final; });
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
+      var info = infoProduitConso('P5');
+      (final === 16020 && agg.paquets === 89 && info.cond === 180)
+        ? 'OK : 16 020 pointes = 89 paquets (cond repris du catalogue), plus de 0'
+        : 'ECHEC registre=' + final + ' paq=' + agg.paquets + ' cond=' + info.cond
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
     app: 'production.html', store: storeRealiste,
     code: `
@@ -4709,19 +4818,23 @@ r.push({
       setSection('pfIgnores', []);
       renderPage = function () {};
       window.confirm2 = function () { return true; };
-      /* Sans mapping : 114 créé à part (code différent) */
+      /* Sans mapping saisi : la liaison automatique doit reconcilier
+         PAL114 et 114 (memes chiffres) — PAS de doublon, une seule fiche. */
       syncProduitsFinisFromIndex();
-      var sansMap = getArticles().filter(function (a) { return a.code === '114'; }).length;
-      /* Liaison : le prix index (6000) remonte, pas de doublon */
+      var sansDoublon = getArticles().filter(function (a) { return a.categorie === 'finished'; }).length;
+      var palAuto = getArticles().filter(function (a) { return a.code === 'PAL114'; })[0] || {};
+      var autoLiens = getPfLinks();
+      /* La liaison manuelle reste possible et idempotente */
       lierProduitFini('PAL114', '114');
       var arts = getArticles();
       var pal = arts.filter(function (a) { return a.code === 'PAL114'; })[0] || {};
       var liens = getPfLinks();
       var d = diagnosticCorrespondancesPF();
-      (sansMap === 1 && pal.prix_vente === 6000 && liens.length === 1
+      (sansDoublon === 1 && palAuto.prix_vente === 6000 && autoLiens.length === 1
+        && pal.prix_vente === 6000 && liens.length === 1
         && d.mappes.length === 1 && d.mappes[0].expl === 'PAL114')
-        ? 'OK : 114 créé puis lié à PAL114 (prix 6000 remonté), diagnostic cohérent'
-        : 'ECHEC : sansMap=' + sansMap + ' pal=' + JSON.stringify(pal) + ' liens=' + JSON.stringify(liens)
+        ? 'OK : 1 seule fiche, PAL114 lie automatiquement a 114, prix 6000 remonté'
+        : 'ECHEC : fiches=' + sansDoublon + ' pal=' + JSON.stringify(pal) + ' liens=' + JSON.stringify(liens)
     `,
     attenduPrefixe: 'OK'
   });
