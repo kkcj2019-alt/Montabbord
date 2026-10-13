@@ -4816,6 +4816,32 @@ r.push({
   });
 
   r.push({
+    nom: 'Stockage plein : la purge d\u2019urgence libere de la place et l\u2019appli ne plante pas',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* On sature vraiment le stockage, puis on ecrit une cle ordinaire */
+      var gros = '';
+      for (var g = 0; g < 900; g++) gros += 'x'.repeat(4000);
+      try { localStorage.setItem('mdb_test_saturant', gros); } catch (eW) {}
+      localStorage.setItem('mdb_backup_1', '{\"essai\":1}');
+      localStorage.setItem('mdb_backup_2', '{\"essai\":2}');
+      /* Une purge doit repartir les sauvegardes */
+      var n = _quotaPurgeUrgence();
+      var reste = 0;
+      try { reste = (localStorage.getItem('mdb_backup_1') ? 1 : 0) + (localStorage.getItem('mdb_backup_2') ? 1 : 0); } catch (e2) {}
+      /* Et l'ecriture d'une petite cle ne doit pas lever d'exception */
+      var ecrit = true;
+      try { localStorage.setItem('mdb_test_apres', 'ok'); } catch (e3) { ecrit = false; }
+      try { localStorage.removeItem('mdb_test_saturant'); } catch (e4) {}
+      var etat = _quotaEtat();
+      (n >= 2 && reste === 0 && ecrit && etat && etat.totalKo > 0)
+        ? 'OK : ' + n + ' temporaires purgedes, ecriture suivante acceptee, etat = ' + etat.totalKo + ' Ko'
+        : 'ECHEC n=' + n + ' reste=' + reste + ' ecrit=' + ecrit + ' etat=' + JSON.stringify(etat)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Catalogue : le diagnostic d\u2019écart nomme le produit manquant et les doublons',
     app: 'production.html', store: storeRealiste,
     code: `

@@ -1979,19 +1979,67 @@ function _quotaJanitor(keep) {
   }
   return removedN;
 }
+/* Purge d'urgence : le stockage est plein et plus rien ne s'ecrit. On
+   supprime, dans cet ordre : les copies de sauvegarde, les images cloud,
+   les caches jetables. Les donnees metier ne sont JAMAIS touchees. */
+function _quotaPurgeUrgence() {
+  var n = 0, prefixes = ['mdb_backup_', 'mdb_lastCloud', 'mdb_cloud_snapshot', 'mdb_sync_queue', 'mdb_tmp'];
+  try {
+    var cles = [];
+    for (var i = 0; i < localStorage.length; i++) cles.push(localStorage.key(i));
+    for (var p = 0; p < prefixes.length; p++) {
+      for (var k = 0; k < cles.length; k++) {
+        var key = cles[k];
+        if (!key || key.indexOf(prefixes[p]) !== 0) continue;
+        localStorage.removeItem(key);
+        n++;
+      }
+    }
+    if (n) console.warn('Purge d\u2019urgence : ' + n + ' entrée(s) temporaire(s) supprimée(s) (sauvegardes / caches).');
+  } catch (e) {}
+  return n;
+}
 (function () {
   var _siO = Storage.prototype.setItem;
   Storage.prototype.setItem = function (kQ, vQ) {
     try { return _siO.call(this, kQ, vQ); }
     catch (eQ) {
-      if (eQ && (eQ.name === 'QuotaExceededError' || eQ.code === 22)) {
+      if (eQ && (eQ.name === 'QuotaExceededError' || eQ.code === 22 || eQ.code === 1014)) {
+        /* 1) nettoyage habituel, 2) purge d'urgence, 3) on n'interrompt JAMAIS
+           l'interface : une reussite de sauvegarde vaut moins qu'une page qui
+           ne s'ouvre plus. */
         _quotaJanitor(1);
-        try { return _siO.call(this, kQ, vQ); } catch (eQ2) { console.warn('Stockage sature meme apres nettoyage :', kQ); }
+        try { return _siO.call(this, kQ, vQ); } catch (eQ2) {
+          try { _quotaPurgeUrgence(); } catch (eU) {}
+          try { return _siO.call(this, kQ, vQ); } catch (eQ3) {
+            var _petite = String(vQ || '').length < 262144;
+            if (_petite) {
+              console.warn('Stockage plein : « ' + kQ + ' » non enregistré (l\u2019application continue).');
+              return null;
+            }
+            console.warn('Stockage saturé, « ' + kQ + ' » non enregistré (sauvegarde ignorée).');
+            return null;
+          }
+        }
       } else { throw eQ; }
     }
   };
 })();
-_quotaJanitor(2);
+_quotaJanitor(1);
+/* Le stockage local est-il encore confortable ? */
+function _quotaEtat() {
+  var total = 0, details = {};
+  try {
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i) || '';
+      var t = String(localStorage.getItem(k) || '').length;
+      total += t;
+      var grp = k.indexOf('mdb_backup_') === 0 ? 'sauvegardes' : (k.indexOf('mdb_') === 0 ? 'donnees' : 'autres');
+      details[grp] = (details[grp] || 0) + t;
+    }
+  } catch (e) {}
+  return { totalKo: Math.round(total / 1024), details: details };
+}
 var APP_VER = '24.08.4-N';
 /* Session stricte : seul un rafraichissement conserve la session, SAUF saut
    inter-modules (Exploitation/Paie -> appli principale) avec activité récente :
@@ -2161,7 +2209,27 @@ function createFullBackup() {
       freeSlot = oldest.index;
     }
     var size = calcBackupSize(backup);
-    try { localStorage.setItem('mdb_backup_' + freeSlot, JSON.stringify(backup)); } catch(e) { return; }
+    /* Sauvegarde locale : si le stockage est plein, on tente une version
+       allegée (clés essentielles seules) plutot que de la perdre, et on
+       n'insiste pas — une sauvegarde ratee ne doit pas casser l'appli. */
+    var _ecrit = false;
+    try { localStorage.setItem('mdb_backup_' + freeSlot, JSON.stringify(backup)); _ecrit = true; }
+    catch (e) {
+      try { _quotaPurgeUrgence(); localStorage.setItem('mdb_backup_' + freeSlot, JSON.stringify(backup)); _ecrit = true; }
+      catch (e2) {
+        try {
+          var _min = {};
+          var _ess = ['mdb_entreprise', 'mdb_employes', 'mdb_nomenclature', 'mdb_operationsCaisse', 'mdb_acomptesPrets', 'mdb_factures'];
+          for (var _ei = 0; _ei < _ess.length; _ei++) { if (backup[_ess[_ei]] !== undefined) _min[_ess[_ei]] = backup[_ess[_ei]]; }
+          localStorage.setItem('mdb_backup_' + freeSlot, JSON.stringify(_min));
+          _ecrit = true;
+          console.warn('Sauvegarde locale allégée (stockage plein) : seules les clés essentielles sont conservées.');
+        } catch (e3) {
+          try { console.warn('Sauvegarde locale impossible (stockage plein) — l\u2019application continue.'); } catch (e4) {}
+          return;
+        }
+      }
+    }
     var newEntry = {index: freeSlot, ts: Date.now(), size: size, keys: Object.keys(backup).length};
     meta.unshift(newEntry);
     while (meta.length > BACKUP_MAX_VERSIONS) {
