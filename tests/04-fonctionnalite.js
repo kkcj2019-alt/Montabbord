@@ -4711,6 +4711,59 @@ r.push({
   });
 
   r.push({
+    nom: 'Catalogue : Resynchroniser réintègre même si le code est écrit dans une autre casse',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = []; p.definitions = []; p.composants = []; p.stockConsum = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* Index : « Cafe ». Blocage : « CAFE ». Sans comparaison insensible a la
+         casse, le blocage restait et rien ne revenait. */
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n1', code:'Cafe', designation:'Café Cacao', typeArticle:'produit_fini' }
+      ]));
+      setSection('articles', []);
+      setSection('pfIgnores', ['CAFE']);
+      setSection('pfLinks', []);
+      renderPage = function () {};
+      var r = resynchroniserCatalogue();
+      var codes = getArticlesActifs().map(function (a) { return a.code; });
+      (codes.length === 1 && codes[0].toUpperCase() === 'CAFE' && getPfIgnores().length === 0)
+        ? 'OK : Cafe réintégré malgré le blocage « CAFE », marquage levé'
+        : 'ECHEC codes=' + JSON.stringify(codes) + ' ignores=' + JSON.stringify(getPfIgnores())
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Nomenclature : les doublons 112/PAL112 et NES/Nest sont fusionnés automatiquement',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_nomenclature', [
+        { id:'n1', code:'112', designation:'PALETTE 112*112*13', typeArticle:'produit_fini' },
+        { id:'n2', code:'PAL112', designation:'PALETTES 112*112*12', typeArticle:'produit_fini' },
+        { id:'n3', code:'NES', designation:'NESTLE', typeArticle:'produit_fini' },
+        { id:'n4', code:'Nest', designation:'Nestle 120x10x20', typeArticle:'produit_fini' },
+        { id:'n5', code:'CAFE', designation:'Café Cacao', typeArticle:'produit_fini' }
+      ]);
+      /* L'exploitation utilise PAL112 et NES : ce sont eux qui sont conserves */
+      apProdGet = function () { return { articles: [{ code:'PAL112' }, { code:'NES' }], pfLinks: [], pfIgnores: [] }; };
+      var fusions = harmoniserNomenclature();
+      var codes = DB.get('mdb_nomenclature').map(function (a) { return a.code; });
+      var pfRestants = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
+      (fusions.length === 2 && codes.length === 3 && pfRestants === 3
+        && codes.indexOf('PAL112') !== -1 && codes.indexOf('NES') !== -1 && codes.indexOf('CAFE') !== -1
+        && codes.indexOf('112') === -1 && codes.indexOf('Nest') === -1)
+        ? 'OK : 112 et Nest fusionnés dans PAL112 et NES — 3 produits finis, comme l’exploitation'
+        : 'ECHEC fusions=' + JSON.stringify(fusions) + ' codes=' + JSON.stringify(codes)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Catalogue : le diagnostic d\u2019écart nomme le produit manquant et les doublons',
     app: 'production.html', store: storeRealiste,
     code: `

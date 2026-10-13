@@ -13033,13 +13033,83 @@ function importerDimensionsExploitation() {
 function nomDimNb(n) {
   try { return (parseFloat(n) || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 }); } catch (e2) { return String(n); }
 }
+/* Fusionne les doublons de la Nomenclature : meme produit porte sous deux
+   codes (112 / PAL112, NES / Nest, Fries120 / FRI120...). Tant que ces
+   doublons subsistent, les deux applications n'affichent pas le meme
+   nombre d'articles. On garde le code deja utilise par l'exploitation
+   (c'est lui qui porte les composants et le stock), l'autre disparait.
+   Renvoie la liste des fusions faites. */
+function harmoniserNomenclature() {
+  var arts = null;
+  try { arts = getArticles() || []; } catch (e) { return []; }
+  var pf = [];
+  arts.forEach(function (a) { if (a && a.typeArticle === 'produit_fini') pf.push(a); });
+  if (pf.length < 2) return [];
+  var p = null;
+  try { p = apProdGet(); } catch (e2) {}
+  var expl = ((p && p.articles) || []);
+  var links = (p && p.pfLinks) || [];
+  /* Codes reellement utilises en exploitation : c'est eux qu'on garde. */
+  var codesExpl = {};
+  expl.forEach(function (a) { if (a && a.code) codesExpl[String(a.code).trim().toUpperCase()] = String(a.code).trim(); });
+  links.forEach(function (l) {
+    if (!l) return;
+    var ci = String(l.idx || '').trim().toUpperCase(), ce = String(l.expl || '').trim();
+    if (ce) codesExpl[ci] = ce;
+  });
+  var sigDes = function (d) {
+    var s = String(d || '').toUpperCase();
+    try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+    return s.replace(/[^A-Z0-9]/g, '');
+  };
+  var sigChiffres = function (c) { return String(c || '').toUpperCase().replace(/[^0-9]/g, ''); };
+  varFusion = [];
+  var suppr = {};
+  pf.forEach(function (a) {
+    var ca = String(a.code || '').trim().toUpperCase();
+    if (suppr[ca]) return;
+    for (var i = 0; i < pf.length; i++) {
+      var b = pf[i];
+      if (b === a) continue;
+      var cb = String(b.code || '').trim().toUpperCase();
+      if (!cb || cb === ca || suppr[cb]) continue;
+      /* meme produit ? memes chiffres, ou meme designation, ou l'un des
+         codes contient l'autre (NES / Nest). */
+      var memesChiffres = sigChiffres(ca) && sigChiffres(ca) === sigChiffres(cb);
+      var memeDes = sigDes(a.designation) && sigDes(a.designation) === sigDes(b.designation);
+      var prefixe = ca.length !== cb.length && ca.length >= 2 && cb.length >= 2
+        && (ca.indexOf(cb) === 0 || cb.indexOf(ca) === 0);
+      if (!memesChiffres && !memeDes && !prefixe) continue;
+      /* On garde celui utilise en exploitation ; sinon le premier. */
+      var garde = null, perd = null;
+      if (codesExpl[ca] && !codesExpl[cb]) { garde = a; perd = b; }
+      else if (codesExpl[cb] && !codesExpl[ca]) { garde = b; perd = a; }
+      else { garde = a; perd = b; }
+      if (!garde || !perd) continue;
+      if (!(parseFloat(garde.longueur) > 0) && parseFloat(perd.longueur) > 0) {
+        garde.longueur = perd.longueur; garde.largeur = perd.largeur; garde.epaisseur = perd.epaisseur;
+      }
+      if (!(garde.prixPeriodes || []).length && (perd.prixPeriodes || []).length) garde.prixPeriodes = perd.prixPeriodes;
+      if (!garde.designation) garde.designation = perd.designation;
+      suppr[String(perd.code || '').trim().toUpperCase()] = true;
+      varFusion.push(String(perd.code) + ' \u2192 ' + String(garde.code));
+      break;
+    }
+  });
+  if (!varFusion.length) return [];
+  var garder = arts.filter(function (a) { return !(a && a.typeArticle === 'produit_fini' && suppr[String(a.code || '').trim().toUpperCase()]); });
+  try { DB.set('mdb_nomenclature', garder); } catch (e3) { return []; }
+  try { toast('Nomenclature harmonisée : ' + varFusion.join(', ') + ' — même liste que l’Exploitation.'); } catch (e4) {}
+  return varFusion;
+}
 function renderNomenclature() {
+  try { harmoniserNomenclature(); } catch (eH) {}
   try { syncProduitsFinisFromExploitation(); } catch (eSy) {}
   var articles = getArticles();
   var readonly = isReadonly('nomenclature');
   var html = '<div class="toolbar">';
-  html += '<input type="text" id="nomSearch" placeholder="Rechercher..." oninput="filterNomenclature()" style="width:280px">';
-  html += '<select id="nomFilterType" onchange="filterNomenclature()" style="width:180px"><option value="">Tous les types</option><option value="produit_fini">Produit fini</option><option value="marchandise">Marchandise</option><option value="semi_fini">Semi-finis</option><option value="consommable">Consommable</option><option value="autres">Autres</option></select>';
+  html += '<input type="text" id="nomSearch" placeholder="Rechercher..." oninput="filterNomenclature()" value="' + escH(window._nomSearch || '') + '" style="width:280px">';
+  html += '<select id="nomFilterType" onchange="filterNomenclature()" style="width:180px"><option value="">Tous les types</option><option value="produit_fini"' + (window._nomFilterType === 'produit_fini' ? ' selected' : '') + '>Produit fini</option><option value="marchandise"' + (window._nomFilterType === 'marchandise' ? ' selected' : '') + '>Marchandise</option><option value="semi_fini"' + (window._nomFilterType === 'semi_fini' ? ' selected' : '') + '>Semi-finis</option><option value="consommable"' + (window._nomFilterType === 'consommable' ? ' selected' : '') + '>Consommable</option><option value="autres"' + (window._nomFilterType === 'autres' ? ' selected' : '') + '>Autres</option></select>';
   try {
     var _nbPF = 0, _k;
     for (_k = 0; _k < articles.length; _k++) { if (articles[_k].typeArticle === 'produit_fini') _nbPF++; }
@@ -13080,12 +13150,25 @@ function renderNomenclature() {
   var fcEl = document.getElementById('facturationContent');
   if (fcEl) fcEl.innerHTML = html;
   else document.getElementById('content').innerHTML = html;
+  /* Le filtre est reapplique : sans ca, un re-rendu remettrait toutes les
+     lignes visibles alors que le select dit « Produit fini ». */
+  try { filterNomenclature(); } catch (eF) {}
 }
 
 function filterNomenclature() {
-  var q = (document.getElementById('nomSearch').value || '').toLowerCase();
+  /* Memorise les filtres : un re-rendu periodique (synchro, sauvegarde,
+     rafraichissement) recreait le select a vide et effacait le choix. */
+  try {
+    var _q = document.getElementById('nomSearch');
+    var _f = document.getElementById('nomFilterType');
+    window._nomSearch = _q ? (_q.value || '') : (window._nomSearch || '');
+    window._nomFilterType = _f ? (_f.value || '') : (window._nomFilterType || '');
+  } catch (eM) {}
+  var q = (document.getElementById('nomSearch') ? (document.getElementById('nomSearch').value || '') : '').toLowerCase();
   var ft = document.getElementById('nomFilterType') ? document.getElementById('nomFilterType').value : '';
-  var rows = document.getElementById('nomBody').getElementsByTagName('tr');
+  var body = document.getElementById('nomBody');
+  if (!body) return;
+  var rows = body.getElementsByTagName('tr');
   for (var i = 0; i < rows.length; i++) {
     var matchSearch = (rows[i].getAttribute('data-search') || '').indexOf(q) !== -1;
     var matchType = !ft || rows[i].getAttribute('data-type') === ft;
