@@ -1795,13 +1795,22 @@ function pushToCloud() {
   var keys = Object.keys(_dirtyKeys);
   if (keys.length === 0) return;
   if (!firebaseDb) return;
-  /* Ne jamais abandonner une écriture en attente : réessayer après la fenêtre de chargement */
+  /* Ne jamais abandonner une écriture en attente : réessayer après la fenêtre de
+     chargement. GARDE-FOU : si une promesse Firestore reste suspendue (reseau
+     coupé sans reponse), _isPushing restait a true DEFINITIVEMENT et chaque
+     nouvel essai se reprogrammait tout seul sans jamais rien envoyer -> blocage
+     total de la synchro. On libere donc le verrou au bout de 20 s. */
+  if (_isPushing && window._pushStartAt && (Date.now() - window._pushStartAt) > 20000) {
+    _isPushing = false;
+    console.warn('[Sync] ecriture deposee sans reponse du cloud, verrou libere (reprise).');
+  }
   if (_receivingSnapshot || _isPushing) {
     clearTimeout(_pushTimer);
     _pushTimer = setTimeout(pushToCloud, 1500);
     return;
   }
   _isPushing = true;
+  window._pushStartAt = Date.now();
   /* Limiteur de débit : jamais plus d'une \u00e9criture cloud par 1,2s */
   var _nowW = Date.now();
   var _waitMs = Math.max(0, 1200 - (_nowW - (window._lastCloudSet || 0)));
@@ -1892,14 +1901,18 @@ function pushToCloud() {
       if (cleared.length > 0) clearPendingSync(cleared);
       _pushFailStreak = 0;
       _isPushing = false;
+      window._pushStartAt = 0;
+      window._lastSyncError = null;
       if (ind) ind.textContent = '\u2713 Sync';
       setTimeout(function() { if (ind) ind.textContent = ''; }, 2000);
       try { localStorage.removeItem('mdb_sync_queue'); } catch(e) {}
     });
-  }).catch(function(e) {
+}).catch(function(e) {
     _isPushing = false;
+    window._pushStartAt = 0;
+    window._lastSyncError = { at: Date.now(), code: (e && e.code) || '', message: (e && e.message) || String(e) };
     _pushFailStreak = (_pushFailStreak || 0) + 1;
-    if (_pushFailStreak === 3) toast('Synchronisation en attente : vérifiez votre connexion Internet. Rien n\'est perdu, nouvel essai automatique.', 'error');
+    if (_pushFailStreak === 3) toast('Synchronisation en attente : ' + _syncErrorLabel(e) + ' Rien n\'est perdu, nouvel essai automatique.', 'error');
     if (ind) ind.textContent = '\u2717 Sync';
     setTimeout(function() { if (ind) ind.textContent = ''; }, 3000);
     console.warn('Sync error:', e);
@@ -1907,6 +1920,42 @@ function pushToCloud() {
     setTimeout(pushToCloud, 5000);
   });
 }
+/* Message d'attente SYNCRONE et exact : "verifiez votre connexion" pour une
+   panne reseau, "session expiree / acces refuse" pour un probleme de droits.
+   Evite de renvoyer l'utilisateur vers la connexion alors que le probleme est
+   ailleurs. */
+function _syncErrorLabel(e) {
+  var c = String((e && e.code) || '');
+  var m = String((e && e.message) || '').toLowerCase();
+  if (c === 'permission-denied' || m.indexOf('permission') !== -1) return 'acc\u00e8s au cloud refus\u00e9.';
+  if (c === 'unauthenticated' || m.indexOf('auth') !== -1) return 'session expir\u00e9e, reconnectez-vous.';
+  if (m.indexOf('quota') !== -1) return 'stockage plein.';
+  if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return 'vous \u00eates hors connexion.';
+  return 'v\u00e9rifiez votre connexion Internet.';
+}
+/* Diagnostic console : pourquoi la synchro tourne-t-elle en attente ?
+   Coller  diagnosticSync()  dans la console du navigateur. */
+function diagnosticSync() {
+  var d = {
+    connecte: (typeof navigator !== 'undefined' && navigator) ? navigator.onLine : '?',
+    firebase: !!firebaseDb,
+    user: currentUser ? (currentUser.id || '') : '(aucun)',
+    modeHorsLigne: !!(window._offlineMode || localStorage.getItem('mdb_offlineMode') === '1'),
+    enCours: !!_isPushing,
+    pousseeDepuis: window._pushStartAt ? Math.round((Date.now() - window._pushStartAt) / 1000) + ' s' : 'non',
+    echecs: _pushFailStreak || 0,
+    cleEnAttente: Object.keys(_dirtyKeys || {}),
+    fileAttente: (function () { try { return JSON.parse(localStorage.getItem('mdb_sync_queue') || 'null'); } catch (e) { return null; } })(),
+    derniereErreur: window._lastSyncError || null
+  };
+  console.log('[Sync]', d);
+  if (!navigator.onLine) console.log('-> Reconnectez Internet, l\u2019envoi repart automatiquement.');
+  else if (d.derniereErreur && String(d.derniereErreur.code) === 'permission-denied') console.log('-> Acc\u00e8s refus\u00e9 par Firebase : refaites une connexion / vérifiez les droits du compte.');
+  else if (d.enCours && d.pousseeDepuis !== 'non') console.log('-> Requ\u00eate d\u00e9eup\u00e8s plus de 20 s : le verrou sera lib\u00e9r\u00e9 automatiquement, puis pushToCloud() relance l\u2019envoi.');
+  else console.log('-> Lancez  pushToCloud()  pour forcer un nouvel essai.');
+  return d;
+}
+window.addEventListener('online', function () { try { pushToCloud(); } catch (eO2) {} });
 
 /* ===== Nettoyage automatique du stockage (anti-saturation) ===== */
 function _quotaJanitor(keep) {
@@ -29187,6 +29236,11 @@ function openCollectifNewUIByGroupe(groupeId) {
     for (i = 0; i < opsAll.length; i++) { if (opsAll[i].groupeId === groupeId) { target = opsAll[i]; break; } }
     if (!target) { for (i = 0; i < opsAll.length; i++) { if (opsAll[i].id === groupeId) { target = opsAll[i]; break; } } }
     if (!target) { toast('Pi\u00e8ce collective introuvable en caisse', 'error'); return false; }
+    /* Solde/indemnité collective : son éditeur est le modal groupé des soldes */
+    if (target.code && CS_PERIOD_CODES.indexOf(target.code) !== -1 && target.date) {
+      openSoldeGroupeEdit(target.id);
+      return true;
+    }
     window._apFromCaisse = true;
     var needNav = (typeof currentPage === 'undefined' || currentPage !== 'tresorerie') || !document.getElementById('csCollectifBody');
     if (needNav && typeof navigateTo === 'function') {
@@ -29328,16 +29382,20 @@ function editCaisseOp(id) {
      numerique : sans normalisation, rien ne s'ouvrait au clic sur Modifier. */
   for (var i = 0; i < ops.length; i++) { if (String(ops[i].id) === String(id)) { o = ops[i]; break; } }
   if (!o) return;
+  /* Solde salaire/indemnité : TOUJOURS le modal groupé (permet d'ajouter d'autres
+     employés et de rééquilibrer une répartition). Ce test doit passer AVANT le
+     cas collectif : une remise collective de soldes porte elle aussi
+     collective:true, mais son éditeur est celui des soldes, pas celui des
+     acomptes/prêts (sinon « Remise collective non éditable »). */
+  if (o.code && CS_PERIOD_CODES.indexOf(o.code) !== -1 && o.date) {
+    openSoldeGroupeEdit(o.id);
+    return;
+  }
   /* Remise collective acompte/prêt : nouvelle UI pré-remplie ; jamais l'ancien éditeur */
   if (o.collective) {
     window._apFromCaisse = true;
     try { if (typeof editCaisseCollectifNewUI === 'function' && editCaisseCollectifNewUI(o.id)) return; } catch(eECN) { console.warn('[Edit] collectif:', eECN); }
     try { toast('Remise collective non \u00e9ditable pour cette p\u00e9riode', 'error'); } catch(eTE) {}
-    return;
-  }
-  /* Solde salaire/indemnité : toujours ouvrir le modal groupé (permet d'ajouter d'autres employés) */
-  if (o.code && CS_PERIOD_CODES.indexOf(o.code) !== -1 && o.date) {
-    openSoldeGroupeEdit(o.id);
     return;
   }
   /* Édition normale */

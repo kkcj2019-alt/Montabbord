@@ -1617,6 +1617,49 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Remise collective de soldes : « Modifier » ouvre le modal des soldes, pas celui des acomptes',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Une remise collective de soldes porte collective:true ET apType:'solde' :
+         elle doit partir dans l editeur des soldes, sinon l editeur des
+         acomptes refusait la piece (« non editable pour cette periode »). */
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opSC', numeroPiece: 'SLD-100', date: '2026-09-15', heure: '', codeId: 'cid', code: 'SOLDE_INDEMNITE', libelle: 'Solde indemnite - Septembre 2026', periode: '2026-09', montant: 50000, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', remettant: 'Kanga', executant: 'P.O.', caisseId: 'c1', collective: true, groupeId: 'gSC', apType: 'solde', apMoisDeduction: '2026-09' });
+      DB.set('mdb_operationsCaisse', ops);
+      var appeleSolde = 0, appeleAcompte = 0;
+      var vraiSolde = openSoldeGroupeEdit, vraiCollectif = editCaisseCollectifNewUI;
+      openSoldeGroupeEdit = function (id) { appeleSolde++; };
+      editCaisseCollectifNewUI = function (id) { appeleAcompte++; return true; };
+      try { editCaisseOp('opSC'); } finally { openSoldeGroupeEdit = vraiSolde; editCaisseCollectifNewUI = vraiCollectif; }
+      /* Idem par le chemin groupeId (page Tr\u00e9sorerie / liens de groupe) */
+      var appeleSolde2 = 0, vraiSolde2 = openSoldeGroupeEdit;
+      openSoldeGroupeEdit = function (id) { appeleSolde2++; };
+      try { openCollectifNewUIByGroupe('gSC'); } finally { openSoldeGroupeEdit = vraiSolde2; }
+      (appeleSolde === 1 && appeleAcompte === 0 && appeleSolde2 === 1)
+        ? 'OK : la piece collective de soldes ouvre le modal des soldes (direct + par groupe)'
+        : 'ECHEC solde=' + appeleSolde + ' acompte=' + appeleAcompte + ' groupe=' + appeleSolde2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Remise collective de soldes : une piece collective SANS soldes garde l editeur acomptes/pr\u00eats',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opAC', numeroPiece: 'AC-200', date: '2026-09-15', code: 'CASH', libelle: 'Acompte', montant: 10000, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1', collective: true, groupeId: 'gAC', apType: 'acompte' });
+      DB.set('mdb_operationsCaisse', ops);
+      var appeleAcompte = 0, vraiCollectif = editCaisseCollectifNewUI;
+      editCaisseCollectifNewUI = function (id) { appeleAcompte++; return true; };
+      try { editCaisseOp('opAC'); } finally { editCaisseCollectifNewUI = vraiCollectif; }
+      (appeleAcompte === 1)
+        ? 'OK : le vrai collectif acomptes/pr\u00eats utilise toujours son editeur d\u00e9di\u00e9'
+        : 'ECHEC appeleAcompte=' + appeleAcompte
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Soldes : une piece apType solde recree sa ligne dans l\u2019etat des acomptes (avec lien retour)',
     app: 'index.html', store: storeRealiste,
     code: `
