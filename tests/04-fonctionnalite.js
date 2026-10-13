@@ -4711,14 +4711,39 @@ r.push({
   });
 
   r.push({
+    nom: 'Suppression refus\u00e9e clairement si l\u2019article est li\u00e9 \u00e0 une facture ou une livraison',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Le jeu de test contient une facture ET un BL sur l'article « a1 » */
+      var art = { id: 'a1', code: 'PAL', designation: 'Palette', categorie: 'finished' };
+      var bloq = articleBloquePar(art);
+      setSection('articles', [art]);
+      renderPage = function () {};
+      window.confirm2 = function () { return true; };
+      var r = supprimerArticle('a1', true);
+      var encore = getArticlesActifs().filter(function (a) { return a.id === 'a1'; }).length;
+      /* Un article libre passe */
+      var libre = { id: 'zz', code: 'LIBRE', designation: 'Libre', categorie: 'finished' };
+      var setArticles2 = getArticles().concat([libre]);
+      setArticles(setArticles2);
+      var bloqLibre = articleBloquePar(libre);
+      var r2 = supprimerArticle('zz', true);
+      (bloq === 'une facture' && r === false && encore === 1 && bloqLibre === '' && r2 === true)
+        ? 'OK : refus motivé (« utilisé dans une facture ») et l\u2019article reste ; un article libre passe'
+        : 'ECHEC bloq=' + bloq + ' r=' + r + ' encore=' + encore + ' bloqLibre=' + bloqLibre + ' r2=' + r2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Suppression group\u00e9e : deux produits finis coch\u00e9s partent vraiment (et de la Nomenclature)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
       p.articles = [
-        { id: 'a1', code: 'TST1', designation: 'Test 1', categorie: 'finished' },
-        { id: 'a2', code: 'TST2', designation: 'Test 2', categorie: 'finished' },
-        { id: 'a3', code: 'GARDE', designation: 'A garder', categorie: 'finished' }
+        { id: 'z1', code: 'TST1', designation: 'Test 1', categorie: 'finished' },
+        { id: 'z2', code: 'TST2', designation: 'Test 2', categorie: 'finished' },
+        { id: 'z3', code: 'GARDE', designation: 'A garder', categorie: 'finished' }
       ];
       p.composants = [];
       s.mdb_production = JSON.stringify(p);
@@ -4733,8 +4758,8 @@ r.push({
       setSection('pfIgnores', []); setSection('pfLinks', []);
       renderPage = function () {};
       window.confirm2 = function () { return true; };
-      var r1 = supprimerArticle('a1', true);
-      var r2 = supprimerArticle('a2', true);
+      var r1 = supprimerArticle('z1', true);
+      var r2 = supprimerArticle('z2', true);
       var codes = getArticles().map(function (a) { return a.code; });
       var idx = JSON.parse(localStorage.getItem('mdb_nomenclature')).map(function (a) { return a.code; });
       /* Le seul test : ils ne doivent PAS revenir */
@@ -4781,16 +4806,16 @@ r.push({
       window.confirm2 = function () { return true; };
       /* 1) l'index alimente l'exploitation */
       syncProduitsFinisFromIndex();
-      var cree = getArticles().filter(function (a) { return a.code === 'BBOXB'; }).length;
+      var cree = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; }).length;
       /* 2) l'utilisateur le supprime */
-      var cible = getArticles().filter(function (a) { return a.code === 'BBOXB'; })[0];
+      var cible = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; })[0];
       deleteArticle(cible.id);
-      var apresDel = getArticles().filter(function (a) { return a.code === 'BBOXB'; }).length;
+      var apresDel = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; }).length;
       /* 3) l'index renvoie encore son article + un onglet renvoie une base
             plus ancienne : rien ne doit ressusciter */
       syncProduitsFinisFromIndex();
       setSection('articles', [{ id: 'z1', code: 'BBOXB', designation: 'Big box banane', categorie: 'finished', _fromIndex: true }]);
-      var apresRendu = getArticles().filter(function (a) { return a.code === 'BBOXB'; }).length;
+      var apresRendu = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; }).length;
       (cree === 1 && apresDel === 0 && apresRendu === 0)
         ? 'OK : cr\u00e9\u00e9 puis supprim\u00e9, et il ne revient ni par l\u2019index ni par une base plus ancienne'
         : 'ECHEC cree=' + cree + ' apresDel=' + apresDel + ' apresRendu=' + apresRendu

@@ -6625,17 +6625,8 @@ function pfOublierSupprime(code) {
 }
 function getArticles() {
   var arts = getSection('articles', []);
-  /* Un article supprime ne reapparait pas, meme si un autre onglet renvoie
-     une copie plus ancienne de la base. */
-  try {
-    if (arts && arts.length) {
-      var sup = pfSupprimes();
-      if (sup.length) {
-        arts = arts.filter(function (a) { return a && sup.indexOf(pfNormCode(a.code)) === -1; });
-      }
-    }
-  } catch (eSup) {}
-  /* Partage automatique avec les articles de montage du module Paye (Données de Salaire) */
+  var _artsRestants = arts;
+  /* Partage automatique avec les articles de montage du module Paie (Donnees de Salaire) */
   try {
     var ams = acGetArticlesMontage();
     if (ams.length > 0) {
@@ -6669,6 +6660,21 @@ function getArticles() {
     }
   } catch(e) {}
   return arts;
+}
+/* Les articles UTILISABLES : ceux qui n'ont pas ete supprimes. La liste
+   « supprime » est stockee a part et n'est jamais reecrite en bloc : meme si
+   un autre onglet renvoie une copie plus ancienne de la base, un article
+   supprime ne reapparait pas. Le filtre est volontairement ici, et pas
+   dans getArticles() : celle-ci estappelee dans des boucles (recherche d'un
+   conditionnement…) et le filtrer a chaque lecture_epuisait la memoire
+   jusqu'a faire planter l'onglet. */
+function getArticlesActifs() {
+  var arts = getArticles();
+  try {
+    var sup = pfSupprimes();
+    if (!sup || !sup.length) return arts;
+    return arts.filter(function (a) { return a && sup.indexOf(pfNormCode(a.code)) === -1; });
+  } catch (e) { return arts; }
 }
 function setArticles(v) { setSection('articles', v); }
 function getStockPalettes() { return getSection('stockPalettes', []); }
@@ -15121,7 +15127,7 @@ function render_articles() {
   } catch (eSy) {}
   /* Le catalogue produits ne liste ni les consommables ni les divers :
      ils se gèrent dans Articles > Consommables & Divers (page articles-conso). */
-  var articles = (getArticles() || []).filter(function(a) { return ['consum', 'consommable', 'consommables', 'divers', 'diver'].indexOf(String(a.categorie || '').toLowerCase()) === -1; });
+  var articles = (getArticlesActifs() || []).filter(function(a) { return ['consum', 'consommable', 'consommables', 'divers', 'diver'].indexOf(String(a.categorie || '').toLowerCase()) === -1; });
   var composants = getSection('composants', []) || [];
   /* Filtre par destination (ex : MONDI ABIDJAN, SIVEM...) */
   var dests = {};
@@ -15627,11 +15633,49 @@ function deleteArticle(id) {
   if (!confirm2(msg)) return;
   supprimerArticle(id, true);
 }
+/* Où un article est-il utilisé ? Les memes documents que l'app principale
+   (factures, BL, BC, pré-financements) sont lus depuis mdb_factures /
+   mdb_bl / mdb_bc, partagés entre les deux applications. */
+function articleBloquePar(art) {
+  if (!art) return '';
+  var id = art.id;
+  var code = String(art.code || '').trim().toUpperCase();
+  var verif = function (cle, label) {
+    try {
+      var liste = JSON.parse(localStorage.getItem(cle) || '[]');
+      if (!Array.isArray(liste)) return '';
+      for (var i = 0; i < liste.length; i++) {
+        var d = liste[i];
+        if (!d || !d.lignes || !d.lignes.length) continue;
+        for (var j = 0; j < d.lignes.length; j++) {
+          var l = d.lignes[j] || {};
+          if (l.articleId === id || l.article_id === id) return label;
+          var lc = String(l.code || '').trim().toUpperCase();
+          if (code && lc === code) return label;
+        }
+      }
+    } catch (e) {}
+    return '';
+  };
+  return verif('mdb_factures', 'une facture')
+      || verif('mdb_bl', 'un bon de livraison')
+      || verif('mdb_bc', 'un bon de commande')
+      || verif('mdb_prefinancement', 'un pré-financement');
+}
 /* Suppression effective. `dejaConfirme` = suppression groupée (une seule
    confirmation pour toute la sélection). */
 function supprimerArticle(id, dejaConfirme) {
-  var art = getArticles().find(function(a) { return a.id === id; });
+  var art = getArticlesActifs().find(function(a) { return a.id === id; });
   if (!art) return false;
+  /* Un article lié à une facture, un BL ou un BC est garde : on dit
+     clairement CE QUI le bloque, sinon l'utilisateur croit au bug. */
+  try {
+    var _bloque = articleBloquePar(art);
+    if (_bloque) {
+      toast('Suppression impossible : ' + (art.code || 'cet article') + ' est utilisé dans ' + _bloque + '. Supprimez d\'abord ce document.', 'error');
+      return false;
+    }
+  } catch (eBl) {}
   /* Produit fini : la SOURCE UNIQUE est la Nomenclature de l'index
      (mdb_nomenclature, cle partagee par les deux applis). Supprimer ici
      doit donc supprimer la-bas aussi, sinon la synchronisation le recreait
@@ -15669,6 +15713,8 @@ function supprimerArticle(id, dejaConfirme) {
       setPfLinks(getPfLinks().filter(function(l) { return pfNormCode(l.expl) !== _n; }));
     } catch (eI) {}
   }
+  /* On ecrit la liste BRUTE moins l'article : le filtre « supprime » ne doit
+     pas ecarter d'autres articles ici. */
   setArticles(getArticles().filter(function(a) { return a.id !== id; }));
   /* Le catalogue = les produits finis : supprimer aussi les entrées stock liées */
   setStockFinished(getStockFinished().filter(function(s) { return s.article_id !== id; }));
@@ -15677,7 +15723,9 @@ function supprimerArticle(id, dejaConfirme) {
      conserver l'article et le recreer au rendu suivant. */
   var _restant = null;
   try {
-    _restant = getArticles().filter(function (x) { return x && String(x.id) === String(id); })[0] || null;
+    /* Verification sur la section BRUTE : le filtre « supprime » masque
+       volontairement l'article, il ne doit pas faire crier a l'echec. */
+    _restant = getSection('articles', []).filter(function (x) { return x && String(x.id) === String(id); })[0] || null;
   } catch (eChk) {}
   if (_restant) {
     toast('Suppression non effective : l\u2019article est encore là. Rechargez la page puis réessayez.', 'error');
@@ -16362,6 +16410,8 @@ function deleteConsoDivers(id) {
   /* L'historique de stock est conservé : seule la fiche référentiel est
      retirée (les lignes d'achat déjà saisies restent visibles au stock). */
   if (!confirm2('⚠️ Supprimer ' + (art.code || '-') + ' — ' + (art.designation || '') + ' du référentiel ?\n\nLe stock déjà saisi est conservé.\nConfirmer ?')) return;
+  /* On ecrit la liste BRUTE moins l'article : le filtre « supprime » ne doit
+     pas ecarter d'autres articles ici. */
   setArticles(getArticles().filter(function(a) { return a.id !== id; }));
   toast('Supprimé (stock conservé)');
   renderPage();
