@@ -16,7 +16,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-11-253';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-254';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -1709,6 +1709,39 @@ function checkPersistedIdleExpiry() {
 function isSyncable(key) {
   return key !== 'mdb_currentUser' && key.indexOf('mdb_draft_') === -1 && key.indexOf('mdb_sa') !== 0 && key.indexOf('mdb_pending') === -1 && key !== 'mdb_sync_queue';
 }
+/* Fusion d'un objet partage (mdb_paye, mdb_production) : chaque section est
+   un tableau fusionne par identifiant (local gagne pour le meme id), le reste
+   vient du local. Un appareil perime ne peut donc plus ecraser une section
+   qu'il ne connait pas — c'etait la cause des pointages disparus. */
+function mergeObjetPartage(cloud, local) {
+  var out = {}, k;
+  for (k in cloud) if (Object.prototype.hasOwnProperty.call(cloud, k)) out[k] = cloud[k];
+  for (k in local) {
+    if (!Object.prototype.hasOwnProperty.call(local, k)) continue;
+    var lv = local[k], cv = cloud[k];
+    if (Array.isArray(lv) && Array.isArray(cv)) {
+      var byId = {}, ordre = [];
+      cv.forEach(function (x) {
+        if (x && x.id !== undefined && x.id !== null) { byId[x.id] = x; ordre.push(x.id); }
+        else ordre.push({ __sansId: x });
+      });
+      lv.forEach(function (x) {
+        if (x && x.id !== undefined && x.id !== null) { if (!(x.id in byId)) ordre.push(x.id); byId[x.id] = x; }
+        else ordre.push({ __sansId: x });
+      });
+      out[k] = ordre.map(function (id) {
+        return (id && typeof id === 'object' && id.__sansId !== undefined) ? id.__sansId : byId[id];
+      });
+    } else if (Array.isArray(lv) && !Array.isArray(cv)) {
+      out[k] = lv;
+    } else if (lv && typeof lv === 'object' && cv && typeof cv === 'object' && !Array.isArray(lv) && !Array.isArray(cv)) {
+      out[k] = mergeObjetPartage(cv, lv);
+    } else {
+      out[k] = lv;
+    }
+  }
+  return out;
+}
 
 /* File d'attente persistante : toute modification non encore envoyée est mémorisée
    sur le disque. Même si la page est fermée/refresh avant l'envoi, elle partira
@@ -1823,6 +1856,12 @@ function pushToCloud() {
         }
         }
         data[k] = stripTombstoned(k, mergedArr);
+      } else if (lv && typeof lv === 'object' && !Array.isArray(lv) && cloud[k] && typeof cloud[k] === 'object' && !Array.isArray(cloud[k])) {
+        /* Objet partage (mdb_paye, mdb_production) : NE JAMAIS renvoyer la copie
+           locale en bloc. L'app principale peut etre perimee (module Paie ou
+           Exploitation ouverts a cote) : remplacer alors l'objet entier effacait
+           le pointage deja synchronise. On fusionne section par section. */
+        data[k] = mergeObjetPartage(cloud[k], lv);
       } else {
         data[k] = lv;
       }
@@ -2000,6 +2039,50 @@ function cleanupOldBackups() {
     }
   } catch(e) {}
 }
+/* ---------- FILET DE SÉCURITÉ LOCAL ----------
+   Les 2 emplacements de sauvegarde ci-dessus sont écrasés vite. On garde en
+   plus une copie roulante des sections critiques, renouvelée toutes les
+   30 minutes et à la fermeture de l'onglet : même si une copie périmée a été
+   envoyée au cloud, on peut toujours récupérer la saisie locale. */
+var AUTOSAVE_KEYS = ['mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_employes', 'mdb_acomptesPrets', 'mdb_stocks', 'mdb_bl', 'mdb_salairesPaiements'];
+var _autosaveTimer = null;
+function sauvegardeAutoLocale() {
+  try {
+    var snap = { ts: Date.now(), data: {} };
+    for (var i = 0; i < AUTOSAVE_KEYS.length; i++) {
+      var v = DB.get(AUTOSAVE_KEYS[i]);
+      if (v !== null && v !== undefined) snap.data[AUTOSAVE_KEYS[i]] = v;
+    }
+    if (Object.keys(snap.data).length === 0) return;
+    localStorage.setItem('mdb_autosave', JSON.stringify(snap));
+  } catch (e) {}
+}
+function demarrerAutosave() {
+  try { if (_autosaveTimer) clearInterval(_autosaveTimer); } catch (e) {}
+  try { sauvegardeAutoLocale(); } catch (e) {}
+  try { _autosaveTimer = setInterval(sauvegardeAutoLocale, 30 * 60 * 1000); } catch (e2) {}
+}
+function infoAutosave() {
+  try {
+    var s = JSON.parse(localStorage.getItem('mdb_autosave') || 'null');
+    if (!s || !s.ts) return 'aucune copie locale';
+    return new Date(s.ts).toLocaleString('fr-FR');
+  } catch (e) { return 'aucune copie locale'; }
+}
+function restaurerAutosave() {
+  var s = null;
+  try { s = JSON.parse(localStorage.getItem('mdb_autosave') || 'null'); } catch (e) {}
+  if (!s || !s.data) { toast('Aucune copie locale à restaurer', 'error'); return; }
+  var n = Object.keys(s.data).length;
+  if (!confirm2('Restaurer la copie locale du ' + infoAutosave() + ' ?\n\n' + n + ' section(s) seront remises à cette date (pointage, production, caisse…).')) return;
+  for (var k in s.data) {
+    if (!Object.prototype.hasOwnProperty.call(s.data, k)) continue;
+    DB.set(k, s.data[k]);
+    try { markDirty(k); } catch (e) {}
+  }
+  toast('Copie locale restaurée — synchronisation en cours');
+}
+window.addEventListener('pagehide', function () { try { sauvegardeAutoLocale(); } catch (e) {} });
 function createFullBackup() {
   try {
     var backup = {};
@@ -2181,6 +2264,8 @@ function renderBackupManager() {
   html += ' <a href="fusion.html" target="_blank" class="btn btn-sm" style="background:#16a34a;color:#fff;border:none;text-decoration:none;display:inline-block;padding:6px 12px;border-radius:6px" title="Mélanger une sauvegarde JSON (autre appareil) avec les données locales sans rien écraser">🔀 Fusionner (2 appareils hors-ligne)</a>';
   html += '<button class="btn btn-outline btn-sm" onclick="renderEntreprise()">Rafra\u00eechir</button>';
   html += '<a href="restaurer.html" class="btn btn-outline btn-sm" target="_blank">Restaurer depuis fichier</a>';
+  html += '<button class="btn btn-sm" style="background:#0f766e;color:#fff;border:none" onclick="sauvegardeAutoLocale();toast(\'Copie locale-recorded\')" title="Enregistrer la copie locale de sécurité">💾 Copie locale</button>';
+  html += '<button class="btn btn-sm btn-outline" onclick="restaurerAutosave()">↩️ Restaurer la copie locale (' + escH(infoAutosave()) + ')</button>';
   html += '</div>';
   if (meta.length === 0) {
     html += '<p style="color:var(--gray-400);font-style:italic;padding:20px;text-align:center">Aucune sauvegarde automatique pour le moment. Les sauvegardes sont cr\u00e9\u00e9es automatiquement toutes les 5 minutes, lors de la fermeture de la page, et avant chaque chargement depuis le cloud.</p>';
@@ -5363,6 +5448,7 @@ var _snapshotUnsubscribe = null;
 
 function startRealtimeSync(uid) {
   if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
+  try { demarrerAutosave(); } catch (eAuto) {}
   /* Base saturée : on ne maintient plus d'abonnement temps réel (chaque
      abonnement = 1 requête Postgres par seconde côté Supabase). Reprise
      automatique après la période de refroidissement. */
@@ -5422,9 +5508,17 @@ var local = DB.get(key);
          if (JSON.stringify(_mcR) !== JSON.stringify(_lcR)) { DB.set(key, _mcR); changed = true; }
          continue;
        }
-       var cloudStr = JSON.stringify(data[key]);
-       var localStr = JSON.stringify(local);
-       if (localStr !== cloudStr) {
+        var cloudStr = JSON.stringify(data[key]);
+        var localStr = JSON.stringify(local);
+        /* Objet partage : on fusionne au lieu d'ecraser, sinon une copie cloud
+           incomplete (module ouvert ailleurs) efface des donnees locales. */
+        if (data[key] && typeof data[key] === 'object' && !Array.isArray(data[key])
+            && local && typeof local === 'object' && !Array.isArray(local)) {
+          var _mgPartage = mergeObjetPartage(local, data[key]);
+          if (JSON.stringify(_mgPartage) !== localStr) { DB.set(key, _mgPartage); changed = true; }
+          continue;
+        }
+        if (localStr !== cloudStr) {
         /* Merge arrays without losing local-only records; cloud wins same IDs. */
         if (Array.isArray(data[key]) && Array.isArray(local) && local.length > 0 && data[key].length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
            var mergedRealtime = (key === 'mdb_employes') ? mergeEmployesPreferRecent(local, data[key]) : mergeArraysPreferCloud(local, data[key]);

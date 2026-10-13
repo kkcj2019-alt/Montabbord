@@ -744,6 +744,46 @@ attenduPrefixe: 'OK'
     attendu: 'OK'
   });
 
+  /* ---------- Synchronisation : aucun poste ne peut ecraser le travail d'un autre ---------- */
+  r.push({
+    nom: 'Sync : une copie locale perimee ne peut plus ecraser le pointage du cloud',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Le cloud a les pointages d'hier ; l'app principale n'a qu'une copie
+         perimee (module Paie ouvert a cote). */
+      var cloud = { pointage: [ {id:'p_hier', employee_id:'e1', date:'2026-10-11', heures:8} ], primesSpec: [ {id:'pr1', code:'PANIER'} ] };
+      var local = { pointage: [ {id:'p_avant', employee_id:'e1', date:'2026-10-05', heures:7} ], primesSpec: [], couve: [ {id:'c1'} ] };
+      var m = mergeObjetPartage(cloud, local);
+      var idsP = [];
+      for (var i = 0; i < m.pointage.length; i++) idsP.push(m.pointage[i].id);
+      var gardePr = (m.primesSpec.length === 1 && m.primesSpec[0].id === 'pr1');
+      var gardeCouve = (Array.isArray(m.couve) && m.couve.length === 1);
+      (idsP.indexOf('p_hier') !== -1 && idsP.indexOf('p_avant') !== -1 && idsP.length === 2 && gardePr && gardeCouve)
+        ? 'OK : pointage d hier conserve + pointage local ajoute, primes et couve intacts'
+        : 'ECHEC pointage=' + idsP.join('/') + ' primes=' + gardePr + ' couve=' + gardeCouve
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Securite : la copie locale de secours se fait et se restaure',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_paye', { pointage: [ {id:'pt_local', date:'2026-10-12'} ] });
+      sauvegardeAutoLocale();
+      var info = infoAutosave();
+      DB.set('mdb_paye', { pointage: [] });
+      confirm2 = function () { return true; };
+      restaurerAutosave();
+      var apres = DB.get('mdb_paye');
+      var n = (apres && apres.pointage && apres.pointage.length) || 0;
+      (n === 1 && apres.pointage[0].id === 'pt_local' && info.indexOf('/') !== -1)
+        ? 'OK : copie locale du ' + info + ' restauree (pointage retrouve)'
+        : 'ECHEC info=' + info + ' n=' + n
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat : modification d'un achat avec identifiant de type chaine ---------- */
   r.push({
     nom: 'Achat : modifier un achat dont l\'identifiant est une chaîne',
