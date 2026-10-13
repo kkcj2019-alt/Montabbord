@@ -16,7 +16,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-11-254';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-255';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -1978,6 +1978,9 @@ setTimeout(function () {
     }} catch (eVS) {}
 }, 500);
 var BACKUP_MAX_VERSIONS = 2;
+/* Copies cloud : c'est le filet anti-défaut de synchronisation. 30 versions
+   = environ 5 jours avec le rythme de 4 h, largement de quoi remonter le temps. */
+var CLOUD_BACKUP_MAX = 30;
 /* Garde-fou cloud : au-dela de ce poids, le push SILENCIEUX (auto) est ignore
    avec alerte (un snapshot de 300 Mo pousse toutes les heures = egress explose).
    Le push MANUEL reste possible (choix explicite, taille affichee). */
@@ -2264,7 +2267,8 @@ function renderBackupManager() {
   html += ' <a href="fusion.html" target="_blank" class="btn btn-sm" style="background:#16a34a;color:#fff;border:none;text-decoration:none;display:inline-block;padding:6px 12px;border-radius:6px" title="Mélanger une sauvegarde JSON (autre appareil) avec les données locales sans rien écraser">🔀 Fusionner (2 appareils hors-ligne)</a>';
   html += '<button class="btn btn-outline btn-sm" onclick="renderEntreprise()">Rafra\u00eechir</button>';
   html += '<a href="restaurer.html" class="btn btn-outline btn-sm" target="_blank">Restaurer depuis fichier</a>';
-  html += '<button class="btn btn-sm" style="background:#0f766e;color:#fff;border:none" onclick="sauvegardeAutoLocale();toast(\'Copie locale-recorded\')" title="Enregistrer la copie locale de sécurité">💾 Copie locale</button>';
+  html += '<button class="btn btn-sm btn-outline" onclick="afficherSauvegardesCloud()">☁️ Sauvegardes cloud</button>';
+  html += '<button class="btn btn-sm" style="background:#0f766e;color:#fff;border:none" onclick="sauvegardeAutoLocale();toast(\'Copie locale enregistrée\')" title="Enregistrer la copie locale de sécurité">💾 Copie locale</button>';
   html += '<button class="btn btn-sm btn-outline" onclick="restaurerAutosave()">↩️ Restaurer la copie locale (' + escH(infoAutosave()) + ')</button>';
   html += '</div>';
   if (meta.length === 0) {
@@ -2295,7 +2299,9 @@ function pruneCloudBackups() {
     if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
     if (!currentUser || !currentUser.id || !window.SB_CLIENT) return;
     var _uid = currentUser.id;
-    var _keep = (typeof BACKUP_MAX_VERSIONS === 'number' && BACKUP_MAX_VERSIONS > 0) ? BACKUP_MAX_VERSIONS : 2;
+    /* 30 versions cloud conservees (et non 2) : ce sont les copies qui
+       permettent de remonter le temps apres un defaut de synchronisation. */
+    var _keep = (typeof CLOUD_BACKUP_MAX === 'number' && CLOUD_BACKUP_MAX > 0) ? CLOUD_BACKUP_MAX : 30;
     window.SB_CLIENT.from('backups').select('ts').eq('enterprise_id', _uid).order('ts', { ascending: false }).then(function(res) {
       var rows = (res && res.data) || [];
       if (res && res.error) { console.warn('[MDB] Rotation cloud backups: lecture impossible: ' + (res.error.message || JSON.stringify(res.error))); return; }
@@ -2319,6 +2325,73 @@ function pruneCloudBackups() {
       }
     }).catch(function(eC) { console.warn('[MDB] Rotation cloud backups: ' + ((eC && eC.message) || eC)); });
   } catch(ePCB) {}
+}
+/* ---------- RESTAURATION DEPUIS UNE SAUVEGARDE CLOUD ----------
+   Les copies cloud existaient mais AUCUN bouton ne permettait de les remettre :
+   une sauvegarde qu'on ne peut pas restaurer ne protege rien. */
+function listerSauvegardesCloud() {
+  if (!currentUser || !currentUser.id || !window.SB_CLIENT) {
+    return Promise.resolve([]);
+  }
+  var uid = currentUser.id;
+  return window.SB_CLIENT.from('backups')
+    .select('ts,size,keys,created_at')
+    .eq('enterprise_id', uid)
+    .order('ts', { ascending: false })
+    .limit(CLOUD_BACKUP_MAX || 30)
+    .then(function (res) {
+      if (res && res.error) throw res.error;
+      return (res && res.data) || [];
+    });
+}
+function restaurerSauvegardeCloud(ts) {
+  if (!currentUser || !currentUser.id || !window.SB_CLIENT) { toast('Sauvegarde cloud indisponible', 'error'); return; }
+  var uid = currentUser.id;
+  var d = new Date(Number(ts));
+  if (!confirm2('Restaurer la sauvegarde cloud du ' + (isNaN(d.getTime()) ? ts : d.toLocaleString('fr-FR')) + ' ?\n\nToutes les sections seront remises à ce moment-là.')) return;
+  window.SB_CLIENT.from('backups').select('data').eq('enterprise_id', uid).eq('ts', Number(ts)).limit(1).then(function (res) {
+    var row = res && res.data && res.data[0];
+    if (!row || !row.data) { toast('Sauvegarde introuvable', 'error'); return; }
+    var n = 0;
+    for (var k in row.data) {
+      if (!Object.prototype.hasOwnProperty.call(row.data, k)) continue;
+      DB.set(k, row.data[k]);
+      try { markDirty(k); } catch (e) {}
+      n++;
+    }
+    toast(n + ' section(s) restaurées — synchronisation en cours');
+    try { var ov = document.getElementById('cloudBakOverlay'); if (ov) ov.remove(); } catch (e2) {}
+  }).catch(function (e) { toast('Restauration impossible : ' + ((e && e.message) || e), 'error'); });
+}
+function afficherSauvegardesCloud() {
+  var ov = document.getElementById('cloudBakOverlay');
+  if (ov) ov.remove();
+  ov = document.createElement('div');
+  ov.id = 'cloudBakOverlay';
+  ov.className = 'modal-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.5);display:flex;align-items:center;justify-content:center;z-index:9999';
+  ov.innerHTML = '<div class="modal" style="max-width:640px;width:92%"><h3>Sauvegardes dans le cloud</h3><div style="font-size:.8rem;color:var(--dim)">Chargement…</div></div>';
+  document.body.appendChild(ov);
+  listerSauvegardesCloud().then(function (rows) {
+    if (!document.getElementById('cloudBakOverlay')) return;
+    var box = ov.querySelector('.modal');
+    if (!box) return;
+    if (!rows.length) { box.innerHTML = '<h3>Sauvegardes dans le cloud</h3><p style="font-size:.82rem;color:var(--dim)">Aucune sauvegarde pour le moment. Elles se créent automatiquement toutes les 4 h.</p><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button>'; return; }
+    var h = '<h3>Sauvegardes dans le cloud</h3>'
+      + '<p style="font-size:.8rem;color:var(--dim);margin:0 0 .6rem">' + rows.length + ' version(s) conservée(s). Choisissez-en une pour la remettre en place.</p>'
+      + '<div style="max-height:360px;overflow:auto"><table style="width:100%;font-size:.8rem"><thead><tr style="background:#f1f5f9"><th>Date</th><th>Sections</th><th></th></tr></thead><tbody>';
+    rows.forEach(function (r) {
+      var dd = new Date(Number(r.ts));
+      h += '<tr><td>' + (isNaN(dd.getTime()) ? r.ts : dd.toLocaleString('fr-FR')) + '</td>'
+        + '<td>' + (r.keys || '?') + '</td>'
+        + '<td style="text-align:right"><button class="btn btn-sm" onclick="restaurerSauvegardeCloud(' + Number(r.ts) + ')">Restaurer</button></td></tr>';
+    });
+    h += '</tbody></table></div><div style="margin-top:.6rem"><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button></div>';
+    box.innerHTML = h;
+  }).catch(function (e) {
+    var box2 = ov.querySelector('.modal');
+    if (box2) box2.innerHTML = '<h3>Sauvegardes cloud</h3><p style="font-size:.82rem;color:var(--danger)">Lecture impossible : ' + ((e && e.message) || e) + '</p><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button>';
+  });
 }
 function startAutoBackup() {
   if (_autoBackupTimer) return;
