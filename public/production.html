@@ -13050,6 +13050,9 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     renderPage();
   }
   function render_stock_consum() {
+  /* Un ancien bug ecrivait la base d'inventaire en double : on nettoie une
+     fois pour toutes, sinon le recapitulatif compte 7 fois le reel. */
+  try { var _dup = dedoublonnerBasesInventaire(); if (_dup > 0) console.info('[Stock] ' + _dup + ' ligne(s) « Stock initial » en double retiree(s).'); } catch (eDup) {}
     var tab = getSection('stockConsoTab', 'tous');
     if (tab !== 'tous' && tab !== 'pointes' && tab !== 'divers') tab = 'tous';
     /* Une seule ligne par PRODUIT (les fiches en double sont regroupees a
@@ -14786,6 +14789,8 @@ function applyInventoryAsInitial(month, items, opts) {
   var epiMap = {};
   epi.forEach(function(s, i) { epiMap[s.code] = i; });
   var _invLogs = [];
+  /* La base consommable se joue une fois pour tout l'inventaire. */
+  var _baseConsoAppliquee = false;
   function _invLog(list, idx, real) {
     var s = list[idx];
     if (!s || !s.article_id) return;
@@ -14843,14 +14848,21 @@ function applyInventoryAsInitial(month, items, opts) {
         idx = merchMap[it.ref];
         if (idx !== undefined) { merch[idx].quantite = it.real_qte; }
         break;
-      case 'stockConsum':
+case 'stockConsum':
         /* Grand-livre propre (voir appliquerBaseInventaireConso) : le réel
            devient une ligne « Stock initial » au lendemain, l'historique
-           antérieur est clôturé — plus aucune ligne d'écart négative. */
+           antérieur est clôturé - plus aucune ligne d'écart négative.
+           ATTENTION : cet appel porte sur TOUS les items à la fois. Il était
+           dans la boucle, donc exécuté une fois PAR LIGNE consommable : avec
+           7 lignes, la base P5 était écrite 7 fois (7 × 16 020 = 112 140
+           pointes au lieu de 16 020). On le joue donc UNE seule fois. */
         try {
           var _o = opts || {};
-          appliquerBaseInventaireConso(items, _o.date || today(), _o.supervisor || '', _o.invId || month);
-          consum = getStockConsum();
+          if (!_baseConsoAppliquee) {
+            _baseConsoAppliquee = true;
+            appliquerBaseInventaireConso(items, _o.date || today(), _o.supervisor || '', _o.invId || month);
+            consum = getStockConsum();
+          }
         } catch (eB) {}
         break;
       case 'epiItems':
@@ -22400,6 +22412,27 @@ function achatHasMouvements(a) {
   return false;
 }
 
+/* Bases d'inventaire en double : un ancien bug écrivait la ligne « Stock
+   initial » une fois par ligne d'inventaire (P5 : 7 × 16 020 = 112 140 au
+   lieu de 16 020). On ne garde qu'UNE base par (inventaire, produit) : les
+   excédentaires sont retirees. Ne touche qu'aux lignes _invBase. */
+function dedoublonnerBasesInventaire() {
+  try {
+    var lignes = getStockConsum() || [];
+    if (!lignes.length) return 0;
+    var vues = {}, garde = [], n = 0;
+    lignes.forEach(function (s) {
+      if (!s) return;
+      if (!s._invBase) { garde.push(s); return; }
+      var k = String(s._invId || s.date || '') + '|' + String(s.code || '').trim().toUpperCase();
+      if (vues[k]) { n++; return; }
+      vues[k] = true;
+      garde.push(s);
+    });
+    if (n > 0) setStockConsum(garde);
+    return n;
+  } catch (e) { return 0; }
+}
 /* Dettes fournisseurs orphelines : « Achat production BL-XXXX » alors que ce
    bon n'existe plus dans les achats (supprime avant que le lien soit fiable, ou
    supprime a la main dans la Nomenclature). Elles restent affichees au compte

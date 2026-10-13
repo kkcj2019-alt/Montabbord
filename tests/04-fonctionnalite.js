@@ -5102,6 +5102,73 @@ r.push({
   });
 
   r.push({
+    nom: 'Inventaire consommables : UNE seule base par produit (pas 7 fois le reel)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 },
+        { id: 'a6', code: 'P6', designation: 'POINTE6', categorie: 'consum', qty_per_packet: 170 }
+      ];
+      p.definitions = [];
+      p.stockConsum = [
+        { id: 'c1', code: 'P6', designation: 'POINTE6', ctype: 'POINTE', cond: 170, quantite: 500, date: '2026-09-01', obs: 'ancien achat' },
+        { id: 'c2', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 180, quantite: 300, date: '2026-09-01', obs: 'ancien achat' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var items = [
+        { store: 'stockConsum', code: 'P5', ref: 'P5', theo_qte: 300, real_qte: 16020 },
+        { store: 'stockConsum', code: 'P6', ref: 'P6', theo_qte: 500, real_qte: 34510 }
+      ];
+      applyInventoryAsInitial('2026-09', items, { date: '2026-09-30', supervisor: 'Goli', invId: 'inv9' });
+      var lignes = getStockConsum();
+      var bases = lignes.filter(function (s) { return s._invBase && s._invId === 'inv9'; });
+      /* Une base par produit : 2 au total (et non 2 par ligne inventoriede) */
+      var p5 = bases.filter(function (s) { return s.code === 'P5'; })[0] || {};
+      var p6 = bases.filter(function (s) { return s.code === 'P6'; })[0] || {};
+      var agg = consoAggregate();
+      var a5 = agg.filter(function (a) { return a.code === 'P5'; })[0] || {};
+      (bases.length === 2 && p5.quantite === 16020 && p6.quantite === 34510
+        && a5.unites === 16020 && a5.paquets === 89)
+        ? 'OK : 2 bases seulement, P5 = 16 020 pointes = 89 paquets (et non 112 140 = 623 paquets)'
+        : 'ECHEC bases=' + bases.length + ' p5=' + p5.quantite + ' agg=' + a5.unites + ' paq=' + a5.paquets
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock : les bases d\u2019inventaire en double sont retirees',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.definitions = [];
+      /* 7 bases identiques + un achat anterieur (doit rester) */
+      var l = [];
+      for (var i = 0; i < 7; i++) l.push({ id: 'b' + i, code: 'P5', ctype: 'POINTE', cond: 180, quantite: 16020, date: '2026-10-01', _invBase: true, _invId: 'i1', obs: 'Stock initial' });
+      l.push({ id: 'x1', code: 'P5', ctype: 'POINTE', cond: 180, quantite: 500, date: '2026-10-13', obs: 'Achat BL-1' });
+      p.stockConsum = l;
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var avant = getStockConsum().length;
+      var n = dedoublonnerBasesInventaire();
+      var l = getStockConsum();
+      var bases = l.filter(function (s) { return s._invBase; });
+      var achatTrouve = l.filter(function (s) { return !s._invBase && String(s.obs || '').indexOf('BL-1') !== -1; })[0] || {};
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
+      (n === 6 && bases.length === 1 && l.length === avant - 6 && achatTrouve.quantite === 500 && agg.unites === 16520)
+        ? 'OK : 6 bases en trop retirees, l achat conserve, stock = 16 020 + 500 = 16 520'
+        : 'ECHEC n=' + n + ' bases=' + bases.length + ' avant=' + avant + ' apres=' + l.length + ' agg=' + agg.unites
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
     app: 'production.html', store: storeRealiste,
     code: `
