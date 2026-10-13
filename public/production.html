@@ -20915,6 +20915,8 @@ function toggleAchatDetail(id) {
   el.style.display = open ? 'none' : '';
 }
 function render_achats() {
+  /* Un achat supprime ne doit plus apparaitre au compte d'un fournisseur. */
+  try { var _orph = nettoyerDettesAchatsSupprimes(); if (_orph > 0) console.info('[Achats] ' + _orph + ' dette(s) fournisseur orpheline(s) retiree(s) (achat supprime).'); } catch (eOrph) {}
   var f = window._achatTypeFilter || 'all';
   var q = (window._achatSearch || '').toString().toLowerCase().trim();
   var _pwA = true;
@@ -22398,6 +22400,40 @@ function achatHasMouvements(a) {
   return false;
 }
 
+/* Dettes fournisseurs orphelines : « Achat production BL-XXXX » alors que ce
+   bon n'existe plus dans les achats (supprime avant que le lien soit fiable, ou
+   supprime a la main dans la Nomenclature). Elles restent affichees au compte
+   du fournisseur : on les retire. Ne touche qu'a ces entrees-la. */
+function nettoyerDettesAchatsSupprimes() {
+  try {
+    var dettes = lsArr('mdb_dettesFournisseurs');
+    if (!dettes.length) return 0;
+    var refs = {};
+    getAchats().forEach(function (a) {
+      var r = String((a && a.reference) || '').trim().toUpperCase();
+      if (r) refs[r] = true;
+    });
+    var ids = {};
+    getAchats().forEach(function (a) { if (a && a.id !== undefined) ids[String(a.id)] = true; });
+    var garde = dettes.filter(function (d) {
+      if (!d) return false;
+      if (d.prodAchatId !== undefined && d.prodAchatId !== null && !ids[String(d.prodAchatId)]) {
+        var desc0 = String(d.description || '');
+        if (desc0.toLowerCase().indexOf('achat production') !== -1) return false;
+      }
+      var desc = String(d.description || '');
+      if (desc.toLowerCase().indexOf('achat production') === -1) return true;
+      var m = desc.match(/Achat production\s+(.+)$/i);
+      if (!m) return true;
+      var ref = String(m[1] || '').trim().toUpperCase();
+      if (!ref) return true;
+      return !!refs[ref];
+    });
+    var n = dettes.length - garde.length;
+    if (n > 0) localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(garde));
+    return n;
+  } catch (e) { return 0; }
+}
 function deleteAchat(id) {
   var achats = getAchats();
   var a = achats.find(function(x) { return String(x.id) === String(id); });
@@ -22412,15 +22448,22 @@ function deleteAchat(id) {
     '• Fournisseur : ' + (a.fournisseur || '-') + '\n\n' +
     'Le stock sera impacté si cet achat a déjà été réceptionné.\nConfirmer ?';
   if (!confirm2(msg)) return;
-  var _rev = reverseAchatStock(a);
+var _rev = reverseAchatStock(a);
   try {
     var _dfs = lsArr('mdb_dettesFournisseurs');
     var _ref = 'Achat production ' + (a.reference || '');
+    var _refN = String(a.reference || '').trim().toUpperCase();
     var _mt = Math.round((parseFloat(a.montant_total) || 0) * 100) / 100;
+    /* On se fie a la REFERENCE inscrite dans la description (« Achat production
+       BL-70006 ») : c'est elle qui identifie l'achat. La date et le montant
+       pouvant avoir ete corriges depuis, les exiger a l'identique laissait
+       l'ecetre dredit au compte du fournisseur pour un achat supprime. */
     localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(_dfs.filter(function(d) {
       if (d.prodAchatId !== undefined && d.prodAchatId !== null && String(d.prodAchatId) === String(a.id)) return false;
-      /* Filet legacy : dettes créées avant le lien prodAchatId (même description+date+montant) */
-      if (!d.prodAchatId && d.description === _ref && (d.date || '') === (a.date || '') && Math.round((parseFloat(d.montant) || 0) * 100) / 100 === _mt) return false;
+      var desc = String(d.description || '');
+      if (_refN && desc.toUpperCase().indexOf(_refN) !== -1 && desc.toLowerCase().indexOf('achat production') !== -1) return false;
+      /* Filet legacy : dettes creees avant le lien prodAchatId */
+      if (!d.prodAchatId && desc === _ref && (d.date || '') === (a.date || '') && Math.round((parseFloat(d.montant) || 0) * 100) / 100 === _mt) return false;
       return true;
     })));
   } catch(e) {}

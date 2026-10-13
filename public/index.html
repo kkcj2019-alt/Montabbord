@@ -12837,10 +12837,10 @@ function deleteClient(id) {
    pfLinks), on ne touche jamais aux prix existants (gérés ici).
    pfIgnores (codes supprimés à ne pas recréer) vit dans mdb_production. */
 function syncProduitsFinisFromExploitation() {
-  var res = { crees: 0 };
+  var res = { crees: 0, dimsMaj: 0 };
   try {
     var p = (typeof apProdGet === 'function') ? (apProdGet() || {}) : {};
-    var expl = ((p && p.articles) || []).filter(function(a) { return a && a.categorie === 'finished'; });
+    var expl = ((p && p.articles) || []).filter(function(a) { return a && a.categorie === 'finished' && !a._horsIndex; });
     var links = (p && p.pfLinks) || [];
     var ignores = (p && p.pfIgnores) || [];
     var norm = function(c) { return String(c || '').trim().toUpperCase(); };
@@ -12854,8 +12854,16 @@ function syncProduitsFinisFromExploitation() {
       for (var i = 0; i < ignores.length; i++) { if (norm(ignores[i]) === n) return true; }
       return false;
     };
+    /* MEME signature que l'exploitation : sans elle, PAL114 creeait un doublon
+       a cote de 114 dans la nomenclature. */
+    var sigDes = function(d) {
+      var s = String(d || '').toUpperCase();
+      try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+      return s.replace(/[^A-Z0-9]/g, '').replace(/S$/, '');
+    };
     var arts = getArticles();
     var change = false;
+    var vus = {};
     for (var j = 0; j < expl.length; j++) {
       var ea = expl[j];
       if (!ea || !ea.code || ignore(ea.code)) continue;
@@ -12864,17 +12872,93 @@ function syncProduitsFinisFromExploitation() {
       var trouve = null;
       for (var k = 0; k < arts.length; k++) { if (norm(arts[k].code) === norm(codeIdx)) { trouve = arts[k]; break; } }
       if (!trouve) {
-        var an = new Date().getFullYear();
-        var px0 = parseFloat(ea.prix_vente) || 0;
-        arts.push({ id: DB.genId(), code: ea.code, designation: ea.designation || ea.code,
-          typeArticle: 'produit_fini', commercialise: true,
-          prixPeriodes: px0 > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: px0 }] : [] });
-        res.crees++; change = true;
+        /* meme designation des deux cotes ? on complete plutot que de dupliquer */
+        var sd = sigDes(ea.designation);
+        var cands = [];
+        if (sd) {
+          for (var k2 = 0; k2 < arts.length; k2++) {
+            if (!vus[norm(arts[k2].code)] && sigDes(arts[k2].designation) === sd) cands.push(arts[k2]);
+          }
+        }
+        if (cands.length === 1) trouve = cands[0];
       }
+      if (trouve) {
+        vus[norm(trouve.code)] = true;
+        /* Les dimensions sont saisies en exploitation : on les remonte ici
+           (la Nomenclature est la source, elle ne doit pas rester vide). */
+        var l = parseFloat(ea.length) || 0, w = parseFloat(ea.width) || 0, t = parseFloat(ea.thickness) || 0;
+        if (l > 0 && w > 0 && t > 0) {
+          if (!(parseFloat(trouve.longueur) > 0 && parseFloat(trouve.largeur) > 0 && parseFloat(trouve.epaisseur) > 0)) {
+            trouve.longueur = l; trouve.largeur = w; trouve.epaisseur = t;
+            res.dimsMaj++; change = true;
+          }
+        }
+        if (!trouve.designation && ea.designation) { trouve.designation = ea.designation; change = true; }
+        continue;
+      }
+      var an = new Date().getFullYear();
+      var px0 = parseFloat(ea.prix_vente) || 0;
+      arts.push({ id: DB.genId(), code: ea.code, designation: ea.designation || ea.code,
+        typeArticle: 'produit_fini', commercialise: true,
+        longueur: parseFloat(ea.length) || 0, largeur: parseFloat(ea.width) || 0, epaisseur: parseFloat(ea.thickness) || 0,
+        prixPeriodes: px0 > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: px0 }] : [] });
+      res.crees++; change = true;
     }
     if (change) DB.set('mdb_nomenclature', arts);
   } catch (eS) {}
   return res;
+}
+/* Les deux listes doivent etre les memes : on diagnostique les articles de la
+   Nomenclature qui designent le meme produit sous deux codes differents
+   (114 / PAL114, Nest / NES...). Rien n'est supprime tout seul : l'utilisateur
+   confirme la fusion. */
+function diagnosticDoublonsNomenclature() {
+  var arts = (getArticles() || []).filter(function (a) { return a && a.typeArticle === 'produit_fini'; });
+  var sig = function (d) {
+    var s = String(d || '').toUpperCase();
+    try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+    return s.replace(/[^A-Z0-9]/g, '').replace(/S$/, '');
+  };
+  var groupes = {}, ordre = [];
+  arts.forEach(function (a) {
+    var k = sig(a.designation);
+    if (!k) return;
+    if (!groupes[k]) { groupes[k] = []; ordre.push(k); }
+    groupes[k].push(a);
+  });
+  var paires = [];
+  ordre.forEach(function (k) {
+    var g = groupes[k];
+    if (g.length > 1) paires.push({ designation: g[0].designation, codes: g.map(function (x) { return x.code; }) });
+  });
+  console.log('[Nomenclature] doublons de produits finis :', paires);
+  if (paires.length) console.log('-> Pour en fusionner un : fusionnerDoublonNomenclature(\'' + paires[0].codes[0] + '\', \'' + paires[0].codes[1] + '\')');
+  return paires;
+}
+/* Fusionne deux articles de la Nomenclature qui designent le meme produit.
+   Le code garde est celui de l'index ; le doublon disparait. Les periodes de
+   prix du doublon sont reprises si le garde n'en a aucune. */
+function fusionnerDoublonNomenclature(codeDoublon, codeFinal) {
+  var norm = function (c) { return String(c || '').trim().toUpperCase(); };
+  var arts = getArticles() || [];
+  var d = null, f = null;
+  for (var i = 0; i < arts.length; i++) {
+    if (norm(arts[i].code) === norm(codeDoublon)) d = arts[i];
+    if (norm(arts[i].code) === norm(codeFinal)) f = arts[i];
+  }
+  if (!d || !f) return toast('Article introuvable : verifiez les deux codes', 'error');
+  if (d === f) return toast('Meme article : rien a fusionner', 'error');
+  if (!confirm2('Fusionner ' + d.code + ' dans ' + f.code + ' ?\n\n' + d.code + ' disparait de la nomenclature.\n'
+    + 'Le code ' + f.code + ' est conserve.')) return;
+  if (!(f.prixPeriodes || []).length && (d.prixPeriodes || []).length) f.prixPeriodes = d.prixPeriodes;
+  if (!(parseFloat(f.longueur) > 0) && parseFloat(d.longueur) > 0) {
+    f.longueur = d.longueur; f.largeur = d.largeur; f.epaisseur = d.epaisseur;
+  }
+  if (!f.designation && d.designation) f.designation = d.designation;
+  DB.set('mdb_nomenclature', arts.filter(function (a) { return a !== d; }));
+  toast(d.code + ' fusionne dans ' + f.code + ' — la nomenclature est a jour');
+  renderNomenclature();
+  return true;
 }
 /* Dimension d'un article : Longueur x Largeur x Epaisseur (cm). Meme regle
    que l'exploitation : c'est ce trio saisi qui fait la dimension. */
@@ -45830,6 +45914,44 @@ function apFillAchatCode() {
     }
   } catch(e) {}
 }
+/* Colonnes « Colis » de la liste des achats — MEME rendu que le module
+   Exploitation : pour le bois, N colis ; pour les consommables et l'EPI,
+   le nombre de CARTONS par produit (« 6 cartons P6 · 1 carton P8 · »),
+   et ce resume est affiche sous la colonne Type. */
+function apAchatSansVolume(cat) {
+  return cat === 'consumables' || cat === 'consumable' || cat === 'epi';
+}
+function apResumeColisTxt(a) {
+  var lits = Array.isArray(a && a.items) ? a.items.filter(function (x) { return x && typeof x === 'object'; }) : [];
+  if (!apAchatSansVolume((a && (a.category || a.type)) || '')) return String(lits.length);
+  var parCode = {}, ordre = [];
+  lits.forEach(function (it) {
+    var code = String(it.code || it.designation || '?').trim() || '?';
+    var n = parseFloat(it.cartons) > 0 ? parseFloat(it.cartons) : (parseFloat(it.quantity) || 0);
+    if (parCode[code] === undefined) { parCode[code] = 0; ordre.push(code); }
+    parCode[code] += n;
+  });
+  if (!ordre.length) return '0';
+  return ordre.reduce(function (s, c) { return s + parCode[c]; }, 0).toLocaleString('fr-FR');
+}
+function apResumeColisHtml(a) {
+  var lits = Array.isArray(a && a.items) ? a.items.filter(function (x) { return x && typeof x === 'object'; }) : [];
+  if (!apAchatSansVolume((a && (a.category || a.type)) || '')) return '';
+  var parCode = {}, ordre = [];
+  lits.forEach(function (it) {
+    var code = String(it.code || it.designation || '?').trim() || '?';
+    var n = parseFloat(it.cartons) > 0 ? parseFloat(it.cartons) : (parseFloat(it.quantity) || 0);
+    if (parCode[code] === undefined) { parCode[code] = 0; ordre.push(code); }
+    parCode[code] += n;
+  });
+  if (!ordre.length) return '';
+  var parts = ordre.map(function (c) {
+    var n = parCode[c];
+    var nom = Math.abs(n - 1) > 0.001 ? 'cartons' : 'carton';
+    return '<b style="color:#ea580c">' + escH(n.toLocaleString('fr-FR')) + '</b> ' + nom + ' ' + escH(c);
+  });
+  return parts.join(' <span style="color:#94a3b8">·</span> ');
+}
 function renderAchatsProduction() {
   var f = window._apTypeFilter || 'all';
   var readonly = isReadonly('achatsProduction');
@@ -45847,7 +45969,10 @@ function renderAchatsProduction() {
   } else {
     html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr><th>N° BL / Réf</th><th>Date</th><th>Fournisseur</th><th>Réceptionnaire</th><th>Type</th><th style="text-align:right">Colis</th><th style="text-align:right">Volume (m³)</th><th style="text-align:right">Montant</th>' + (!readonly ? '<th style="width:100px">Actions</th>' : '') + '</tr></thead><tbody>';
     achats.forEach(function(a) {
-      html += '<tr><td class="fw-600">' + escH(a.reference || '-') + '</td><td>' + fmtDate(a.date || '') + '</td><td>' + escH(a.fournisseur || '-') + '</td><td>' + escH(a.receiver_name || '-') + '</td><td><span class="badge badge-primary">' + escH(apCatLabel(a.category || a.type)) + '</span></td><td style="text-align:right">' + ((a.items || []).length) + '</td><td style="text-align:right">' + (parseFloat(a.total_volume || 0).toFixed(3)) + '</td><td style="text-align:right">' + fmtMoney(a.montant_total || 0) + '</td>';
+      html += '<tr><td class="fw-600">' + escH(a.reference || '-') + '</td><td>' + fmtDate(a.date || '') + '</td><td>' + escH(a.fournisseur || '-') + '</td><td>' + escH(a.receiver_name || '-') + '</td>'
+      html += '<td><span class="badge badge-primary">' + escH(apCatLabel(a.category || a.type)) + '</span><div style="font-size:11px;color:var(--gray-500);margin-top:2px">' + apResumeColisHtml(a) + '</div></td>'
+        + '<td style="text-align:right">' + escH(apResumeColisTxt(a)) + '</td>'
+        + '<td style="text-align:right">' + (parseFloat(a.total_volume || 0).toFixed(3)) + '</td><td style="text-align:right">' + fmtMoney(a.montant_total || 0) + '</td>';
       if (!readonly) html += '<td><button class="btn-icon" onclick="editApAchat(\'' + apJsArg(a.id) + '\')" title="Modifier cet achat" style="color:#2563eb"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button> <button class="btn-icon danger" onclick="deleteApAchat(\'' + apJsArg(a.id) + '\')" title="Supprimer (déduit le stock)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1 2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
       html += '</tr>';
     });

@@ -5017,6 +5017,91 @@ r.push({
   });
 
   r.push({
+    nom: 'Achat supprime : la dette fournisseur disparait (meme si date/montant ont change)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var achats = getAchats();
+      achats.push({ id: 'bl1', reference: 'BL-70006', date: '2026-10-13', fournisseur: 'TIJANI', category: 'consumables', montant_total: 252000, items: [] });
+      setAchats(achats);
+      /* Dette creee par une version ancienne : meme ref, date et montant differents */
+      localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify([
+        { id: 'd1', prodAchatId: null, description: 'Achat production BL-70006', date: '2026-09-30', montant: 250000 },
+        { id: 'd2', prodAchatId: null, description: 'Achat production BL-76557', date: '2026-10-13', montant: 252000 },
+        { id: 'd3', description: 'Autre facture', date: '2026-10-13', montant: 1000 }
+      ]));
+      window.confirm2 = function () { return true; };
+      deleteAchat('bl1');
+      var reste = lsArr('mdb_dettesFournisseurs');
+      var refs = reste.map(function (d) { return d.description; });
+      (refs.indexOf('Achat production BL-70006') === -1 && refs.indexOf('Autre facture') !== -1)
+        ? 'OK : la dette BL-70006 est retirees, les autres sont intactes'
+        : 'ECHEC reste=' + JSON.stringify(refs)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Dettes orphelines : un achat supprimé ne laisse plus d\'écriture chez le fournisseur',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setAchats([{ id: 'bl2', reference: 'BL-76557', date: '2026-10-13', fournisseur: 'TIJANI', category: 'consumables', montant_total: 252000, items: [] }]);
+      localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify([
+        { id: 'd1', description: 'Achat production BL-70006', date: '2026-10-13', montant: 252000 },
+        { id: 'd2', description: 'Achat production BL-76557', date: '2026-10-13', montant: 252000 },
+        { id: 'd3', description: 'Avance fournisseur', date: '2026-10-13', montant: 5000 }
+      ]));
+      var n = nettoyerDettesAchatsSupprimes();
+      var refs = lsArr('mdb_dettesFournisseurs').map(function (d) { return d.description; });
+      (n === 1 && refs.length === 2 && refs.indexOf('Achat production BL-70006') === -1
+        && refs.indexOf('Achat production BL-76557') !== -1 && refs.indexOf('Avance fournisseur') !== -1)
+        ? 'OK : BL-70006 (achat inexistant) retire, BL-76557 et l\u2019avance conserves'
+        : 'ECHEC n=' + n + ' refs=' + JSON.stringify(refs)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Index : le tableau Achats montre le resume cartons, comme l\u2019Exploitation',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var a = { category: 'consumables', items: [
+        { code: 'P6', quantity: 51000, cartons: 6 },
+        { code: 'P8', quantity: 1200, cartons: 1 },
+        { code: 'P7', quantity: 1200, cartons: 2 }
+      ] };
+      var h = apResumeColisHtml(a);
+      var t = apResumeColisTxt(a);
+      var bois = apResumeColisHtml({ category: 'raw-materials', items: [{ code: 'L1' }, { code: 'L2' }, { code: 'L3' }] });
+      var tBois = apResumeColisTxt({ category: 'raw-materials', items: [{ code: 'L1' }, { code: 'L2' }, { code: 'L3' }] });
+      (h.indexOf('6') !== -1 && h.indexOf('cartons P6') !== -1 && h.indexOf('carton P8') !== -1 && t === '9'
+        && bois === '' && tBois === '3')
+        ? 'OK : « 6 cartons P6 · 1 carton P8 · 2 cartons P7 » (total 9), et 3 colis pour le bois'
+        : 'ECHEC h=' + h + ' total=' + t + ' bois=' + tBois
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Nomenclature : les dimensions saisies en Exploitation remontent dans la source',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_nomenclature', [{ id: 'n1', code: '114', designation: 'PALETTE 114', typeArticle: 'produit_fini', prixPeriodes: [] }]);
+      apProdGet = function () {
+        return { articles: [{ id: 'e1', code: 'PAL114', designation: 'PALETTES 114*114*12', categorie: 'finished', length: 114, width: 114, thickness: 12 }],
+                 pfLinks: [{ expl: 'PAL114', idx: '114' }], pfIgnores: [] };
+      };
+      var r = syncProduitsFinisFromExploitation();
+      var arts = DB.get('mdb_nomenclature');
+      var n = arts.filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
+      var l = arts[0] || {};
+      (r.crees === 0 && r.dimsMaj === 1 && n === 1 && l.longueur === 114 && l.largeur === 114 && l.epaisseur === 12)
+        ? 'OK : pas de doublon (114 garde), dimensions 114x114x12 remontees dans la Nomenclature'
+        : 'ECHEC r=' + JSON.stringify(r) + ' n=' + n + ' dim=' + l.longueur + 'x' + l.largeur + 'x' + l.epaisseur
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
     app: 'production.html', store: storeRealiste,
     code: `
