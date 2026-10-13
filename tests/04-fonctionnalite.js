@@ -4862,6 +4862,28 @@ r.push({
   });
 
   r.push({
+    nom: 'Stockage plein : la sauvegarde locale se suspend (fini la boucle sauvegarde ↔ purge)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Tant que le refroidissement court, aucune tentative de sauvegarde :
+         c'etait la boucle « ecriture » -> « purge » -> « ecriture » qui
+         rendait le telephone inutilisable. */
+      window._sauvegardeBloqueJusqua = Date.now() + 600000;
+      var metaAvant = JSON.stringify(getBackupMeta());
+      createFullBackup();
+      var metaApres = JSON.stringify(getBackupMeta());
+      /* A froid (aucun blocage), une sauvegarde se fait bien */
+      window._sauvegardeBloqueJusqua = 0;
+      createFullBackup();
+      var avec = getBackupMeta().length;
+      (metaAvant === metaApres && avec >= 1)
+        ? 'OK : aucune tentative pendant le refroidissement, puis sauvegarde normale (' + avec + ' version(s))'
+        : 'ECHEC avant=' + metaAvant + ' apres=' + metaApres + ' avec=' + avec
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stockage plein : le nettoyage manuel libere de la place sans toucher aux donnees',
     app: 'index.html', store: storeRealiste,
     code: `
