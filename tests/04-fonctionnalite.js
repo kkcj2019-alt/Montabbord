@@ -4860,6 +4860,66 @@ r.push({
   });
 
   r.push({
+    nom: 'Index : colonne Dimension + saisie Longueur/Largeur/Epaisseur',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_nomenclature', [{ id:'n1', code:'114', designation:'PALETTE 114', typeArticle:'produit_fini', longueur:114, largeur:114, epaisseur:12 }]);
+      renderNomenclature();
+      var h = (document.getElementById('facturationContent') || document.getElementById('content')).innerHTML || '';
+      var okCol = h.indexOf('Dimension') !== -1;
+      var dim = nomDimTxt({ longueur:114, largeur:114, epaisseur:12 });
+      var okVal = h.indexOf(dim) !== -1;
+      /* Le formulaire propose les 3 champs, pre-remplis, avec l'apercu */
+      var capture = '';
+      var vraiOpen = openFormModal;
+      openFormModal = function (t, c) { capture = c; };
+      try { openNomenclatureModal('n1'); } finally { openFormModal = vraiOpen; }
+      var okChamps = capture.indexOf('id="aLong"') !== -1 && capture.indexOf('id="aLarg"') !== -1 && capture.indexOf('id="aEpais"') !== -1;
+      var okApercu = capture.indexOf('aDimApercu') !== -1 && capture.indexOf('value="114"') !== -1;
+      /* Et la sauvegarde conserve les 3 valeurs */
+      document.getElementById('aLong').value = '114';
+      document.getElementById('aLarg').value = '114';
+      document.getElementById('aEpais').value = '12';
+      saveNomenclature('n1');
+      var art = DB.get('mdb_nomenclature').filter(function (a) { return a.id === 'n1'; })[0] || {};
+      var okSave = art.longueur === 114 && art.largeur === 114 && art.epaisseur === 12;
+      (okCol && okVal && okChamps && okApercu && okSave)
+        ? 'OK : colonne « 114 × 114 × 12 », 3 champs, aperçu et sauvegarde'
+        : 'ECHEC col=' + okCol + ' val=' + okVal + ' champs=' + okChamps + ' apercu=' + okApercu + ' save=' + okSave + ' dim=' + dim
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Exploitation : le bouton Convertir apparait quand la base a ete saisie en paquets (P5)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.definitions = [];
+      /* 89 enregistre comme 89 POINTES : moins d'un paquet -> affiche 0 paquet */
+      p.stockConsum = [
+        { id: 'b1', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 180, quantite: 89, date: '2026-10-01', obs: 'Stock initial', _invBase: true, _invId: 'i1' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* Detection du cas : une seule ligne (la base), moins d'un paquet */
+      var aDetecter = consoBaseATransformer('P5');
+      var p8 = consoBaseATransformer('P8');   /* cond inconnu -> pas de bouton */
+      window.confirm2 = function () { return true; };
+      renderPage = function () {};
+      convertirBaseEnPaquets('P5');
+      var l = getStockConsum().filter(function (s) { return s.code === 'P5'; })[0] || {};
+      (aDetecter === true && p8 === false && l.quantite === 16020 && l.paquets === 89)
+        ? 'OK : bouton propose, conversion 89 -> 16 020 pointes = 89 paquets'
+        : 'ECHEC detect=' + aDetecter + ' p8=' + p8 + ' qte=' + l.quantite + ' paq=' + l.paquets
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
     app: 'production.html', store: storeRealiste,
     code: `

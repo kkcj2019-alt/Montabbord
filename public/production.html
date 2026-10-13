@@ -13109,7 +13109,9 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? '-' : fmt(x.unites)) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? fmt(x.paquets) : _fmtPaq(x.paquets)) + '</td>';
         h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + (isDiv ? '-' : _fmtCart(x.paquets, _ppcL)) + '</td>';
-        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button></td></tr>';
+        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button>'
+          + (consoBaseATransformer(x.code) ? ' <button class="btn" onclick="convertirBaseEnPaquets(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Stock initial saisi en PAQUETS mais enregistre comme des pointes (conditionnement introuvable a l\u2019epoque). Cliquez pour convertir : 89 paquets = 89 x 180 = 16 020 pointes.">⚙️ Convertir</button>' : '')
+          + '</td></tr>';
         if (isPointe) {
           h += '<tr id="' + detId + '" style="display:none;background:#fff7ed"><td colspan="9" style="padding:8px 10px">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem">'
@@ -14428,12 +14430,35 @@ function convertirBaseEnPaquets(code, condManuel) {
     + 'A faire SEULEMENT si la saisie avait ete faite en paquets.')) return;
   cible.quantite = q * cond;
   cible.cond = cond;
-  if (cible.paquets !== undefined) cible.paquets = Math.floor(cible.quantite / cond);
+  cible.paquets = Math.floor(cible.quantite / cond);
   cible.obs = (cible.obs || 'Stock initial') + ' (converti en paquets)';
   setStockConsum(lignes);
   toast(K + ' : base corrigee a ' + fmt(cible.quantite) + ' pointes (' + fmt(Math.floor(cible.quantite / cond)) + ' paquets)');
   renderPage();
   return true;
+}
+/* Le stock initial de cet inventaire a-t-il ete saisi en PAQUETS alors qu'il
+   est enregistre en POINTES ? Signature : une SEULE ligne (la base), dont la
+   quantite est inferieure a un paquet — donc affichee « 0 paquet ». */
+function consoBaseATransformer(code) {
+  try {
+    var K = String(code || '').trim().toUpperCase();
+    var cond = 0;
+    try { cond = parseFloat(acPointesParPaquet(K)) || 0; } catch (e) {}
+    if (!(cond > 1)) return false;
+    var lignes = getStockConsum() || [];
+    var base = null, autres = 0;
+    for (var i = 0; i < lignes.length; i++) {
+      var s = lignes[i];
+      if (!s || s._invClos || String(s.code || '').trim().toUpperCase() !== K) continue;
+      if (s._invBase) { if (!base) base = s; }
+      else if ((parseFloat(s.quantite) || 0) !== 0) autres++;
+    }
+    if (!base || autres > 0) return false;
+    var q = parseFloat(base.quantite) || 0;
+    /* deja convertie ? la base aurait ete multipliee, donc >= cond */
+    return q > 0 && q < cond;
+  } catch (e2) { return false; }
 }
 /* Facteur joue au demarrage : remet le cond la ou il manque. */
 try { if (typeof reparerCondConsommables === 'function') reparerCondConsommables(); } catch (eRep) {}
@@ -14824,7 +14849,7 @@ function render_articles() {
     var cp = comp.filter(function(c) { return c.type === 'CP'; });
     h += '<tr data-dest="' + escH(a.destination || '') + '">';
     h += '<td style="text-align:center"><input type="checkbox" class="cat-cb" value="' + a.id + '"></td>';
-    h += '<td style="font-weight:600">' + escH(a.code) + '</td>';
+    h += '<td style="font-weight:600">' + escH(a.code) + (a._horsIndex ? ' <span title="Ce produit n\u2019existe pas dans la Nomenclature (app principale), qui est la source. Supprimez-le ici (les deux c\u00f4tes) ou reintegr\u00e9z-le avec restaurerProduitHorsIndex(\'' + escH(a.code) + '\')." style="font-size:.6rem;font-weight:800;color:#b91c1c;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:0 5px;white-space:nowrap">HORS INDEX</span>' : '') + '</td>';
     h += '<td>' + escH(a.designation) + '</td>';
     h += '<td style="font-size:.75rem;color:var(--dim)">' + escH(a.destination || '') + '</td>';
     h += '<td style="font-size:.75rem;font-weight:600;color:var(--blue);white-space:nowrap" title="Longueur x Largeur x Epaisseur (cm)">' + escH(pfDimTxt(a)) + '</td>';
@@ -15498,9 +15523,12 @@ function syncProduitsFinisFromIndex() {
         if (chg) change = true;
       }
     }
-    /* 3) Suppression des produits finis locaux qui n'existent plus dans
-       l'index (crees par la synchro). Sans ca, une suppression faite dans
-       l'index laissait le produit visible ici pour toujours. */
+    /* 3) Abandon des produits finis locaux absents de la Nomenclature :
+       l'index est la source unique, donc un produit supprime la-bas doit
+       disparaitre ici — meme s'il avait ete cree directement en Exploitation
+       (c'etait precisement le cas de BBOXB). On ne supprime que ce qui
+       n'est reference par AUCUN stock ni nomenclature ; sinon la fiche est
+       conservee et signalee « hors Index ». */
     var codesIdx = {};
     for (var q = 0; q < pfIdx.length; q++) {
       var cc = pfNormCode(pfIdx[q].code);
@@ -15508,20 +15536,70 @@ function syncProduitsFinisFromIndex() {
       var ce = pfNormCode(pfExplDe(pfIdx[q].code));
       codesIdx[ce] = true;
     }
-    var avant = arts.length;
-    arts = arts.filter(function (a) {
-      if (!a || a.categorie !== 'finished' || !a._fromIndex) return true;
-      var n = pfNormCode(a.code);
-      if (codesIdx[n]) return true;
-      if (pfEstIgnore(n)) return true;
+    var _comps = getSection('composants', []) || [];
+    var _stkFin = getStockFinished() || [], _stkSemi = getStockSemi() || [];
+    var _refere = function (aid) {
+      for (var c = 0; c < _comps.length; c++) { if (_comps[c] && _comps[c].article_id === aid) return true; }
+      for (var s1 = 0; s1 < _stkFin.length; s1++) { if (_stkFin[s1] && _stkFin[s1].article_id === aid) return true; }
+      for (var s2 = 0; s2 < _stkSemi.length; s2++) { if (_stkSemi[s2] && _stkSemi[s2].article_id === aid) return true; }
       return false;
+    };
+    var retires = [], conserves = [];
+    arts = arts.filter(function (a) {
+      if (!a || a.categorie !== 'finished') return true;
+      var n = pfNormCode(a.code);
+      if (codesIdx[n]) { if (a._horsIndex) { try { delete a._horsIndex; } catch (eH) {} } return true; }
+      if (pfEstIgnore(n)) return true;
+      /* Fiche venue de l'index (miroir) et disparue de l'index -> on retire,
+         c'est la consequence logique d'une suppression faite la-bas. */
+      if (a._fromIndex && !_refere(a.id)) { retires.push(a.code); return false; }
+      /* Fiche creee directement en Exploitation : on ne la supprime PAS (le
+         travail local ne disparait pas), on la signale « hors Index » pour que
+         l'utilisateur tranche. */
+      a._horsIndex = true; conserves.push(a.code);
+      return true;
     });
-    res.supprimes = avant - arts.length;
-    if (res.supprimes > 0) change = true;
+    res.supprimes = retires.length;
+    res.supprimesCodes = retires;
+    res.horsIndex = conserves;
+    if (retires.length > 0 || conserves.length > 0) change = true;
 
     if (change) setArticles(arts);
+    /* Information : ce qui a disparu doit etre visible, sinon l'utilisateur
+       a l'impression que la suppression n'a pas marche. */
+    if (retires.length) {
+      try {
+        toast(retires.length + ' produit(s) retiré(s) du catalogue (absents de la Nomenclature, source unique) : '
+          + retires.join(', ') + '. Pour en garder un : restaurerProduitHorsIndex(\'' + retires[0] + '\')', 'info');
+      } catch (eT2) {}
+    }
   } catch (eS) {}
   return res;
+}
+/* Reintegre un produit absent de la Nomenclature en le CREANT dans l'index
+   (c'est l'index la source : on deplace le produit vers elle). */
+function restaurerProduitHorsIndex(code) {
+  var n = pfNormCode(code);
+  if (!n) return;
+  var art = null, arts = getArticles() || [];
+  for (var i = 0; i < arts.length; i++) { if (arts[i] && arts[i].categorie === 'finished' && pfNormCode(arts[i].code) === n) art = arts[i]; }
+  if (!art) return toast('Produit ' + code + ' introuvable en Exploitation', 'error');
+  var idx = idxNomenclature();
+  for (var j = 0; j < idx.length; j++) {
+    if (idx[j] && String(idx[j].typeArticle || '') === 'produit_fini' && pfNormCode(idx[j].code) === n) {
+      return toast(code + ' est déjà dans la Nomenclature', 'info');
+    }
+  }
+  idx.push({ id: 'nf_' + Date.now(), code: art.code, designation: art.designation || art.code,
+    typeArticle: 'produit_fini', prixUnitaire: art.prix_vente || 0,
+    longueur: art.length || 0, largeur: art.width || 0, epaisseur: art.thickness || 0,
+    created_at: new Date().toISOString() });
+  localStorage.setItem('mdb_nomenclature', JSON.stringify(idx));
+  try { window._prodNomModifie = true; } catch (eM) {}
+  try { if (typeof art._horsIndex !== 'undefined') delete art._horsIndex; } catch (eH) {}
+  setArticles(arts);
+  toast(code + ' remis dans la Nomenclature : il reste dans les deux applications ✅');
+  renderPage();
 }
 /* Dimensions d'un article index : longueur / largeur / epaisseur. */
 function idxDimDe(ia) {
