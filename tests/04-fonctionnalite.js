@@ -2594,21 +2594,25 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Inventaire : la sauvegarde garde les valeurs saisies (pas le theo)',
+    nom: 'Inventaire : le brouillon garde les valeurs saisies sans toucher au stock',
     app: 'production.html', store: storeRealiste,
     code: `
       setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180 }]);
       window._invItems = [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 1600, type: 'POINTE' }];
       var _origGet = document.getElementById;
-      document.getElementById = function(id) { if (id && id.indexOf('inv_real_') === 0) return null; return _origGet(id); };
+      document.getElementById = function(id) { if (id && (id.indexOf('inv_real_') === 0 || id.indexOf('inv_comment_') === 0)) return null; return _origGet(id); };
       document.getElementById('u_P5').value = '89';
       document.getElementById('u_P5').parentNode = { querySelector: function() { return { value: 'paquet' }; } };
-      window.confirm2 = function() { return true; };
-      try { saveInventory('2026-09'); } catch (e) {}
+      renderPage = function () {};
+      try { saveInventoryDraft('2026-09'); } catch (e) {}
       document.getElementById = _origGet;
       var invs = getInventories().filter(function(x) { return x && x.month === '2026-09'; });
-      var rq = invs.length && invs[invs.length - 1].items && invs[invs.length - 1].items[0] ? invs[invs.length - 1].items[0].real_qte : null;
-      (rq === 16020) ? 'OK : sauvegarde 16020 (pas 1600)' : 'ECHEC real_qte=' + rq
+      var inv = invs.length ? invs[invs.length - 1] : null;
+      var rq = inv && inv.items && inv.items[0] ? inv.items[0].real_qte : null;
+      var stockIntact = getStockConsum().length === 1 && !getStockConsum()[0]._invClos && !getStockConsum()[0]._invBase;
+      (inv && inv.statut === 'brouillon' && rq === 16020 && stockIntact)
+        ? 'OK : brouillon 16020 (pas 1600), stock intact (aucune base, aucune clôture)'
+        : 'ECHEC statut=' + (inv && inv.statut) + ' real_qte=' + rq + ' stock=' + JSON.stringify(getStockConsum())
     `,
     attenduPrefixe: 'OK'
   });
@@ -2631,24 +2635,32 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Inventaire : le compte saisit devient le solde (fiches en double comprises)',
+    nom: 'Inventaire : valider (code) met le compte en stock initial et clôt l\u2019historique',
     app: 'production.html', store: storeRealiste,
     code: `
+      localStorage.setItem('mdb_entreprise', JSON.stringify({ nom: 'T', validationCode: '1234' }));
       setSection('stockConsum', [
-        { id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 100, cond: 180 },
-        { id: 'c2', code: 'P5', designation: 'POINTE5', type: 'POINTE', quantite: 1500, cond: 180 }
+        { id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 100, cond: 180, created_at: '2026-09-02' },
+        { id: 'c2', code: 'P5', designation: 'POINTE5', type: 'POINTE', quantite: 1500, cond: 180, created_at: '2026-09-10' }
       ]);
-      window._invItems = [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 1600, type: 'POINTE' }];
-      var _origGet = document.getElementById;
-      document.getElementById = function(id) { if (id && id.indexOf('inv_real_') === 0) return null; return _origGet(id); };
-      document.getElementById('u_P5').value = '89';
-      document.getElementById('u_P5').parentNode = { querySelector: function() { return { value: 'paquet' }; } };
+      setInventories([{ id: 'd1', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'SUP',
+        items: [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 16020 }], statut: 'brouillon' }]);
       window.confirm2 = function() { return true; };
-      try { saveInventory('2026-09'); } catch (e) {}
-      document.getElementById = _origGet;
-      var total = 0;
-      getStockConsum().forEach(function(s) { if (String(s.code || '').toUpperCase() === 'P5') total += parseFloat(s.quantite) || 0; });
-      (total === 16020) ? 'OK : 2 fiches (100+1500) + compte 16020 -> solde 16020' : 'ECHEC solde=' + total
+      renderPage = function () {};
+      /* Mauvais code : rien ne bouge, toujours brouillon */
+      validerInventaireBrouillon('d1', 'mauvais');
+      var bloque = getInventories()[0].statut === 'brouillon' && getStockConsum().length === 2;
+      /* Bon code : base 16020 au 01/10, ancien historique clôturé */
+      validerInventaireBrouillon('d1', '1234');
+      var lignes = getStockConsum();
+      var base = lignes.filter(function (l) { return l._invBase; })[0] || {};
+      var totalOuvert = 0;
+      lignes.forEach(function (l) { if (!l._invClos) totalOuvert += parseFloat(l.quantite) || 0; });
+      var rec = getInventories()[0];
+      (bloque && rec.statut === 'valide' && base.quantite === 16020 && base.date === '2026-10-01'
+        && /Stock initial/.test(base.obs || '') && /SUP/.test(base.obs || '') && totalOuvert === 16020)
+        ? 'OK : code faux bloque, code bon -> base 16020 au 01/10 « Stock initial ... SUP », total ouvert 16020'
+        : 'ECHEC bloque=' + bloque + ' statut=' + rec.statut + ' base=' + JSON.stringify(base) + ' total=' + totalOuvert
     `,
     attenduPrefixe: 'OK'
   });
@@ -3395,7 +3407,7 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Inventaire : il corrige le stock par un AJUSTEMENT, il n\'ecrase pas l\'achat',
+    nom: 'Inventaire : il fige le réel en stock initial au lendemain, historique clôturé (pas d\u2019ajustement)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
@@ -3405,46 +3417,48 @@ attenduPrefixe: 'OK'
     },
     code: `
       localStorage.setItem('mdb_packs_per_carton', '50');
-      var avant = getStockConsum()[0];
-      /* Reel constate a l'inventaire : 12 000 (soit -3 000) */
-      applyInventoryAsInitial('2026-07', [{ store: 'stockConsum', ref: 'P7', code: 'P7', real_qte: 12000 }]);
+      /* Reel constate a l'inventaire du 31/07 : 12 000 */
+      applyInventoryAsInitial('2026-07', [{ store: 'stockConsum', ref: 'P7', code: 'P7', real_qte: 12000 }], { date: '2026-07-31', supervisor: 'SUP', invId: 't1' });
       var lignes = getStockConsum();
-      var achat = lignes.filter(function (l) { return !l._ajustInv; })[0] || {};
-      var aj = lignes.filter(function (l) { return l._ajustInv; })[0] || {};
-      var total = 0;
-      lignes.forEach(function (l) { total += parseFloat(l.quantite) || 0; });
+      var vieille = lignes.filter(function (l) { return l.id === 'v1'; })[0] || {};
+      var base = lignes.filter(function (l) { return l._invBase; })[0] || {};
+      var totalOuvert = 0;
+      lignes.forEach(function (l) { if (!l._invClos) totalOuvert += parseFloat(l.quantite) || 0; });
       var r = buildConsoMovements(lignes.map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P7'; }));
-      var ligneAj = r.filter(function (x) { return x.ajust !== 0; })[0] || {};
-      (achat.quantite === 15000 && aj.quantite === -3000 && total === 12000
-        && ligneAj.ajust === -3000 && ligneAj.entree === 0 && ligneAj.sortie === 0
-        && /Inventaire/.test(ligneAj.obs || '') && r[r.length - 1].final === 12000)
-        ? 'OK : achat conserve (15 000), ecart d\\'inventaire en ajustement (-3 000), stock reel 12 000'
-        : 'ECHEC : achat=' + JSON.stringify(achat) + ' ajust=' + JSON.stringify(aj) + ' registre=' + JSON.stringify(r)
+      var ouverture = r.filter(function (x) { return x.estInitial; })[0] || {};
+      var ajusts = r.filter(function (x) { return x.ajust !== 0; });
+      (vieille._invClos === 't1' && base.quantite === 12000 && base.date === '2026-08-01'
+        && /Stock initial/.test(base.obs || '') && /SUP/.test(base.obs || '') && totalOuvert === 12000
+        && ouverture.estInitial && ouverture.initial === 12000 && ouverture.date === '2026-08-01'
+        && ajusts.length === 0 && r[r.length - 1].final === 12000)
+        ? 'OK : achat clôturé, base 12 000 au 01/08 « Stock initial ... SUP », registre ouvert à 12 000 sans ajustement'
+        : 'ECHEC : vieille=' + JSON.stringify(vieille) + ' base=' + JSON.stringify(base) + ' registre=' + JSON.stringify(r)
     `,
     attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Inventaire : stock 50, reel annonce 10 -> le stock devient bien 10 (ajustement de -40)',
+    nom: 'Inventaire : stock 50, reel annonce 10 -> base 10 au lendemain, ancien clos',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
-      p.stockConsum = [{ id: 'w1', code: 'P5', designation: 'POINTE 5', quantite: 50, paquets: 0, cartons: 0, cond: 0, ctype: 'DIVERS', created_at: '2026-07-01' }];
+      p.stockConsum = [{ id: 'w1', code: 'P5', designation: 'POINTE5', ctype: 'POINTE', cond: 0, quantite: 50, paquets: 0, cartons: 0, created_at: '2026-07-01' }];
       s.mdb_production = JSON.stringify(p);
       return s;
     },
     code: `
-      applyInventoryAsInitial('2026-08', [{ store: 'stockConsum', ref: 'P5', code: 'P5', real_qte: 10 }]);
+      applyInventoryAsInitial('2026-08', [{ store: 'stockConsum', ref: 'P5', code: 'P5', real_qte: 10 }], { date: '2026-08-15', supervisor: 'SUP', invId: 't2' });
       var lignes = getStockConsum();
-      var total = 0;
-      lignes.forEach(function (l) { total += parseFloat(l.quantite) || 0; });
+      var totalOuvert = 0;
+      lignes.forEach(function (l) { if (!l._invClos) totalOuvert += parseFloat(l.quantite) || 0; });
       var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
       var r = buildConsoMovements(lignes.map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P5'; }));
-      var aj = r.filter(function (x) { return x.ajust !== 0; })[0] || {};
+      var base = lignes.filter(function (l) { return l._invBase; })[0] || {};
       var fin = r[r.length - 1] || {};
-      (total === 10 && agg.unites === 10 && aj.ajust === -40 && fin.final === 10)
-        ? 'OK : 50 -> reel 10, le stock vaut 10, l\\'ecart -40 est trace en Ajustement'
-        : 'ECHEC : total=' + total + ' agg=' + JSON.stringify(agg) + ' registre=' + JSON.stringify(r)
+      (totalOuvert === 10 && agg.unites === 10 && base.date === '2026-08-16' && fin.final === 10
+        && r.filter(function (x) { return x.ajust !== 0; }).length === 0)
+        ? 'OK : 50 -> base 10 au 16/08, fiche et registre à 10, sans ajustement'
+        : 'ECHEC : total=' + totalOuvert + ' agg=' + JSON.stringify(agg) + ' registre=' + JSON.stringify(r)
     `,
     attenduPrefixe: 'OK'
   });
@@ -8174,29 +8188,110 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     attenduPrefixe: 'OK'
   });
   r.push({
-    nom: 'Stock consommables : remise a zero — chaque produit affiche 0/0/0 avec ajustement trace',
+    nom: 'Stock consommables : remise a zero — chaque produit repart d\u2019un stock initial à 0, sans lignes négatives',
     app: 'production.html', store: storeRealiste,
     code: `
       setStockConsum([
-        { id: 'l1', code: 'P5', designation: 'POINTE5', ctype: 'POINTE', cond: 180, quantite: 3000 },
-        { id: 'l2', code: 'P7', designation: 'POINTE7', ctype: 'POINTE', cond: 150, quantite: 22500, cartons: 3 },
-        { id: 'l3', code: 'COLLE', designation: 'COLLE', ctype: 'DIVERS', quantite: 12 },
-        { id: 'l4', code: 'VIDE', designation: 'VIDE', ctype: 'POINTE', cond: 100, quantite: 0 }
+        { id: 'l1', code: 'P5', designation: 'POINTE5', ctype: 'POINTE', cond: 180, quantite: 3000, created_at: '2026-09-02' },
+        { id: 'l2', code: 'P7', designation: 'POINTE7', ctype: 'POINTE', cond: 150, quantite: 22500, cartons: 3, created_at: '2026-09-03' },
+        { id: 'l3', code: 'COLLE', designation: 'COLLE', ctype: 'DIVERS', quantite: 12, created_at: '2026-09-04' },
+        { id: 'l4', code: 'VIDE', designation: 'VIDE', ctype: 'POINTE', cond: 100, quantite: 0, created_at: '2026-09-05' }
       ]);
       confirm2 = function () { return true; };
       renderPage = function () {};
       remettreZeroStockConso();
       var agg = consoAggregate();
       var toutZero = agg.every(function (a) { return a.unites === 0 && a.paquets === 0 && a.cartons === 0; });
-      var ajust = getStockConsum().filter(function (s) { return s && s._ajustInv; });
-      /* Les 4 lignes de stock doivent rester listees a 0/0/0. Le catalogue
-         ajoute d'autres produits a 0 : c'est voulu (produits jamais achetes). */
+      var lignes = getStockConsum();
+      var bases = lignes.filter(function (s) { return s && s._invBase; });
+      var negatifs = lignes.filter(function (s) { return s && !s._invClos && (parseFloat(s.quantite) || 0) < 0; });
+      var vieillesCloses = ['l1', 'l2', 'l3'].every(function (id) {
+        var l = lignes.filter(function (s) { return s && s.id === id; })[0] || {};
+        return !!l._invClos;
+      });
+      /* Les 4 produits restent listés à 0/0/0. Le catalogue ajoute d'autres
+         produits à 0 : c'est voulu (produits jamais achetés). */
       var vus = {};
       agg.forEach(function (a) { vus[a.code] = true; });
       var quatre = ['P5', 'P7', 'COLLE', 'VIDE'].every(function (c) { return !!vus[c]; });
-      (toutZero && ajust.length === 3 && quatre)
-        ? 'OK : 3 ajustements, P5/P7/COLLE/VIDE a 0/0/0 (3000/180 sans -1 paquet), produits catalogue aussi'
-        : 'ECHEC zero=' + toutZero + ' ajust=' + ajust.length + ' quatre=' + quatre + ' agg=' + JSON.stringify(agg.map(function (a) { return [a.code, a.unites, a.paquets, a.cartons]; }))
+      (toutZero && bases.length === 3 && negatifs.length === 0 && vieillesCloses && quatre)
+        ? 'OK : 3 bases à 0, ancien historique clôturé, aucune ligne négative, P5/P7/COLLE/VIDE à 0/0/0'
+        : 'ECHEC zero=' + toutZero + ' bases=' + bases.length + ' negatifs=' + negatifs.length + ' closes=' + vieillesCloses + ' quatre=' + quatre
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : un brouillon se rouvre avec ses réels (continuer plus tard)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'inventory';
+      window._invHidden = {};
+      setSection('stockConsum', [{ id: 'c1', code: 'P5', designation: 'POINTE 5', type: 'POINTE', quantite: 1600, cond: 180, created_at: '2026-09-02' }]);
+      setInventories([{ id: 'd1', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'SUP',
+        items: [{ store: 'stockConsum', ref: 'P5', code: 'P5', theo_qte: 1600, real_qte: 16020, comment: 'compte tiroir' }], statut: 'brouillon' }]);
+      var _origGet = document.getElementById;
+      document.getElementById = function(id) {
+        if (id === 'inv_date') return { value: '2026-09-30' };
+        if (id === 'inv_supervisor' || id === 'inv_executants' || id === 'inv_heure_debut' || id === 'inv_heure_fin') return { value: '' };
+        if (id === 'invContent') return { set innerHTML(v) {}, get innerHTML() { return ''; } };
+        if (id && (id.indexOf('inv_real_') === 0 || id.indexOf('inv_comment_') === 0)) return null;
+        if (id === 'u_P5') return null;
+        if (id && id.indexOf('inv_') === 0) return { value: '', textContent: '', style: {} };
+        return _origGet(id);
+      };
+      reopenInventoryDraft('d1');
+      document.getElementById = _origGet;
+      var ligne = null;
+      (window._invItems || []).forEach(function (it) { if (String(it.ref || it.code || '').toUpperCase() === 'P5') ligne = it; });
+      (ligne && ligne.real_qte === 16020)
+        ? 'OK : reprise du brouillon, réel P5 = 16020 reporté dans le tableau frais'
+        : 'ECHEC : ' + JSON.stringify(window._invItems)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : une 2e validation clôt la base précédente (base unique)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'a1', code: 'P8', designation: 'Pointe 8', quantite: 6000, cond: 120, ctype: 'POINTE', created_at: '2026-09-05' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      applyInventoryAsInitial('2026-09', [{ store: 'stockConsum', ref: 'P8', code: 'P8', real_qte: 5000 }], { date: '2026-09-30', supervisor: 'A', invId: 'i1' });
+      var stock = getStockConsum();
+      stock.unshift({ id: 'n1', code: 'P8', designation: 'Pointe 8', quantite: 2000, cond: 120, ctype: 'POINTE', created_at: '2026-10-05' });
+      setStockConsum(stock);
+      applyInventoryAsInitial('2026-10', [{ store: 'stockConsum', ref: 'P8', code: 'P8', real_qte: 7000 }], { date: '2026-10-13', supervisor: 'B', invId: 'i2' });
+      var lignes = getStockConsum();
+      var bases = lignes.filter(function (l) { return l._invBase && !l._invClos; });
+      var totalOuvert = 0;
+      lignes.forEach(function (l) { if (!l._invClos) totalOuvert += parseFloat(l.quantite) || 0; });
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P8'; })[0] || {};
+      (bases.length === 1 && bases[0].quantite === 7000 && /fait par B/.test(bases[0].obs || '')
+        && totalOuvert === 7000 && agg.unites === 7000)
+        ? 'OK : 1 seule base ouverte (7000), achat 6000 + base 5000 + achat 2000 clôturés'
+        : 'ECHEC : bases=' + JSON.stringify(bases.map(function (b) { return [b.quantite, b.date]; })) + ' total=' + totalOuvert
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : un inventaire validé est verrouillé (ni suppression ni réouverture)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setInventories([{ id: 'v1', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'S', items: [], statut: 'valide', validatedAt: '2026-10-01' }]);
+      window.confirm2 = function() { return true; };
+      renderPage = function () {};
+      deleteInventory('v1');
+      reopenInventoryDraft('v1');
+      var encore = getInventories().filter(function (x) { return x.id === 'v1'; }).length === 1
+        && getInventories()[0].statut === 'valide';
+      encore ? 'OK : suppression et réouverture refusées, validé intact'
+        : 'ECHEC : ' + JSON.stringify(getInventories())
     `,
     attenduPrefixe: 'OK'
   });
