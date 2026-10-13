@@ -2126,7 +2126,10 @@ var CLOUD_BACKUP_MAX = 30;
 /* Garde-fou cloud : au-dela de ce poids, le push SILENCIEUX (auto) est ignore
    avec alerte (un snapshot de 300 Mo pousse toutes les heures = egress explose).
    Le push MANUEL reste possible (choix explicite, taille affichee). */
-var CLOUD_PUSH_MAX_BYTES = 50 * 1024 * 1024;
+/* Un snapshot jsonb de plusieurs Mo fait expirer la requete PostgREST
+   (57014 statement timeout -> 500). 8 Mo reste tres au-dessus de la taille
+   reelle d'un snapshot sain, tout en evitant l'ecriture qui ne aboutit pas. */
+var CLOUD_PUSH_MAX_BYTES = 8 * 1024 * 1024;
 function getBackupMeta() {
   try { return dbArr('mdb_backup_meta'); } catch(e) { return []; }
 }
@@ -2285,12 +2288,29 @@ function createFullBackup() {
     }
     setBackupMeta(meta);
     /* Sauvegarde automatique vers le cloud (protection contre perte d'ordinateur) */
-    if (currentUser && currentUser.id && firebaseDb) {
+    if (currentUser && currentUser.id && firebaseDb && Date.now() >= (_cloudSauvegardeBloqueJusqua || 0)) {
       try {
-        var refB = firebaseDb.collection('enterprises').doc(currentUser.id).collection('backups').doc(String(newEntry.ts));
-        refB.set({data: backup, createdAt: new Date(newEntry.ts).toISOString(), size: newEntry.size, keys: newEntry.keys});
+        var _jsonAuto = '';
+        try { _jsonAuto = JSON.stringify(backup); } catch(eJA) {}
+        if (_jsonAuto.length > CLOUD_PUSH_MAX_BYTES) {
+          console.warn('[MDB] Snapshot de ' + Math.round(_jsonAuto.length / 1048576) + ' Mo non pousse au cloud (limite ' + Math.round(CLOUD_PUSH_MAX_BYTES / 1048576) + ' Mo) — la copie locale reste la reference.');
+        } else {
+          var refB = firebaseDb.collection('enterprises').doc(currentUser.id).collection('backups').doc(String(newEntry.ts));
+          /* Le rejet etait ignore : chaque backup relancait un push qui echouait
+             (500 / 57014) sans arret. On note l'echec et on suspend les pushes
+             cloud 30 min pour ne pas marteler PostgREST. */
+          Promise.resolve(refB.set({data: backup, createdAt: new Date(newEntry.ts).toISOString(), size: newEntry.size, keys: newEntry.keys}))
+            .then(function(r) {
+              if (r && r.error) throw r.error;
+              _cloudSauvegardeBloqueJusqua = 0;
+              try { pruneCloudBackups(); } catch(ePB) {}
+            })
+            .catch(function(eC) {
+              _cloudSauvegardeBloqueJusqua = Date.now() + 30 * 60 * 1000;
+              console.warn('[MDB] Push cloud auto ignore 30 min : ' + ((eC && eC.message) || eC));
+            });
+        }
       } catch(e) {}
-      try { pruneCloudBackups(); } catch(ePB) {}
     }
   } catch(e) {}
 }
@@ -2384,10 +2404,12 @@ function pushBackupToCloud(slotIndex) {
   } catch(e) { toast('Erreur: ' + e.message, 'error'); }
 }
 var _lastSilentBackup = 0;
+var _cloudSauvegardeBloqueJusqua = 0;
 function silentCloudBackup() {
   try {
     if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
     if (!currentUser || !currentUser.id || !firebaseDb) return;
+    if (Date.now() < (_cloudSauvegardeBloqueJusqua || 0)) return;
     if (Date.now() - _lastSilentBackup < 55 * 60 * 1000) return;
     _lastSilentBackup = Date.now();
     createFullBackup();
@@ -2409,11 +2431,20 @@ function silentCloudBackup() {
     }
     var _newHash = _jsonBackup.length + '|' + (newest.ts||0);
     if (window._lastBackupHash && window._lastBackupHash === _newHash) return;
-    window._lastBackupHash = _newHash;
     var tsX = newest.ts;
-    firebaseDb.collection('enterprises').doc(currentUser.id).collection('backups').doc(String(tsX)).set({
+    /* Le hash n'est memorise qu'apres succes : sinon un echec (500 / 57014)
+       interdisait tout nouvel essai pendant 24 h. */
+    Promise.resolve(firebaseDb.collection('enterprises').doc(currentUser.id).collection('backups').doc(String(tsX)).set({
       data: backup, createdAt: new Date(tsX).toISOString(), size: newest.size, keys: newest.keys, silent: true
-    }).then(function() { console.log('[MDB] Sauvegarde silencieuse envoyee vers le cloud'); }).catch(function() {});
+    })).then(function(r) {
+      if (r && r.error) throw r.error;
+      window._lastBackupHash = _newHash;
+      _cloudSauvegardeBloqueJusqua = 0;
+      console.log('[MDB] Sauvegarde silencieuse envoyee vers le cloud');
+    }).catch(function(eS) {
+      _cloudSauvegardeBloqueJusqua = Date.now() + 30 * 60 * 1000;
+      console.warn('[MDB] Sauvegarde silencieuse impossible, nouvel essai dans 30 min : ' + ((eS && eS.message) || eS));
+    });
   } catch (eSB) {}
 }
 setTimeout(function(){ silentCloudBackup(); }, 10 * 60 * 1000);
@@ -2509,7 +2540,7 @@ function listerSauvegardesCloud() {
   /* On ne demande que les colonnes dont on a besoin. La table ne contient
      pas toutes (created_at / keys / size) : les demander renvoyait un
      400 Bad Request et la liste des sauvegardes cloud restait vide. */
-  var _sel = 'ts,size';
+  var _sel = 'ts';
   return window.SB_CLIENT.from('backups')
     .select(_sel)
     .eq('enterprise_id', uid)
@@ -2561,11 +2592,10 @@ function afficherSauvegardesCloud() {
     if (!rows.length) { box.innerHTML = '<h3>Sauvegardes dans le cloud</h3><p style="font-size:.82rem;color:var(--dim)">Aucune sauvegarde pour le moment. Elles se créent automatiquement toutes les 4 h.</p><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button>'; return; }
     var h = '<h3>Sauvegardes dans le cloud</h3>'
       + '<p style="font-size:.8rem;color:var(--dim);margin:0 0 .6rem">' + rows.length + ' version(s) conservée(s). Choisissez-en une pour la remettre en place.</p>'
-      + '<div style="max-height:360px;overflow:auto"><table style="width:100%;font-size:.8rem"><thead><tr style="background:#f1f5f9"><th>Date</th><th>Sections</th><th></th></tr></thead><tbody>';
+      + '<div style="max-height:360px;overflow:auto"><table style="width:100%;font-size:.8rem"><thead><tr style="background:#f1f5f9"><th>Date</th><th></th></tr></thead><tbody>';
     rows.forEach(function (r) {
       var dd = new Date(Number(r.ts));
       h += '<tr><td>' + (isNaN(dd.getTime()) ? r.ts : dd.toLocaleString('fr-FR')) + '</td>'
-        + '<td>' + (r.keys || '?') + '</td>'
         + '<td style="text-align:right"><button class="btn btn-sm" onclick="restaurerSauvegardeCloud(' + Number(r.ts) + ')">Restaurer</button></td></tr>';
     });
     h += '</tbody></table></div><div style="margin-top:.6rem"><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button></div>';
