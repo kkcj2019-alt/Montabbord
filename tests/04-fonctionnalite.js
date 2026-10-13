@@ -1132,6 +1132,50 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Referentiel conso : la migration recupere stock + definitions en articles',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setStockConsum([{ id:'sc1', code:'P9', designation:'POINTE9', ctype:'POINTE', cond:150, quantite:3000, prix_carton:28000, created_at:'2026-10-10' }]);
+      setDefinitions([{ id:'d9', code:'P8', designation:'POINTE8', type:'POINTE', qty_per_packet:170, prix_carton:25000 }]);
+      setArticles([]);
+      var r = migrerConsommablesExistants(true);
+      var arts = getArticles();
+      var p9 = null, p8 = null;
+      for (var i = 0; i < arts.length; i++) {
+        if (arts[i] && arts[i].code === 'P9') p9 = arts[i];
+        if (arts[i] && arts[i].code === 'P8') p8 = arts[i];
+      }
+      (r.crees === 2 && p9 && p9.categorie === 'consum' && p9.qty_per_packet === 150 && p9.prix_carton === 28000
+        && p8 && p8.categorie === 'consum' && p8.qty_per_packet === 170 && p8.prix_carton === 25000)
+        ? 'OK : P9 (stock) + P8 (definition) crees en articles avec tarifs'
+        : 'ECHEC : crees=' + r.crees + ' p9=' + JSON.stringify(p9) + ' p8=' + JSON.stringify(p8)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Referentiel conso : un article pointe A est visible en definitions, stock et achats',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setStockConsum([]);
+      setDefinitions([]);
+      setArticles([{ id:'a9', code:'PA', designation:'POINTE A', categorie:'consum', qty_per_packet:150, prix_carton:28000, prix_vente:28000, unit_cost:5, unite:'pcs', statut:'active' }]);
+      var cat = defCatalog(), pa = null;
+      for (var i = 0; i < cat.length; i++) { if (cat[i] && cat[i].code === 'PA') pa = cat[i]; }
+      var agg = consoAggregate(), st = null;
+      for (var j = 0; j < agg.length; j++) { if (agg[j] && agg[j].code === 'PA') st = agg[j]; }
+      var sug = apAchatCatalog('consumables'), okSug = false;
+      for (var k = 0; k < sug.length; k++) { if (sug[k] && sug[k].code === 'PA') okSug = true; }
+      (pa && pa.type === 'POINTE' && pa.qty_per_packet === 150 && st && st.unites === 0 && okSug)
+        ? 'OK : PA en definitions (POINTE/150), stock a 0, propose a l achat'
+        : 'ECHEC : def=' + JSON.stringify(pa) + ' stock=' + JSON.stringify(st) + ' achat=' + okSug
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Soldes : une piece SOLDE_INDEMNITE a identifiant numerique reste modifiable',
     app: 'index.html', store: storeRealiste,
     code: `
