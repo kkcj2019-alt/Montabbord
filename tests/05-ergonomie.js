@@ -37,7 +37,8 @@ const EXCLUS = [
   { motif: /^deliverFrom/, raison: 'ce n\'est pas une suppression' },
   { motif: /^removeByTombstone/, raison: 'helper interne' },
   { motif: /^removeDeletedOperations/, raison: 'filtre de fusion cloud : ne modifie aucune donnée' },
-  { motif: /^removeFilter|^removePin|^removeLogo/, raison: 'filtre ouLogo, pas un enregistrement' }
+  { motif: /^removeFilter|^removePin|^removeLogo/, raison: 'filtre ouLogo, pas un enregistrement' },
+  { motif: /^supprimerNomenclature$|^supprimerArticlesSelectionnes$|^supprimerArticle$/, raison: 'helper de suppression (l\u2019appelant confirme, ou suppression group\u00e9e)' }
 ];
 const CONFIRMER = /(window\.)?confirm2?\s*\(/;
 

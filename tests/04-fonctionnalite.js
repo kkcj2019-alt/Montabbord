@@ -4680,6 +4680,77 @@ r.push({
   });
 
   r.push({
+    nom: 'Suppression group\u00e9e : les cases existent dans les deux applications et suppriment en lot',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a1', code: 'TST1', designation: 'Test 1', categorie: 'finished' },
+        { id: 'a2', code: 'TST2', designation: 'Test 2', categorie: 'finished' },
+        { id: 'a3', code: 'GARDE', designation: 'A garder', categorie: 'finished' }
+      ];
+      p.composants = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      CURRENT_PAGE = 'cat-produits-finis'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      /* Cases + bouton de suppression group\u00e9e */
+      var okCases = (h.match(/cat-cb/g) || []).length >= 3;
+      var okBouton = h.indexOf('supprimerArticlesSelectionnes') !== -1;
+      /* On coche deux articles et on supprime */
+      window.confirm2 = function () { return true; };
+      renderPage = function () {};
+      var n = supprimerArticlesSelectionnes.call(null) ;
+      (okCases && okBouton)
+        ? 'OK : 3 cases, bouton « Supprimer la s\u00e9lection » pr\u00e9sent (' + (h.match(/cat-cb/g) || []).length + ' cases)'
+        : 'ECHEC cases=' + okCases + ' bouton=' + okBouton
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Suppression group\u00e9e : deux produits finis coch\u00e9s partent vraiment (et de la Nomenclature)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a1', code: 'TST1', designation: 'Test 1', categorie: 'finished' },
+        { id: 'a2', code: 'TST2', designation: 'Test 2', categorie: 'finished' },
+        { id: 'a3', code: 'GARDE', designation: 'A garder', categorie: 'finished' }
+      ];
+      p.composants = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n1', code:'TST1', designation:'Test 1', typeArticle:'produit_fini' },
+        { id:'n2', code:'TST2', designation:'Test 2', typeArticle:'produit_fini' },
+        { id:'n3', code:'GARDE', designation:'A garder', typeArticle:'produit_fini' }
+      ]));
+      setSection('pfIgnores', []); setSection('pfLinks', []);
+      renderPage = function () {};
+      window.confirm2 = function () { return true; };
+      var r1 = supprimerArticle('a1', true);
+      var r2 = supprimerArticle('a2', true);
+      var codes = getArticles().map(function (a) { return a.code; });
+      var idx = JSON.parse(localStorage.getItem('mdb_nomenclature')).map(function (a) { return a.code; });
+      /* Le seul test : ils ne doivent PAS revenir */
+      syncProduitsFinisFromIndex();
+      var apres = getArticles().map(function (a) { return a.code; });
+      (r1 === true && r2 === true
+        && codes.indexOf('TST1') === -1 && codes.indexOf('TST2') === -1 && codes.indexOf('GARDE') !== -1
+        && idx.join(',') === 'GARDE'
+        && apres.indexOf('TST1') === -1 && apres.indexOf('TST2') === -1 && apres.indexOf('GARDE') !== -1)
+        ? 'OK : TST1 et TST2 supprimés des deux côtés, la synchro ne les recrée pas'
+        : 'ECHEC r1=' + r1 + ' r2=' + r2 + ' loc=' + codes.join(',') + ' idx=' + idx.join(',') + ' apres=' + apres.join(',')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : l\u2019index NE recopie plus les produits cr\u00e9\u00e9s en exploitation (source unique)',
     app: 'index.html', store: storeRealiste,
     code: `
