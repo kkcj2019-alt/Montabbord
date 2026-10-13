@@ -8252,6 +8252,39 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Inventaire : reprise avec recalcul vide — le brouillon s\u2019affiche quand même',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      CURRENT_PAGE = 'inventory';
+      window._invHidden = {};
+      /* Ni stock ni catalogue : le recalcul sort vide */
+      setSection('stockConsum', []);
+      setSection('definitions', []);
+      setSection('composants', []);
+      setArticles([]);
+      setInventories([{ id: 'd9', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'SUP',
+        items: [{ store: 'stockConsum', ref: 'PX', code: 'PX', theo_qte: 5, real_qte: 7, comment: 'c' }], statut: 'brouillon' }]);
+      var _origGet = document.getElementById;
+      document.getElementById = function(id) {
+        if (id === 'inv_date') return { value: '2026-09-30' };
+        if (id === 'inv_type' || id === 'inv_article_filter' || id === 'inv_supervisor' || id === 'inv_executants' || id === 'inv_heure_debut' || id === 'inv_heure_fin') return { value: '' };
+        if (id === 'invContent') return { set innerHTML(v) {}, get innerHTML() { return ''; } };
+        if (id && (id.indexOf('inv_real_') === 0 || id.indexOf('inv_comment_') === 0 || id.indexOf('u_') === 0)) return null;
+        if (id && id.indexOf('inv_') === 0) return { value: '', textContent: '', style: {} };
+        return _origGet(id);
+      };
+      reopenInventoryDraft('d9');
+      document.getElementById = _origGet;
+      var ligne = null;
+      (window._invItems || []).forEach(function (it) { if (String(it.ref || it.code || '').toUpperCase() === 'PX') ligne = it; });
+      (ligne && ligne.real_qte === 7 && window._invFromDraft === true)
+        ? 'OK : recalcul vide -> ligne PX du brouillon affichée (réel 7) avec bandeau'
+        : 'ECHEC : ' + JSON.stringify(window._invItems)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Inventaire : une 2e validation clôt la base précédente (base unique)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
