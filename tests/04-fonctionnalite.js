@@ -4807,6 +4807,59 @@ r.push({
   });
 
   r.push({
+    nom: 'Pointes : le conditionnement du referentiel Articles est retrouve (P5 = 180)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* P5 n'existe QUE dans Articles > Consommables & Divers */
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.definitions = [];
+      p.stockConsum = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var cond = acPointesParPaquet('P5');
+      /* La saisie en paquets doit donc etre convertie en pointes */
+      var depuisPaquets = acConvertirEnUnites(89, 'paquet', 'P5');
+      var depuisCartons = acConvertirEnUnites(1, 'carton', 'P5');
+      /* Et l'inventaire sait afficher l'equivalence */
+      var aff = invPaquetsCartons(16020, { store:'stockConsum', type:'POINTE', code:'P5', ref:'P5' });
+      (cond === 180 && depuisPaquets === 16020 && depuisCartons === 9000 && aff.indexOf('89') !== -1 && aff.indexOf('1,8') !== -1)
+        ? 'OK : cond 180 retrouve, 89 paquets = 16 020 pointes, 1 carton = 9 000, affichage 89paq · 1,8cart'
+        : 'ECHEC cond=' + cond + ' paq=' + depuisPaquets + ' cart=' + depuisCartons + ' aff=' + aff
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointes : le cond manquant est repare sans toucher aux quantites',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.definitions = [];
+      p.stockConsum = [
+        { id: 'b1', code: 'P5', ctype: 'POINTE', cond: 0, quantite: 16020, date: '2026-10-01', _invBase: true },
+        { id: 'b2', code: 'P8', ctype: 'POINTE', cond: 120, quantite: 6960, date: '2026-10-01', _invBase: true }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      reparerCondConsommables();
+      var l = getStockConsum();
+      var p5 = l.filter(function (s) { return s.code === 'P5'; })[0] || {};
+      var p8 = l.filter(function (s) { return s.code === 'P8'; })[0] || {};
+      /* n peut valoir 0 : la reparation automatique au chargement a deja joue */
+      (p5.cond === 180 && p5.quantite === 16020 && p8.cond === 120)
+        ? 'OK : P5 recupere cond 180, quantites intactes, P8 non touche'
+        : 'ECHEC p5cond=' + p5.cond + ' p5qte=' + p5.quantite + ' p8cond=' + p8.cond
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
     app: 'production.html', store: storeRealiste,
     code: `

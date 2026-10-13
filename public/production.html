@@ -3530,6 +3530,28 @@ function acPointesParPaquet(code) {
       if (c2 > 0) return c2;
     }
   } catch (e) {}
+  /* 3. le referentiel Articles > Consommables & Divers (source unique des
+     consommables). Sans ce 3e etage, un code defini uniquement la (P5) n'etait
+     connu de personne : la saisie en paquets n'etait pas convertie et
+     l'affichage retombaitsur 0 paquet. */
+  try {
+    var arts = getArticles() || [];
+    for (var a = 0; a < arts.length; a++) {
+      var ar = arts[a] || {};
+      if (String(ar.code || '').trim().toUpperCase() !== key) continue;
+      var c3 = parseFloat(ar.qty_per_packet || ar.cond) || 0;
+      if (c3 > 0) return c3;
+    }
+  } catch (e3) {}
+  /* 4. le catalogue des consommables */
+  try {
+    var cat = defCatalog();
+    for (var j = 0; j < cat.length; j++) {
+      if (String(cat[j].code || '').trim().toUpperCase() !== key) continue;
+      var c4 = parseFloat(cat[j].qty_per_packet || cat[j].cond) || 0;
+      if (c4 > 0) return c4;
+    }
+  } catch (e4) {}
   return 0;
 }
 
@@ -14362,6 +14384,59 @@ function ligneConsoDate(s) {
 }
 /* Désignation/cond/type/emplacement d'un produit : lignes existantes d'abord,
    catalogue (définitions/articles) sinon. */
+/* Remplit le conditionnement MANQUANT des lignes de stock consommables a
+   partir du referentiel (aucune quantite n'est touchee : uniquement le champ
+   cond, qui manquait et faisait afficher 0 paquet). Idempotent. */
+function reparerCondConsommables() {
+  try {
+    var lignes = getStockConsum() || [];
+    var n = 0;
+    var out = lignes.map(function (s) {
+      if (!s) return s;
+      var c = parseFloat(s.cond != null ? s.cond : s.qty_per_packet) || 0;
+      if (c > 0) return s;
+      var cd = 0;
+      try { cd = parseFloat(acPointesParPaquet(s.code)) || 0; } catch (e) {}
+      if (cd > 0) { s.cond = cd; n++; }
+      return s;
+    });
+    if (n > 0) setStockConsum(out);
+    return n;
+  } catch (e2) { return 0; }
+}
+/* Les premiers inventaires ont enregistre une saisie en PAQUETS sans la
+   convertir (conditionnement introuvable a l'epoque) : la ligne porte « 89 »
+   au lieu de 89 x 180 pointes. Ce convertit EXPLICITEMENT la ligne de base
+   d'un produit. Aucune conversion automatique : on ne devine pas une quantite. */
+function convertirBaseEnPaquets(code, condManuel) {
+  var K = String(code || '').trim().toUpperCase();
+  var cond = parseFloat(condManuel) || 0;
+  if (!(cond > 0)) { try { cond = parseFloat(acPointesParPaquet(K)) || 0; } catch (e) {} }
+  if (!(cond > 0)) return toast('Conditionnement inconnu pour ' + K + ' : passez-le en parametre (ex : convertirBaseEnPaquets(\'P5\', 180))', 'error');
+  var lignes = getStockConsum() || [];
+  var cible = null;
+  for (var i = 0; i < lignes.length; i++) {
+    var s = lignes[i];
+    if (!s || s._invClos || !s._invBase) continue;
+    if (String(s.code || '').trim().toUpperCase() !== K) continue;
+    cible = s; break;
+  }
+  if (!cible) return toast('Aucune ligne de base d’inventaire pour ' + K, 'error');
+  var q = parseFloat(cible.quantite) || 0;
+  if (!confirm2('Convertir la base d’inventaire de ' + K + ' ?\n\nactuel : ' + fmt(q) + ' pointe(s)\n'
+    + 'devient : ' + fmt(q * cond) + ' pointe(s)  (' + q + ' paquets x ' + cond + ')\n\n'
+    + 'A faire SEULEMENT si la saisie avait ete faite en paquets.')) return;
+  cible.quantite = q * cond;
+  cible.cond = cond;
+  if (cible.paquets !== undefined) cible.paquets = Math.floor(cible.quantite / cond);
+  cible.obs = (cible.obs || 'Stock initial') + ' (converti en paquets)';
+  setStockConsum(lignes);
+  toast(K + ' : base corrigee a ' + fmt(cible.quantite) + ' pointes (' + fmt(Math.floor(cible.quantite / cond)) + ' paquets)');
+  renderPage();
+  return true;
+}
+/* Facteur joue au demarrage : remet le cond la ou il manque. */
+try { if (typeof reparerCondConsommables === 'function') reparerCondConsommables(); } catch (eRep) {}
 function infoProduitConso(code) {
   var K = String(code || '').trim().toUpperCase();
   var info = { code: code, designation: code, cond: 0, ctype: 'POINTE', emplacement: '' };
