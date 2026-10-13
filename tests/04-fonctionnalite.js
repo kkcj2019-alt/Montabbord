@@ -784,6 +784,25 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Securite : une section vide cote poste mais pleine en sauvegarde est detectee',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var v1 = estSectionVide(null) && estSectionVide([]) && estSectionVide({}) && estSectionVide({ a: [], b: {} });
+      var v2 = !estSectionVide([{id:'a'}]) && !estSectionVide({ pointage: [{id:'p'}] });
+      /* Poste : pointage vide (donnee perdue) ; sauvegarde : 3 pointages d'hier */
+      DB.set('mdb_paye', { pointage: [] });
+      DB.set('mdb_operationsCaisse', [ {id:'op1'} ]);
+      var _sauve = { mdb_paye: { pointage: [{id:'p1'},{id:'p2'},{id:'p3'}] },
+                     mdb_operationsCaisse: [ {id:'op1'} ], mdb_employes: [] };
+      var _trouve = detecterSectionsVides(_sauve);
+      (v1 && v2 && _trouve.length === 1 && _trouve[0].key === 'mdb_paye' && _trouve[0].taille.indexOf('3') !== -1)
+        ? 'OK : pointage vide detecte (3 enregistrements en sauvegarde), caisse non signalee'
+        : 'ECHEC v1=' + v1 + ' v2=' + v2 + ' liste=' + JSON.stringify(_trouve)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Achat : modification d'un achat avec identifiant de type chaine ---------- */
   r.push({
     nom: 'Achat : modifier un achat dont l\'identifiant est une chaîne',

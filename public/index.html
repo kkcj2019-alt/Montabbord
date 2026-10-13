@@ -16,7 +16,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-11-255';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-256';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2392,6 +2392,114 @@ function afficherSauvegardesCloud() {
     var box2 = ov.querySelector('.modal');
     if (box2) box2.innerHTML = '<h3>Sauvegardes cloud</h3><p style="font-size:.82rem;color:var(--danger)">Lecture impossible : ' + ((e && e.message) || e) + '</p><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button>';
   });
+}
+/* ---------- DÉTECTION DE PERTE DE DONNÉES (redondance) ----------
+   La redondance par section consiste à comparer en permanence chaque section
+   critique avec la dernière sauvegarde cloud : si une section est VIDE chez nous
+   alors qu'elle avait du contenu dans la sauvegarde, c'est la signature d'une
+   synchronisation ratée. On ne devine pas, on mesure — et on propose de remettre
+   la section, sans rien écraser tout seul. */
+var CRITICAL_KEYS = ['mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_employes', 'mdb_acomptesPrets', 'mdb_salairesPaiements', 'mdb_stocks'];
+var _perteTimer = null;
+function estSectionVide(v) {
+  if (v === null || v === undefined) return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') {
+    var ks = Object.keys(v);
+    if (!ks.length) return true;
+    for (var i = 0; i < ks.length; i++) { if (!estSectionVide(v[ks[i]])) return false; }
+    return true;
+  }
+  return false;
+}
+function tailleSection(v) {
+  try {
+    if (Array.isArray(v)) return v.length + ' enregistrement(s)';
+    if (v && typeof v === 'object') {
+      var out = [];
+      for (var k in v) { if (!Object.prototype.hasOwnProperty.call(v, k)) continue; if (Array.isArray(v[k]) && v[k].length) out.push(k + ' (' + v[k].length + ')'); }
+      return out.length ? out.join(', ') : '1 objet';
+    }
+  } catch (e) {}
+  return '';
+}
+/* Sections critiques vides chez nous mais pleines dans la sauvegarde : on ne
+   touche pas au cloud, on mesure. Fonction pure (testable). */
+function detecterSectionsVides(sauvegarde) {
+  var out = [];
+  if (!sauvegarde || typeof sauvegarde !== 'object') return out;
+  for (var i = 0; i < CRITICAL_KEYS.length; i++) {
+    var k = CRITICAL_KEYS[i];
+    if (estSectionVide(DB.get(k)) && !estSectionVide(sauvegarde[k])) {
+      out.push({ key: k, taille: tailleSection(sauvegarde[k]) });
+    }
+  }
+  return out;
+}
+function suspecterPerteDonnees() {
+  if (!currentUser || !currentUser.id || !window.SB_CLIENT) return Promise.resolve([]);
+  var uid = currentUser.id;
+  return listerSauvegardesCloud().then(function (rows) {
+    if (!rows || !rows.length) return [];
+    var ts = Number(rows[0].ts);
+    return window.SB_CLIENT.from('backups').select('data').eq('enterprise_id', uid).eq('ts', ts).limit(1).then(function (res) {
+      var row = res && res.data && res.data[0];
+      if (!row || !row.data) return [];
+      return detecterSectionsVides(row.data);
+    });
+  }).catch(function () { return []; });
+}
+function restaurerSectionsDetectees(list, ts) {
+  if (!list || !list.length) return;
+  var uid = currentUser && currentUser.id;
+  if (!uid || !window.SB_CLIENT) { toast('Restauration impossible', 'error'); return; }
+  var labels = list.map(function (x) { return x.key; }).join(', ');
+  if (!confirm2('Des données semblent manquantes sur ce poste :\n\n' + labels + '\n\nLes remettre depuis la sauvegarde du ' + (new Date(Number(ts)).toLocaleString('fr-FR')) + ' ?')) return;
+  window.SB_CLIENT.from('backups').select('data').eq('enterprise_id', uid).eq('ts', Number(ts)).limit(1).then(function (res) {
+    var row = res && res.data && res.data[0];
+    if (!row || !row.data) { toast('Sauvegarde introuvable', 'error'); return; }
+    var n = 0;
+    list.forEach(function (x) {
+      if (row.data[x.key] === undefined) return;
+      DB.set(x.key, row.data[x.key]);
+      try { markDirty(x.key); } catch (e) {}
+      n++;
+    });
+    toast(n + ' section(s) remises en place — synchronisation en cours');
+    try { var ov = document.getElementById('perteDonOverlay'); if (ov) ov.remove(); } catch (e2) {}
+    try { renderPage(); } catch (e3) {}
+  }).catch(function (e) { toast('Restauration impossible : ' + ((e && e.message) || e), 'error'); });
+}
+function afficherAlertePerte(list) {
+  try { var ov = document.getElementById('perteDonOverlay'); if (ov) ov.remove(); } catch (e0) {}
+  var ov2 = document.createElement('div');
+  ov2.id = 'perteDonOverlay';
+  ov2.className = 'modal-overlay';
+  ov2.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.6);display:flex;align-items:center;justify-content:center;z-index:10000';
+  var detail = list.map(function (x) { return '<li><strong>' + escH(x.key) + '</strong> — la sauvegarde contient ' + escH(x.taille) + ', ce poste est vide</li>'; }).join('');
+  ov2.innerHTML = '<div class="modal" style="max-width:560px;width:92%">'
+    + '<h3 style="color:#b91c1c">⚠️ Des données semblent manquantes</h3>'
+    + '<p style="font-size:.85rem">Ces sections sont vides sur ce poste alors que la sauvegarde contient des données. C\'est la signature d\'une synchronisation qui n\'a pas abouti.</p>'
+    + '<ul style="font-size:.82rem;margin:.4rem 0 .8rem 1rem">' + detail + '</ul>'
+    + '<div style="display:flex;gap:.5rem;flex-wrap:wrap">'
+    + '<button class="btn btn-primary" onclick="restaurerSectionsDetectees(window._perteList, window._perteTs)">↩️ Remettre les données</button>'
+    + '<button class="btn" onclick="document.getElementById(\'perteDonOverlay\').remove()">Plus tard</button>'
+    + '</div></div>';
+  document.body.appendChild(ov2);
+}
+function controlerPerteDonnees(silencieux) {
+  return suspecterPerteDonnees().then(function (list) {
+    if (!list || !list.length) return 0;
+    window._perteList = list;
+    window._perteTs = list[0].ts;
+    if (!silencieux || true) afficherAlertePerte(list);
+    return list.length;
+  });
+}
+function demarrerControlePerte() {
+  try { if (_perteTimer) clearInterval(_perteTimer); } catch (e) {}
+  try { setTimeout(function () { controlerPerteDonnees(true); }, 6000); } catch (e2) {}
+  try { _perteTimer = setInterval(function () { controlerPerteDonnees(true); }, 6 * 60 * 60 * 1000); } catch (e3) {}
 }
 function startAutoBackup() {
   if (_autoBackupTimer) return;
@@ -5522,6 +5630,7 @@ var _snapshotUnsubscribe = null;
 function startRealtimeSync(uid) {
   if (window._offlineMode || localStorage.getItem('mdb_offlineMode')==='1') return;
   try { demarrerAutosave(); } catch (eAuto) {}
+  try { demarrerControlePerte(); } catch (ePerte) {}
   /* Base saturée : on ne maintient plus d'abonnement temps réel (chaque
      abonnement = 1 requête Postgres par seconde côté Supabase). Reprise
      automatique après la période de refroidissement. */
