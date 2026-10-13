@@ -5082,7 +5082,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Nomenclature : les dimensions saisies en Exploitation remontent dans la source',
+    nom: 'Nomenclature : dimension stable (repli sur Exploitation) + reprise volontaire',
     app: 'index.html', store: storeRealiste,
     code: `
       DB.set('mdb_nomenclature', [{ id: 'n1', code: '114', designation: 'PALETTE 114', typeArticle: 'produit_fini', prixPeriodes: [] }]);
@@ -5090,13 +5090,46 @@ r.push({
         return { articles: [{ id: 'e1', code: 'PAL114', designation: 'PALETTES 114*114*12', categorie: 'finished', length: 114, width: 114, thickness: 12 }],
                  pfLinks: [{ expl: 'PAL114', idx: '114' }], pfIgnores: [] };
       };
+      /* 1) affichage par repli sur Exploitation, SANS ecrire (pas de clignotement) */
       var r = syncProduitsFinisFromExploitation();
-      var arts = DB.get('mdb_nomenclature');
-      var n = arts.filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
-      var l = arts[0] || {};
-      (r.crees === 0 && r.dimsMaj === 1 && n === 1 && l.longueur === 114 && l.largeur === 114 && l.epaisseur === 12)
-        ? 'OK : pas de doublon (114 garde), dimensions 114x114x12 remontees dans la Nomenclature'
-        : 'ECHEC r=' + JSON.stringify(r) + ' n=' + n + ' dim=' + l.longueur + 'x' + l.largeur + 'x' + l.epaisseur
+      var aff = nomDimTxt(DB.get('mdb_nomenclature')[0]);
+      var stock = DB.get('mdb_nomenclature')[0];
+      /* 2) la reprise explicite enregistre pour de bon */
+      var n = importerDimensionsExploitation();
+      var apres = DB.get('mdb_nomenclature')[0] || {};
+      (r.dimsMaj === 0 && aff.indexOf('114') !== -1 && !stock.longueur
+        && n === 1 && apres.longueur === 114 && apres.largeur === 114 && apres.epaisseur === 12)
+        ? 'OK : affichage par repli (aucune ecriture, donc pas de clignotement), reprise manuelle enregistree ensuite'
+        : 'ECHEC dimsMaj=' + r.dimsMaj + ' aff=' + aff + ' stock=' + stock.longueur + ' n=' + n + ' apres=' + apres.longueur
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Exploitation : un menu s\u2019ouvre meme si le stockage local est plein',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Le clic ecrivait la page courante AVANT le rendu : le stockage plein
+         interrompait tout, et plus aucun menu ne repondait. */
+      var vraiSet = window.localStorage.setItem;
+      var aExplode = false;
+      window.localStorage.setItem = function (k, v) {
+        if (k === 'mdb_prod_currentPage') {
+          var e = new Error('QuotaExceededError');
+          e.name = 'QuotaExceededError';
+          aExplode = true;
+          throw e;
+        }
+        return vraiSet.call(this, k, v);
+      };
+      CURRENT_PAGE = 'dashboard';
+      var ok = false;
+      try { navigate('stock-consum'); ok = (CURRENT_PAGE === 'stock-consum'); } catch (e) { ok = false; }
+      window.localStorage.setItem = vraiSet;
+      var h = ok ? (document.getElementById('content').innerHTML || '') : '';
+      (ok && aExplode && h.length > 100)
+        ? 'OK : le menu s\u2019ouvre et la page s\u2019affiche malgre le stockage plein'
+        : 'ECHEC ok=' + ok + ' aExplose=' + aExplode + ' len=' + h.length
     `,
     attenduPrefixe: 'OK'
   });

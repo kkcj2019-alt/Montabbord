@@ -12884,15 +12884,10 @@ function syncProduitsFinisFromExploitation() {
       }
       if (trouve) {
         vus[norm(trouve.code)] = true;
-        /* Les dimensions sont saisies en exploitation : on les remonte ici
-           (la Nomenclature est la source, elle ne doit pas rester vide). */
-        var l = parseFloat(ea.length) || 0, w = parseFloat(ea.width) || 0, t = parseFloat(ea.thickness) || 0;
-        if (l > 0 && w > 0 && t > 0) {
-          if (!(parseFloat(trouve.longueur) > 0 && parseFloat(trouve.largeur) > 0 && parseFloat(trouve.epaisseur) > 0)) {
-            trouve.longueur = l; trouve.largeur = w; trouve.epaisseur = t;
-            res.dimsMaj++; change = true;
-          }
-        }
+        /* La dimension est SAISIE dans l'index (source). Celle d'exploitation
+           ne sert que d'affichage de repli, on ne l'ecrit PAS ici : une
+           ecriture a chaque affichage se faisait_ecraser par la
+           synchronisation cloud et la valeur clignotait. */
         if (!trouve.designation && ea.designation) { trouve.designation = ea.designation; change = true; }
         continue;
       }
@@ -12962,8 +12957,33 @@ function fusionnerDoublonNomenclature(codeDoublon, codeFinal) {
 }
 /* Dimension d'un article : Longueur x Largeur x Epaisseur (cm). Meme regle
    que l'exploitation : c'est ce trio saisi qui fait la dimension. */
+/* Dimension affichee : celle saisie dans l'index ; a defaut, celle de
+   l'exploitation (repli d'affichage, sans ecrire — la valeur ne clignote
+   donc plus). */
 function nomDimTxt(a) {
   try {
+    if (!(parseFloat(a && (a.longueur != null ? a.longueur : a.length)) > 0
+        && parseFloat(a && (a.largeur != null ? a.largeur : a.width)) > 0
+        && parseFloat(a && (a.epaisseur != null ? a.epaisseur : a.thickness)) > 0)) {
+      var ex = null;
+      try {
+        var p = apProdGet();
+        var arts = ((p && p.articles) || []);
+        var n = String((a && a.code) || '').trim().toUpperCase();
+        var links = (p && p.pfLinks) || [];
+        for (var li = 0; li < links.length; li++) {
+          if (String(links[li].idx || '').trim().toUpperCase() === n) { n = String(links[li].expl || '').trim().toUpperCase(); break; }
+        }
+        for (var i = 0; i < arts.length; i++) {
+          if (arts[i] && String(arts[i].code || '').trim().toUpperCase() === n) { ex = arts[i]; break; }
+        }
+      } catch (e) {}
+      if (ex && parseFloat(ex.length) > 0 && parseFloat(ex.width) > 0 && parseFloat(ex.thickness) > 0) {
+        var p2 = [];
+        p2.push(nomDimNb(ex.length)); p2.push(nomDimNb(ex.width)); p2.push(nomDimNb(ex.thickness));
+        return p2.join(' × ');
+      }
+    }
     var l = parseFloat(a && (a.longueur != null ? a.longueur : a.length)) || 0;
     var w = parseFloat(a && (a.largeur != null ? a.largeur : a.width)) || 0;
     var t = parseFloat(a && (a.epaisseur != null ? a.epaisseur : a.thickness)) || 0;
@@ -12973,6 +12993,40 @@ function nomDimTxt(a) {
     if (t > 0) p.push(nomDimNb(t));
     return p.length >= 2 ? p.join(' × ') : '-';
   } catch (e) { return '-'; }
+}
+/* Recopie les dimensions de l'exploitation vers la nomenclature (action
+   volontaire : la valeur est ensuite stable et.cloud). */
+function importerDimensionsExploitation() {
+  var arts = getArticles() || [];
+  var p = null;
+  try { p = apProdGet(); } catch (e) {}
+  var expl = ((p && p.articles) || []);
+  var links = (p && p.pfLinks) || [];
+  var n = 0;
+  var norm = function (c) { return String(c || '').trim().toUpperCase(); };
+  arts.forEach(function (a) {
+    if (!a || !a.code) return;
+    /* Codes d'exploitation possibles pour cet article index : lui-meme, ou
+       le code lie a ce code index (PAL114 <-> 114). */
+    var candidats = { };
+    candidats[norm(a.code)] = true;
+    for (var li = 0; li < links.length; li++) {
+      if (norm(links[li].idx) === norm(a.code)) candidats[norm(links[li].expl)] = true;
+    }
+    for (var i = 0; i < expl.length; i++) {
+      var e = expl[i];
+      if (!e || !candidats[norm(e.code)]) continue;
+      var l = parseFloat(e.length) || 0, w = parseFloat(e.width) || 0, t = parseFloat(e.thickness) || 0;
+      if (!(l > 0 && w > 0 && t > 0)) continue;
+      a.longueur = l; a.largeur = w; a.epaisseur = t;
+      n++;
+      break;
+    }
+  });
+  if (n > 0) { DB.set('mdb_nomenclature', arts); toast(n + ' dimension(s) reprise(s) de l\u2019exploitation — désormais enregistrées.'); }
+  else toast('Aucune dimension à reprendre (ou déjà renseignées).', 'info');
+  renderNomenclature();
+  return n;
 }
 function nomDimNb(n) {
   try { return (parseFloat(n) || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 }); } catch (e2) { return String(n); }
@@ -12988,6 +13042,7 @@ function renderNomenclature() {
     var _nbPF = 0, _k;
     for (_k = 0; _k < articles.length; _k++) { if (articles[_k].typeArticle === 'produit_fini') _nbPF++; }
     html += '<span style="font-size:12px;font-weight:800;color:var(--primary)">' + articles.length + ' article(s) · ' + _nbPF + ' produit(s) fini(s)</span>';
+    html += '<button class="btn btn-sm btn-outline" onclick="importerDimensionsExploitation()" title="Reprendre les dimensions saisies dans Exploitation et les enregistrer ici" style="font-size:11px">📐 Reprendre les dimensions</button>';
   } catch (eC) {}
   if (!readonly) html += '<button class="btn btn-primary" onclick="openNomenclatureModal()">+ Nouvel article</button>';
   html += '</div>';

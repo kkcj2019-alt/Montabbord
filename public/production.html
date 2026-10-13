@@ -439,17 +439,55 @@ function _prodQuotaJanitor(keep) {
     return removedN;
   } catch (eJ) { return 0; }
 }
+/* Purge d'urgence : le stockage local est plein et aucune application ne
+   respond. On supprime, dans cet ordre : les copies de sauvegarde, les
+   images de fusion cloud, puis les caches jetables. Les donnees metier
+   (achats, stocks, pointages...) ne sont jamais touchees. */
+function _prodPurgeUrgence() {
+  var liberes = 0, n = 0;
+  var prefixes = ['mdb_backup_', 'mdb_prod_lastCloud', 'mdb_lastCloud', 'mdb_prod_snap', 'mdb_prod_tmp'];
+  try {
+    var cles = [];
+    for (var i = 0; i < localStorage.length; i++) cles.push(localStorage.key(i));
+    for (var p = 0; p < prefixes.length; p++) {
+      for (var k = 0; k < cles.length; k++) {
+        var key = cles[k];
+        if (!key || key.indexOf(prefixes[p]) !== 0) continue;
+        liberes += (localStorage.getItem(key) || '').length;
+        localStorage.removeItem(key);
+        n++;
+      }
+    }
+    if (n) {
+      try { console.warn('[Exploitation] Purge d\u2019urgence : ' + n + ' entrée(s) temporaire(s) supprimée(s) pour libérer le stockage.'); } catch (e) {}
+    }
+  } catch (e2) {}
+  return n;
+}
 try {
   if (typeof Storage !== 'undefined' && Storage.prototype && !Storage.prototype._mdbQuotaPatched) {
     Storage.prototype._mdbQuotaPatched = true;
-    var _siOrigProd = Storage.prototype.setItem;
+var _siOrigProd = Storage.prototype.setItem;
     Storage.prototype.setItem = function (kQ, vQ) {
       try { return _siOrigProd.call(this, kQ, vQ); }
       catch (eQ) {
         if (eQ && (eQ.name === 'QuotaExceededError' || eQ.code === 22 || eQ.code === 1014)) {
+          /* 1) nettoyage habituel, 2) purge d'urgence, 3) on n'interrompt
+             JAMAIS l'interface : une petite cle (page courante, preferences)
+             ne doit pas empecher un menu de s'ouvrir. */
           try { _prodQuotaJanitor(1); } catch (eJ2) {}
-          try { return _siOrigProd.call(this, kQ, vQ); }
-          catch (eQ2) { try { console.warn('[Exploitation] Stockage saturé même après nettoyage :', kQ); } catch (eW) {} throw eQ2; }
+          try { return _siOrigProd.call(this, kQ, vQ); } catch (eQ2) {
+            try { _prodPurgeUrgence(); } catch (eU) {}
+            try { return _siOrigProd.call(this, kQ, vQ); } catch (eQ3) {
+              var _petite = String(vQ || '').length < 8192;
+              if (_petite) {
+                try { console.warn('[Exploitation] Stockage plein : « ' + kQ + ' » non enregistre (page conservee en memoire).'); } catch (eW2) {}
+                return null;
+              }
+              try { console.error('[Exploitation] Stockage saturé, « ' + kQ + ' » non enregistré :', eQ3); } catch (eW3) {}
+              throw eQ3;
+            }
+          }
         } else { throw eQ; }
       }
     };
@@ -989,7 +1027,11 @@ function navigate(page) {
   try { _prodAutoRStamp = _prodDataStamp(); } catch (e) {}
   CURRENT_PAGE = page;
   try { var _mn = document.getElementById('app'); if (_mn) _mn.classList.toggle('dash-dense', page === 'dashboard'); } catch (e) {}
-  localStorage.setItem('mdb_prod_currentPage', page);
+  /* Une écriture de preference ne doit JAMAIS empecher l'ouverture du menu
+     (le stockage local peut être plein : l'utilisateur cliquait et rien ne
+     se passait). */
+  try { localStorage.setItem('mdb_prod_currentPage', page); }
+  catch (eSt) { try { _prodPurgeUrgence(); localStorage.setItem('mdb_prod_currentPage', page); } catch (eSt2) {} }
   renderNav();
   renderPage();
   if (window.innerWidth <= 768) closeSidebar();
