@@ -8313,18 +8313,71 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
-    nom: 'Inventaire : un inventaire validé est verrouillé (ni suppression ni réouverture)',
-    app: 'production.html', store: storeRealiste,
+    nom: 'Inventaire : un inventaire validé se supprime avec code + annule ses écritures',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'h1', code: 'P8', designation: 'Pointe 8', quantite: 6000, cond: 120, ctype: 'POINTE', created_at: '2026-09-05' },
+        { id: 'b1', code: 'P8', designation: 'Pointe 8', quantite: 5000, cond: 120, ctype: 'POINTE', created_at: '2026-10-01', _invBase: true, _invId: 'v1', obs: 'Stock initial' },
+        { id: 'm1', code: 'P8', designation: 'Pointe 8', quantite: 2000, cond: 120, ctype: 'POINTE', created_at: '2026-10-05' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
     code: `
-      setInventories([{ id: 'v1', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'S', items: [], statut: 'valide', validatedAt: '2026-10-01' }]);
+      localStorage.setItem('mdb_entreprise', JSON.stringify({ nom: 'T', validationCode: '1234' }));
+      setInventories([{ id: 'v1', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'S',
+        items: [{ store: 'stockConsum', ref: 'P8', code: 'P8', real_qte: 5000 }], statut: 'valide', validatedAt: '2026-10-01' }]);
+      /* La vieille ligne a été clôturée par la validation */
+      var st0 = getStockConsum();
+      for (var i0 = 0; i0 < st0.length; i0++) { if (st0[i0].id === 'h1') st0[i0]._invClos = 'v1'; }
+      setStockConsum(st0);
       window.confirm2 = function() { return true; };
       renderPage = function () {};
-      deleteInventory('v1');
-      reopenInventoryDraft('v1');
-      var encore = getInventories().filter(function (x) { return x.id === 'v1'; }).length === 1
-        && getInventories()[0].statut === 'valide';
-      encore ? 'OK : suppression et réouverture refusées, validé intact'
-        : 'ECHEC : ' + JSON.stringify(getInventories())
+      /* Sans code : bloqué, tout reste (base présente, h1 toujours clôturé) */
+      deleteInventory('v1', 'faux');
+      var _apB = getStockConsum();
+      var bloque = getInventories().length === 1
+        && _apB.filter(function (l) { return l.id === 'b1'; }).length === 1
+        && (_apB.filter(function (l) { return l.id === 'h1'; })[0] || {})._invClos === 'v1';
+      /* Avec code : base retirée, historique rouvert, achat postérieur gardé */
+      deleteInventory('v1', '1234');
+      var lignes = getStockConsum();
+      var ids = lignes.map(function (l) { return l.id; });
+      var h1 = lignes.filter(function (l) { return l.id === 'h1'; })[0] || {};
+      var totalOuvert = 0;
+      lignes.forEach(function (l) { if (!l._invClos) totalOuvert += parseFloat(l.quantite) || 0; });
+      (bloque && getInventories().length === 0 && ids.indexOf('b1') === -1 && ids.indexOf('m1') !== -1
+        && !h1._invClos && totalOuvert === 8000)
+        ? 'OK : code faux bloque ; code bon -> base partie, h1 rouvert, achat 2000 gardé, total 8000'
+        : 'ECHEC : bloque=' + bloque + ' lignes=' + JSON.stringify(lignes.map(function (l) { return [l.id, l.quantite, l._invClos || '']; })) + ' total=' + totalOuvert
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : supprimer un ancien inventaire annule ses ajustements du mois',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'h1', code: 'P8', designation: 'Pointe 8', quantite: 6000, cond: 120, ctype: 'POINTE', created_at: '2026-09-05' },
+        { id: 'a1', code: 'P8', designation: 'Pointe 8', quantite: -1000, cond: 120, ctype: 'POINTE', created_at: '2026-09-30', _ajustInv: true, _invMois: '2026-09', obs: 'Inventaire Septembre 2026' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      setInventories([{ id: 'vieux', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'S',
+        items: [{ store: 'stockConsum', ref: 'P8', code: 'P8', real_qte: 5000 }] }]);
+      window.confirm2 = function() { return true; };
+      renderPage = function () {};
+      deleteInventory('vieux');
+      var lignes = getStockConsum().filter(function (l) { return String(l.code || '').toUpperCase() === 'P8'; });
+      (getInventories().length === 0 && lignes.length === 1 && lignes[0].id === 'h1' && lignes[0].quantite === 6000)
+        ? 'OK : ajustement -1000 du mois parti avec l\u2019inventaire, achat 6000 intact'
+        : 'ECHEC : ' + JSON.stringify(lignes)
     `,
     attenduPrefixe: 'OK'
   });

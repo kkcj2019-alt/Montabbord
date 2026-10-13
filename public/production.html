@@ -13478,7 +13478,8 @@ function render_inventory() {
         : '<span style="font-size:.68rem;font-weight:800;color:#92400e;background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:1px 8px;white-space:nowrap" title="Modifiable : rouvrez-le pour continuer">📝 Brouillon</span>') + '</td>';
       h += '<td style="white-space:nowrap">';
       if (estValide) {
-        h += '<button class="btn" onclick="viewInventory(\'' + inv.id + '\')" style="font-size:.7rem">👁️ Voir</button>';
+        h += '<button class="btn" onclick="viewInventory(\'' + inv.id + '\')" style="font-size:.7rem">👁️ Voir</button> ';
+        h += '<button class="btn btn-red" onclick="deleteInventory(\'' + inv.id + '\')" style="font-size:.7rem" title="Supprimer + annuler ses écritures stock (code requis)">🗑️</button>';
       } else {
         h += '<button class="btn" onclick="reopenInventoryDraft(\'' + inv.id + '\')" style="font-size:.7rem" title="Rouvrir pour modifier et continuer">📝 Reprendre</button> ';
         h += '<button class="btn btn-accent" onclick="validerInventaireBrouillon(\'' + inv.id + '\')" style="font-size:.7rem" title="Code requis : applique le stock et verrouille">✅ Valider</button> ';
@@ -14236,12 +14237,53 @@ function applyInventoryAsInitial(month, items, opts) {
 }
 
 
-function deleteInventory(id) {
-  var inv = getInventories().find(function(x) { return x.id === id; });
-  if (inv && inv.statut === 'valide') return toast('Inventaire validé : verrouillé, suppression impossible', 'error');
-  if (!confirm2('Supprimer ce brouillon d\u2019inventaire ? (le stock n\u2019a pas été touché)')) return;
-  setInventories(getInventories().filter(function(x) { return x.id !== id; }));
-  toast('Brouillon supprimé');
+/* Suppression en cascade : l'inventaire parti, ce qu'il a écrit en stock
+   consommables part avec lui —
+   - lignes « Stock initial » créées par lui (_invId) : retirées ;
+   - historique qu'il avait clôturé (_invClos) : rouvert ;
+   - anciens ajustements du même mois (_invMois, ancien système) : annulés.
+   Les mouvements postérieurs (achats/sorties après la base) sont conservés.
+   MP/semi/finis/marchandises (écrasés en place, sans traçabilité) ne peuvent
+   pas être annulés : on le dit. Supprimer un validé exige le code. */
+function deleteInventory(id, codeOpt) {
+  var invs = getInventories();
+  var inv = null;
+  for (var i = 0; i < invs.length; i++) { if (invs[i].id === id) { inv = invs[i]; break; } }
+  if (!inv) return;
+  var estValide = inv.statut === 'valide';
+  if (estValide && !demanderCodeValidation('Supprimer l\u2019inventaire validé', codeOpt)) return;
+  var conso = getStockConsum() || [];
+  var nbBases = 0, nbClos = 0, nbAjust = 0;
+  conso.forEach(function(s) {
+    if (!s) return;
+    if (s._invId === id) nbBases++;
+    else if (s._invClos === id) nbClos++;
+    else if (s._ajustInv && inv.month && s._invMois === inv.month) nbAjust++;
+  });
+  var aNonConso = false;
+  try {
+    aNonConso = (inv.items || []).some(function(it) { return it.store && it.store !== 'stockConsum'; });
+  } catch (eN) {}
+  if (!confirm2('Supprimer ' + (estValide ? 'l\u2019INVENTAIRE VALIDÉ' : 'ce brouillon')
+    + ' du ' + fmtD(inv.date || '') + ' ?\n\n'
+    + '- ' + nbBases + ' ligne(s) « Stock initial » retirée(s)\n'
+    + '- ' + nbClos + ' ligne(s) d\u2019historique rouverte(s)\n'
+    + '- ' + nbAjust + ' ajustement(s) d\u2019inventaire annulé(s)'
+    + (aNonConso ? '\n\n⚠️ MP / semi-finis / finis / marchandises (appliqués en place) : à corriger à la main si besoin.' : '')
+    + (estValide ? '\n\nMouvements postérieurs (achats/sorties après la base) conservés.' : ''))) return;
+  var garde = [];
+  conso.forEach(function(s) {
+    if (!s) return;
+    if (s._invId === id) return;
+    if (s._invClos === id) { try { delete s._invClos; } catch (eD) { s._invClos = ''; } garde.push(s); return; }
+    if (s._ajustInv && inv.month && s._invMois === inv.month) return;
+    garde.push(s);
+  });
+  setStockConsum(garde);
+  setInventories(invs.filter(function(x) { return x.id !== id; }));
+  toast(estValide
+    ? 'Inventaire supprimé — stock remis comme avant (' + nbBases + ' base(s), ' + nbClos + ' rouverte(s), ' + nbAjust + ' ajustement(s))'
+    : 'Brouillon supprimé (le stock n\u2019avait pas été touché)');
   renderPage();
 }
 
@@ -18550,7 +18592,7 @@ function viewInventory(id) {
   var inv = getInventories().find(function(x) { return x.id === id; });
   if (!inv) return;
   var m = '<h2>📊 Inventaire du ' + fmtD(inv.date) + '</h2>';
-  m += '<p><strong>Statut :</strong> ' + (inv.statut === 'valide' ? '🔒 Validé (verrouillé' + (inv.validatedAt ? ', le ' + fmtD(inv.validatedAt) : '') + ')' : '📝 Brouillon (modifiable)') + '</p>';
+  m += '<p><strong>Statut :</strong> ' + (inv.statut === 'valide' ? '🔒 Validé (appliqué au stock' + (inv.validatedAt ? ', le ' + fmtD(inv.validatedAt) : '') + ' — suppression possible avec code, avec annulation des écritures)' : '📝 Brouillon (modifiable)') + '</p>';
   m += '<p><strong>Superviseur:</strong> ' + escH(inv.supervisor || '-') + '</p>';
   m += '<p><strong>Articles comptés:</strong> ' + (inv.articles_comptes || 0) + '</p>';
   m += '<p><strong>Écarts:</strong> ' + (inv.ecarts || 0) + '</p>';
