@@ -11824,7 +11824,13 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
        apparaitre a 0 (sinon il disparait des fiches et de l'inventaire). */
     function _ajouteCat(code, des, type, cond) {
       var k = String(code || '').trim().toUpperCase();
-      if (!k || map[k]) return;
+      if (!k) return;
+      if (map[k]) {
+        /* Une ligne de stock à zéro (ex : initialisation sans cond) ne doit
+           pas masquer le conditionnement du catalogue. */
+        if (!(map[k].cond > 0) && (cond > 0)) map[k].cond = cond;
+        return;
+      }
       map[k] = { key: k, code: code, des: des || code, type: type || 'DIVERS', emplacement: '',
                  cond: cond || 0, unites: 0, paquets: 0, _cartonsSaisis: 0, _nbSaisis: 0, nbFiches: 0, ids: [] };
       ordre.push(k);
@@ -12903,7 +12909,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     h += '<button class="btn" onclick="showSortieConso()" title="Enregistrer une consommation ou une perte">📤 Sortie / consommation</button>';
     h += '<button class="btn" onclick="showAddStock(\'stock-consum\')">+ Ajouter au stock</button>';
     h += '<button class="btn" onclick="reconstruireStockConsum()" title="Recreer le stock a partir des achats (BL)">🔄 Reconstruire le stock</button>';
-    h += '<button class="btn btn-accent" onclick="showAddConsumDirect()">+ Nouveau Consommable</button>';
+    h += '<button class="btn btn-accent" onclick="creerConsoDepuisStock()" title="Créer dans le référentiel Articles > Consommables & Divers">+ Nouveau Consommable</button>';
     h += '<button class="btn" onclick="fusionnerFichesConso()" title="Regrouper les fiches en double : une seule fiche par produit">🧹 Fusionner les fiches en double</button>';
     h += '<button class="btn" onclick="remettreZeroStockConso()" title="Inventaire : ramener chaque produit a zero (ajustement trace, conserve a la reconstruction)">↺ Remettre à zéro</button>';
     h += '</div></div>';
@@ -12916,7 +12922,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(x.code) + '</td>';
         h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + fmt(x.unites) + '</td>';
-        h += '<td style="white-space:nowrap"></td></tr>';
+        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button></td></tr>';
       });
       h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="4" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totD) + '</td><td></td></tr>';
     } else {
@@ -12939,7 +12945,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? '-' : fmt(x.unites)) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + fmt(x.paquets) + '</td>';
         h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + (isDiv ? '-' : fmt(x.cartons)) + '</td>';
-        h += '<td style="white-space:nowrap"></td></tr>';
+        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button></td></tr>';
         if (isPointe) {
           h += '<tr id="' + detId + '" style="display:none;background:#fff7ed"><td colspan="9" style="padding:8px 10px">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem">'
@@ -13143,6 +13149,48 @@ function showAddStock(key) {
   document.body.insertAdjacentHTML('beforeend', m);
 }
 
+function creerConsoDepuisStock() {
+  /* Ici on ne crée PLUS de consommable en direct : le référentiel unique
+     est Articles > Consommables & Divers — on y envoie avec le formulaire
+     déjà ouvert, pour que tout s'y loge (cond, prix, définitions...). */
+  try { navigate('articles-conso'); } catch (eN) {}
+  try { openConsoDiversModal(null); } catch (eM) {}
+}
+/* Lignes de stock d'un produit, code direct OU via article lié (les lignes
+   d'initialisation ne portent que article_id). */
+function lignesProduitConso(code) {
+  var K = String(code || '').trim().toUpperCase();
+  if (!K) return [];
+  var arts = [];
+  try { arts = getArticles() || []; } catch (eA) {}
+  return (getStockConsum() || []).filter(function(s) {
+    if (!s) return false;
+    if (String(s.code || '').trim().toUpperCase() === K) return true;
+    if (s.article_id) {
+      for (var i = 0; i < arts.length; i++) {
+        if (arts[i].id === s.article_id && String(arts[i].code || '').trim().toUpperCase() === K) return true;
+      }
+    }
+    return false;
+  });
+}
+/* Suppression d'un produit consommable SANS mouvements : toutes ses lignes
+   sont à zéro (cas typique : test comme P20). Dès qu'une ligne porte une
+   quantité, refus (passer par « Sortie / consommation » pour vider). */
+function supprimerProduitConso(code) {
+  var K = String(code || '').trim().toUpperCase();
+  if (!K) return;
+  var lignes = lignesProduitConso(K);
+  if (!lignes.length) return toast('Rien à supprimer pour ' + K, 'error');
+  var bloque = lignes.some(function(s) { return Math.abs(parseFloat(s.quantite) || 0) >= 0.0001; });
+  if (bloque) return toast('Suppression impossible : des mouvements existent pour ' + K + ' (utilisez « Sortie / consommation » pour vider le stock)', 'error');
+  if (!confirm2('Supprimer définitivement ' + K + ' du stock ?\n(' + lignes.length + ' ligne(s) à zéro)')) return;
+  var ids = {};
+  lignes.forEach(function(s) { if (s && s.id != null) ids[String(s.id)] = true; });
+  setStockConsum((getStockConsum() || []).filter(function(s) { return !s || !ids[String(s.id)]; }));
+  toast(K + ' supprimé du stock ✅');
+  renderPage();
+}
 function showAddConsumDirect() {
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal">';
   m += '<h2>📌 Nouveau Consommable / Pointe</h2>';

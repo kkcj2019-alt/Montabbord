@@ -8442,6 +8442,53 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+
+  r.push({
+    nom: 'Conso : le cond du menu s\u2019affiche même avec une ligne de stock à zéro sans cond',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [{ id: 'stk_a1', article_id: 'a9', quantite: 0, prix_unitaire: 0, created_at: '2026-10-13' }];
+      p.articles = [{ id: 'a9', code: 'P5', designation: 'POINTE5', categorie: 'consum', qty_per_packet: 180, unite: 'pcs', statut: 'active' }];
+      p.definitions = [];
+      p.composants = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P5'; })[0] || {};
+      (agg.cond === 180 && agg.unites === 0)
+        ? 'OK : cond 180 repris du menu malgré la ligne à zéro sans cond'
+        : 'ECHEC : ' + JSON.stringify(agg)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Conso : un produit test sans mouvements se supprime, avec mouvements c\u2019est refusé',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 't1', code: 'P20', nom: 'test', quantite: 0, ctype: 'POINTE', created_at: '2026-10-13' },
+        { id: 'm1', code: 'P6', designation: 'POINTE6', quantite: 500, cond: 170, ctype: 'POINTE', created_at: '2026-10-13' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      window.confirm2 = function() { return true; };
+      renderPage = function () {};
+      supprimerProduitConso('P20');
+      var resteP20 = getStockConsum().filter(function (x) { return String(x.code || '').toUpperCase() === 'P20'; });
+      supprimerProduitConso('P6');
+      var resteP6 = getStockConsum().filter(function (x) { return String(x.code || '').toUpperCase() === 'P6'; });
+      (resteP20.length === 0 && resteP6.length === 1)
+        ? 'OK : P20 (zéro) supprimé, P6 (500) conservé et refusé'
+        : 'ECHEC : P20=' + resteP20.length + ' P6=' + resteP6.length
+    `,
+    attenduPrefixe: 'OK'
+  });
   r.push({
     nom: 'Synchro exploitation : un achat distant arrive meme si le poste est sale',
     app: 'production.html', store: storeRealiste,
