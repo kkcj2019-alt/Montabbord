@@ -411,6 +411,50 @@ function setDB(v) {
   localStorage.setItem(DB_KEY, JSON.stringify(v));
   try { if (_prodChannel) _prodChannel.postMessage({ type: 'shared_key_updated', key: DB_KEY, value: JSON.stringify(v) }); } catch (e) {}
 }
+/* Filet quota : stockage plein -> on purge les vieilles copies de sauvegarde
+   puis on réessaie une fois. Sans ça, une écriture (~4 Mo le document)
+   lève QuotaExceededError et la sauvegarde paraît réussie alors que le stock
+   n'a pas été mis à jour (achat sans mouvements). */
+function _prodQuotaJanitor(keep) {
+  keep = keep || 1;
+  try {
+    var meta = [];
+    try { meta = JSON.parse(localStorage.getItem('mdb_backup_meta') || '[]') || []; } catch (eM0) {}
+    if (!Array.isArray(meta)) meta = [];
+    meta.sort(function (aJ, bJ) { return ((bJ && bJ.ts) || 0) - ((aJ && aJ.ts) || 0); });
+    var keepIdx = {}, iJ;
+    for (iJ = 0; iJ < meta.length && iJ < keep; iJ++) { if (meta[iJ]) keepIdx[meta[iJ].index] = true; }
+    var removedN = 0, kJ, kk;
+    for (kJ = localStorage.length - 1; kJ >= 0; kJ--) {
+      kk = localStorage.key(kJ);
+      if (kk && kk.indexOf('mdb_backup_') === 0 && kk !== 'mdb_backup_meta') {
+        var nJ = parseInt(kk.slice(11), 10);
+        if (isNaN(nJ) || !keepIdx[nJ]) { try { localStorage.removeItem(kk); removedN++; } catch (eR) {} }
+      }
+    }
+    if (removedN > 0) {
+      try { localStorage.setItem('mdb_backup_meta', JSON.stringify(meta.slice(0, keep))); } catch (eM1) {}
+      try { console.log('[Exploitation] Nettoyage stockage : ' + removedN + ' vieille(s) copie(s) supprimee(s)'); } catch (eL) {}
+    }
+    return removedN;
+  } catch (eJ) { return 0; }
+}
+try {
+  if (typeof Storage !== 'undefined' && Storage.prototype && !Storage.prototype._mdbQuotaPatched) {
+    Storage.prototype._mdbQuotaPatched = true;
+    var _siOrigProd = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (kQ, vQ) {
+      try { return _siOrigProd.call(this, kQ, vQ); }
+      catch (eQ) {
+        if (eQ && (eQ.name === 'QuotaExceededError' || eQ.code === 22 || eQ.code === 1014)) {
+          try { _prodQuotaJanitor(1); } catch (eJ2) {}
+          try { return _siOrigProd.call(this, kQ, vQ); }
+          catch (eQ2) { try { console.warn('[Exploitation] Stockage saturé même après nettoyage :', kQ); } catch (eW) {} throw eQ2; }
+        } else { throw eQ; }
+      }
+    };
+  }
+} catch (eP) {}
 /* Une section peut contenir des entrees inutilisables (null, undefined, nombre,
    chaine) : lire `a.date` ou `a.items` dessus fait tomber la page entiere.
    On ne laisse passer que les objets : le reste est ignore a la lecture. */
@@ -6541,6 +6585,25 @@ function getLivraisons() { return seulementObjets(getSection('livraisons', []));
 function setLivraisons(v) { setSection('livraisons', v); }
 function getInventories() { return getSection('inventories', []); }
 function setInventories(v) { setSection('inventories', v); }
+/* Dernier inventaire matière première VALIDÉ (par date) : c'est lui qui
+   définit le stock initial (onglet Stock Initial). Les brouillons ne
+   définissent jamais le stock. Les enregistrements d'avant le verrouillage
+   (sans statut) comptent comme validés : ils avaient été appliqués. */
+function dernierInventaireMPValide() {
+  var invs = getInventories() || [];
+  var cand = invs.filter(function(x) {
+    if (!x || x.statut === 'brouillon') return false;
+    return ((x.items || []).some(function(it) { return it && it.store === 'stockRaw'; }));
+  });
+  if (!cand.length) return null;
+  cand.sort(function(a, b) {
+    var da = String(a.date || ''), db = String(b.date || '');
+    if (da !== db) return da < db ? -1 : 1;
+    var ca = String(a.created_at || ''), cb = String(b.created_at || '');
+    return ca < cb ? -1 : (ca > cb ? 1 : 0);
+  });
+  return cand[cand.length - 1];
+}
 function getFichesTech() { return getSection('fichesTech', []); }
 function setFichesTech(v) { setSection('fichesTech', v); }
 function getSpecies() { return getSection('species', []); }
@@ -11286,9 +11349,12 @@ function render_stock_raw() {
   }
 
   if (tab === 'initial') {
-    /* Dernier inventaire sauvegardé = stock initial */
-    var invs = getInventories().slice().reverse();
-    var lastInv = invs.length > 0 ? invs[0] : null;
+    /* Stock initial MP = le DERNIER inventaire MP validé (un brouillon ne
+       définit jamais le stock : il n'a rien appliqué). Les enregistrements
+       d'avant le verrouillage (sans statut) comptent comme validés : ils
+       avaient été appliqués au stock. */
+    var lastInv = null;
+    try { lastInv = dernierInventaireMPValide(); } catch (eDI) { lastInv = null; }
     var curM = thisMonth();
     var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
     var mLabel = _mn[parseInt(curM.slice(5, 7), 10) - 1] + ' ' + curM.slice(0, 4);
@@ -11296,22 +11362,17 @@ function render_stock_raw() {
     if (!lastInv) {
       h += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem">';
       h += '<h3 style="margin:0">Stock Initial au 1er ' + mLabel + '</h3>';
-      h += '<a href="#inventory" class="btn btn-accent" onclick="setSection(\'activeTab\',\'inventory\');renderPage()" style="text-decoration:none">📊 Faire l\'inventaire</a></div>';
-      h += '<div class="empty">Aucun inventaire sauvegardé. Créez un inventaire de fin de mois pour définir le stock initial.</div></div>';
+      h += '<button class="btn btn-accent" onclick="navigate(\'inventory\')" style="text-decoration:none">📊 Faire l\'inventaire</button></div>';
+      h += '<div class="empty">Aucun inventaire matière première validé. Faites l\u2019inventaire de fin de mois (brouillon puis ✅ Valider avec code) : il définira le stock initial.</div></div>';
       return h;
     }
-    var invMonth = lastInv.month || '';
-    var invLabel = monthLabel(invMonth);
-    var prevMonth = '';
-    var d = new Date(parseInt(invMonth.slice(0,4),10), parseInt(invMonth.slice(5,7),10) - 1, 1);
-    prevMonth = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
-    var prevLabel = monthLabel(prevMonth);
+    var mpItems = (lastInv.items || []).filter(function(it) { return it && it.store === 'stockRaw'; });
 
-    /* Résumé */
-    var totItems = (lastInv.items || []).length;
+    /* Résumé (matière première uniquement : c'est sa page) */
+    var totItems = mpItems.length;
     var totTheo = 0, totReal = 0, totEcart = 0;
     var cats = {};
-    (lastInv.items || []).forEach(function(it) {
+    mpItems.forEach(function(it) {
       var t = parseFloat(it.theo_qte) || 0;
       var r = parseFloat(it.real_qte) || 0;
       totTheo += t;
@@ -11326,7 +11387,7 @@ function render_stock_raw() {
 
     h += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem">';
     h += '<h3 style="margin:0">📦 Stock Initial au 1er ' + mLabel + '</h3>';
-    h += '<div style="font-size:.75rem;color:var(--dim)">Défini par l\'inventaire du 31 ' + invLabel + '</div>';
+    h += '<div style="font-size:.75rem;color:var(--dim)">Défini par l\'inventaire du ' + fmtD(lastInv.date || '') + (lastInv.supervisor ? ' — fait par ' + escH(lastInv.supervisor) : '') + '</div>';
     h += '</div>';
     h += '<div style="font-size:1rem;font-weight:800;margin-bottom:.6rem">' + totItems + ' références &nbsp;|&nbsp; ' + fmt(totReal) + ' éléments (réel) &nbsp;|&nbsp; ' + totEcart.toFixed(1) + ' écarts</div>';
     h += '<div style="font-size:.85rem;line-height:1.9">';
@@ -11340,7 +11401,7 @@ function render_stock_raw() {
         + (ecart !== 0 ? ' <span style="color:' + (ecart > 0 ? 'var(--green)' : 'var(--red)') + '">(' + (ecart > 0 ? '+' : '') + fmt(ecart) + ')</span>' : '')
         + '</div>';
       h += '<div id="content_' + _iid + '" style="display:none;margin:.2rem 0 .6rem 1.2rem;font-size:.78rem;line-height:1.5">';
-      var _its = (lastInv.items || []).filter(function (it) { return (it.categorie || 'Autre') === c; });
+      var _its = mpItems.filter(function (it) { return (it.categorie || 'Autre') === c; });
       _its.forEach(function (it, _ii) {
         var d = (parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0);
         var _iid2 = _iid + '_' + _ii;
@@ -20554,6 +20615,11 @@ function saveAchatByCategory(e, category) {
   window._editingAchatId = null;
   try { syncProdAchatDette(existing || achats[0]); } catch(e) {}
 
+  /* Mise à jour du stock selon la catégorie : toute la chaîne est protégée —
+     si l'écriture échoue (ex : stockage plein), l'achat RESTE enregistré mais
+     l'utilisateur est prévenu au lieu de croire à un succès silencieux. */
+  var _stockOk = true, _stockErr = '';
+  try {
   if (category === 'raw-materials' && !existing) {
     var rawStock = getStockRaw();
     _tempAchatItems.forEach(function(it) {
@@ -20677,8 +20743,18 @@ function saveAchatByCategory(e, category) {
     epiPurchases.push({ id: genId(), date: date, fournisseur: fournisseur, acheteur: acheteur, reference: ref, lignes: lignesEpi });
     setEpiPurchases(epiPurchases);
   }
+  } catch (eStock) {
+    _stockOk = false;
+    try { _stockErr = String((eStock && (eStock.message || eStock)) || eStock); } catch (eM) { _stockErr = 'erreur'; }
+  }
 
-  toast(existing ? 'Achat mis à jour' : 'Enregistrement réussi !', 'success');
+  if (!_stockOk) {
+    var _plein = /quota|QuotaExceeded|exceeded/i.test(_stockErr);
+    toast('Achat enregistré, MAIS stock non mis à jour'
+      + (_plein ? ' (stockage plein : libérez de l\u2019espace puis cliquez « Reconstruire le stock »)' : ' : ' + _stockErr), 'error');
+  } else {
+    toast(existing ? 'Achat mis à jour' : 'Enregistrement réussi !', 'success');
+  }
   closeModal();
   renderPage();
 }

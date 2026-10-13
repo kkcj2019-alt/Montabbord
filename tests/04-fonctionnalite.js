@@ -2376,7 +2376,7 @@ attenduPrefixe: 'OK'
     nom: 'Stock MP : l\u2019onglet initial propose la fiche par article inventorie',
     app: 'production.html', store: storeRealiste,
     code: `
-      setSection('inventories', [{ month: '2026-09', items: [{ code: 'K1', designation: 'Bois rouge', theo_qte: 0, real_qte: 300, categorie: 'Consommable' }] }]);
+      setSection('inventories', [{ month: '2026-09', items: [{ code: 'K1', designation: 'Bois rouge', theo_qte: 0, real_qte: 300, categorie: 'Consommable', store: 'stockRaw', ref: 'K1' }] }]);
       setSection('stockRawTab', 'initial');
       CURRENT_PAGE = 'stock-raw'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
@@ -8352,6 +8352,42 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
         && !h1._invClos && totalOuvert === 8000)
         ? 'OK : code faux bloque ; code bon -> base partie, h1 rouvert, achat 2000 gardé, total 8000'
         : 'ECHEC : bloque=' + bloque + ' lignes=' + JSON.stringify(lignes.map(function (l) { return [l.id, l.quantite, l._invClos || '']; })) + ' total=' + totalOuvert
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock initial MP : c\u2019est le dernier inventaire MP validé (brouillons ignorés)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setInventories([
+        { id: 'vieux', month: '2026-08', date: '2026-08-31', items: [{ store: 'stockRaw', code: 'K1', theo_qte: 1, real_qte: 2 }], statut: 'valide' },
+        { id: 'brouillon', month: '2026-09', date: '2026-09-30', items: [{ store: 'stockRaw', code: 'K9', theo_qte: 9, real_qte: 9 }], statut: 'brouillon' },
+        { id: 'conso', month: '2026-09', date: '2026-09-30', items: [{ store: 'stockConsum', ref: 'P5', code: 'P5', real_qte: 1 }], statut: 'valide' },
+        { id: 'ancien', month: '2026-07', date: '2026-07-31', items: [{ store: 'stockRaw', code: 'K0', theo_qte: 0, real_qte: 0 }] }
+      ]);
+      var d = dernierInventaireMPValide();
+      (d && d.id === 'vieux')
+        ? 'OK : le validé MP d\u2019août retenu (brouillon récent, conso validée et legacy ignorés/non-MP)'
+        : 'ECHEC : ' + JSON.stringify(d && d.id)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Quota : le janitor purge les vieilles copies et garde la plus récente',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_backup_0', JSON.stringify({ vieux: true }));
+      localStorage.setItem('mdb_backup_1', JSON.stringify({ recent: true }));
+      localStorage.setItem('mdb_backup_meta', JSON.stringify([{ index: 1, ts: 200 }, { index: 0, ts: 100 }]));
+      var n = _prodQuotaJanitor(1);
+      var garde1 = localStorage.getItem('mdb_backup_1');
+      var parti0 = localStorage.getItem('mdb_backup_0');
+      try { localStorage.removeItem('mdb_backup_1'); localStorage.removeItem('mdb_backup_meta'); } catch (e) {}
+      (n === 1 && garde1 && !parti0)
+        ? 'OK : 1 vieille copie purgée, la récente gardée'
+        : 'ECHEC : n=' + n + ' garde1=' + !!garde1 + ' parti0=' + !parti0
     `,
     attenduPrefixe: 'OK'
   });
