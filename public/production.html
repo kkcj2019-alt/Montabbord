@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-191';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-192';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -9614,6 +9614,87 @@ function updateStockArticle(articleId, qty, type, ref, numero, motifOverride) {
   setMovements(movements);
 }
 
+/* ==================== MOUVEMENTS DE PRODUCTION ORPHELINS ====================
+   Une ecriture de stock porte toujours le numero de la fiche qui l'a creee
+   (« Production <numero> … », « ANNULATION fiche <numero> … », « Lot recree
+   par annulation de la fiche <numero> »). Si la fiche n'existe plus, l'ecriture
+   est un reste : ellecontinue de fausser le stock alors que la fiche, elle, a
+   disparu. C'etait exactement le cas « fiche 260901 supprimee » : le stock
+   affichait des mouvements d'une fiche inexistante.
+   Principe : la fiche fait foi. Supprimee, toutes ses ecritures partent. */
+function _prodNumeroRef(s) {
+  var t = String((s && (s.motif || s.obs)) || '');
+  if (!t) return '';
+  var m = t.match(/Production\s+(\d+)/i);
+  if (m) return m[1];
+  m = t.match(/ANNULATION\s+fiche\s+(\d+)/i);
+  if (m) return m[1];
+  m = t.match(/annulation de la fiche\s+(\d+)/i);
+  if (m) return m[1];
+  return '';
+}
+function prodLignesOrphelines() {
+  var nums = {};
+  getProductions().forEach(function (p) { if (p && p.numero) nums[String(p.numero)] = true; });
+  var out = [];
+  var sections = [
+    { nom: 'Semi-finis', get: getStockSemi, set: setStockSemi },
+    { nom: 'Produits finis', get: getStockFinished, set: setStockFinished },
+    { nom: 'Consommables', get: getStockConsum, set: setStockConsum },
+    { nom: 'Palettes', get: getStockPalettes, set: setStockPalettes },
+    { nom: 'Matiere premiere', get: getStockRaw, set: setStockRaw }
+  ];
+  sections.forEach(function (sec) {
+    var list = sec.get() || [];
+    list.forEach(function (s, i) {
+      var n = _prodNumeroRef(s);
+      if (n && !nums[n]) out.push({ sec: sec, index: i, ligne: s, numero: n });
+    });
+  });
+  return out;
+}
+function nettoyerProdOrphelines(silencieux) {
+  var orph = prodLignesOrphelines();
+  if (!orph.length) {
+    if (!silencieux) toast('Aucun mouvement orphelin — tout est coherent', 'success');
+    return 0;
+  }
+  var parSec = {};
+  orph.forEach(function (o) {
+    var k = o.sec.nom;
+    if (!parSec[k]) parSec[k] = [];
+    parSec[k].push(o);
+  });
+  var resume = Object.keys(parSec).map(function (k) {
+    return parSec[k].length + ' ' + k;
+  }).join(', ');
+  if (!silencieux) {
+    var detail = parSec[Object.keys(parSec)[0]].slice(0, 6).map(function (o) {
+      return (o.ligne.code || o.ligne.colis_number || '?') + ' ' + (parseFloat(o.ligne.quantite) || 0) + ' (fiche ' + o.numero + ')';
+    }).join('\n');
+    if (!confirm2('Nettoyer ' + orph.length + ' mouvement(s) de production sans fiche ?\n\n'
+      + resume + '\n\nExemple :\n' + detail
+      + '\n\nCes mouvements ont ete crees par une fiche qui n existe plus : les retirer rend le stock coherent.')) return 0;
+  }
+  var parNom = {};
+  Object.keys(parSec).forEach(function (k) { parNom[k] = parSec[k]; });
+  var total = 0;
+  Object.keys(parSec).forEach(function (k) {
+    var a = parSec[k][0].sec;
+    var list = a.get() || [];
+    var cuts = {};
+    parSec[k].forEach(function (o) { cuts[o.index] = true; });
+    var neuf = [];
+    list.forEach(function (s, i) { if (!cuts[i]) neuf.push(s); });
+    if (neuf.length !== list.length) { a.set(neuf); total += list.length - neuf.length; }
+  });
+  if (!silencieux) {
+    toast(total + ' mouvement(s) orphelin(s) supprime(s) — stock coherent', 'success');
+    renderPage();
+  }
+  return total;
+}
+
 /* ==================== HISTORIQUE ==================== */
 function render_history() {
   var prods = getProductions().filter(function(p) { return monthMatch(p.date); }).slice().reverse();
@@ -9624,9 +9705,21 @@ function render_history() {
   h += '<div class="tab' + (tab === 'saisies' ? ' active' : '') + '" onclick="setSection(\'historyTab\',\'saisies\');renderPage()">📋 Fiches de Production (' + prods.length + ')</div>';
   h += '<div class="tab' + (tab === 'losses' ? ' active' : '') + '" onclick="setSection(\'historyTab\',\'losses\');renderPage()">⚠️ Pertes (' + losses.length + ')</div>';
   h += '</div>';
+  /* Alerte : des mouvements de stock parlent d'une fiche qui n'existe plus. */
+  try {
+    var _orph = prodLignesOrphelines();
+    if (_orph.length) {
+      h += '<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:10px;padding:.55rem .9rem;margin-bottom:.8rem;font-size:.82rem">'
+        + '⚠️ <strong>' + _orph.length + ' mouvement(s) de stock</strong> proviennent d’une fiche de production supprimée : le stock est faussé. '
+        + '<button class="btn btn-sm" onclick="nettoyerProdOrphelines()" style="font-size:.72rem;padding:2px 8px">🧹 Nettoyer</button></div>';
+    }
+  } catch (eOrph) {}
 
   if (tab === 'saisies') {
-    if (prods.length === 0) return h + '<div class="empty">Aucune fiche de production</div>';
+    if (prods.length === 0) {
+      return h + '<div class="empty">Aucune fiche de production</div>'
+        + '<div style="text-align:center;margin-bottom:1rem"><button class="btn" onclick="nettoyerProdOrphelines()" title="Retirer les mouvements de stock dont la fiche n’existe plus" style="font-size:.75rem">🧹 Nettoyer les mouvements orphelins</button></div>';
+    }
     h += '<div class="card" style="margin-bottom:.5rem"><div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">📋 Fiches de Production (' + prods.length + ')</h3><div style="display:flex;gap:.5rem"><button class="btn" onclick="backfillFinishedCredits()" title="Créer les entrées produits finis manquantes (stock + journal des fiches validées)">💰 PF manquants</button><button class="btn" onclick="printProductionHistory()">🖨 Imprimer</button><button class="btn" onclick="exportProductionHistoryPDF()">📄 Export PDF</button></div></div>';
     h += '<table><tr><th>N°</th><th>Date</th><th>Article / Produit</th><th>Chef Projet</th><th style="text-align:right">Vol. Bois Sorti</th><th style="text-align:right">Vol. Lattes</th><th style="text-align:right">Vol. Plots</th><th style="text-align:right">Rendement</th><th>Statut</th><th>Actions</th></tr>';
     prods.forEach(function(p) {
@@ -9848,6 +9941,21 @@ function deleteProd(id) {
       'Supprimer cette fiche restaurera le stock de ' + fmt(p.vol_sortie_bois || 0) + ' m³.\n\nConfirmer ?';
   }
   if (!confirm2(msg)) return;
+  /* Toute suppression purge les mouvements de la fiche, quel que soit son
+     statut : le test « Production <numero> » ne doit pas dependre d'un espace
+     final, sinon une ecriture sans suffixe survivait a la suppression. */
+  if (p.numero) {
+    var _num = String(p.numero);
+    var _estDeCetteFiche = function (s) { return _prodNumeroRef(s) === _num; };
+    [[getStockSemi, setStockSemi], [getStockFinished, setStockFinished],
+     [getStockConsum, setStockConsum], [getStockPalettes, setStockPalettes]]
+      .forEach(function (paire) {
+        try {
+          var av = paire[0]() || [], ap = av.filter(function (s) { return !_estDeCetteFiche(s); });
+          if (ap.length !== av.length) paire[1](ap);
+        } catch (eX) {}
+      });
+  }
   if (p.statut === 'validated') {
     var _rest = restoreBoisSorti(p);
     /* Annulation complete des ecritures tracees de la fiche (entrees usinage,

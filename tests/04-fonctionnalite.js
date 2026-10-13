@@ -1222,6 +1222,55 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Production : les mouvements d une fiche supprimee sont orphelins et nettoyables',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [{ code:'P114*10', designation:'P114*10', type:'PLOT', length:110, width:10, thickness:4 }]);
+      /* Aucune fiche de production : ce qui reste au stock est un reste. */
+      setProductions([]);
+      setStockSemi([
+        { id:1, code:'P114*10', quantite: 500, motif:'Production 260901 — usinage : +500 P114*10', obs:'Production 260901 — usinage : +500 P114*10', created_at:'2026-09-29' },
+        { id:2, code:'P114*10', quantite:-300, motif:'Production 260901', obs:'Production 260901', created_at:'2026-09-29' },
+        { id:3, code:'L114*8*2', quantite:-500, motif:'ANNULATION fiche 260901 — retrait sortie usinage', obs:'ANNULATION fiche 260901 — retrait sortie usinage', created_at:'2026-09-29' },
+        { id:4, code:'P6', quantite: 900, motif:'Achat BL-9', obs:'Achat BL-9', created_at:'2026-09-10' }
+      ]);
+      var avant = prodLignesOrphelines().length;
+      var n = nettoyerProdOrphelines(true);
+      var st = getStockSemi();
+      var garde = 0, fantome = 0;
+      for (var i = 0; i < st.length; i++) {
+        if (String(st[i].code) === 'P6') garde++;
+        else fantome++;
+      }
+      (avant === 3 && n === 3 && garde === 1 && fantome === 0)
+        ? 'OK : 3 mouvements orphelins supprimes, l achat BL-9 conserve'
+        : 'ECHEC avant=' + avant + ' n=' + n + ' garde=' + garde + ' fantome=' + fantome
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Production : supprimer une fiche retire ses mouvements, meme sans espace final',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      confirm2 = function () { return true; };
+      renderPage = function () {};
+      setSection('composants', [{ code:'P-TEST', designation:'P-TEST', type:'PLOT', length:100, width:10, thickness:4 }]);
+      setProductions([{ id:'p1', numero:'260902', date:'2026-09-29', statut:'brouillon' }]);
+      setStockSemi([
+        { id:1, code:'P-TEST', quantite: 100, motif:'Production 260902 — usinage : +100 P-TEST', obs:'Production 260902 — usinage : +100 P-TEST' },
+        { id:2, code:'P-TEST', quantite: -40, motif:'Production 260902', obs:'Production 260902' }
+      ]);
+      deleteProd('p1');
+      var reste = getStockSemi().length;
+      var fiches = getProductions().length;
+      (reste === 0 && fiches === 0) ? 'OK : fiche et ses 2 mouvements supprimes'
+        : 'ECHEC reste=' + reste + ' fiches=' + fiches
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
