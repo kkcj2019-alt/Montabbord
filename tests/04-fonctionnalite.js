@@ -4680,19 +4680,49 @@ r.push({
   });
 
   r.push({
-    nom: 'Connexion PF : l\u2019index récupère les finis exploitation (sans toucher aux prix)',
+    nom: 'Connexion PF : l\u2019index NE recopie plus les produits cr\u00e9\u00e9s en exploitation (source unique)',
     app: 'index.html', store: storeRealiste,
     code: `
       localStorage.setItem('mdb_nomenclature', JSON.stringify([]));
       var r1 = syncProduitsFinisFromExploitation();
       var arts = getArticles();
-      var pal = arts.filter(function (a) { return a.code === 'PAL'; })[0] || {};
       var r2 = syncProduitsFinisFromExploitation();
-      (r1.crees === 1 && pal.typeArticle === 'produit_fini'
-        && (pal.prixPeriodes || []).length === 1 && pal.prixPeriodes[0].prixUnitaire === 45000
-        && r2.crees === 0)
-        ? 'OK : PAL créé produit_fini (période 45000), 2e passe sans doublon'
+      /* PAL est cree en exploitation : il ne doit PAS etre ajoute a l'index
+         (sinon tout ce qu'on y supprime revient, et les comptes divergent). */
+      (r1.crees === 0 && r2.crees === 0 && arts.length === 0
+        && r1.absents && r1.absents.indexOf('PAL') !== -1)
+        ? 'OK : rien n\u2019est recopie, PAL est signale « absent de la source »'
         : 'ECHEC : r1=' + JSON.stringify(r1) + ' arts=' + JSON.stringify(arts)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Exploitation : un article supprim\u00e9 ne ressuscite plus (marquage d\u00e9di\u00e9)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: 'BBOXB', designation: 'Big box banane', typeArticle: 'produit_fini' }
+      ]));
+      setSection('articles', []);
+      setSection('pfLinks', []); setSection('pfIgnores', []);
+      renderPage = function () {};
+      window.confirm2 = function () { return true; };
+      /* 1) l'index alimente l'exploitation */
+      syncProduitsFinisFromIndex();
+      var cree = getArticles().filter(function (a) { return a.code === 'BBOXB'; }).length;
+      /* 2) l'utilisateur le supprime */
+      var cible = getArticles().filter(function (a) { return a.code === 'BBOXB'; })[0];
+      deleteArticle(cible.id);
+      var apresDel = getArticles().filter(function (a) { return a.code === 'BBOXB'; }).length;
+      /* 3) l'index renvoie encore son article + un onglet renvoie une base
+            plus ancienne : rien ne doit ressusciter */
+      syncProduitsFinisFromIndex();
+      setSection('articles', [{ id: 'z1', code: 'BBOXB', designation: 'Big box banane', categorie: 'finished', _fromIndex: true }]);
+      var apresRendu = getArticles().filter(function (a) { return a.code === 'BBOXB'; }).length;
+      (cree === 1 && apresDel === 0 && apresRendu === 0)
+        ? 'OK : cr\u00e9\u00e9 puis supprim\u00e9, et il ne revient ni par l\u2019index ni par une base plus ancienne'
+        : 'ECHEC cree=' + cree + ' apresDel=' + apresDel + ' apresRendu=' + apresRendu
     `,
     attenduPrefixe: 'OK'
   });

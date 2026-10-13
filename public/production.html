@@ -6595,8 +6595,46 @@ function acGetArticlesMontage() {
   } catch(e) { return []; }
 }
 
+/* Liste des articles SUPPRIMES, dans une cle separee.
+   Pourquoi : l'onglet Exploitation et l'application principale ecrivent la
+   meme cle mdb_production. Un onglet plus ancien peut la renvoyer en
+   entier, et un article supprime ressuscitait (BBOXB). Cette liste, elle,
+   n'est jamais reecrite en bloc : elle filtre a la LECTURE, donc la
+   suppression tient meme si l'autre onglet renvoie ses donnees. */
+function pfSupprimes() {
+  try {
+    var v = JSON.parse(localStorage.getItem('mdb_prod_supprimes') || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+}
+function pfMarquerSupprime(code) {
+  var n = pfNormCode(code);
+  if (!n) return;
+  var l = pfSupprimes();
+  if (l.indexOf(n) === -1) { l.push(n); try { localStorage.setItem('mdb_prod_supprimes', JSON.stringify(l)); } catch (e) {} }
+}
+function pfEstSupprime(code) {
+  var n = pfNormCode(code);
+  if (!n) return false;
+  return pfSupprimes().indexOf(n) !== -1;
+}
+function pfOublierSupprime(code) {
+  var n = pfNormCode(code);
+  if (!n) return;
+  try { localStorage.setItem('mdb_prod_supprimes', JSON.stringify(pfSupprimes().filter(function(x) { return x !== n; }))); } catch (e) {}
+}
 function getArticles() {
   var arts = getSection('articles', []);
+  /* Un article supprime ne reapparait pas, meme si un autre onglet renvoie
+     une copie plus ancienne de la base. */
+  try {
+    if (arts && arts.length) {
+      var sup = pfSupprimes();
+      if (sup.length) {
+        arts = arts.filter(function (a) { return a && sup.indexOf(pfNormCode(a.code)) === -1; });
+      }
+    }
+  } catch (eSup) {}
   /* Partage automatique avec les articles de montage du module Paye (Données de Salaire) */
   try {
     var ams = acGetArticlesMontage();
@@ -15090,9 +15128,13 @@ function render_articles() {
   articles.forEach(function(a) { var d = String(a.destination || '').trim(); if (d) dests[d] = true; });
   var destList = Object.keys(dests).sort();
   var nbPF = articles.filter(function(a) { return String(a.categorie || '').toLowerCase() === 'finished'; }).length;
+  var nbHors = articles.filter(function(a) { return a._horsIndex; }).length;
   var h = '<div style="display:flex;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
   h += '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">';
   h += '<span style="font-size:.78rem;font-weight:800;color:var(--primary)">' + articles.length + ' article(s) · ' + nbPF + ' produit(s) fini(s)</span>';
+  if (nbHors) {
+    h += '<span title="Ces produits n\u2019existent pas dans la Nomenclature (app principale), qui est la source. Int\u00e9grez-les avec restaurerProduitHorsIndex(\u2019CODE\u2019)." style="font-size:.7rem;font-weight:700;color:#b91c1c;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:1px 7px">' + nbHors + ' hors Index</span>';
+  }
   h += '<input type="text" id="catSearch" class="search-box" placeholder="🔍 Rechercher..." oninput="filtrerCatalogue()">';
   h += '<select id="catDestFilter" onchange="filtrerCatalogue()" style="padding:.35rem .5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"><option value="">Toutes destinations</option>';
   destList.forEach(function(d) { h += '<option value="' + escH(d) + '"' + (window._catDestF === d ? ' selected' : '') + '>' + escH(d) + '</option>'; });
@@ -15516,6 +15558,9 @@ function saveArticleModal(id) {
   var articles = getArticles();
   var a = id ? articles.find(function(x) { return x.id === id; }) : null;
   if (id && !a) return;
+  /* Recréer volontairement un code precedemment supprime : on leve le
+     marquage, sinon l'article serait filtre a la lecture. */
+  pfOublierSupprime(code);
   var oldCat = a ? (a.categorie || 'finished') : null;
   if (!a) { a = { id: genId(), created_at: new Date().toISOString() }; articles.push(a); }
   a.code = code;
@@ -15586,6 +15631,9 @@ function deleteArticle(id) {
      toujours present). */
   if (art.categorie === 'finished') {
     var _n = pfNormCode(art.code);
+    /* Filet anti-ressurrection : meme si l'autre onglet renvoie une copie
+       plus ancienne de la base, l'article supprime ne revient pas. */
+    pfMarquerSupprime(art.code);
     try {
       /* tous les codes index Lies a cet article (lui-meme + ses alias) */
       var _codes = [_n];
@@ -15617,7 +15665,17 @@ function deleteArticle(id) {
   /* Le catalogue = les produits finis : supprimer aussi les entrées stock liées */
   setStockFinished(getStockFinished().filter(function(s) { return s.article_id !== id; }));
   setStockSemi(getStockSemi().filter(function(s) { return s.article_id !== id; }));
-  toast('Article supprimé');
+  /* On ne dit « supprime » que si c'est vrai : l'index pouvait encore
+     conserver l'article et le recreer au rendu suivant. */
+  var _restant = null;
+  try {
+    _restant = getArticles().filter(function (x) { return x && String(x.id) === String(id); })[0] || null;
+  } catch (eChk) {}
+  if (_restant) {
+    toast('Suppression non effective : l\u2019article est encore là. Rechargez la page puis réessayez.', 'error');
+  } else {
+    toast('Article supprimé');
+  }
   renderPage();
 }
 
@@ -15763,9 +15821,11 @@ function syncProduitsFinisFromIndex() {
     /* 2) Creation / mise a jour */
     for (var j = 0; j < pfIdx.length; j++) {
       var ia2 = pfIdx[j];
-      if (pfEstIgnore(ia2.code)) continue;
+      /* Article supprime ici : jamais recree, meme si l'index en garde
+         encore une trace (le marquage se double d'une liste dediee). */
+      if (pfEstIgnore(ia2.code) || pfEstSupprime(ia2.code)) continue;
       var codeExp = pfExplDe(ia2.code);
-      if (pfEstIgnore(codeExp)) continue;
+      if (pfEstIgnore(codeExp) || pfEstSupprime(codeExp)) continue;
       var ex2 = null;
       for (var k = 0; k < arts.length; k++) {
         if (arts[k].categorie === 'finished' && pfNormCode(arts[k].code) === pfNormCode(codeExp)) { ex2 = arts[k]; break; }
@@ -15847,6 +15907,7 @@ function syncProduitsFinisFromIndex() {
 function restaurerProduitHorsIndex(code) {
   var n = pfNormCode(code);
   if (!n) return;
+  pfOublierSupprime(code);
   var art = null, arts = getArticles() || [];
   for (var i = 0; i < arts.length; i++) { if (arts[i] && arts[i].categorie === 'finished' && pfNormCode(arts[i].code) === n) art = arts[i]; }
   if (!art) return toast('Produit ' + code + ' introuvable en Exploitation', 'error');
