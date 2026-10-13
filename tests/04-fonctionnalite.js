@@ -630,6 +630,36 @@ attenduPrefixe: 'OK'
     attendu: 'OK'
   });
 
+  r.push({
+    nom: 'Exploitation : un inventaire historique s\'imprime et montre le reel en paquets/cartons',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.__capture = '';
+      window.openModal = function (h) { window.__capture = h; };
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      setSection('definitions', [{ code:'P6', designation:'POINTE6', qty_per_packet:170, type:'POINTE' }]);
+      setSection('inventories', [{ id:'i1', date:'2026-09-30', month:'2026-09', supervisor:'Goli', statut:'valide',
+        items:[ { code:'P6', nom:'POINTE6', categorie:'Consommable', type:'POINTE', store:'stockConsum', theo_qte:34510, real_qte:45100 } ] }]);
+      viewInventory('i1');
+      var h = window.__capture || '';
+      var okBouton = h.indexOf('printInventaire') !== -1;
+      var okCols = h.indexOf('Réel paq/cart') !== -1 && h.indexOf('Théo. paq/cart') !== -1;
+      var okVal = h.indexOf('paq') !== -1;
+      /* L'impression.generate le document complet (tableau + visa) */
+      var captureImpr = '';
+      var faux = { document: { write: function (x) { captureImpr += x; }, open: function () {}, close: function () {} }, focus: function () {}, print: function () {} };
+      var vraiOpen = window.open;
+      window.open = function () { return faux; };
+      try { printInventaire('i1'); } catch (eP) {}
+      window.open = vraiOpen;
+      var okPrint = captureImpr.indexOf('Réel paq/cart') !== -1 && captureImpr.indexOf('Visa responsable') !== -1;
+      (okBouton && okCols && okVal && okPrint)
+        ? 'OK : bouton Imprimer, colonnes paq/cart (45100 = 265 paq · 5,3 cart) et impression complete'
+        : 'ECHEC bouton=' + okBouton + ' cols=' + okCols + ' val=' + okVal + ' print=' + okPrint
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Lectures typees : une donnee abimee ne doit rien casser ---------- */
   r.push({
     nom: 'Exploitation : une section corrompue ne casse pas la page Achats',
@@ -1617,27 +1647,51 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Remise collective de soldes : « Modifier » ouvre le modal des soldes, pas celui des acomptes',
+    nom: 'Remise collective de soldes : « Modifier » ouvre le modal collectif (un seul modal)',
     app: 'index.html', store: storeRealiste,
     code: `
       /* Une remise collective de soldes porte collective:true ET apType:'solde' :
-         elle doit partir dans l editeur des soldes, sinon l editeur des
-         acomptes refusait la piece (« non editable pour cette periode »). */
+         elle doit s'ouvrir dans le modal collectif, comme les acomptes, et y
+         être modifiable sans creer un second lot. */
       var ops = getOperationsCaisse();
       ops.push({ id: 'opSC', numeroPiece: 'SLD-100', date: '2026-09-15', heure: '', codeId: 'cid', code: 'SOLDE_INDEMNITE', libelle: 'Solde indemnite - Septembre 2026', periode: '2026-09', montant: 50000, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', remettant: 'Kanga', executant: 'P.O.', caisseId: 'c1', collective: true, groupeId: 'gSC', apType: 'solde', apMoisDeduction: '2026-09' });
       DB.set('mdb_operationsCaisse', ops);
-      var appeleSolde = 0, appeleAcompte = 0;
-      var vraiSolde = openSoldeGroupeEdit, vraiCollectif = editCaisseCollectifNewUI;
+      var appeleCollectif = 0, appeleSolde = 0;
+      var vraiColl = editCaisseCollectifNewUI, vraiSolde = openSoldeGroupeEdit;
+      editCaisseCollectifNewUI = function (id) { appeleCollectif++; return true; };
       openSoldeGroupeEdit = function (id) { appeleSolde++; };
-      editCaisseCollectifNewUI = function (id) { appeleAcompte++; return true; };
-      try { editCaisseOp('opSC'); } finally { openSoldeGroupeEdit = vraiSolde; editCaisseCollectifNewUI = vraiCollectif; }
-      /* Idem par le chemin groupeId (page Tr\u00e9sorerie / liens de groupe) */
-      var appeleSolde2 = 0, vraiSolde2 = openSoldeGroupeEdit;
-      openSoldeGroupeEdit = function (id) { appeleSolde2++; };
-      try { openCollectifNewUIByGroupe('gSC'); } finally { openSoldeGroupeEdit = vraiSolde2; }
-      (appeleSolde === 1 && appeleAcompte === 0 && appeleSolde2 === 1)
-        ? 'OK : la piece collective de soldes ouvre le modal des soldes (direct + par groupe)'
-        : 'ECHEC solde=' + appeleSolde + ' acompte=' + appeleAcompte + ' groupe=' + appeleSolde2
+      try { editCaisseOp('opSC'); } finally { editCaisseCollectifNewUI = vraiColl; openSoldeGroupeEdit = vraiSolde; }
+      (appeleCollectif === 1 && appeleSolde === 0)
+        ? 'OK : la piece collective de soldes ouvre le modal collectif'
+        : 'ECHEC collectif=' + appeleCollectif + ' soldes=' + appeleSolde
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Remise collective de soldes : le modal collectif repousse le lot (pas de doublon)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'm1', numeroPiece: 'SLD-100', date: '2026-09-15', codeId: 'cid', code: 'SOLDE_INDEMNITE', libelle: 'Solde', periode: '2026-09', montant: 50000, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1', collective: true, groupeId: 'gSC', apType: 'solde' });
+      DB.set('mdb_operationsCaisse', ops);
+      var row = { querySelector: function (sel) {
+        if (sel === '.cs-coll-include') return { checked: true };
+        if (sel === '.cs-coll-employe') return { value: 'e1' };
+        if (sel === '.cs-coll-montant') return { value: '60000' };
+        return { value: '', checked: true, style: {}, options: [], setAttribute: function () {}, querySelector: function () { return null; } };
+      } };
+      var vraiQSA = document.querySelectorAll;
+      document.querySelectorAll = function (sel) { return (sel === '#csCollectifBody tr') ? [row] : []; };
+      try {
+        saveSoldeCollectif('c1', '2026-09-15', { id: 'cid', code: 'SOLDE_INDEMNITE', libelle: 'Solde' }, 'gSC', 'm1');
+      } finally { document.querySelectorAll = vraiQSA; }
+      var apres = getOperationsCaisse().filter(function (x) { return x.groupeId === 'gSC'; });
+      var garde = getOperationsCaisse().length;
+      var avant = getOperationsCaisse().length;
+      (apres.length === 1 && apres[0].montant === 60000 && apres[0].numeroPiece === 'SLD-100' && garde === avant)
+        ? 'OK : 1 seule piece (montant corrige a 60 000, N\u00b0 conserve), aucune piece ajoutee'
+        : 'ECHEC pieces=' + apres.length + ' montant=' + (apres[0] && apres[0].montant) + ' avant=' + avant + ' apres=' + garde
     `,
     attenduPrefixe: 'OK'
   });
@@ -4696,6 +4750,103 @@ r.push({
       (okSel && okCb && okData && okCount)
         ? 'OK : select destination, cases, data-dest et compteur visibles'
         : 'ECHEC : sel=' + okSel + ' cb=' + okCb + ' data=' + okData + ' count=' + okCount
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Exploitation : cliquer « Catalogue Produits finis » ouvre bien la page (navigate du menu)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_currentPage', 'dashboard');
+      CURRENT_PAGE = 'dashboard';
+      renderPage();
+      /* Le menu appelle exactement ceci */
+      navigate('cat-produits-finis');
+      var h = document.getElementById('content').innerHTML || '';
+      var titre = (document.getElementById('pageTitle').textContent || '');
+      var onglet = h.indexOf('Catalogue') !== -1 && h.indexOf('Fiche Technique') !== -1 && h.indexOf('Définitions Composants') !== -1;
+      (CURRENT_PAGE === 'cat-produits-finis' && onglet && titre.indexOf('Catalogue') !== -1 && h.length > 200)
+        ? 'OK : page rendue avec ses 3 onglets (' + h.length + ' car.)'
+        : 'ECHEC page=' + CURRENT_PAGE + ' onglets=' + onglet + ' titre=' + titre + ' len=' + h.length + ' html=' + h.slice(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock consommables : paquets et cartons se deduisent du total (P5 : plus de 0 paquet)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* 623 pointes a cond. 180 reparties en petits lots : l ancien code
+         arrondissait chaque fiche et affichait 0 paquet / 0 carton. */
+      p.stockConsum = [
+        { id: 's1', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 180, quantite: 300, date: '2026-09-01', obs: 'achat' },
+        { id: 's2', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 180, quantite: 323, date: '2026-09-02', obs: 'achat' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var ppc = 50;
+      localStorage.setItem('mdb_packs_per_carton', String(ppc));
+      var a = null;
+      var list = consoAggregate();
+      for (var i = 0; i < list.length; i++) { if (list[i].code === 'P5') a = list[i]; }
+      var ok = !!a && a.unites === 623 && a.paquets === 3 && Math.abs(a.cartons - 0.06) < 0.001;
+      (ok) ? 'OK : 623 pointes cond.180 = 3 paquets = 0,06 carton'
+          : 'ECHEC unites=' + (a && a.unites) + ' paq=' + (a && a.paquets) + ' cart=' + (a && a.cartons)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock consommables : les cartons valent paquets / ppc (P6 : 34,4 et non 6)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* 292 230 pointes a cond. 170 = 1 719 paquets. Les lignes portent un
+         champ `cartons` incoherent : il ne doit plus piloter l affichage. */
+      p.stockConsum = [
+        { id: 's1', code: 'P6', designation: 'POINTE6', ctype: 'POINTE', cond: 170, quantite: 292230, date: '2026-09-01', obs: 'base', _invBase: 'i1', _invId: 'i1' },
+        { id: 's2', code: 'P6', designation: 'POINTE6', ctype: 'POINTE', cond: 170, quantite: 1000, date: '2026-10-02', obs: 'achat BL', cartons: 6 }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var list = consoAggregate(), a = null;
+      for (var i = 0; i < list.length; i++) { if (list[i].code === 'P6') a = list[i]; }
+      var ok = !!a && a.paquets === Math.floor(293230 / 170) && Math.abs(a.cartons - a.paquets / 50) < 0.001;
+      (ok) ? 'OK : ' + a.paquets + ' paquets = ' + a.cartons + ' carton (le 6 saisi ne pilote plus)'
+          : 'ECHEC paq=' + (a && a.paquets) + ' cart=' + (a && a.cartons)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock consommables : le registre affiche les fiches sans id (sinon 1719 paquets au tableau, 501 dans les mouvements)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { code: 'P6', designation: 'POINTE6', ctype: 'POINTE', cond: 170, quantite: 30000, date: '2026-09-02', obs: 'achat sans id' },
+        { id: 's2', code: 'P6', designation: 'POINTE6', ctype: 'POINTE', cond: 170, quantite: 10000, date: '2026-09-03', obs: 'achat' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var lignes = _consoLignes('P6');
+      var mvt = buildConsoMovements(lignes);
+      var total = 0, somme = 0;
+      mvt.forEach(function (m) { if (typeof m.final === 'number') total = m.final; });
+      lignes.forEach(function (l) { somme += (l.unites || 0); });
+      (lignes.length >= 2 && total === somme && somme === 40000)
+        ? 'OK : les fiches (dont celle sans id) totalisent 40 000 pointes dans le registre, comme au tableau'
+        : 'ECHEC fiches=' + lignes.length + ' registre=' + total + ' somme=' + somme + ' detail=' + JSON.stringify(lignes.map(function (l) { return (l.code || '?') + ':' + (l.id === undefined ? 'sans-id' : l.id) + '=' + l.unites; }))
     `,
     attenduPrefixe: 'OK'
   });

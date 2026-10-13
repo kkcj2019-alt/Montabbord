@@ -19893,7 +19893,7 @@ function saveRemiseCollectiveSansDetail(caisseId, fullDate, typeOp) {
   renderCaisseIn(document.getElementById('tresorerieContent'));
 }
 /* Remise collective des SOLDES (salaire / indemnité) : une pièce par employé coché, même N° de pièce */
-function saveSoldeCollectif(caisseId, fullDate, soldeCode) {
+function saveSoldeCollectif(caisseId, fullDate, soldeCode, groupeIdEdit, masterOpIdEdit) {
   if (!caisseId) { toast('Caisse introuvable', 'error'); return; }
   if (!fullDate) { toast('Le jour est obligatoire', 'error'); return; }
   if (!soldeCode) { toast('Code solde introuvable', 'error'); return; }
@@ -19912,6 +19912,16 @@ function saveSoldeCollectif(caisseId, fullDate, soldeCode) {
   var periodeDef = (document.getElementById('csPeriodeMois') ? document.getElementById('csPeriodeMois').value : '') || '';
   var groupeId = DB.genId();
   var np = generatePieceNumber(caisseId, fullDate);
+  /* EDITION d'un lot existant : on repart de ses opérations et on REMPLACE le
+     groupe (sinon la sauvegarde depuis le modal collectif créait un doublon).
+     Le N° de pièce est conservé : c'est la même pièce, corrigée. */
+  if (groupeIdEdit) {
+    var _master = null, _mi;
+    for (_mi = 0; _mi < ops.length; _mi++) { if (ops[_mi].id === masterOpIdEdit) _master = ops[_mi]; }
+    ops = ops.filter(function (x) { return x.groupeId !== groupeIdEdit; });
+    if (_master && _master.numeroPiece) np = _master.numeroPiece;
+    groupeId = groupeIdEdit; /* même lot : on corrige, on ne crée pas un nouveau */
+  }
   var count = 0, total = 0;
   var _anySoldeChecked = false;
   rows.forEach(function (row) { var _ic = row.querySelector('.cs-coll-include'); if (_ic && _ic.checked) _anySoldeChecked = true; });
@@ -29236,11 +29246,6 @@ function openCollectifNewUIByGroupe(groupeId) {
     for (i = 0; i < opsAll.length; i++) { if (opsAll[i].groupeId === groupeId) { target = opsAll[i]; break; } }
     if (!target) { for (i = 0; i < opsAll.length; i++) { if (opsAll[i].id === groupeId) { target = opsAll[i]; break; } } }
     if (!target) { toast('Pi\u00e8ce collective introuvable en caisse', 'error'); return false; }
-    /* Solde/indemnité collective : son éditeur est le modal groupé des soldes */
-    if (target.code && CS_PERIOD_CODES.indexOf(target.code) !== -1 && target.date) {
-      openSoldeGroupeEdit(target.id);
-      return true;
-    }
     window._apFromCaisse = true;
     var needNav = (typeof currentPage === 'undefined' || currentPage !== 'tresorerie') || !document.getElementById('csCollectifBody');
     if (needNav && typeof navigateTo === 'function') {
@@ -29285,7 +29290,11 @@ function editCaisseCollectifNewUI(opId) {
     var pieceNo = masterOp.numeroPiece || '';
     if (!pieceNo && fiches.length > 0) pieceNo = fiches[0].numeroPiece || '';
     var _type = masterOp.apType || o.apType || ((fiches.length > 0 && fiches[0].type) ? fiches[0].type : '') || 'acompte';
-    if (_type !== 'pret') _type = 'acompte';
+    /* Soldes : le type reste « libre » + code solde, sinon la sauvegarde ne
+       reconnait pas la remise collective de soldes (elle exige type !=
+       acompte/pret ET un code solde). */
+    var _estSolde = (_type === 'solde');
+    if (_type !== 'pret' && !_estSolde) _type = 'acompte';
     /* Groupe d'opérations du lot */
     var groupOps = [], gi;
     /* En modification, on ne prend QUE la caisse de la piece : sans ce filtre,
@@ -29311,7 +29320,7 @@ function editCaisseCollectifNewUI(opId) {
     }
     setV('csCaisseId', masterOp.caisseId || '');
     var _csType = document.getElementById('csType');
-    if (_csType) { _csType.value = _type; try { if (typeof onCsTypeUserChange === 'function') onCsTypeUserChange(); } catch(eT) {} try { if (typeof toggleBeneficiaire === 'function') toggleBeneficiaire(); } catch(eB) {} }
+    if (_csType) { _csType.value = _estSolde ? 'libre' : _type; try { if (typeof onCsTypeUserChange === 'function') onCsTypeUserChange(); } catch(eT) {} try { if (typeof toggleBeneficiaire === 'function') toggleBeneficiaire(); } catch(eB) {} }
     var _apg = document.getElementById('csAPGroup');
     if (_apg) _apg.style.display = (_type === 'pret') ? '' : 'none';
     setV('csCode', masterOp.codeId || '');
@@ -29382,20 +29391,24 @@ function editCaisseOp(id) {
      numerique : sans normalisation, rien ne s'ouvrait au clic sur Modifier. */
   for (var i = 0; i < ops.length; i++) { if (String(ops[i].id) === String(id)) { o = ops[i]; break; } }
   if (!o) return;
-  /* Solde salaire/indemnité : TOUJOURS le modal groupé (permet d'ajouter d'autres
-     employés et de rééquilibrer une répartition). Ce test doit passer AVANT le
-     cas collectif : une remise collective de soldes porte elle aussi
-     collective:true, mais son éditeur est celui des soldes, pas celui des
-     acomptes/prêts (sinon « Remise collective non éditable »). */
-  if (o.code && CS_PERIOD_CODES.indexOf(o.code) !== -1 && o.date) {
-    openSoldeGroupeEdit(o.id);
-    return;
-  }
-  /* Remise collective acompte/prêt : nouvelle UI pré-remplie ; jamais l'ancien éditeur */
+  /* Une remise COLLECTIVE s'ouvre toujours dans le modal collectif (le même
+     qu'à la saisie), soldes compris : c'est là qu'on répartit et rééquilibre.
+     Le modal groupé des soldes ne sert que de repli si le collectif est
+     inutilisable (employé absent de la période). */
   if (o.collective) {
     window._apFromCaisse = true;
     try { if (typeof editCaisseCollectifNewUI === 'function' && editCaisseCollectifNewUI(o.id)) return; } catch(eECN) { console.warn('[Edit] collectif:', eECN); }
+    if (o.code && CS_PERIOD_CODES.indexOf(o.code) !== -1 && o.date) {
+      try { toast('Ouverture de l\u2019éditeur des soldes (un salarié de la p\u00e9riode manque dans le tableau collectif)', 'info'); } catch(eIS) {}
+      openSoldeGroupeEdit(o.id);
+      return;
+    }
     try { toast('Remise collective non \u00e9ditable pour cette p\u00e9riode', 'error'); } catch(eTE) {}
+    return;
+  }
+  /* Solde simple (hors collective) : modal groupé des soldes */
+  if (o.code && CS_PERIOD_CODES.indexOf(o.code) !== -1 && o.date) {
+    openSoldeGroupeEdit(o.id);
     return;
   }
   /* Édition normale */
@@ -35272,7 +35285,7 @@ function saveCaisse(id, asDraft) {
         window._csCollectifEditGroupeId = '';
         window._csCollectifEditMasterOpId = '';
         if (_isPanierColl) savePanierCollectif(caisseId, fullDate);
-        else if (_isSoldeColl) saveSoldeCollectif(caisseId, fullDate, _soldeCollCode);
+        else if (_isSoldeColl) saveSoldeCollectif(caisseId, fullDate, _soldeCollCode, _eg, _em);
         else saveAcomptePretCollectif(true, caisseId, fullDate, _eg, _em);
       } catch(e) { toast('Erreur: ' + e.message, 'error'); }
       return;

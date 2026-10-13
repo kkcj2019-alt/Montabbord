@@ -11788,7 +11788,7 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
        Sinon (lignes anciennes) on deduit le nombre de cartons a partir des paquets. */
     var _cartSaisi = (s.cartons === undefined || s.cartons === null || s.cartons === '') ? null : (parseFloat(s.cartons) || 0);
     var cart = t === 'POINTE' ? (_cartSaisi !== null ? _cartSaisi : Math.ceil(paq / _ppc)) : 0;
-    return { id: s.id, code: code || '-', des: des || '-', type: t, emplacement: s.emplacement || s.zone || '-', cond: cond, unites: unites, paquets: paq, cartons: cart };
+    return { id: s.id, src: s, code: code || '-', des: des || '-', type: t, emplacement: s.emplacement || s.zone || '-', cond: cond, unites: unites, paquets: paq, cartons: cart };
   }
   /* Le stock d'un consommable se suit PAR PRODUIT. Chaque achat créait
      pourtant sa propre ligne de stock, d'ou plusieurs fiches pour un meme
@@ -11805,13 +11805,25 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       var key = (n.code || n.des || '?').toUpperCase();
       if (!map[key]) {
         map[key] = { key: key, code: n.code, des: n.des, type: n.type, emplacement: n.emplacement,
-                     cond: 0, unites: 0, paquets: 0, _cartonsSaisis: 0, _nbSaisis: 0, nbFiches: 0, ids: [] };
+                     cond: 0, unites: 0, paquets: 0, cartons: 0, ppc: ppc, _cartonsSaisis: 0, _nbSaisis: 0, nbFiches: 0, ids: [] };
         ordre.push(key);
       }
       var a = map[key];
       a.unites += (n.unites || 0);
       a.paquets += (n.paquets || 0);
       a.nbFiches++;
+      /* Paquets par carton REELS du produit : le réglage de l'achat prime,
+         sinon on le deduit du couple cartons/paquets saisi. Une seule valeur
+         par produit (la derniere connue), sinon P6 affichait 34,4 cartons
+         avec un reglage de 50 alors que ses lignes disent 100 p/c. */
+      var _ppcL = parseInt(s && s.ppc, 10) || 0;
+      if (!(_ppcL > 0) && s && (parseFloat(s.cartons) >= 1) && (n.paquets >= 1)) {
+        var _ratio = n.paquets / parseFloat(s.cartons);
+        /* Ratio plausible seulement (5 a 5000) : sinon la ligne est incoherente
+           (ex. 5 paquets pour 6 cartons) et on garde le reglage global. */
+        if (_ratio >= 5 && _ratio <= 5000) _ppcL = Math.round(_ratio);
+      }
+      if (_ppcL > 0) a.ppc = _ppcL;
       if (s && s.id !== undefined && s.id !== null) a.ids.push(s.id);
       if (n.cond > 0) a.cond = n.cond;
       if (s && (s.cartons !== undefined && s.cartons !== null && s.cartons !== '')) {
@@ -11832,7 +11844,7 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
         return;
       }
       map[k] = { key: k, code: code, des: des || code, type: type || 'DIVERS', emplacement: '',
-                 cond: cond || 0, unites: 0, paquets: 0, _cartonsSaisis: 0, _nbSaisis: 0, nbFiches: 0, ids: [] };
+               cond: cond || 0, unites: 0, paquets: 0, cartons: 0, ppc: ppc, _cartonsSaisis: 0, _nbSaisis: 0, nbFiches: 0, ids: [] };
       ordre.push(k);
     }
     try {
@@ -11858,14 +11870,22 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
     } catch (eA) {}
     return ordre.map(function (k) {
       var a = map[k];
-      /* On additionne les cartons saisis ; sinon on les deduit UNE seule fois
-         sur le total des paquets (un ceil par fiche gonflerait le total). */
-      a.cartons = a.type === 'POINTE'
-        ? (a._nbSaisis > 0 ? a._cartonsSaisis : Math.ceil(a.paquets / ppc))
-        : 0;
-      /* Stock nul = paquets nuls : les arrondis par ligne (floor) ne doivent
-         jamais afficher -1 paquet quand il ne reste rien (ex. 3000/180). */
-      if (Math.abs(a.unites) < 0.0001) { a.unites = 0; a.paquets = 0; }
+      /* Paquets et cartons se deduisent du TOTAL (pointes x cond), JAMAIS fiche
+         par fiche : arrondir chaque ligne a part faisait perdre les restes
+         (P5 : 623 pointes a cond. 180 reparties en petits lots = 0 paquet au
+         lieu de 3,5). Les cartons saisis ligne par ligne etaient, eux, cumules
+         comme s'ils etaient le stock (P6 : 6 cartons au lieu de 34,4) : ils ne
+         servent plus qu'a l'affichage des mouvements. */
+      if (a.type === 'POINTE') {
+        a.paquets = a.cond > 0 ? Math.floor(a.unites / a.cond) : 0;
+        a.cartons = a.ppc > 0 ? a.paquets / a.ppc : 0;
+      } else {
+        a.paquets = a.unites;
+        a.cartons = 0;
+      }
+      /* Stock nul = paquets nuls : les arrondis ne doivent jamais afficher
+         -1 paquet quand il ne reste rien (ex. 3000/180). */
+      if (Math.abs(a.unites) < 0.0001) { a.unites = 0; a.paquets = 0; a.cartons = 0; }
       if (a.emplacement === '-') a.emplacement = '';
       delete a._cartonsSaisis; delete a._nbSaisis;
       return a;
@@ -11911,8 +11931,14 @@ function render_stock_merch() { return renderStockFiche('stock-merch', getStockM
       });
       var ppc = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
       base.quantite = unites;
-      base.paquets = paquets;
-      base.cartons = nbSaisis > 0 ? cartons : Math.ceil(paquets / ppc);
+      /* Meme regle que consoAggregate : paquets et cartons deduits du TOTAL,
+         pas somme des arrondis de chaque fiche (sinon le stock « reconstruit »
+         affichait 0 paquet sur des restes). */
+      base.paquets = (String(base.ctype || base.type || 'POINTE').toUpperCase() === 'DIVERS')
+        ? unites
+        : (cond > 0 ? Math.floor(unites / cond) : 0);
+      base.cartons = (base.paquets > 0 && ppc > 0) ? Math.round((base.paquets / ppc) * 10) / 10 : 0;
+      if (Math.abs(unites) < 0.0001) { base.quantite = 0; base.paquets = 0; base.cartons = 0; }
       if (cond > 0) base.cond = cond;
       if (empl) base.emplacement = empl;
       base._fusion = grp.length;
@@ -12247,7 +12273,21 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     var out = [];
     try {
       var cibles = {};
-      (lignes || []).forEach(function(x) { if (x && x.id != null) cibles[x.id] = x; });
+      /* Les fiches SANS id (anciennes donnees) doivent compter aussi : on les
+         reconnait par SIGNATURE de contenu. Sans id on ne peut pas comparer
+         les objets (chaque lecture localStorage reparse une copie neuve), et
+         ces lignes entraient dans le stock affiche mais pas dans le registre
+         (P6 : 1 719 paquets au tableau, 501 dans les mouvements). */
+      var sigLignes = {};
+      function _sigL(s) {
+        return [String(s.code || ''), parseFloat(s.cond || s.qty_per_packet) || 0, parseFloat(s.quantite) || 0,
+                String(s.date || s.created_at || ''), String(s.obs || s.observation || s.motif || '')].join('|');
+      }
+      (lignes || []).forEach(function(x) {
+        if (!x) return;
+        if (x.id != null) cibles[x.id] = x;
+        else if (x.src) { var _k = _sigL(x.src); sigLignes[_k] = (sigLignes[_k] || 0) + 1; }
+      });
       var stocks = getStockConsum() || [];
       var cond = 0, code = '';
       (lignes || []).forEach(function(x) { if (x && (parseFloat(x.cond) || 0) > 0) cond = parseFloat(x.cond); if (x && !code && x.code) code = x.code; });
@@ -12260,7 +12300,11 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
       stocks.forEach(function(s) {
         if (s && s._invClos) return; /* historique clôturé : invisible au registre */
         var x = consoNorm(s);
-        if (!x || !cibles[x.id]) return;
+        if (!x) return;
+        var estCible = true;
+        if (x.id != null) estCible = !!cibles[x.id];
+        else { var _sk = _sigL(s); if (sigLignes[_sk] > 0) { sigLignes[_sk]--; } else { estCible = false; } }
+        if (!estCible) return;
         /* Ligne « Stock initial » d'inventaire : elle OUVRE le registre à sa
            valeur (pas d'écriture 0 synthétique). En cas de bases multiples,
            la plus récente fait foi. */
@@ -12433,6 +12477,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     h += '<table><thead><tr><th>Code</th><th>Designation</th><th>Type</th><th>Emplacement</th>'
       + '<th class="r">Cond.</th><th class="r">Stock pointes</th><th class="r">Paquets</th><th class="r">Cartons</th><th class="r">Fiches</th></tr></thead><tbody>';
     var tU = 0, tP = 0, tC = 0;
+    var _ppcP = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
     list.forEach(function (x) {
       var isDiv = x.type === 'DIVERS';
       tU += (isDiv ? 0 : (x.unites || 0)); tP += (x.paquets || 0); tC += (isDiv ? 0 : (x.cartons || 0));
@@ -12440,11 +12485,11 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         + '<td>' + escH(x.emplacement || '-') + '</td>'
         + '<td class="r">' + (isDiv ? '-' : fmt(x.cond)) + '</td>'
         + '<td class="r">' + (isDiv ? '-' : fmt(x.unites)) + '</td>'
-        + '<td class="r">' + fmt(x.paquets) + '</td>'
-        + '<td class="r"><strong>' + (isDiv ? '-' : fmt(x.cartons)) + '</strong></td>'
+        + '<td class="r">' + (isDiv ? fmt(x.paquets) : _fmtPaq(x.paquets)) + '</td>'
+        + '<td class="r"><strong>' + (isDiv ? '-' : _fmtCart(x.paquets, _ppcP)) + '</strong></td>'
         + '<td class="r">' + (x.nbFiches > 1 ? x.nbFiches + ' regroupees' : '1') + '</td></tr>';
     });
-    h += '<tr class="total"><td colspan="5" class="r">TOTAL</td><td class="r">' + fmt(tU) + '</td><td class="r">' + fmt(tP) + '</td><td class="r">' + fmt(tC) + '</td><td></td></tr>';
+    h += '<tr class="total"><td colspan="5" class="r">TOTAL</td><td class="r">' + fmt(tU) + '</td><td class="r">' + _fmtPaq(tP) + '</td><td class="r">' + _fmtCart(tP, _ppcP) + '</td><td></td></tr>';
     h += '</tbody></table>';
     h += '<div class="sign"><div>Visa magasinier :<br><br>..............................</div>'
       + '<div>Visa responsable :<br><br>..............................</div>'
@@ -13003,6 +13048,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     } else {
       h += '<tr><th>Code</th><th>Nom</th><th>Type</th><th>Emplacement</th><th style="text-align:right">Cond.</th><th style="text-align:right">Stock pointes</th><th style="text-align:right">Paquets</th><th style="text-align:right">Cartons</th><th>Actions</th></tr>';
       var totU = 0, totP = 0, totC = 0;
+      var _ppcL = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50;
       list.forEach(function(x) {
         totU += x.unites;
         totP += x.paquets;
@@ -13017,8 +13063,8 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement || '-') + '</td>';
         h += '<td style="text-align:right">' + (isDiv ? '-' : fmt(x.cond)) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? '-' : fmt(x.unites)) + '</td>';
-        h += '<td style="text-align:right;font-weight:700">' + fmt(x.paquets) + '</td>';
-        h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + (isDiv ? '-' : fmt(x.cartons)) + '</td>';
+        h += '<td style="text-align:right;font-weight:700">' + (isDiv ? fmt(x.paquets) : _fmtPaq(x.paquets)) + '</td>';
+        h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + (isDiv ? '-' : _fmtCart(x.paquets, _ppcL)) + '</td>';
         h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button></td></tr>';
         if (isPointe) {
           h += '<tr id="' + detId + '" style="display:none;background:#fff7ed"><td colspan="9" style="padding:8px 10px">'
@@ -13031,7 +13077,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
             + '</td></tr>';
         }
       });
-      h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totU) + '</td><td style="text-align:right">' + fmt(totP) + '</td><td style="text-align:right;color:var(--accent)">' + fmt(totC) + '</td><td></td></tr>';
+      h += '<tr style="font-weight:800;background:#f8f9fa"><td colspan="5" style="text-align:right">TOTAL</td><td style="text-align:right">' + fmt(totU) + '</td><td style="text-align:right">' + _fmtPaq(totP) + '</td><td style="text-align:right;color:var(--accent)">' + _fmtCart(totP, _ppcL) + '</td><td></td></tr>';
     }
     h += '</table>';
     if (list.length === 0) h += '<div class="empty">Aucun consommable</div>';
@@ -14584,14 +14630,23 @@ function printInventory() {
   if (heureDebut) html += '<p><strong>Heure début :</strong> ' + escH(heureDebut) + '</p>';
   if (heureFin) html += '<p><strong>Heure fin :</strong> ' + escH(heureFin) + '</p>';
   var hasDim = items.some(function(it) { return it.dimensions; });
+  var hasPointe = items.some(function(it) { return invEstPointe(it); });
   html += '<table><tr><th>Code</th><th>Désignation</th><th>Source</th>';
   if (hasDim) html += '<th>Dimensions</th><th>Volume (m³)</th>';
-  html += '<th>Théorique</th><th>Réel</th><th>Écart</th><th>Commentaire</th></tr>';
+  html += '<th>Théorique</th>';
+  if (hasPointe) html += '<th>Théo. paq/cart</th>';
+  html += '<th>Réel</th>';
+  if (hasPointe) html += '<th>Réel paq/cart</th>';
+  html += '<th>Écart</th><th>Commentaire</th></tr>';
   items.forEach(function(it) {
     var ecart = (parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0);
     html += '<tr><td>' + escH(it.code) + '</td><td>' + escH(it.nom) + '</td><td>' + escH(it.source || '-') + '</td>';
     if (hasDim) html += '<td>' + escH(it.dimensions || '-') + '</td><td>' + (it.volume ? it.volume.toFixed(4) : '-') + '</td>';
-    html += '<td>' + fmt(it.theo_qte) + '</td><td style="font-weight:700">' + fmt(it.real_qte) + '</td><td>' + (ecart > 0 ? '+' : '') + fmt(ecart) + '</td><td>' + escH(it.comment || '') + '</td></tr>';
+    html += '<td>' + fmt(it.theo_qte) + '</td>';
+    if (hasPointe) html += '<td>' + escH(invPaquetsCartons(it.theo_qte, it)) + '</td>';
+    html += '<td style="font-weight:700">' + fmt(it.real_qte) + '</td>';
+    if (hasPointe) html += '<td style="font-weight:700">' + escH(invPaquetsCartons(it.real_qte, it)) + '</td>';
+    html += '<td>' + (ecart > 0 ? '+' : '') + fmt(ecart) + '</td><td>' + escH(it.comment || '') + '</td></tr>';
   });
   html += '</table><p style="margin-top:1rem"><strong>Total articles :</strong> ' + items.length + '</p>';
   html += '</body></html>';
@@ -14607,13 +14662,22 @@ function printInventory() {
    accessibles (favoris) mais ne sont plus dans le menu. */
 function render_cat_produits_finis() {
   var tab = getSection('catPfTab', 'catalogue');
+  /* Onglet inconnu (donnee abimee) -> retour au catalogue : sinon la page
+     restait vide au clic sur le menu. */
+  if (['catalogue', 'fiche', 'definitions'].indexOf(tab) === -1) tab = 'catalogue';
   var h = '<div class="tabs" style="margin-bottom:1rem">';
   h += '<div class="tab' + (tab === 'catalogue' ? ' active' : '') + '" onclick="setSection(\'catPfTab\',\'catalogue\');renderPage()">📑 Catalogue</div>';
   h += '<div class="tab' + (tab === 'fiche' ? ' active' : '') + '" onclick="setSection(\'catPfTab\',\'fiche\');renderPage()">📐 Fiche Technique</div>';
   h += '<div class="tab' + (tab === 'definitions' ? ' active' : '') + '" onclick="setSection(\'catPfTab\',\'definitions\');renderPage()">🧩 Définitions Composants</div>';
   h += '</div>';
-  if (tab === 'fiche') return h + render_fiche_tech();
-  if (tab === 'definitions') return h + render_definitions();
+  /* Un onglet qui plante ne doit pas laisser la page blanche. */
+  try {
+    if (tab === 'fiche') return h + render_fiche_tech();
+    if (tab === 'definitions') return h + render_definitions();
+  } catch (eTab) {
+    console.error('Onglet catalogue PF', eTab);
+    return h + '<div class="empty">Cet onglet n\u2019a pas pu s\u2019afficher. Revenez au Catalogue.</div>';
+  }
   return h + render_articles();
 }
 function render_articles() {
@@ -14625,8 +14689,8 @@ function render_articles() {
   } catch (eSy) {}
   /* Le catalogue produits ne liste ni les consommables ni les divers :
      ils se gèrent dans Articles > Consommables & Divers (page articles-conso). */
-  var articles = getArticles().filter(function(a) { return ['consum', 'consommable', 'consommables', 'divers', 'diver'].indexOf(String(a.categorie || '').toLowerCase()) === -1; });
-  var composants = getSection('composants', []);
+  var articles = (getArticles() || []).filter(function(a) { return ['consum', 'consommable', 'consommables', 'divers', 'diver'].indexOf(String(a.categorie || '').toLowerCase()) === -1; });
+  var composants = getSection('composants', []) || [];
   /* Filtre par destination (ex : MONDI ABIDJAN, SIVEM...) */
   var dests = {};
   articles.forEach(function(a) { var d = String(a.destination || '').trim(); if (d) dests[d] = true; });
@@ -19258,6 +19322,24 @@ function closeModal() {
 }
 function formatCurrency(n) { return fmt(n) + ' FCFA'; }
 
+/* Pointes -> paquets et cartons (pour l'inventaire : le reel se lit aussi en
+   paquets/cartons, comme le stock). '-' sinon. */
+function invEstPointe(it) {
+  try { return String(it && it.store) === 'stockConsum' && String(it.type || '').toUpperCase() === 'POINTE'; } catch (e) { return false; }
+}
+function invPaquetsCartons(unites, it) {
+  if (!invEstPointe(it)) return '-';
+  var code = (it && (it.ref || it.code)) || '';
+  var parPaquet = 0;
+  try { parPaquet = acPointesParPaquet(code); } catch (e) { parPaquet = 0; }
+  if (!(parPaquet > 0)) return '-';
+  var ppc = 0;
+  try { ppc = acPaquetsParCarton(); } catch (e2) { ppc = 0; }
+  var paq = (parseFloat(unites) || 0) / parPaquet;
+  var txt = _fmtPaq(paq) + ' paq';
+  if (ppc > 0) txt += ' · ' + _fmtCart(paq, ppc) + ' cart';
+  return txt;
+}
 function viewInventory(id) {
   var inv = getInventories().find(function(x) { return x.id === id; });
   if (!inv) return;
@@ -19267,14 +19349,16 @@ function viewInventory(id) {
   m += '<p><strong>Articles comptés:</strong> ' + (inv.articles_comptes || 0) + '</p>';
   m += '<p><strong>Écarts:</strong> ' + (inv.ecarts || 0) + '</p>';
   m += '<p><strong>Heure:</strong> ' + escH((inv.heure_debut || '-') + ' → ' + (inv.heure_fin || '-')) + '</p>';
-  m += '<p><strong>Heure:</strong> ' + escH((inv.heure_debut || '-') + ' → ' + (inv.heure_fin || '-')) + '</p>';
   /* Detail par article : sans ce tableau on ne voit pas QUELS articles ont un ecart */
   var _items = inv.items || [];
+  var _hasPointe = _items.some(function (it) { return invEstPointe(it); });
   if (_items.length) {
-    var _ec = 0;
-    _items.forEach(function (it) { _ec += 1; });
     m += '<div style="overflow-x:auto;margin-top:.5rem"><table><thead><tr><th>Code</th><th>Désignation</th><th>Catégorie</th>' +
-      '<th style="text-align:right">Théorique</th><th style="text-align:right">Réel</th><th style="text-align:right">Écart</th></tr></thead><tbody>';
+      '<th style="text-align:right">Théorique</th>';
+    if (_hasPointe) m += '<th style="text-align:right">Théo. paq/cart</th>';
+    m += '<th style="text-align:right">Réel</th>';
+    if (_hasPointe) m += '<th style="text-align:right">Réel paq/cart</th>';
+    m += '<th style="text-align:right">Écart</th></tr></thead><tbody>';
     _items.forEach(function (it) {
       var _theo = parseFloat(it.theo_qte) || 0;
       var _real = parseFloat(it.real_qte) || 0;
@@ -19282,16 +19366,65 @@ function viewInventory(id) {
       var _col = _ecart === 0 ? 'var(--dim)' : (_ecart > 0 ? 'var(--green)' : 'var(--red)');
       m += '<tr><td>' + escH(it.code || '-') + '</td><td>' + escH(it.nom || it.designation || '-') + '</td>' +
         '<td style="font-size:.68rem;color:var(--dim)">' + escH(it.categorie || '-') + '</td>' +
-        '<td style="text-align:right">' + fmt(_theo) + '</td>' +
-        '<td style="text-align:right;font-weight:700">' + fmt(_real) + '</td>' +
-        '<td style="text-align:right;font-weight:700;color:' + _col + '">' + (_ecart > 0 ? '+' : '') + fmt(_ecart) + '</td></tr>';
+        '<td style="text-align:right">' + fmt(_theo) + '</td>';
+      if (_hasPointe) m += '<td style="text-align:right;font-size:.72rem;color:#5b21b6">' + escH(invPaquetsCartons(_theo, it)) + '</td>';
+      m += '<td style="text-align:right;font-weight:700">' + fmt(_real) + '</td>';
+      if (_hasPointe) m += '<td style="text-align:right;font-weight:700;color:#5b21b6">' + escH(invPaquetsCartons(_real, it)) + '</td>';
+      m += '<td style="text-align:right;font-weight:700;color:' + _col + '">' + (_ecart > 0 ? '+' : '') + fmt(_ecart) + '</td></tr>';
     });
     m += '</tbody></table></div>';
   } else {
     m += '<div style="font-size:.78rem;color:var(--dim);margin-top:.5rem">Aucun détail article enregistré pour cet inventaire.</div>';
   }
-  m += '<div style="margin-top:1rem;text-align:right"><button class="btn" onclick="closeModal()">Fermer</button></div>';
+  /* Chaque inventaire (valide ou brouillon) s'imprime tout seul. */
+  m += '<div style="margin-top:1rem;text-align:right;display:flex;gap:.5rem;justify-content:flex-end">'
+    + '<button class="btn btn-accent" onclick="printInventaire(\'' + escH(inv.id) + '\')" title="Imprimer cet inventaire">🖨️ Imprimer</button>'
+    + '<button class="btn" onclick="closeModal()">Fermer</button></div>';
   openModal(m);
+}
+/* Impression d'un inventaire ENREGISTRE (historique) : meme rendu que
+   printInventory, mais sans dependre du formulaire en cours. */
+function printInventaire(invId) {
+  var inv = getInventories().find(function (x) { return x.id === invId; });
+  if (!inv) return toast('Inventaire introuvable', 'error');
+  var items = inv.items || [];
+  var html = '<html><head><meta charset="UTF-8"><title>Inventaire ' + fmtD(inv.date) + '</title>';
+  html += '<style>body{font-family:Arial,sans-serif;font-size:9pt}table{width:100%;border-collapse:collapse}th,td{border:1px solid #94a3b8;padding:4px 6px}th{background:#f1f5f9;font-weight:700}td{text-align:center}.total{font-weight:700;background:#e2e8f0}h2{text-align:center;margin-bottom:.2rem}.meta{font-size:9pt;margin:.1rem 0}</style></head><body>';
+  html += '<h2>INVENTAIRE DU ' + escH(fmtD(inv.date)) + '</h2>';
+  html += '<p class="meta"><strong>Statut :</strong> ' + (inv.statut === 'valide' ? 'Validé' : 'Brouillon') + ' — <strong>Type :</strong> ' + escH(inv.type || 'all')
+    + ' — <strong>Imprime le :</strong> ' + escH(new Date().toLocaleDateString('fr-FR')) + '</p>';
+  html += '<p class="meta"><strong>Superviseur :</strong> ' + escH(inv.supervisor || '-')
+    + ' — <strong>Executants :</strong> ' + escH(inv.executants || '-')
+    + ' — <strong>Heures :</strong> ' + escH((inv.heure_debut || '-') + ' → ' + (inv.heure_fin || '-')) + '</p>';
+  var _hasPointe = items.some(function (it) { return invEstPointe(it); });
+  html += '<table><tr><th>Code</th><th>Désignation</th><th>Catégorie</th><th>Théorique</th>';
+  if (_hasPointe) html += '<th>Théo. paq/cart</th>';
+  html += '<th>Réel</th>';
+  if (_hasPointe) html += '<th>Réel paq/cart</th>';
+  html += '<th>Écart</th><th>Commentaire</th></tr>';
+  var tPaq = 0, tCart = 0;
+  items.forEach(function (it) {
+    var _theo = parseFloat(it.theo_qte) || 0, _real = parseFloat(it.real_qte) || 0, _ec = _real - _theo;
+    html += '<tr><td>' + escH(it.code || '-') + '</td><td>' + escH(it.nom || it.designation || '-') + '</td>'
+      + '<td>' + escH(it.categorie || '-') + '</td><td>' + fmt(_theo) + '</td>';
+    if (_hasPointe) html += '<td>' + escH(invPaquetsCartons(_theo, it)) + '</td>';
+    html += '<td style="font-weight:700">' + fmt(_real) + '</td>';
+    if (_hasPointe) html += '<td style="font-weight:700">' + escH(invPaquetsCartons(_real, it)) + '</td>';
+    html += '<td>' + (_ec > 0 ? '+' : '') + fmt(_ec) + '</td><td>' + escH(it.comment || '') + '</td></tr>';
+  });
+  html += '</table>';
+  html += '<p style="margin-top:.6rem"><strong>Total articles :</strong> ' + items.length + '</p>';
+  html += '<div style="margin-top:1.5rem;display:flex;gap:2rem;font-size:9pt">'
+    + '<div>Visa magasinier :<br><br>..............................</div>'
+    + '<div>Visa responsable :<br><br>..............................</div>'
+    + '<div>Date : ....../....../........</div></div>';
+  html += '</body></html>';
+  var w = null;
+  try { w = window.open('', '_blank'); } catch (eW) {}
+  if (!w) return toast('Autorisez les fenêtres pop-up pour imprimer', 'error');
+  w.document.open(); w.document.write(html); w.document.close();
+  try { w.focus(); } catch (eF) {}
+  w.print();
 }
 
 /* ==================== STOCK MARCHANDISES ARTICLES ==================== */
