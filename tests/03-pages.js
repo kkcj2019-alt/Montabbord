@@ -28,7 +28,7 @@ const DISPATCH = {
   'production.html': {
     pages: ['dashboard', 'production', 'history', 'orders', 'stock-palettes', 'stock-raw',
       'stock-merch', 'stock-consum', 'inventory', 'stock-movements', 'epi', 'thermal',
-      'thermal-types', 'articles', 'articles-conso', 'fiche-tech', 'definitions', 'species', 'stock-merch-art',
+      'thermal-types', 'articles', 'articles-conso', 'cat-produits-finis', 'fiche-tech', 'definitions', 'species', 'stock-merch-art',
       'achats', 'achats-history', 'livraisons', 'preventive', 'corrective', 'qualite',
       'reports', 'rh-dashboard', 'departments', 'positions', 'presence', 'leaves', 'sanctions',
       'analyse-couts', 'cout-revient'],
