@@ -4488,18 +4488,87 @@ r.push({
   });
 
   r.push({
-    nom: 'Articles : le cout de revient est affiche en "auto" quand il est deduit, marge recalculee',
+    nom: 'Articles : aucune info commerciale en exploitation (prix/cout/marge masques)',
     app: 'production.html', store: storeRealiste,
     code: `
       CURRENT_PAGE = 'articles'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
-      /* Les nombres sont groupes avec une espace insecable : on compare les
-         chiffres seuls pour ne pas dependre du formatage. */
-      var chiffres = h.replace(/[^0-9]/g, '');
-      var ok = (h.indexOf('showCoutArticleAuto') !== -1)
-        && (chiffres.indexOf('1787') !== -1) && (chiffres.indexOf('43213') !== -1)
-        && (h.indexOf('auto') !== -1);
-      ok ? 'OK : cout auto + bouton detail' : 'ECHEC : ' + chiffres.substr(0, 300)
+      var ok = (h.indexOf('Prix Unitaire') === -1) && (h.indexOf('Coût Revient') === -1)
+        && (h.indexOf('Marge') === -1) && (h.indexOf('showCoutArticleAuto') === -1)
+        && (h.indexOf('PAL') !== -1) && (h.indexOf('Composants') !== -1);
+      ok ? 'OK : technique seule (codes + composants), aucun prix/cout/marge/bouton cout'
+        : 'ECHEC : fuite commerciale dans le catalogue'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Connexion PF : l\u2019exploitation récupère les produits finis index (et leurs prix)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: 'TES', designation: 'Produit test', typeArticle: 'produit_fini', prixPeriodes: [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: 5000 }] },
+        { id: 'n2', code: 'BR', designation: 'Bois brut', typeArticle: '', prixPeriodes: [] }
+      ]));
+      setSection('articles', []);
+      setSection('pfLinks', []);
+      setSection('pfIgnores', []);
+      renderPage = function () {};
+      var r1 = syncProduitsFinisFromIndex();
+      var arts = getArticles();
+      var tes = arts.filter(function (a) { return a.code === 'TES'; })[0] || {};
+      var br = arts.filter(function (a) { return a.code === 'BR'; })[0];
+      var r2 = syncProduitsFinisFromIndex();
+      (r1.crees === 1 && tes.categorie === 'finished' && tes.prix_vente === 5000 && !br && r2.crees === 0)
+        ? 'OK : TES créé (prix 5000), BR ignoré (pas produit_fini), 2e passe sans doublon'
+        : 'ECHEC : r1=' + JSON.stringify(r1) + ' arts=' + JSON.stringify(arts.map(function (a) { return [a.code, a.prix_vente]; }))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Connexion PF : l\u2019index récupère les finis exploitation (sans toucher aux prix)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([]));
+      var r1 = syncProduitsFinisFromExploitation();
+      var arts = getArticles();
+      var pal = arts.filter(function (a) { return a.code === 'PAL'; })[0] || {};
+      var r2 = syncProduitsFinisFromExploitation();
+      (r1.crees === 1 && pal.typeArticle === 'produit_fini'
+        && (pal.prixPeriodes || []).length === 1 && pal.prixPeriodes[0].prixUnitaire === 45000
+        && r2.crees === 0)
+        ? 'OK : PAL créé produit_fini (période 45000), 2e passe sans doublon'
+        : 'ECHEC : r1=' + JSON.stringify(r1) + ' arts=' + JSON.stringify(arts)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: '114', designation: 'PALETTE 114', typeArticle: 'produit_fini', prixPeriodes: [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: 6000 }] }
+      ]));
+      setSection('articles', [{ id: 'e1', code: 'PAL114', designation: 'PALETTES', categorie: 'finished', prix_vente: 1000 }]);
+      setSection('pfLinks', []);
+      setSection('pfIgnores', []);
+      renderPage = function () {};
+      window.confirm2 = function () { return true; };
+      /* Sans mapping : 114 créé à part (code différent) */
+      syncProduitsFinisFromIndex();
+      var sansMap = getArticles().filter(function (a) { return a.code === '114'; }).length;
+      /* Liaison : le prix index (6000) remonte, pas de doublon */
+      lierProduitFini('PAL114', '114');
+      var arts = getArticles();
+      var pal = arts.filter(function (a) { return a.code === 'PAL114'; })[0] || {};
+      var liens = getPfLinks();
+      var d = diagnosticCorrespondancesPF();
+      (sansMap === 1 && pal.prix_vente === 6000 && liens.length === 1
+        && d.mappes.length === 1 && d.mappes[0].expl === 'PAL114')
+        ? 'OK : 114 créé puis lié à PAL114 (prix 6000 remonté), diagnostic cohérent'
+        : 'ECHEC : sansMap=' + sansMap + ' pal=' + JSON.stringify(pal) + ' liens=' + JSON.stringify(liens)
     `,
     attenduPrefixe: 'OK'
   });

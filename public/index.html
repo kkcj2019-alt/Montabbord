@@ -12782,7 +12782,53 @@ function deleteClient(id) {
   pushToCloud();
   renderClients();
 }
+/* ---------- Connexion produits finis Index <-> Exploitation ----------
+   Même liste des deux côtés. Chaque appli n'écrit que SA clé :
+   ici on crée les manquants depuis l'exploitation (code ou mapping
+   pfLinks), on ne touche jamais aux prix existants (gérés ici).
+   pfIgnores (codes supprimés à ne pas recréer) vit dans mdb_production. */
+function syncProduitsFinisFromExploitation() {
+  var res = { crees: 0 };
+  try {
+    var p = (typeof apProdGet === 'function') ? (apProdGet() || {}) : {};
+    var expl = ((p && p.articles) || []).filter(function(a) { return a && a.categorie === 'finished'; });
+    var links = (p && p.pfLinks) || [];
+    var ignores = (p && p.pfIgnores) || [];
+    var norm = function(c) { return String(c || '').trim().toUpperCase(); };
+    var idxDe = function(explCode) {
+      var n = norm(explCode);
+      for (var i = 0; i < links.length; i++) { if (norm(links[i].expl) === n) return links[i].idx; }
+      return explCode;
+    };
+    var ignore = function(code) {
+      var n = norm(code);
+      for (var i = 0; i < ignores.length; i++) { if (norm(ignores[i]) === n) return true; }
+      return false;
+    };
+    var arts = getArticles();
+    var change = false;
+    for (var j = 0; j < expl.length; j++) {
+      var ea = expl[j];
+      if (!ea || !ea.code || ignore(ea.code)) continue;
+      var codeIdx = idxDe(ea.code);
+      if (ignore(codeIdx)) continue;
+      var trouve = null;
+      for (var k = 0; k < arts.length; k++) { if (norm(arts[k].code) === norm(codeIdx)) { trouve = arts[k]; break; } }
+      if (!trouve) {
+        var an = new Date().getFullYear();
+        var px0 = parseFloat(ea.prix_vente) || 0;
+        arts.push({ id: DB.genId(), code: ea.code, designation: ea.designation || ea.code,
+          typeArticle: 'produit_fini', commercialise: true,
+          prixPeriodes: px0 > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: px0 }] : [] });
+        res.crees++; change = true;
+      }
+    }
+    if (change) DB.set('mdb_nomenclature', arts);
+  } catch (eS) {}
+  return res;
+}
 function renderNomenclature() {
+  try { syncProduitsFinisFromExploitation(); } catch (eSy) {}
   var articles = getArticles();
   var readonly = isReadonly('nomenclature');
   var html = '<div class="toolbar">';
@@ -12912,7 +12958,22 @@ function deleteNomenclature(id) {
   for (var x = 0; x < pfs.length; x++) { if (pfs[x] && pfs[x].lignes) for (var y = 0; y < pfs[x].lignes.length; y++) { if (pfs[x].lignes[y] && pfs[x].lignes[y].articleId === id) { toast('Impossible de supprimer : cet article est utilis\u00e9 dans des pr\u00e9-financements', 'error'); return; } } }
   openConfirm('\u00cates-vous s\u00fbr de vouloir supprimer cet article ?', function() {
     var articles = getArticles(); var result = [];
-    for (var i = 0; i < articles.length; i++) { if (articles[i].id !== id) result.push(articles[i]); }
+    var suppr = null;
+    for (var i = 0; i < articles.length; i++) { if (articles[i].id !== id) result.push(articles[i]); else suppr = articles[i]; }
+    /* Produit fini : mémorisé comme refusé pour la synchro (sinon
+       l'exploitation le recrée à l'affichage suivant). */
+    if (suppr && suppr.typeArticle === 'produit_fini') {
+      try {
+        var pp = (typeof apProdGet === 'function') ? (apProdGet() || {}) : {};
+        var nn = String(suppr.code || '').trim().toUpperCase();
+        if (nn) {
+          var ig = Array.isArray(pp.pfIgnores) ? pp.pfIgnores : [];
+          if (ig.indexOf(nn) === -1) ig.push(nn);
+          pp.pfIgnores = ig;
+          if (typeof apProdSet === 'function') apProdSet(pp);
+        }
+      } catch (eI) {}
+    }
     DB.set('mdb_nomenclature', result);
     toast('Article supprim\u00e9');
     renderNomenclature();
