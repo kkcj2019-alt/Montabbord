@@ -8558,6 +8558,69 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+
+  r.push({
+    nom: 'Sortie conso : 2 cartons P6 = -17 000 pointes, 20 L d\u2019encre = -20',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 's1', code: 'P6', designation: 'POINTE6', quantite: 51000, cond: 170, ctype: 'POINTE', created_at: '2026-10-01' },
+        { id: 's2', code: 'ENCRE', designation: 'ENCRE', quantite: 100, ctype: 'DIVERS', created_at: '2026-10-01' }
+      ];
+      p.articles = [{ id: 'aE', code: 'ENCRE', designation: 'ENCRE', categorie: 'divers', unite: 'L', statut: 'active' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      renderPage = function () {};
+      var _origGet = document.getElementById;
+      /* 2 cartons P6 : 2 x 50 x 170 = 17 000 pointes */
+      document.getElementById = function(id) {
+        var vals = { so_code: { value: 'P6' }, so_qte: { value: '2' }, so_unite: { value: 'carton' },
+          so_date: { value: '2026-10-13' }, so_motif: { value: 'Test' }, sortieConsoOverlay: { remove: function() {} } };
+        return vals[id] || null;
+      };
+      saveSortieConso();
+      /* 20 L d'encre */
+      document.getElementById = function(id) {
+        var vals = { so_code: { value: 'ENCRE' }, so_qte: { value: '20' }, so_unite: { value: 'unite' },
+          so_date: { value: '2026-10-13' }, so_motif: { value: 'Test' }, sortieConsoOverlay: { remove: function() {} } };
+        return vals[id] || null;
+      };
+      saveSortieConso();
+      document.getElementById = _origGet;
+      var lignes = getStockConsum();
+      var p6 = lignes.filter(function (l) { return l.code === 'P6' && (parseFloat(l.quantite) || 0) < 0; })[0] || {};
+      var enc = lignes.filter(function (l) { return l.code === 'ENCRE' && (parseFloat(l.quantite) || 0) < 0; })[0] || {};
+      var agg = consoAggregate().filter(function (a) { return a.code === 'P6'; })[0] || {};
+      (p6.quantite === -17000 && /carton/.test(p6.obs || '') && enc.quantite === -20 && /L/.test(enc.obs || '') && agg.unites === 34000)
+        ? 'OK : -17 000 P6 (2 cartons), -20 encre (L), stock P6 = 34 000'
+        : 'ECHEC : p6=' + JSON.stringify(p6) + ' encre=' + JSON.stringify(enc) + ' agg=' + agg.unites
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Menu conso : l\u2019unité saisie (L) est conservée et affichée',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      renderPage = function () {};
+      document.getElementById = function(id) {
+        var vals = { cd_code: { value: 'XX' }, cd_nom: { value: 'Test X' }, cd_type: { value: 'divers' },
+          cd_cond: { value: '' }, cd_prixcarton: { value: '' }, cd_cout: { value: '' }, cd_obs: { value: '' },
+          cd_unite: { value: 'L' }, modalOverlay: { remove: function() {} } };
+        return vals[id] || null;
+      };
+      saveConsoDiversModal(null);
+      var a = getArticles().filter(function (x) { return x.code === 'XX'; })[0] || {};
+      (a.unite === 'L' && a.categorie === 'divers')
+        ? 'OK : unité L conservée sur l\u2019article divers'
+        : 'ECHEC : ' + JSON.stringify(a)
+    `,
+    attenduPrefixe: 'OK'
+  });
   r.push({
     nom: 'Synchro exploitation : un achat distant arrive meme si le poste est sale',
     app: 'production.html', store: storeRealiste,

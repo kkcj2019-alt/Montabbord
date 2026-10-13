@@ -12638,7 +12638,10 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     m += '<p style="font-size:.78rem;color:var(--dim);margin:0 0 .8rem">Consommation, perte, casse ou pr&#232;t. Le stock est diminu&#233; et la sortie est trac&#233;e dans le registre du produit.</p>';
     m += '<div class="form-row">' + formField('so_code', 'Produit', '', 'text', true).replace('id="so_code"', 'id="so_code" list="soCodeList" onchange="soRemplir()"') + '</div>';
     m += '<datalist id="soCodeList">' + opts + '</datalist>';
-    m += '<div class="form-row">' + formField('so_qte', 'Quantit&#233; en pointe', '', 'number', true) + formField('so_carton', 'Equiv. cartons (1 = 50 paquets x cond.)', '', 'number', false) + '</div>';
+    /* Ligne quantité : reconstruite selon le produit (pointes = choix
+       carton/paquet/pointe, autres = quantité dans leur unité). */
+    m += '<div class="form-row" id="soQteRow"></div>';
+    m += '<div id="so_equiv" style="font-size:.74rem;color:var(--dim);margin-bottom:.8rem"></div>';
     m += '<div class="form-row">' + formField('so_date', 'Date', today(), 'date', true) + formField('so_motif', 'Motif', 'Consommation', 'text', true) + '</div>';
     m += '<div id="so_help" style="font-size:.74rem;color:var(--dim);margin-bottom:.8rem"></div>';
     m += '<div style="display:flex;gap:.5rem;margin-top:.6rem">';
@@ -12650,38 +12653,110 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
     document.body.insertAdjacentHTML('beforeend', m);
     try { document.getElementById('so_code').focus(); } catch (e) {}
   }
+  /* Unité de saisie d'un produit : pointes = carton|paquet|pointe au choix,
+     autres = leur unité propre (L, kg, pcs... définie dans le menu). */
+  function soProduitInfo(code) {
+    var K = String(code || '').trim().toUpperCase();
+    var info = { code: K, type: 'DIVERS', cond: 0, unite: 'pcs', unites: 0, paquets: 0, cartons: 0 };
+    try {
+      var agg = consoAggregate();
+      for (var i = 0; i < agg.length; i++) {
+        if (String(agg[i].code || '').toUpperCase() === K) {
+          info.type = agg[i].type || 'DIVERS';
+          info.cond = parseFloat(agg[i].cond) || 0;
+          info.unites = parseFloat(agg[i].unites) || 0;
+          info.paquets = parseFloat(agg[i].paquets) || 0;
+          info.cartons = parseFloat(agg[i].cartons) || 0;
+          break;
+        }
+      }
+    } catch (eA) {}
+    try {
+      var arts = getArticles() || [];
+      for (var j = 0; j < arts.length; j++) {
+        if (String(arts[j].code || '').trim().toUpperCase() === K && arts[j].unite) { info.unite = arts[j].unite; break; }
+      }
+    } catch (eB) {}
+    return info;
+  }
+  function soPpc() {
+    try { return parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50; }
+    catch (e) { return 50; }
+  }
   function soRemplir() {
     try {
       var code = String((document.getElementById('so_code') || {}).value || '').trim().toUpperCase();
-      var a = consoAggregate().filter(function (x) { return String(x.code).toUpperCase() === code; })[0] || {};
+      var row = document.getElementById('soQteRow');
       var help = document.getElementById('so_help');
-      if (a.code) {
-        if (help) help.innerHTML = 'Stock actuel : <strong>' + fmt(a.unites) + '</strong> pointes &middot; ' + fmt(a.paquets) + ' paquets &middot; ' + fmt(a.cartons) + ' carton(s) &middot; cond. ' + (a.cond || '-');
-        var s = document.getElementById('so_code');
-        if (s) s.value = a.code;
-      } else if (help) help.textContent = 'Produit introuvable au stock.';
+      var info = soProduitInfo(code);
+      var estPointe = info.type === 'POINTE';
+      var s = 'width:100%;padding:.35rem .5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem';
+      var htm = '';
+      if (estPointe) {
+        htm += '<div class="form-group" style="flex:2"><label>Quantité *</label><input type="number" id="so_qte" value="" min="0" step="any" style="' + s + '" oninput="soEquiv()"></div>';
+        htm += '<div class="form-group" style="flex:1"><label>Unité *</label><select id="so_unite" onchange="soEquiv()" style="' + s + '">'
+          + '<option value="carton">carton(s)</option>'
+          + '<option value="paquet">paquet(s)</option>'
+          + '<option value="pointe">pointe(s)</option></select></div>';
+      } else {
+        htm += '<div class="form-group"><label>Quantité (' + escH(info.unite || 'pcs') + ') *</label><input type="number" id="so_qte" value="" min="0" step="any" style="' + s + '" oninput="soEquiv()"></div>';
+        htm += '<input type="hidden" id="so_unite" value="unite">';
+      }
+      if (row) row.innerHTML = htm;
+      if (help) {
+        if (estPointe) help.innerHTML = 'Stock actuel : <strong>' + fmt(info.unites) + '</strong> pointes &middot; ' + fmt(info.paquets) + ' paquets &middot; ' + fmt(info.cartons) + ' carton(s) &middot; cond. ' + (info.cond || '-');
+        else help.innerHTML = 'Stock actuel : <strong>' + fmt(info.unites) + '</strong> ' + escH(info.unite || 'pcs');
+      }
+      var sc = document.getElementById('so_code');
+      if (sc && code) sc.value = code;
+      soEquiv();
     } catch (e) {}
+  }
+  /* Équivalence en direct : 2 cartons = N pointes, etc. */
+  function soEquiv() {
+    try {
+      var box = document.getElementById('so_equiv');
+      if (!box) return;
+      var code = String((document.getElementById('so_code') || {}).value || '').trim().toUpperCase();
+      var qte = parseFloat((document.getElementById('so_qte') || {}).value) || 0;
+      var unit = ((document.getElementById('so_unite') || {}).value || '');
+      if (!code || !(qte > 0)) { box.textContent = ''; return; }
+      var info = soProduitInfo(code);
+      if (info.type !== 'POINTE') { box.textContent = '= ' + fmt(qte) + ' ' + (info.unite || 'pcs') + ' en moins au stock.'; return; }
+      var base = soQteEnUnites(qte, unit, info);
+      box.textContent = '= ' + fmt(base) + ' pointes en moins au stock'
+        + (info.cond > 0 ? ' (' + _fmtPaq(base / info.cond) + ' paq · ' + _fmtCart(base / info.cond, soPpc()) + ' cart.)' : '') + '.';
+    } catch (e) {}
+  }
+  /* Conversion saisie -> unités de stock (pointes pour POINTE, unité telle
+     quelle sinon). */
+  function soQteEnUnites(qte, unit, info) {
+    qte = parseFloat(qte) || 0;
+    if (!info || info.type !== 'POINTE') return qte;
+    var cond = parseFloat(info.cond) || 0;
+    if (unit === 'carton') return qte * soPpc() * cond;
+    if (unit === 'paquet') return qte * cond;
+    return qte;
   }
   function saveSortieConso() {
     try {
       var code = String((document.getElementById('so_code') || {}).value || '').trim().toUpperCase();
-      var qte = parseFloat((document.getElementById('so_qte') || {}).value) || 0;
+      var qteSaisie = parseFloat((document.getElementById('so_qte') || {}).value) || 0;
+      var unit = String((document.getElementById('so_unite') || {}).value || '');
       var date = (document.getElementById('so_date') || {}).value || today();
       var motif = String((document.getElementById('so_motif') || {}).value || '').trim() || 'Sortie de stock';
       if (!code) return toast('Produit requis', 'error');
-      if (!(qte > 0)) return toast('Quantit&#233; invalide', 'error');
+      if (!(qteSaisie > 0)) return toast('Quantit&#233; invalide', 'error');
+      var info = soProduitInfo(code);
+      var qte = soQteEnUnites(qteSaisie, unit, info);
+      if (!(qte > 0)) return toast('Quantit&#233; invalide (conditionnement inconnu ?)', 'error');
       var stock = getStockConsum();
       var base = null;
       for (var i = 0; i < stock.length; i++) {
         if (String((stock[i] || {}).code || '').trim().toUpperCase() === code) { base = stock[i]; break; }
       }
       if (!base) return toast('Produit absent du stock', 'error');
-      var cur = 0, cond = 0;
-      stock.forEach(function (s) {
-        if (String((s || {}).code || '').trim().toUpperCase() !== code) return;
-        cur += parseFloat(consoNorm(s).unites) || 0;
-        if ((parseFloat(s.cond) || 0) > 0) cond = parseFloat(s.cond);
-      });
+      var cur = info.unites || 0, cond = info.cond || 0;
       if (qte > cur) {
         if (!confirm('Stock insuffisant : ' + fmt(cur) + ' disponible(s). Enregistrer quand meme ?')) return;
       }
@@ -12689,15 +12764,15 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         id: Date.now() + Math.random(),
         code: base.code, designation: base.designation, fournisseur: '',
         quantite: -qte, paquets: 0, cartons: 0,
-        cond: cond || 0, ctype: base.ctype || 'POINTE',
+        cond: cond || 0, ctype: base.ctype || info.type || 'POINTE',
         emplacement: base.emplacement || '',
         prix_unitaire: 0,
-        motif: motif, obs: motif,
+        motif: motif, obs: motif + ' — ' + fmt(qteSaisie) + ' ' + (info.type === 'POINTE' ? (unit === 'carton' ? 'carton(s)' : unit === 'paquet' ? 'paquet(s)' : 'pointe(s)') : (info.unite || 'pcs')),
         created_at: date
       });
       setStockConsum(stock);
       document.getElementById('sortieConsoOverlay').remove();
-      toast(fmt(qte) + ' pointe(s) sorti(es) — ' + motif, 'success');
+      toast(fmt(qteSaisie) + ' ' + (info.type === 'POINTE' ? (unit === 'carton' ? 'carton(s)' : unit === 'paquet' ? 'paquet(s)' : 'pointe(s)') : (info.unite || 'pcs')) + ' sorti(es) — ' + motif, 'success');
       renderPage();
     } catch (e) { toast('Sortie impossible : ' + e.message, 'error'); }
   }
@@ -12938,7 +13013,6 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         var detId = 'consoDet_' + String(x.key || x.code || '').replace(/[^a-zA-Z0-9_-]/g, '_');
         h += '<tr' + (isPointe ? ' style="cursor:pointer" onclick="toggleConsoDetailRow(this)" title="Cliquer pour derouler les mouvements de ce produit"' : '') + '>'
           + '<td style="font-weight:700;color:var(--accent)">' + (isPointe ? '▸ ' : '') + escH(x.code)
-          + (x.nbFiches > 1 ? ' <span style="font-size:.58rem;background:#eef2ff;color:#3730a3;border-radius:8px;padding:1px 5px;font-weight:700" title="Ce produit avait ' + x.nbFiches + ' fiches, regroupees en une seule">' + x.nbFiches + ' fiches regroupées</span>' : '')
           + '</td>';
         h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement || '-') + '</td>';
         h += '<td style="text-align:right">' + (isDiv ? '-' : fmt(x.cond)) + '</td>';
@@ -12950,7 +13024,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
           h += '<tr id="' + detId + '" style="display:none;background:#fff7ed"><td colspan="9" style="padding:8px 10px">'
             + '<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem">'
             + '<div style="font-size:.72rem;font-weight:800;color:#9a3412;text-transform:uppercase;letter-spacing:.04em">'
-            + 'Mouvements — ' + escH(x.code) + (x.nbFiches > 1 ? ' (' + x.nbFiches + ' fiches regroupées)' : '') + '</div>'
+            + 'Mouvements — ' + escH(x.code) + '</div>'
             + '<button class="btn" onclick="event.stopPropagation();printConsoDetail(\'' + escH(x.code) + '\')" title="Imprimer cette fiche" style="font-size:.68rem;padding:2px 8px">🖨 Imprimer</button>'
             + '</div>'
             + _consoRegistreHtml(_consoLignes(x.code))
@@ -15214,14 +15288,15 @@ function render_articles_conso() {
   h += '<button class="btn btn-accent" onclick="openConsoDiversModal(null)">+ Nouveau</button></div></div>';
   h += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.6rem">Référentiel unique : tout consommable/divers créé ici apparaît dans le Stock Consommables, les achats et les Définitions Composants (Pointes).</div>';
   if (articles.length === 0) return h + '<div class="empty">Aucun consommable ni divers. Créez le premier avec « + Nouveau » ou récupérez l\'existant.</div>';
-  h += '<div class="card"><table id="consoDivTable"><tr><th>Code</th><th>Désignation</th><th>Type</th><th style="text-align:right">Qté / paquet</th><th style="text-align:right">Prix carton</th><th style="text-align:right">Coût / unité</th><th style="text-align:right">Stock</th><th style="text-align:right">Utilisé dans</th><th>Actions</th></tr>';
+  h += '<div class="card"><table id="consoDivTable"><tr><th>Code</th><th>Désignation</th><th>Type</th><th>Unité</th><th style="text-align:right">Qté / paquet</th><th style="text-align:right">Prix carton</th><th style="text-align:right">Coût / unité</th><th style="text-align:right">Stock</th><th style="text-align:right">Utilisé dans</th><th>Actions</th></tr>';
   articles.forEach(function(a) {
     var st = stockParCode[String(a.code || '').toUpperCase()];
-    var stockTxt = st ? (fmt(st.unites || 0) + (consoDiversTypeOf(a) === 'POINTE' ? ' (' + fmt(st.paquets || 0) + ' paq)' : '')) : '—';
+    var stockTxt = st ? (fmt(st.unites || 0) + (consoDiversTypeOf(a) === 'POINTE' ? ' (' + fmt(st.paquets || 0) + ' paq)' : '') + ' ' + escH(a.unite || 'pcs')) : '—';
     h += '<tr>';
     h += '<td style="font-weight:600;color:var(--accent)">' + escH(a.code) + '</td>';
     h += '<td>' + escH(a.designation || '') + '</td>';
     h += '<td>' + (consoDiversTypeOf(a) === 'POINTE' ? 'Pointe' : 'Divers') + '</td>';
+    h += '<td>' + escH(a.unite || 'pcs') + '</td>';
     h += '<td style="text-align:right">' + (a.qty_per_packet || '—') + '</td>';
     h += '<td style="text-align:right">' + ((parseFloat(a.prix_carton) || 0) > 0 ? fmt(a.prix_carton) + ' F' : '—') + '</td>';
     h += '<td style="text-align:right">' + ((parseFloat(a.unit_cost) || 0) > 0 ? fmt(a.unit_cost) + ' F' : '—') + '</td>';
@@ -15248,6 +15323,7 @@ function openConsoDiversModal(id) {
   m += '<div class="form-row">';
   m += '<div class="form-group"><label>Type *</label><select id="cd_type"><option value="consum"' + (cat === 'consum' ? ' selected' : '') + '>Pointe (consommable)</option><option value="divers"' + (cat === 'divers' ? ' selected' : '') + '>Divers</option></select></div>';
   m += formField('cd_cond', 'Qté par paquet (pointes)', v('qty_per_packet', ''), 'number', false);
+  m += '<div class="form-group"><label>Unité *</label><input type="text" id="cd_unite" list="cdUniteList" value="' + escH(v('unite', 'pcs') || 'pcs') + '" placeholder="pcs, L, kg..." style="width:100%;padding:.35rem .5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem"><datalist id="cdUniteList"><option value="pcs"></option><option value="paquet"></option><option value="carton"></option><option value="L"></option><option value="kg"></option><option value="m"></option><option value="boîte"></option><option value="bidon"></option><option value="sac"></option><option value="rouleau"></option></datalist></div>';
   m += '</div>';
   m += '<div class="form-row">';
   m += formField('cd_prixcarton', 'Prix du carton (FCFA)', (v('prix_carton', '') || v('prix_vente', '')), 'number', false);
@@ -15280,7 +15356,10 @@ function saveConsoDiversModal(id) {
   a.prix_vente = a.prix_carton;
   a.unit_cost = parseFloat((document.getElementById('cd_cout') || {}).value) || 0;
   a.observation = ((document.getElementById('cd_obs') || {}).value || '').trim();
-  a.unite = a.unite || 'pcs';
+  /* Unité de suivi (L, kg, pcs...) : la sortie/consommation s'exprime dedans
+     (sauf pointes : carton/paquet/pointe au choix). */
+  var _un = ((document.getElementById('cd_unite') || {}).value || '').trim();
+  a.unite = _un || a.unite || 'pcs';
   a.statut = 'active';
   setArticles(articles);
   /* Pas d'écriture stock : la fiche affiche le catalogue à 0 jusqu'au 1er
