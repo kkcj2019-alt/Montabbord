@@ -4920,6 +4920,103 @@ r.push({
   });
 
   r.push({
+    nom: 'Inventaire : une pointe sans « type » garde le widget paquet/pointe (P5)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.definitions = [];
+      p.stockConsum = [
+        { id: 'b1', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 180, quantite: 0, date: '2026-10-01', obs: 'base', _invBase: true }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      /* P5 : ligne d'inventaire SANS type — avant il n'avait pas le widget */
+      var itP5 = { store: 'stockConsum', code: 'P5', ref: 'P5' };
+      var itDivers = { store: 'stockConsum', code: 'ENCRE', ref: 'ENCRE' };
+      var ok = invItemEstPointe(itP5) === true && invItemEstPointe(itDivers) === false;
+      var itMP = { store: 'stockRaw', code: 'BL1' };
+      (ok && invItemEstPointe(itMP) === false)
+        ? 'OK : P5 (sans type) = pointe, ENCRE et matiere premiere = quantite seule'
+        : 'ECHEC P5=' + invItemEstPointe(itP5) + ' encre=' + invItemEstPointe(itDivers)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : la saisie survit au changement de filtre (conso -> marchandises)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 }];
+      p.definitions = [];
+      p.stockConsum = [{ id: 'b1', code: 'P5', designation: 'POINTES5', ctype: 'POINTE', cond: 180, quantite: 1000, date: '2026-10-01', obs: 'base', _invBase: true }];
+      p.stockMerch = [{ id: 'm1', code: 'MARCH1', designation: 'Marchandise 1', quantite: 50, date: '2026-10-01' }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      window._invSaisie = {};
+      /* Saisie du reel consommable + commentaire (le widget n'est pas rendu
+         ici : on passe par le modele, comme si l'utilisateur avait tape). */
+      window._invItems = [
+        { store: 'stockConsum', code: 'P5', ref: 'P5', theo_qte: 1000, type: 'POINTE', real_qte: 16200 },
+        { store: 'stockMerch', code: 'MARCH1', ref: 'MARCH1', theo_qte: 50, real_qte: 48 }
+      ];
+      _invMemoriserSaisie();
+      window._invSaisie['stockConsum|P5'].comment = 'comptage Goli';
+      /* On change de filtre : la table est reconstruite, plus aucun champ */
+      window._invItems = [{ store: 'stockMerch', code: 'MARCH1', ref: 'MARCH1', theo_qte: 50, real_qte: 48 }];
+      var collectes = collecterInventaireComplet('2026-09', '2026-09-30');
+      var p5 = null;
+      for (var i = 0; i < collectes.length; i++) { if (collectes[i].store === 'stockConsum') p5 = collectes[i]; }
+      var cache = window._invSaisie || {};
+      (p5 && p5.real_qte === 16200 && p5.comment === 'comptage Goli'
+        && cache['stockConsum|P5'] && cache['stockConsum|P5'].reel === 16200
+        && cache['stockMerch|MARCH1'] && cache['stockMerch|MARCH1'].reel === 48)
+        ? 'OK : le reel consommable (16 200) ET son commentaire survivent au changement de filtre, la saisie marchandises reste memorisee'
+        : 'ECHEC p5=' + JSON.stringify(p5) + ' cache=' + JSON.stringify(cache)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : le resume dit ce qui a ete inventorie (m3 brut/semi/encours, paquets par type)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a5', code: 'P5', designation: 'POINTES5', categorie: 'consum', qty_per_packet: 180 },
+        { id: 'a6', code: 'P6', designation: 'POINTE6', categorie: 'consum', qty_per_packet: 170 }
+      ];
+      p.definitions = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var items = [
+        { store: 'stockRaw', code: 'LOT1', source: 'Matière première (BL)', volume: 5, real_qte: 5 },
+        { store: 'stockRaw', code: 'LOT2', source: 'Matière première (Spécifique)', volume: 10, real_qte: 10 },
+        { store: 'stockRaw', code: 'LOT3', source: 'Matière première (En cours)', volume: 25, real_qte: 25 },
+        { store: 'stockConsum', code: 'P6', ref: 'P6', type: 'POINTE', real_qte: 34510 },
+        { store: 'stockConsum', code: 'P5', ref: 'P5', real_qte: 16020 },
+        { store: 'stockConsum', code: 'ENCRE', ref: 'ENCRE', real_qte: 3 }
+      ];
+      var r = invResume(items);
+      var okMp = r.indexOf('40,000 m³') !== -1 && r.indexOf('8,000 en brut') === -1 && r.indexOf('15,000 en brut') !== -1
+        && r.indexOf('25,000 en encours') !== -1;
+      var okPaq = r.indexOf('P6 203 paq') !== -1 && r.indexOf('P5 89 paq') !== -1;
+      var okDivers = r.indexOf('Divers : ENCRE 3') !== -1;
+      (okMp && okPaq && okDivers)
+        ? 'OK : ' + r
+        : 'ECHEC mp=' + okMp + ' paq=' + okPaq + ' divers=' + okDivers + ' -> ' + r
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Connexion PF : le prix suit l\u2019index, jamais l\u2019inverse, et mapping PAL114<->114',
     app: 'production.html', store: storeRealiste,
     code: `
