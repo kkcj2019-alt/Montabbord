@@ -1271,6 +1271,38 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Semi-finis : l inspecteur liste chaque ecriture avec son origine',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [{ code:'P114*10', designation:'P114*10', type:'PLOT', length:110, width:10, thickness:4 }]);
+      setProductions([]);
+      setStockSemi([
+        { id:1, code:'P114*10', quantite: 500, motif:'Production 260901 — usinage : +500', created_at:'2026-09-29' },
+        { id:2, code:'P114*10', quantite:-300, created_at:'2026-09-29' },
+        { id:3, code:'P114*10', quantite: 700, motif:'Ajout manuel au stock', created_at:'2026-09-10' }
+      ]);
+      var o1 = _semiOrigine(getStockSemi()[0]);
+      var o2 = _semiOrigine(getStockSemi()[1]);
+      var o3 = _semiOrigine(getStockSemi()[2]);
+      /* Le harnais n'injecte pas le HTML : on capture ce que produit la fenetre. */
+      var capture = '';
+      var body = document.body;
+      var origIAH = body.insertAdjacentHTML;
+      body.insertAdjacentHTML = function (pos, html) { capture = String(html || ''); };
+      try { inspecterMouvementsSemi(); } catch (e) {}
+      body.insertAdjacentHTML = origIAH;
+      var ok = (o1.indexOf('FICHE SUPPRIMEE') !== -1)
+            && (o2.indexOf('Aucune') !== -1)
+            && (o3 === 'Achat')
+            && capture.indexOf('semi-ins-cb') !== -1
+            && capture.indexOf('500') !== -1 && capture.indexOf('-300') !== -1 && capture.indexOf('700') !== -1;
+      ok ? 'OK : 3 ecritures listees (fiche supprimee / sans origine / achat)'
+        : 'ECHEC o1=' + o1 + ' o2=' + o2 + ' o3=' + o3 + ' capture=' + capture.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
