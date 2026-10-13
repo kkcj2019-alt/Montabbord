@@ -1129,6 +1129,51 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Marchandises : un article du catalogue sans stock sort en fiche et en inventaire',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var arts = getArticles();
+      arts.push({ id:'am1', code:'MARCH1', designation:'Marchandise test', categorie:'merch', prix_vente:5000 });
+      setArticles(arts);
+      setStockMerch([]);
+      var h = render_stock_merch();
+      var enFiche = (h.indexOf('MARCH1') !== -1);
+      var items = calcInventoryItems('2026-10', '2026-10-31');
+      var enInv = false, qte = null;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] && items[i].store === 'stockMerch' && items[i].code === 'MARCH1') { enInv = true; qte = items[i].theo_qte; }
+      }
+      (enFiche && enInv && qte === 0) ? 'OK : MARCH1 listee a 0 dans la fiche et l inventaire'
+        : 'ECHEC fiche=' + enFiche + ' inv=' + enInv + ' qte=' + qte
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Stock specifique : les lignes a 0 sont signalees au lieu de disparaitre',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._globalMonth = '';
+      setSection('stockRawTab', 'spe');
+      setSection('stockRawEtat', 'actif');
+      setStockRaw([
+        { id:'sp1', code:'SP-A', origin:'SPECIFIC', quantite:0, created_at:'2026-09-01' },
+        { id:'sp2', code:'SP-B', origin:'SPECIFIC', quantite:5, created_at:'2026-09-01' },
+        { id:'bl1', code:'BL-C', origin:'BL', quantite:7, created_at:'2026-09-01' }
+      ]);
+      var h = render_stock_raw();
+      var okActif = (h.indexOf('SP-B') !== -1 && h.indexOf('SP-A') === -1 && h.indexOf('BL-C') === -1);
+      var okBanner = (h.indexOf('quantité 0 masquée') !== -1);
+      setSection('stockRawEtat', 'tout');
+      var h2 = render_stock_raw();
+      var okTout = (h2.indexOf('SP-A') !== -1 && h2.indexOf('SP-B') !== -1 && h2.indexOf('BL-C') === -1);
+      (okActif && okBanner && okTout) ? 'OK : Actif = 1 ligne + bandeau, Tout = 2 lignes specifiques (BL exclu)'
+        : 'ECHEC actif=' + okActif + ' banner=' + okBanner + ' tout=' + okTout
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',

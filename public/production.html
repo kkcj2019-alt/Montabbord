@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-189';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-190';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -9569,7 +9569,11 @@ function updateStockArticle(articleId, qty, type, ref, numero, motifOverride) {
     existing.quantite = (existing.quantite || 0) + (type === 'entree' ? qty : -qty);
     existing.updated_at = new Date().toISOString();
   } else {
-    stockList.push({ id: genId(), article_id: articleId, quantite: type === 'entree' ? qty : 0, created_at: new Date().toISOString() });
+    /* Un article « matiere premiere » de la nomenclature n'est pas un colis de
+       BL : sans origin, mpOrigin le classait en BL et il n'apparaitait donc
+       jamais dans l'onglet Spécifique. */
+    var _originNew = (cat === 'raw') ? 'SPECIFIC' : '';
+    stockList.push({ id: genId(), article_id: articleId, code: article.code || '', designation: article.designation || '', origin: _originNew, quantite: type === 'entree' ? qty : 0, created_at: new Date().toISOString() });
   }
   setFn(stockList);
 
@@ -10175,7 +10179,8 @@ function syncCatalogueToStock() {
   var articles = getArticles();
   var fin = getStockFinished();
   var semi = getStockSemi();
-  var changedF = false, changedS = false;
+  var merch = getStockMerch();
+  var changedF = false, changedS = false, changedM = false;
   articles.forEach(function(a) {
     var cat = a.categorie || 'finished';
     if (cat === 'finished') {
@@ -10188,10 +10193,18 @@ function syncCatalogueToStock() {
         semi.push({ id: genId(), article_id: a.id, quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: new Date().toISOString() });
         changedS = true;
       }
+    } else if (cat === 'merch' || cat === 'merchandise') {
+      /* Marchandises : sans cette ligne, un article du catalogue cree mais
+         jamais stocke n'apparait dans aucune fiche (la page restait vide). */
+      if (!merch.some(function(s) { return s.article_id === a.id; })) {
+        merch.push({ id: genId(), article_id: a.id, code: a.code || '', designation: a.designation || a.code || '', quantite: 0, prix_unitaire: a.prix_vente || 0, created_at: new Date().toISOString() });
+        changedM = true;
+      }
     }
   });
   if (changedF) setStockFinished(fin);
   if (changedS) setStockSemi(semi);
+  if (changedM) setStockMerch(merch);
   /* Backfill : les anciennes entrées miroir mdb_stocks sans articleNom/articleCode (invisibles en gestion commerciale) */
   try { backfillMirrorFields(); } catch (e) {}
 }
@@ -10993,16 +11006,29 @@ function render_stock_raw() {
   h += '<div class="tab' + (tab === 'wip' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'wip\');renderPage()">En-cours (WIP)</div>';
   h += '<div class="tab' + (tab === 'initial' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'initial\');renderPage()">Stock Initial</div>';
   h += '</div>';
-  /* Anti-panique : si le filtre Mois masque des lignes, on le DIT (sinon
-     l'utilisateur croit son achat supprimé). Comptage en amont. */
+  /* Anti-panique : si un filtre masque des lignes, on le DIT (sinon
+     l'utilisateur croit ses données supprimées). */
+  var _gmPage = '';
+  try { _gmPage = getGlobalMonth() || ''; } catch (eG) {}
   try {
-    var _gmPage = getGlobalMonth() || '';
     if (_gmPage) {
       var _mB = 0, _mR = 0, _mS = 0;
       getAchats().forEach(function(a) { if ((a.category || a.type) === 'raw-materials' && String(a.date || '').slice(0, 7) > _gmPage) _mB++; });
       getStockRaw().forEach(function(s) { if (!stockVisibleMois(_gmPage, s)) _mR++; });
       getStockSemi().forEach(function(s) { if (s && !stockVisibleMois(_gmPage, s)) _mS++; });
       h += stockMoisBanner(tab === 'bl' ? _mB : (tab === 'semi' ? _mS : _mR), _gmPage);
+    }
+    /* Lignes a 0 : elles existent, seul le filtre « Actif » les cache. */
+    if (etat === 'actif' && tab !== 'semi') {
+      var _z = 0;
+      getStockRaw().forEach(function(s) {
+        var o = mpOrigin(s);
+        if (tab === 'bl' && o !== 'BL') return;
+        if (tab === 'spe' && o !== 'SPECIFIC') return;
+        if (_gmPage && !stockVisibleMois(_gmPage, s)) return;
+        if (!(parseFloat(s.quantite) > 0)) _z++;
+      });
+      h += stockZeroBanner(_z, tab === 'spe' ? 'bois spécifique' : (tab === 'bl' ? 'colis' : 'ligne'));
     }
   } catch (eBM) {}
 
@@ -11369,9 +11395,40 @@ function createBoisBrut() {
   renderPage();
 }
 
+/* Articles du catalogue sans AUCUNE ligne de stock : on les ajoute a 0.
+   Sans cela, un article cree (donc visible dans la nomenclature) n'apparait
+   dans aucune fiche tant qu'un achat/saisie ne l'a pas touche. */
+function stockAvecCatalogue(key, rows) {
+  var out = (rows || []).slice();
+  var cats = { 'stock-merch': ['merch', 'merchandise'], 'stock-finished': ['finished'] };
+  var list = cats[key];
+  if (!list) return out;
+  function codeOf(s) {
+    var k = String((s && (s.code || s.colis_number)) || '').trim().toUpperCase();
+    if (!k && s && s.article_id) {
+      var a = getArticles().find(function (x) { return x.id === s.article_id; }) || {};
+      k = String(a.code || '').trim().toUpperCase();
+    }
+    return k;
+  }
+  var vus = {};
+  out.forEach(function (s) { var k = codeOf(s); if (k) vus[k] = true; });
+  try {
+    getArticles().forEach(function (a) {
+      if (!a || !a.code) return;
+      if (list.indexOf(String(a.categorie || '').toLowerCase()) === -1) return;
+      var k = String(a.code).trim().toUpperCase();
+      if (vus[k]) return;
+      vus[k] = true;
+      out.push({ id: 'cat_' + k, code: a.code, designation: a.designation || a.code, article_id: a.id, quantite: 0, volume: 0 });
+    });
+  } catch (e) {}
+  return out;
+}
+
 /* ==================== FICHE DE STOCK GENERIQUE (façon ACSER) ==================== */
 function renderStockFiche(key, getFn, title, addFn) {
-  var items = getFn();
+  var items = stockAvecCatalogue(key, getFn());
   var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
   h += '<h2 style="font-size:1.15rem;margin:0">' + escH(title) + '</h2>';
   h += '<p style="color:var(--dim);font-size:.82rem;margin:0">État du stock et historique des mouvements</p></div>';
@@ -13251,13 +13308,20 @@ function launchInventory() {
   calcInvEcart();
 }
 
-/* Bandeau anti-panique : quand le filtre Mois masque des lignes, on le DIT
+/* Bandeau anti-panique : quand un filtre masque des lignes, on le DIT
    (sinon l'utilisateur croit ses données supprimées). */
 function stockMoisBanner(n, gm) {
   if (!gm || !(n > 0)) return '';
   return '<div style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:10px;padding:.5rem .9rem;margin-bottom:.8rem;font-size:.8rem">'
     + '⚠️ ' + n + ' ligne(s) postérieure(s) à ' + escH(monthLabel(gm)) + ' masquée(s) par le filtre <strong>Mois</strong> (en haut). '
     + 'Vos données ne sont pas supprimées : changez le Mois pour les voir.</div>';
+}
+/* Même principe pour le filtre Actif / Tout (quantité nulle). */
+function stockZeroBanner(n, quoi) {
+  if (!(n > 0)) return '';
+  return '<div style="background:#fefce8;border:1px solid #fde68a;color:#854d0e;border-radius:10px;padding:.5rem .9rem;margin-bottom:.8rem;font-size:.8rem">'
+    + 'ℹ️ ' + n + ' ' + (quoi || 'ligne') + '(s) à quantité 0 masquée(s) par le filtre <strong>Actif (qté&gt;0)</strong>. '
+    + 'Cliquez <strong>Tout (y compris 0)</strong> pour les voir.</div>';
 }
 
 /* Une ligne de stock est-elle visible pour un mois donné ? Oui si elle a été
@@ -13318,19 +13382,19 @@ function calcInventoryItems(month, dateMax) {
     var _a = invArt(s);
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Palette', source: 'Palette', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockPalettes', storeIdx: items.length });
   });
-  (getStockFinished() || []).forEach(function(s) {
-    if (!visible(s)) return;
+  stockAvecCatalogue('stock-finished', getStockFinished() || []).forEach(function(s) {
     var _a = invArt(s);
     var _dims = s.dimensions || _a.dimensions || '';
     var _l = parseFloat(s.length) || parseFloat(_a.length) || 0;
     var _w = parseFloat(s.width) || parseFloat(_a.width) || 0;
     var _t = parseFloat(s.thickness) || parseFloat(_a.thickness) || 0;
     if (!_dims && _l > 0 && _w > 0 && _t > 0) _dims = _l + 'x' + _w + 'x' + _t;
+    if (!visible(s)) return;
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Produit fini', source: 'Produit fini', emplacement: s.emplacement || '', dimensions: _dims, volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockFinished', storeIdx: items.length });
   });
-  (getStockMerch() || []).forEach(function(s) {
-    if (!visible(s)) return;
+  stockAvecCatalogue('stock-merch', getStockMerch() || []).forEach(function(s) {
     var _a = invArt(s);
+    if (!visible(s)) return;
     items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Marchandise', source: 'Marchandise', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockMerch', storeIdx: items.length });
   });
   /* Consommables : on part du CATALOGUE, pas seulement des lignes de stock.
