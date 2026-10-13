@@ -8382,6 +8382,31 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     attenduPrefixe: 'OK'
   });
   r.push({
+    nom: 'Tableau de bord : la carte pointes ignore l\u2019historique clôturé (comme la fiche)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockConsum = [
+        { id: 'h1', code: 'P6', designation: 'POINTE6', quantite: 51000, cond: 170, ctype: 'POINTE', created_at: '2026-09-02', _invClos: 'inv1' }
+      ];
+      p.definitions = [];
+      p.composants = [];
+      p.articles = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_packs_per_carton', '50');
+      var h = dashCartePointes();
+      /* 51 000 pointes clôturées = 300 paquets à ignorer : ni le chiffre, ni
+         un total non nul ne doivent apparaître. */
+      (/TOTAL 0 paquets/.test(h) && h.indexOf('300') === -1)
+        ? 'OK : ligne clôturée ignorée, carte à 0 comme la fiche'
+        : 'ECHEC : ' + h.slice(0, 300)
+    `,
+    attenduPrefixe: 'OK'
+  });
+  r.push({
     nom: 'Synchro exploitation : un achat distant arrive meme si le poste est sale',
     app: 'production.html', store: storeRealiste,
     code: `
