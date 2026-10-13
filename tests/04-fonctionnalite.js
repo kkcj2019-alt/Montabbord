@@ -744,7 +744,63 @@ attenduPrefixe: 'OK'
     attendu: 'OK'
   });
 
-  /* ---------- Synchronisation : aucun poste ne peut ecraser le travail d'un autre ---------- */
+  r.push({
+    nom: 'Code de validation : un champ vide garde le code existant (pas d effacement silencieux)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_entreprise', { nom:'ACSER', devise:'FCFA', validationCode:'1234' });
+      var champ = document.getElementById('entValidationCode');
+      /* Cas reel : le code est masque, l'utilisateur sauvegarde sans le resaisir */
+      champ.value = '';
+      window.prompt = function () { return null; };
+      saveEntreprise();
+      var apresVide = (getEntreprise().validationCode || '');
+      /* Idem sur un enregistrement ou le champ n existe pas du tout */
+      var garde2 = fusionCodeValidation('1234', '   ');
+      (apresVide === '1234' && garde2.code === '1234' && garde2.change === false)
+        ? 'OK : code 1234 conserve' : 'apres=' + apresVide + ' fusion=' + JSON.stringify(garde2)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Consommables : les champs carton/paquet sont propres aux pointes, pas aux divers',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Un divers se suit dans son unite : pas de carton, pas de paquet */
+      var d0 = document.createElement('div');
+      document.body.appendChild(d0);
+      document.getElementById('modalOverlay').remove();
+      openConsoDiversModal(null);
+      document.getElementById('cd_type').value = 'divers';
+      document.getElementById('cd_code').value = 'PEINT';
+      document.getElementById('cd_nom').value = 'Peinture';
+      document.getElementById('cd_unite').value = 'L';
+      document.getElementById('cd_cond').value = '12';
+      document.getElementById('cd_prixcarton').value = '45000';
+      document.getElementById('cd_cout').value = '3500';
+      cdTypeChange();
+      var cache = document.getElementById('cdRowPointe').style.display === 'none';
+      saveConsoDiversModal(null);
+      var art = getArticles().filter(function (a) { return a.code === 'PEINT'; })[0];
+      var okDivers = !!art && art.categorie === 'divers' && art.unite === 'L'
+        && !art.qty_per_packet && !art.prix_carton && art.unit_cost === 3500;
+      /* Une pointe, elle, garde conditionnement + prix carton */
+      openConsoDiversModal(null);
+      document.getElementById('cd_type').value = 'consum';
+      document.getElementById('cd_code').value = 'PT80';
+      document.getElementById('cd_nom').value = 'Pointes 80mm';
+      document.getElementById('cd_cond').value = '5000';
+      document.getElementById('cd_prixcarton').value = '30000';
+      saveConsoDiversModal(null);
+      var pointe = getArticles().filter(function (a) { return a.code === 'PT80'; })[0];
+      var okPointe = !!pointe && pointe.qty_per_packet === 5000 && pointe.prix_carton === 30000;
+      (cache && okDivers && okPointe)
+        ? 'OK : divers sans carton (unite L, cout conserve), pointe avec paquet 5000 / carton 30000'
+        : 'ECHEC cache=' + cache + ' divers=' + JSON.stringify(art) + ' pointe=' + JSON.stringify(pointe)
+    `,
+    attenduPrefixe: 'OK'
+  });
   r.push({
     nom: 'Sync : une copie locale perimee ne peut plus ecraser le pointage du cloud',
     app: 'index.html', store: storeRealiste,
@@ -4569,6 +4625,97 @@ r.push({
         && d.mappes.length === 1 && d.mappes[0].expl === 'PAL114')
         ? 'OK : 114 créé puis lié à PAL114 (prix 6000 remonté), diagnostic cohérent'
         : 'ECHEC : sansMap=' + sansMap + ' pal=' + JSON.stringify(pal) + ' liens=' + JSON.stringify(liens)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Catalogue : filtre destination + cases + compteur produits finis',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a1', code: 'PAL114', designation: 'PALETTES', categorie: 'finished', destination: 'MONDI ABIDJAN' },
+        { id: 'a2', code: 'PAL112', designation: 'PALETTES 112', categorie: 'finished', destination: 'SIVEM' }
+      ];
+      p.composants = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      CURRENT_PAGE = 'cat-produits-finis';
+      renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var okSel = h.indexOf('catDestFilter') !== -1 && h.indexOf('MONDI ABIDJAN') !== -1 && h.indexOf('SIVEM') !== -1;
+      var okCb = h.indexOf('cat-cb') !== -1 && h.indexOf('catImprimerSelection') !== -1;
+      var okData = h.indexOf('data-dest="MONDI ABIDJAN"') !== -1;
+      var okCount = h.indexOf('2 article') !== -1 && h.indexOf('2 produit') !== -1 && h.indexOf('fini') !== -1;
+      (okSel && okCb && okData && okCount)
+        ? 'OK : select destination, cases, data-dest et compteur visibles'
+        : 'ECHEC : sel=' + okSel + ' cb=' + okCb + ' data=' + okData + ' count=' + okCount
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche technique : corps + impression sélection + par destination',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'a1', code: 'PAL114', designation: 'PALETTES', categorie: 'finished', destination: 'MONDI ABIDJAN' },
+        { id: 'a2', code: 'PAL112', designation: 'PALETTES 112', categorie: 'finished', destination: 'SIVEM' }
+      ];
+      p.composants = [{ article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', quantity: 5, length: 114, width: 8, thickness: 2, volume: 0.0146 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var corps = ficheTechCorpsHtml('a1');
+      var vide = ficheTechCorpsHtml('a2');
+      var capture = '';
+      var faux = { document: { write: function (x) { capture += x; }, close: function () {}, title: '' }, onload: null, print: function () {}, focus: function () {}, closed: false };
+      var vraiOpen = window.open;
+      window.open = function () { return faux; };
+      try { printFichesTechniques(['a1', 'a2'], 'Test'); } catch (e) {}
+      window.open = vraiOpen;
+      var okCorps = corps.indexOf('L1') !== -1 && corps.indexOf('0.0146') !== -1;
+      var okPrint = capture.indexOf('PAL114') !== -1 && capture.indexOf('PAL112') !== -1 && capture.indexOf('window.print') !== -1;
+      (okCorps && okPrint && vide.indexOf('Aucune nomenclature') !== -1)
+        ? 'OK : corps avec L1/volume, impression des 2 fiches, vide signalé'
+        : 'ECHEC : corps=' + okCorps + ' print=' + okPrint
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Doublons PF : fusion repointée + ancien ignoré (PAL114 -> 114)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'e1', code: 'PAL114', designation: 'PALETTES', categorie: 'finished' },
+        { id: 'e2', code: '114', designation: 'PALETTE 114', categorie: 'finished' }
+      ];
+      p.composants = [{ article_id: 'e1', type: 'LATTE', code: 'L1', designation: 'Latte', quantity: 5 }];
+      p.stockFinished = [{ id: 's1', article_id: 'e1', quantite: 10 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      renderPage = function () {};
+      setSection('pfLinks', []);
+      setSection('pfIgnores', []);
+      var r = fusionnerDoublonPF('PAL114', '114');
+      var comps = getSection('composants', []);
+      var reste = getArticles().map(function (a) { return a.code; });
+      var ig = getPfIgnores();
+      (r.ok && comps[0].article_id === 'e2'
+        && reste.indexOf('PAL114') === -1 && reste.indexOf('114') !== -1
+        && ig.indexOf('PAL114') !== -1
+        && getStockFinished()[0].article_id === 'e2')
+        ? 'OK : nomenclature+stock repointés sur 114, PAL114 supprimé et ignoré'
+        : 'ECHEC : r=' + JSON.stringify(r) + ' reste=' + JSON.stringify(reste)
     `,
     attenduPrefixe: 'OK'
   });
