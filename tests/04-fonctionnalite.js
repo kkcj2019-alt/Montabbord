@@ -1710,6 +1710,86 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Finis : le miroir complet copie chaque produit vers Index (articles + codes seuls)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var arts = getArticles();
+      arts.push({ id:'a-pal', code:'PAL114', designation:'PALETTES 114', categorie:'finished', prix_vente:1000 });
+      setArticles(arts);
+      setStockFinished([
+        { id:'f1', article_id:'a-pal', code:'PAL114', quantite: 100 },
+        { id:'f2', article_id:'a-pal', code:'PAL114', quantite: 50 },
+        { id:'f3', code:'VIEUX', designation:'Vieux code', quantite: 7 }
+      ]);
+      localStorage.setItem('mdb_stocks', JSON.stringify([]));
+      var n = syncMirrorFinishedAll(true);
+      var ms = lsArr('mdb_stocks');
+      var pal = null, vieux = null;
+      for (var i = 0; i < ms.length; i++) {
+        if (ms[i].article_id === 'a-pal') pal = ms[i];
+        if (ms[i].code === 'VIEUX') vieux = ms[i];
+      }
+      (n >= 2 && pal && pal.quantite === 150 && vieux && vieux.quantite === 7)
+        ? 'OK : PAL114 cumule a 150, VIEUX sans article copie a 7'
+        : 'ECHEC n=' + n + ' pal=' + (pal ? pal.quantite : 'absent') + ' vieux=' + (vieux ? vieux.quantite : 'absent')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Finis : l import depuis Index cree les articles manquants a zero',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm = function () { return true; };
+      var arts = getArticles();
+      arts.push({ id:'a-connu', code:'CONNU', designation:'Connu', categorie:'finished' });
+      setArticles(arts);
+      setStockFinished([]);
+      localStorage.setItem('mdb_stocks', JSON.stringify([
+        { id:'m1', code:'CONNU', articleCode:'CONNU', categorie:'finished', quantite: 4 },
+        { id:'m2', code:'NOUVEAU', articleCode:'NOUVEAU', articleNom:'Nouveau produit', categorie:'finished', quantite: 9 },
+        { id:'m3', code:'P5', categorie:'consommable', quantite: 3 }
+      ]));
+      var n = importerFinisIndex();
+      var arts2 = getArticles(), trouve = false;
+      for (var i = 0; i < arts2.length; i++) if (arts2[i].code === 'NOUVEAU') trouve = true;
+      var st = getStockFinished(), zero = false;
+      for (var j = 0; j < st.length; j++) if (String(st[j].code) === 'NOUVEAU' && parseFloat(st[j].quantite) === 0) zero = true;
+      (n === 1 && trouve && zero) ? 'OK : NOUVEAU cree a 0, CONNU et P5 ignores'
+        : 'ECHEC n=' + n + ' trouve=' + trouve + ' zero=' + zero
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Index reel : les produits finis sont agreges par produit, zeros inclus',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_production', JSON.stringify({
+        articles: [{ id:'a1', code:'PAL114', designation:'PALETTES 114', prix_vente:1000 }],
+        stockFinished: [
+          { id:'f1', article_id:'a1', code:'PAL114', quantite: 100 },
+          { id:'f2', article_id:'a1', code:'PAL114', quantite: -100 },
+          { id:'f3', code:'SEUL', designation:'Seul', quantite: 0, prix_unitaire: 50 }
+        ],
+        stockRaw: [], stockSemi: [], stockPalettes: [], stockMerch: [], stockConsum: [], epiItems: []
+      }));
+      var out = getProductionStocksReel();
+      var finis = [];
+      for (var i = 0; i < out.length; i++) if (out[i].categorie === 'Produits finis') finis.push([out[i].designation, out[i].quantite]);
+      var pal = null, seul = null;
+      for (var j = 0; j < finis.length; j++) {
+        if (String(finis[j][0]).indexOf('PAL114') !== -1) pal = finis[j][1];
+        if (String(finis[j][0]).indexOf('SEUL') !== -1) seul = finis[j][1];
+      }
+      (finis.length === 2 && pal === 0 && seul === 0)
+        ? 'OK : 1 ligne PAL114 a 0 (100-100) + 1 ligne SEUL a 0'
+        : 'ECHEC lignes=' + finis.length + ' pal=' + pal + ' seul=' + seul
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',

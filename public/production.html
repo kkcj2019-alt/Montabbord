@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ACSER — Exploitation</title>
-<script>window.__APP_VERSION='2026-10-11-195';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-11-196';try{var _v=localStorage.getItem('app_version_prod');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version_prod',window.__APP_VERSION);location.reload(true);}else if(!_v){localStorage.setItem('app_version_prod',window.__APP_VERSION);}}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap">
@@ -9918,6 +9918,9 @@ function saveProduction(validate) {
     /* Entree produits finis : les quantites assemblees entrent au stock
        (carte Produits Finis du tableau de bord) */
     creditAssemblageFini(prod);
+    /* Miroir immediat vers Index : un produit nouvellement fabrique doit y
+       etre visible sans attendre l'ouverture de la fiche. */
+    try { syncMirrorFinishedAll(true); } catch (eM2) {}
     clearAutoDraft();
     localStorage.removeItem('mdb_prod_editId');
     toast('Fiche de Production validée ✅ — Rendement: ' + prod.rendement.toFixed(1) + '%');
@@ -11010,6 +11013,105 @@ function syncMirrorFinished(articleId) {
     localStorage.setItem('mdb_stocks', JSON.stringify(ms));
   } catch (e) {}
 }
+/* Miroir COMPLET des produits finis vers l'app principale (mdb_stocks) :
+   chaque article fini du catalogue ET chaque code présent au stock (même sans
+   article) a sa ligne miroir, créée ou mise à jour avec la quantité totale.
+   Avant, seules les lignes touchées par certains chemins étaient recopiées :
+   un produit fabriqué restait invisible dans Index. */
+function syncMirrorFinishedAll(silencieux) {
+  try {
+    var n = 0;
+    var ms = lsArr('mdb_stocks');
+    var tousFinis = getStockFinished();
+    function ecrireMiroir(code, designation, articleId, qte, pu) {
+      code = String(code || '').trim();
+      if (!code && !articleId) return;
+      var ex = null;
+      for (var i = 0; i < ms.length; i++) {
+        var x = ms[i] || {};
+        if (articleId && x.article_id === articleId) { ex = x; break; }
+        if (code && String(x.code || x.articleCode || '').trim().toUpperCase() === code.toUpperCase()) { ex = x; break; }
+      }
+      if (ex) {
+        ex.qte = qte; ex.quantite = qte; ex.date = today();
+        if (code && !ex.articleCode) ex.articleCode = code;
+        if (designation && !ex.articleNom) ex.articleNom = designation;
+      } else {
+        ms.push({ id: 'prod_' + genId(), code: code || articleId, designation: designation || '', articleCode: code, articleNom: designation || '', article_id: articleId || '', qte: qte, quantite: qte, prixUnitaire: pu || 0, date: today(), categorie: 'finished' });
+      }
+      n++;
+    }
+    var vus = {};
+    getArticles().forEach(function (a) {
+      if (!a) return;
+      if (String(a.categorie || '').toLowerCase() !== 'finished') return;
+      var q = 0;
+      tousFinis.forEach(function (s) { if (s.article_id === a.id) q += parseFloat(s.quantite) || 0; });
+      ecrireMiroir(a.code, a.designation, a.id, q, a.prix_vente || a.prix_revient);
+      vus[String(a.code || '').trim().toUpperCase()] = true;
+    });
+    var parCode = {};
+    tousFinis.forEach(function (s) {
+      if (!s || s.article_id) return;
+      var code = String(s.code || '').trim();
+      if (!code) return;
+      var k = code.toUpperCase();
+      if (vus[k] || parCode[k]) return;
+      parCode[k] = true;
+      var q2 = 0, des = '', pu2 = 0;
+      tousFinis.forEach(function (t) {
+        if (String(t.code || '').trim().toUpperCase() === k) {
+          q2 += parseFloat(t.quantite) || 0;
+          if (!des) des = t.designation || '';
+          if (!pu2) pu2 = t.prix_unitaire || 0;
+        }
+      });
+      ecrireMiroir(code, des, '', q2, pu2);
+    });
+    localStorage.setItem('mdb_stocks', JSON.stringify(ms));
+    if (!silencieux) toast(n + ' produit(s) fini(s) synchronisé(s) vers Index', 'success');
+    return n;
+  } catch (e) { return 0; }
+}
+/* Import depuis l'app principale : un produit fini saisi manuellement dans
+   Index (mdb_stocks) mais inconnu d'Exploitation devient un article du
+   catalogue + une ligne à 0. Explicite (bouton), jamais automatique : on ne
+   pollue pas le catalogue avec une coquille de saisie. */
+function importerFinisIndex() {
+  try {
+    var ms = lsArr('mdb_stocks');
+    var arts = getArticles();
+    var manquants = [], vus = {};
+    ms.forEach(function (s) {
+      if (!s) return;
+      if (String(s.categorie || '').toLowerCase() !== 'finished') return;
+      var code = String(s.articleCode || s.code || '').trim();
+      if (!code) return;
+      var k = code.toUpperCase();
+      if (vus[k]) return;
+      vus[k] = true;
+      var connu = false;
+      for (var i = 0; i < arts.length; i++) {
+        if (String(arts[i].code || '').trim().toUpperCase() === k) { connu = true; break; }
+      }
+      if (!connu) manquants.push({ code: code, des: s.articleNom || s.designation || code });
+    });
+    if (!manquants.length) { toast('Aucun produit fini à importer — tout est déjà connu', 'success'); return 0; }
+    if (!confirm2('Importer ' + manquants.length + ' produit(s) fini(s) depuis Index ?\n\n' + manquants.slice(0, 8).map(function (m) { return m.code; }).join(', ') + (manquants.length > 8 ? '...' : '') + '\n\nIls seront créés dans le catalogue avec un stock à 0.')) return 0;
+    var fin = getStockFinished(), n = 0;
+    manquants.forEach(function (m) {
+      var id = genId();
+      arts.push({ id: id, code: m.code, designation: m.des, categorie: 'finished', prix_vente: 0 });
+      fin.push({ id: genId(), article_id: id, code: m.code, designation: m.des, quantite: 0, created_at: today() });
+      n++;
+    });
+    setArticles(arts);
+    setStockFinished(fin);
+    toast(n + ' produit(s) importé(s) depuis Index', 'success');
+    renderPage();
+    return n;
+  } catch (e) { try { toast('Import impossible', 'error'); } catch (e2) {} return 0; }
+}
 function backfillMirrorFields() {
   var ms = lsArr('mdb_stocks');
   var changed = false;
@@ -11062,7 +11164,7 @@ function remettreZeroStockFinished() {
   } catch (e) { try { toast('Remise à zéro impossible', 'error'); } catch (e2) {} }
 }
 
-function render_stock_finished() { syncCatalogueToStock(); return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
+function render_stock_finished() { syncCatalogueToStock(); try { syncMirrorFinishedAll(true); } catch (eM) {} return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
 
 /* ==================== STOCK SEMI-FINIS ==================== */
 /* Fiche de Stock - Semi-Finis (page dediee) : UNE ligne par composant,
@@ -12296,6 +12398,8 @@ function renderStockFiche(key, getFn, title, addFn) {
   h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
   h += '<button class="btn btn-accent" onclick="' + addFn + '(\'' + key + '\')">+ Nouveau</button>';
   if (key === 'stock-finished') h += '<button class="btn" onclick="remettreZeroStockFinished()" title="Ramener chaque produit à zéro (écart tracé, comme un inventaire)">↺ Remettre à zéro</button>';
+  if (key === 'stock-finished') h += '<button class="btn" onclick="syncMirrorFinishedAll(false)" title="Recopier tous les produits finis vers Index (même ceux jamais touchés)">🔄 Synchroniser vers Index</button>';
+  if (key === 'stock-finished') h += '<button class="btn" onclick="importerFinisIndex()" title="Créer dans le catalogue les produits finis saisis dans Index mais inconnus ici">📥 Importer depuis Index</button>';
   h += '</div></div>';
   var noVol = (key === 'stock-finished');
   h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th>' + (noVol ? '' : '<th style="text-align:right">Volume (m³)</th>') + '<th>Observation</th><th>Actions</th></tr>';
