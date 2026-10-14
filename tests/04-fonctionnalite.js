@@ -1888,6 +1888,77 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Achat antidate : les colis portent la date d achat, pas la date de saisie (cas BL-44531)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      renderPage = function () {};
+      setStockRaw([]);
+      document.getElementById('ach_ref').value = 'BL-44531';
+      document.getElementById('ach_date').value = '2026-09-29';
+      document.getElementById('ach_fournisseur').value = 'SMI';
+      document.getElementById('ach_receiver').value = 'OULAI';
+      document.getElementById('ach_acheteur').value = '';
+      _tempAchatItems = [
+        { colis_number:'C1', essence:'KAP', type:'Blanc', length:250, width:34, thickness:10, volume:2.243, quantity:26, zone:'' },
+        { colis_number:'C2', essence:'KAP', type:'Blanc', length:330, width:30, thickness:10, volume:2.744, quantity:27, zone:'' }
+      ];
+      window._editingAchatId = null;
+      saveAchatByCategory({ preventDefault: function () {} }, 'raw-materials');
+      var st = getStockRaw(), d1 = '', d2 = '';
+      for (var i = 0; i < st.length; i++) {
+        if (String(st[i].colis_number) === 'C1') d1 = String(st[i].created_at || '').slice(0, 10);
+        if (String(st[i].colis_number) === 'C2') d2 = String(st[i].created_at || '').slice(0, 10);
+      }
+      var items = calcInventoryItems('2026-09', '2026-09-30');
+      var i1 = false, i2 = false;
+      for (var j = 0; j < items.length; j++) {
+        if (items[j] && items[j].code === 'C1') i1 = true;
+        if (items[j] && items[j].code === 'C2') i2 = true;
+      }
+      (d1 === '2026-09-29' && d2 === '2026-09-29' && i1 && i2)
+        ? 'OK : 2 colis dates au 29-09 et visibles a l inventaire du 30-09'
+        : 'ECHEC d1=' + d1 + ' d2=' + d2 + ' inv1=' + i1 + ' inv2=' + i2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Achat antidate : rouvrir et enregistrer recale les lignes sur la date d achat',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      renderPage = function () {};
+      setStockRaw([
+        { id:'s1', code:'C1', colis_number:'C1', quantite:26, volume:2.243, created_at:'2026-10-14' },
+        { id:'s2', code:'C2', colis_number:'C2', quantite:27, volume:2.744, created_at:'2026-10-14' }
+      ]);
+      var dbs = getDB();
+      dbs.achats = [{ id:'a1', category:'raw-materials', date:'2026-09-29', reference:'BL-44531', fournisseur:'SMI',
+        items: [
+          { colis_number:'C1', essence:'KAP', type:'Blanc', length:250, width:34, thickness:10, volume:2.243, quantity:26, zone:'' },
+          { colis_number:'C2', essence:'KAP', type:'Blanc', length:330, width:30, thickness:10, volume:2.744, quantity:27, zone:'' }
+        ] }];
+      localStorage.setItem('mdb_production', JSON.stringify(dbs));
+      document.getElementById('ach_ref').value = 'BL-44531';
+      document.getElementById('ach_date').value = '2026-09-29';
+      document.getElementById('ach_fournisseur').value = 'SMI';
+      document.getElementById('ach_receiver').value = 'OULAI';
+      document.getElementById('ach_acheteur').value = '';
+      _tempAchatItems = JSON.parse(JSON.stringify(dbs.achats[0].items));
+      window._editingAchatId = 'a1';
+      saveAchatByCategory({ preventDefault: function () {} }, 'raw-materials');
+      var st = getStockRaw(), d1 = '', d2 = '';
+      for (var i = 0; i < st.length; i++) {
+        if (String(st[i].colis_number) === 'C1') d1 = String(st[i].created_at || '').slice(0, 10);
+        if (String(st[i].colis_number) === 'C2') d2 = String(st[i].created_at || '').slice(0, 10);
+      }
+      (d1 === '2026-09-29' && d2 === '2026-09-29')
+        ? 'OK : lignes recalees au 29-09 par la modification'
+        : 'ECHEC d1=' + d1 + ' d2=' + d2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
