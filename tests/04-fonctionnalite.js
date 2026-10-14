@@ -10270,6 +10270,36 @@ function run(rapport) {
     rapport.ko('Bandeau figé Exploitation : bandeau illisible (' + eBd.message + ')');
   }
 
+  /* Controle statique : aucun re-rendu automatique (snapshot temps reel NI
+     sonde de synchro) ne doit vider un formulaire en cours de saisie. La
+     garde _mdbFormActiveGuard doit proteger les DEUX chemins, sinon sur
+     telephone les champs de la caisse se vident tout seuls pendant la
+     frappe (la sonde rechargeait et appelait navigateTo sans la garde). */
+  try {
+    const fsG = require('fs');
+    const pathG = require('path');
+    const srcG = fsG.readFileSync(pathG.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okDef = srcG.indexOf('function _mdbFormActiveGuard()') !== -1;
+    /* sonde : la garde doit etre testee AVANT d'enregistrer le timestamp
+       (sinon la modification distante serait perdue, pas differ\u00e9e). */
+    const iSonde = srcG.indexOf('function _mdbStartSonde');
+    const segSonde = iSonde >= 0 ? srcG.slice(iSonde, iSonde + 1600) : '';
+    const iGuardSonde = segSonde.indexOf('_mdbFormActiveGuard()');
+    const iTs = segSonde.indexOf('window._mdbVuTs = ts;');
+    const okSonde = iGuardSonde !== -1 && iTs !== -1 && iGuardSonde < iTs;
+    /* temps reel : le debounce de re-rendu doit utiliser la meme garde. */
+    const iRt = srcG.indexOf('window._rtNavTimer = setTimeout');
+    const segRt = iRt >= 0 ? srcG.slice(iRt, iRt + 600) : '';
+    const okRt = segRt.indexOf('_mdbFormActiveGuard()') !== -1;
+    if (okDef && okSonde && okRt) {
+      rapport.ok('Saisie protegee : la garde _mdbFormActiveGuard couvre la sonde de synchro et le temps reel (les champs ne se vident plus pendant la frappe)');
+    } else {
+      rapport.ko('Saisie protegee : garde — def=' + okDef + ' sonde=' + okSonde + ' tempsReel=' + okRt);
+    }
+  } catch (eG) {
+    rapport.ko('Saisie protegee : lecture index.html impossible (' + eG.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
