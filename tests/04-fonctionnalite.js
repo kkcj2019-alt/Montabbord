@@ -1667,6 +1667,49 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Finis : remettre a zero ramene chaque produit sans mouvement a 0 avec trace',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      confirm2 = function () { return true; };
+      renderPage = function () {};
+      var arts = getArticles();
+      arts.push({ id:'a-pal', code:'PAL114', designation:'PALETTES 114', categorie:'finished' });
+      arts.push({ id:'a-couv', code:'COUV114', designation:'COUVERCLES 114', categorie:'finished' });
+      setArticles(arts);
+      setStockFinished([
+        { id:'f1', code:'PAL114', designation:'PALETTES 114', quantite: 1310, created_at:'2026-09-01' },
+        { id:'f2', code:'COUV114', designation:'COUVERCLES 114', quantite: 810, created_at:'2026-09-01' },
+        { id:'f3', code:'BBOX', designation:'BIG BOX', quantite: 0, created_at:'2026-09-01' }
+      ]);
+      setSection('mouvements', []);
+      remettreZeroStockFinished();
+      var st = getStockFinished(), tot = 0, n = 0;
+      for (var i = 0; i < st.length; i++) tot += parseFloat(st[i].quantite) || 0;
+      var movs = getMovements(), trace = 0;
+      for (var j = 0; j < movs.length; j++) {
+        if (movs[j] && String(movs[j].motif || '').indexOf('inventaire') !== -1) trace++;
+      }
+      for (var k = 0; k < st.length; k++) if (String(st[k].code) === 'BBOX') n++;
+      (tot === 0 && trace >= 2 && n === 1)
+        ? 'OK : total 0, ecarts traces (' + trace + '), BBOX intouché'
+        : 'ECHEC total=' + tot + ' trace=' + trace + ' bbox=' + n
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Finis : la fiche palettes propose le bouton remettre a zero',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setStockFinished([{ id:'f1', code:'PAL114', designation:'PALETTES 114', quantite: 5 }]);
+      var h = render_stock_palettes();
+      (h.indexOf('remettreZeroStockFinished()') !== -1) ? 'OK : bouton present'
+        : 'ECHEC : bouton absent'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
