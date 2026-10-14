@@ -10385,6 +10385,29 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Jours fériés : vraie table (Date, Jour, Libellé, Type) + regroupement par année',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      setFeries([]);
+      var g = ptGenererFeriesCI(2026);
+      setFeries(g);
+      showModalFeries();
+      var h = document.getElementById('pt-modal-content').innerHTML;
+      var hasTable = h.indexOf('<table') !== -1 && h.indexOf('</table>') !== -1;
+      var cols = h.indexOf('>Date<') !== -1 && h.indexOf('>Jour<') !== -1 && h.indexOf('>Libellé<') !== -1 && h.indexOf('>Type<') !== -1 && h.indexOf('>Actions<') !== -1;
+      var group = h.indexOf('>2026 ') !== -1;
+      var badges = h.indexOf('Lunaire') !== -1 && h.indexOf('Fixe') !== -1 && h.indexOf('Religieux') !== -1;
+      var jour = feriesJourFr('2026-05-01') === 'Vendredi';
+      var dim = feriesJourFr('2026-01-04') === 'Dimanche';
+      var ty = feriesType({libelle:'Tabaski (lune)'}).lbl === 'Lunaire' && feriesType({type:'report'}).lbl === 'Report' && feriesType({}).lbl === 'Perso';
+      var typGen = g.filter(function(x){return x.type==='lunaire';}).length > 0 && g.filter(function(x){return x.type==='fixe';}).length > 0;
+      (hasTable && cols && group && badges && jour && dim && ty && typGen) ? 'OK : table Date/Jour/Libelle/Type, badges de type, regroupement par annee'
+        : 'ECHEC table=' + hasTable + ' cols=' + cols + ' group=' + group + ' badges=' + badges + ' jour=' + jour + ' dim=' + dim + ' ty=' + ty + ' typGen=' + typGen;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
