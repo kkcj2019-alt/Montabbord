@@ -2843,14 +2843,64 @@ function mergeTombstonesFromCloud(cloudT) {
   if (changed) { try { localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(local)); } catch(e) {} }
 }
 
+var _dbMemCache = {};
+var _clientMap = null;
+var _fournMap = null;
+var _articleMap = null;
+var _bcMap = null;
+var _factureMap = null;
+
+var _localBackupTimer = null;
+var _pendingBackupKeys = {};
+function scheduleLocalBackup(key, data) {
+  _pendingBackupKeys[key] = data;
+  if (_localBackupTimer) return;
+  _localBackupTimer = setTimeout(function() {
+    _localBackupTimer = null;
+    var keysToUpdate = _pendingBackupKeys;
+    _pendingBackupKeys = {};
+    if (typeof _storageKnownFull !== 'undefined' && _storageKnownFull && (Date.now() - _storageKnownFull) < 120000) return;
+    try {
+      var meta = getBackupMeta();
+      if (meta && meta.length > 0) {
+        var idx = meta[0].index;
+        var rawB = localStorage.getItem('mdb_backup_' + idx);
+        if (rawB) {
+          var backup = JSON.parse(rawB) || {};
+          for (var k in keysToUpdate) {
+            backup[k] = keysToUpdate[k];
+          }
+          localStorage.setItem('mdb_backup_' + idx, JSON.stringify(backup));
+        }
+      }
+    } catch(e) {}
+  }, 2500);
+}
+
 var DB = {
   get: function(key) {
-    try { return JSON.parse(localStorage.getItem(key)); } catch(e) { return null; }
+    if (Object.prototype.hasOwnProperty.call(_dbMemCache, key)) {
+      return _dbMemCache[key];
+    }
+    try {
+      var raw = localStorage.getItem(key);
+      var parsed = raw ? JSON.parse(raw) : null;
+      _dbMemCache[key] = parsed;
+      return parsed;
+    } catch(e) {
+      return null;
+    }
   },
   set: function(key, data) {
-    var old = null;
-    try { old = JSON.parse(localStorage.getItem(key)); } catch(e) {}
-    /* Toute ligne pr\u00e9sente avant et absente apr\u00e8s \u00e9criture = suppression d\u00e9finitive (pierre tombale) */
+    var old = DB.get(key);
+    _dbMemCache[key] = data;
+    if (key === 'mdb_clients') _clientMap = null;
+    else if (key === 'mdb_fournisseurs') _fournMap = null;
+    else if (key === 'mdb_nomenclature') _articleMap = null;
+    else if (key === 'mdb_bc') _bcMap = null;
+    else if (key === 'mdb_factures') _factureMap = null;
+
+    /* Toute ligne présente avant et absente après écriture = suppression définitive (pierre tombale) */
     if (!_receivingSnapshot && !_loadingCloud && !window._restoringBackup && Array.isArray(old) && Array.isArray(data)) {
       var removedIds = [];
       var presentIds = {};
@@ -2861,9 +2911,12 @@ var DB = {
       }
       if (removedIds.length > 0) addTombstones(key, removedIds);
     }
-    if (Array.isArray(data) && !window._restoringBackup) data = stripTombstoned(key, data);
-    localStorage.setItem(key, JSON.stringify(data));
-    saveLocalBackup(key, data);
+    if (Array.isArray(data) && !window._restoringBackup) {
+      data = stripTombstoned(key, data);
+      _dbMemCache[key] = data;
+    }
+    try { localStorage.setItem(key, JSON.stringify(data)); } catch(eLS) {}
+    scheduleLocalBackup(key, data);
     if (!_receivingSnapshot && currentUser && currentUser.id) {
       markDirty(key);
     }
@@ -2887,9 +2940,15 @@ var DB = {
     return 'id_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
   },
   remove: function(key) {
+    delete _dbMemCache[key];
+    if (key === 'mdb_clients') _clientMap = null;
+    else if (key === 'mdb_fournisseurs') _fournMap = null;
+    else if (key === 'mdb_nomenclature') _articleMap = null;
+    else if (key === 'mdb_bc') _bcMap = null;
+    else if (key === 'mdb_factures') _factureMap = null;
     localStorage.removeItem(key);
   }
-}
+};
 
 /* ---- Lecture typeee : une section abimee ne doit plus casser une page ----
    Le motif historique "valeur ou tableau vide" ne protege pas : un objet
@@ -2911,6 +2970,12 @@ pruneTombstones();
 var SHARED_SYNC_KEYS = ['mdb_employes', 'mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_acomptesPrets', 'mdb_caisses', 'mdb_entreprise', 'mdb_factures_hors_prime_ca', 'mdb_missions'];
 window.addEventListener('storage', function(e) {
   if (!e.key) return;
+  if (_dbMemCache) delete _dbMemCache[e.key];
+  if (e.key === 'mdb_clients') _clientMap = null;
+  else if (e.key === 'mdb_fournisseurs') _fournMap = null;
+  else if (e.key === 'mdb_nomenclature') _articleMap = null;
+  else if (e.key === 'mdb_bc') _bcMap = null;
+  else if (e.key === 'mdb_factures') _factureMap = null;
   if (SHARED_SYNC_KEYS.indexOf(e.key) === -1) return;
   if (e.newValue === e.oldValue) return;
   try {
@@ -8618,14 +8683,22 @@ function getModelesCaisse() { return dbArr('mdb_modelesCaisse'); }
 function getCaisses() { return dbArr('mdb_caisses'); }
 
 function getClientById(id) {
-  var c = getClients();
-  for (var i = 0; i < c.length; i++) { if (c[i].id === id) return c[i]; }
-  return null;
+  if (!id) return null;
+  if (!_clientMap) {
+    _clientMap = {};
+    var c = getClients();
+    for (var i = 0; i < c.length; i++) { if (c[i] && c[i].id) _clientMap[c[i].id] = c[i]; }
+  }
+  return _clientMap[id] || null;
 }
 function getFournisseurById(id) {
-  var f = getFournisseurs();
-  for (var i = 0; i < f.length; i++) { if (f[i].id === id) return f[i]; }
-  return null;
+  if (!id) return null;
+  if (!_fournMap) {
+    _fournMap = {};
+    var f = getFournisseurs();
+    for (var i = 0; i < f.length; i++) { if (f[i] && f[i].id) _fournMap[f[i].id] = f[i]; }
+  }
+  return _fournMap[id] || null;
 }
 function getFournisseurCompte(fournisseurId) {
   var ops = getOperationsCaisse();
@@ -8751,9 +8824,13 @@ function saveInlineEdit(tableId, rowId, field, val) {
 }
 
 function getArticleById(id) {
-  var arts = getArticles();
-  for (var i = 0; i < arts.length; i++) { if (arts[i].id === id) return arts[i]; }
-  return null;
+  if (!id) return null;
+  if (!_articleMap) {
+    _articleMap = {};
+    var arts = getArticles();
+    for (var i = 0; i < arts.length; i++) { if (arts[i] && arts[i].id) _articleMap[arts[i].id] = arts[i]; }
+  }
+  return _articleMap[id] || null;
 }
 function getArticleLabel(articleId) {
   var a = getArticleById(articleId);
@@ -8766,15 +8843,23 @@ function getArticleCodeById(articleId) {
   return '';
 }
 function getBCById(id) {
-  var bcs = getBCs();
-  for (var i = 0; i < bcs.length; i++) { if (bcs[i].id === id) return bcs[i]; }
-  return null;
+  if (!id) return null;
+  if (!_bcMap) {
+    _bcMap = {};
+    var bcs = getBCs();
+    for (var i = 0; i < bcs.length; i++) { if (bcs[i] && bcs[i].id) _bcMap[bcs[i].id] = bcs[i]; }
+  }
+  return _bcMap[id] || null;
 }
 
 function getFactureById(id) {
-  var facs = getFactures();
-  for (var i = 0; i < facs.length; i++) { if (facs[i].id === id) return facs[i]; }
-  return null;
+  if (!id) return null;
+  if (!_factureMap) {
+    _factureMap = {};
+    var facs = getFactures();
+    for (var i = 0; i < facs.length; i++) { if (facs[i] && facs[i].id) _factureMap[facs[i].id] = facs[i]; }
+  }
+  return _factureMap[id] || null;
 }
 
 function getCompanyHeader() {
@@ -48031,10 +48116,8 @@ window.addEventListener('beforeunload', function() {
   }
 });
 document.addEventListener('visibilitychange', function() {
-  if (document.hidden && currentUser && currentUser.id) {
-    createFullBackup();
-  } else if (!document.hidden && currentUser && currentUser.id) {
-    pushToCloud();
+  if (!document.hidden && currentUser && currentUser.id) {
+    try { pushToCloud(); } catch(eVC) {}
   }
 });
 startAutoBackup();
