@@ -1633,6 +1633,40 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Inventaire finis : enregistrer applique l ecart sur une ligne, pas toute la valeur',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setStockFinished([
+        { id:'f1', code:'PAL114', designation:'PALETTES 114', quantite: 800, created_at:'2026-09-01' },
+        { id:'f2', code:'PAL114', designation:'PALETTES 114', quantite: 510, created_at:'2026-09-02' }
+      ]);
+      applyInventoryAsInitial('2026-10', [{ code:'PAL114', ref:'PAL114', store:'stockFinished', real_qte: 0 }]);
+      var st = getStockFinished(), tot = 0, n = 0;
+      for (var i = 0; i < st.length; i++) if (String(st[i].code) === 'PAL114') { tot += parseFloat(st[i].quantite) || 0; n++; }
+      (tot === 0 && n === 2) ? 'OK : total 0 sur 2 lignes conservees (au lieu de 0 pose 2 fois)'
+        : 'ECHEC total=' + tot + ' lignes=' + n
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche finis : le registre montre l ecart quand le stock ne colle pas aux mouvements',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setInventories([{ id:'inv1', statut:'valide', date:'2026-10-14',
+        items:[{ store:'stockFinished', ref:'PAL114', code:'PAL114', real_qte:0 }] }]);
+      setStockFinished([{ id:'f1', code:'PAL114', designation:'PALETTES 114', quantite: 1310, created_at:'2026-09-01' }]);
+      setSection('mouvements', []);
+      var h = _finRegistreHtml('f1');
+      (h.indexOf('Écart non justifié') !== -1 && h.indexOf('1310') !== -1)
+        ? 'OK : ecart +1310 visible au lieu d un registre muet a 0'
+        : 'ECHEC : pas de ligne d ecart'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
