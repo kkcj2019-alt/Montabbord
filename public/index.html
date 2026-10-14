@@ -1720,6 +1720,16 @@ function mergeObjetPartage(cloud, local) {
     if (!Object.prototype.hasOwnProperty.call(local, k)) continue;
     var lv = local[k], cv = cloud[k];
     if (Array.isArray(lv) && Array.isArray(cv)) {
+      /* Detecter si les elements ont un champ id (donnees transactionnelles)
+         ou non (donnees de reference : categories, fonctions, services...).
+         SANS id : local remplace cloud — ne jamais concatener, cela provoquait
+         un doublement exponentiel a chaque sync (6816 categories au lieu de ~100). */
+      var _hasId = false;
+      for (var _ci = 0; _ci < cv.length && !_hasId; _ci++) { if (cv[_ci] && cv[_ci].id !== undefined && cv[_ci].id !== null) _hasId = true; }
+      for (var _li = 0; _li < lv.length && !_hasId; _li++) { if (lv[_li] && lv[_li].id !== undefined && lv[_li].id !== null) _hasId = true; }
+      if (!_hasId) {
+        out[k] = lv.length > 0 ? lv : cv;
+      } else {
       var byId = {}, ordre = [];
       cv.forEach(function (x) {
         if (x && x.id !== undefined && x.id !== null) { byId[x.id] = x; ordre.push(x.id); }
@@ -1732,6 +1742,7 @@ function mergeObjetPartage(cloud, local) {
       out[k] = ordre.map(function (id) {
         return (id && typeof id === 'object' && id.__sansId !== undefined) ? id.__sansId : byId[id];
       });
+      }
     } else if (Array.isArray(lv) && !Array.isArray(cv)) {
       out[k] = lv;
     } else if (lv && typeof lv === 'object' && cv && typeof cv === 'object' && !Array.isArray(lv) && !Array.isArray(cv)) {
@@ -1989,7 +2000,15 @@ function _quotaPurgeUrgence() {
   var _n = Date.now();
   if (_n - (_quotaDernierPurge || 0) < 30000) return 0;
   _quotaDernierPurge = _n;
-  var n = 0, prefixes = ['mdb_backup_', 'mdb_lastCloud', 'mdb_cloud_snapshot', 'mdb_sync_queue', 'mdb_tmp'];
+  /* Ordre de priorite : autosave (doublon cloud, ~2 Mo), caches UI (actif_hidden,
+     dashSect), puis backups et fichiers temporaires. Les donnees metier ne sont
+     JAMAIS touchees par cette fonction. */
+  var n = 0, prefixes = [
+    'mdb_autosave',
+    'mdb_actif_hidden',
+    'mdb_dashSect',
+    'mdb_backup_', 'mdb_lastCloud', 'mdb_cloud_snapshot', 'mdb_sync_queue', 'mdb_tmp'
+  ];
   try {
     var cles = [];
     for (var i = 0; i < localStorage.length; i++) cles.push(localStorage.key(i));
@@ -2006,6 +2025,8 @@ function _quotaPurgeUrgence() {
   return n;
 }
 var _quotaDernierPurge = 0;
+var _janitorDernierAppel = 0;  /* Debounce du janitor : max 1x / 10 s */
+var _storageKnownFull = 0;     /* Horodatage de la derniere saturation confirmee */
 var _sauvegardeBloqueJusqua = 0;
 /* Appele quand une ecriture de donnees a echoue : on cesse de tenter des
    sauvegardes locales pendant un moment (elles saturent le stockage et
@@ -2019,19 +2040,33 @@ function _suspendreSauvegardesLocales() {
     try { return _siO.call(this, kQ, vQ); }
     catch (eQ) {
       if (eQ && (eQ.name === 'QuotaExceededError' || eQ.code === 22 || eQ.code === 1014)) {
-        /* 1) nettoyage habituel, 2) purge d'urgence, 3) on n'interrompt JAMAIS
-           l'interface : une reussite de sauvegarde vaut moins qu'une page qui
-           ne s'ouvre plus. */
-        _quotaJanitor(1);
+        /* ANTI-FREEZE : si on sait deja que le stockage est plein (< 2 min),
+           les cles de sauvegarde sont abandonnees immediatement sans scanner
+           localStorage. Seules les cles metier critiques (< 256 Ko) tentent
+           encore une ecriture directe. */
+        var _estBackup = (kQ.indexOf('mdb_backup_') === 0 || kQ === 'mdb_autosave' || kQ === 'mdb_diag_trace');
+        var _stockagePleinRecent = (_storageKnownFull && (Date.now() - _storageKnownFull) < 120000);
+        if (_estBackup && _stockagePleinRecent) {
+          return null; /* sauvegarde ignoree sans scan — pas de freeze */
+        }
+        /* Janitor debounce : evite de scanner localStorage a chaque ecriture ratee */
+        var _nowJ = Date.now();
+        if (_nowJ - _janitorDernierAppel > 10000) {
+          _janitorDernierAppel = _nowJ;
+          _quotaJanitor(1);
+        }
         try { return _siO.call(this, kQ, vQ); } catch (eQ2) {
           try { _quotaPurgeUrgence(); } catch (eU) {}
           try { return _siO.call(this, kQ, vQ); } catch (eQ3) {
+            /* Stockage confirme plein : on le memorise pour eviter les boucles */
+            _storageKnownFull = Date.now();
             var _petite = String(vQ || '').length < 262144;
             if (_petite) {
-              console.warn('Stockage plein : « ' + kQ + ' » non enregistré (l\u2019application continue).');
+              /* Ne pas logger les cles de backup en boucle — trop de bruit */
+              if (!_estBackup) console.warn('Stockage plein : \u00ab ' + kQ + ' \u00bb non enregistr\u00e9 (l\u2019application continue).');
               return null;
             }
-            console.warn('Stockage saturé, « ' + kQ + ' » non enregistré (sauvegarde ignorée).');
+            if (!_estBackup) console.warn('Stockage satur\u00e9, \u00ab ' + kQ + ' \u00bb non enregistr\u00e9 (sauvegarde ignor\u00e9e).');
             return null;
           }
         }
@@ -2137,6 +2172,10 @@ function setBackupMeta(meta) {
   try { localStorage.setItem('mdb_backup_meta', JSON.stringify(meta)); } catch(e) {}
 }
 function saveLocalBackup(key, data) {
+  /* Si le stockage est connu plein (< 2 min), on ne tente meme pas d'ecrire
+     le backup : chaque tentative declenchait un scan complet du localStorage
+     et gelait l'interface pendant plusieurs secondes. */
+  if (_storageKnownFull && (Date.now() - _storageKnownFull) < 120000) return;
   try {
     var meta = getBackupMeta();
     if (meta.length > 0) {
@@ -2180,9 +2219,12 @@ function cleanupOldBackups() {
   try {
     var keys = Object.keys(localStorage);
     for (var kk = 0; kk < keys.length; kk++) {
-      if (keys[kk].indexOf('hiddenFournisseurs') !== -1 || keys[kk].indexOf('_temp') !== -1) {
-        var val = localStorage.getItem(keys[kk]);
-        if (val && val.length > 500000) localStorage.removeItem(keys[kk]);
+      /* Caches UI : toujours supprimes (quelle que soit leur taille) */
+      if (keys[kk].indexOf('hiddenFournisseurs') !== -1 ||
+          keys[kk].indexOf('mdb_actif_hidden') === 0 ||
+          keys[kk].indexOf('mdb_dashSect') === 0 ||
+          keys[kk].indexOf('_temp') !== -1) {
+        localStorage.removeItem(keys[kk]);
       }
     }
   } catch(e) {}
@@ -2195,6 +2237,20 @@ function cleanupOldBackups() {
 var AUTOSAVE_KEYS = ['mdb_paye', 'mdb_production', 'mdb_operationsCaisse', 'mdb_employes', 'mdb_acomptesPrets', 'mdb_stocks', 'mdb_bl', 'mdb_salairesPaiements'];
 var _autosaveTimer = null;
 function sauvegardeAutoLocale() {
+  /* Garde-fou taille : si le stockage est connu plein ou si le localStorage
+     total depasse 3 Mo, on ne cree pas de copie locale (elle serait de toute
+     facon rejetee et declencherait la boucle de freeze). Les donnees sont
+     deja dans le cloud via Supabase. */
+  if (_storageKnownFull && (Date.now() - _storageKnownFull) < 120000) return;
+  try {
+    var _totalBrut = 0;
+    for (var _ti = 0; _ti < localStorage.length; _ti++) {
+      var _tk = localStorage.key(_ti);
+      if (_tk && _tk !== 'mdb_autosave') _totalBrut += ((localStorage.getItem(_tk) || '').length);
+    }
+    /* Au-dela de 3 Mo deja utilises, l'autosave (~2 Mo) ne pourra pas ecrire */
+    if (_totalBrut > 3 * 1024 * 1024) return;
+  } catch (e) {}
   try {
     var snap = { ts: Date.now(), data: {} };
     for (var i = 0; i < AUTOSAVE_KEYS.length; i++) {

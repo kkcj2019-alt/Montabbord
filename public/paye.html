@@ -5808,9 +5808,13 @@ function _payePurgeUrgence() {
            fois. Sans ça, la moindre écriture mdb_paye (~1 Mo) lève
            QuotaExceededError et la synchro ne converge plus jamais. */
         setMain: function (k, v) {
+          if (k === PAYE_KEY && v && typeof v === "object" && !Array.isArray(v)) {
+            _memPayeData = v;
+          }
           var s = "";
           try { s = JSON.stringify(v); }
           catch (eS) { try { console.warn("[Paye] setMain non sérialisable :", k); } catch (eS2) {} return; }
+          if (k === PAYE_KEY) _memPayeDataRaw = s;
           try { localStorage.setItem(k, s); }
           catch (eQ) {
             if (eQ && (eQ.name === "QuotaExceededError" || eQ.code === 22 || eQ.code === 1014)) {
@@ -6277,16 +6281,44 @@ function payeObj(key) {
       /* Le module Paye lit/écrit directement dans le même document Firestore
          que l'app principale (enterprises/{uid}) => données partagées partout. */
 
+      /* Cache memoire pour mdb_paye : evite de parser 1.5 Mo de JSON des centaines
+         de fois par seconde lors des calculs de paie, conges, ecritures et declarations. */
+      var _memPayeData = null;
+      var _memPayeDataRaw = null;
+      function invalidatePayeDataCache() {
+        _memPayeData = null;
+        _memPayeDataRaw = null;
+        try { if (window._payrollCache) window._payrollCache = {}; } catch (eC) {}
+      }
+      try {
+        window.addEventListener("storage", function (e) {
+          if (!e || e.key === PAYE_KEY) invalidatePayeDataCache();
+        });
+      } catch (eEv) {}
+
       function getPayeData() {
-        var p = DB.getMain(PAYE_KEY);
-        /* mdb_paye est toujours un objet de sections, jamais une liste. */
-        if (Array.isArray(p)) return {};
-        if (p && typeof p === "object") return p;
-        return {};
+        if (_memPayeData) return _memPayeData;
+        try {
+          var raw = localStorage.getItem(PAYE_KEY);
+          if (raw === _memPayeDataRaw && _memPayeData) return _memPayeData;
+          _memPayeDataRaw = raw;
+          var p = raw ? JSON.parse(raw) : {};
+          if (Array.isArray(p)) p = {};
+          if (!p || typeof p !== "object") p = {};
+          _memPayeData = p;
+          return _memPayeData;
+        } catch (e) {
+          return _memPayeData || {};
+        }
       }
       var payeBootstrapping = true;
       function setPayeData(obj) {
-        DB.setMain(PAYE_KEY, obj);
+        _memPayeData = (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+        var s = "";
+        try { s = JSON.stringify(_memPayeData); } catch (eS) {}
+        _memPayeDataRaw = s;
+        DB.setMain(PAYE_KEY, _memPayeData);
+        try { if (window._payrollCache) window._payrollCache = {}; } catch (eC) {}
         if (!payeBootstrapping) pushPayeCloud();
       }
       function getPayeSection(section, def) {
@@ -6297,8 +6329,11 @@ function payeObj(key) {
         var p = getPayeData();
         p[section] = val;
         setPayeData(p);
-        /* Horodate les écritures locales : une réponse cloud plus vieille
-           qu'une saisie de moins de 2 min ne doit pas l'écraser. */
+        /* Invalidation du cache de calcul de paie : toute modification des
+           donnees (pointage, primes, conges...) doit forcer un recalcul. */
+        try { if (window._payrollCache) window._payrollCache = {}; } catch(eC) {}
+        /* Horodate les ecritures locales : une reponse cloud plus vieille
+           qu'une saisie de moins de 2 min ne doit pas l'ecraser. */
         try {
           if (!payeBootstrapping)
             (window._payeEcritLocal = window._payeEcritLocal || {})[section] =
@@ -8265,9 +8300,9 @@ function renderPrimeEmpMatrix() {
           });
           html += '<td style="padding:5px 8px;border:1px solid var(--border);text-align:right;color:#16a34a;font-weight:700">' + (pan > 0 ? fmtF(pan) : "—") + '</td>';
           /* ---- PRIME PRODUCTION : droit, type, barème, taux CA ---- */
-          /* Le taux saisi ici détermine le montant :
-             montant = chiffre d’affaires HT du mois × taux %. C’est ce
-             montant qui part sur le bulletin. */
+          /* Le taux saisi ici détermine le montant :
+             montant = chiffre d’affaires HT du mois × taux %. C’est ce
+             montant qui part sur le bulletin. */
           html += '<td style="padding:3px 4px;border:1px solid var(--border);text-align:center;white-space:nowrap">' +
             '<input type="checkbox" ' + (pmePrimeDroitDe(e.id) ? "checked" : "") + ' onchange="pmePrimeDroit(\'' + e.id + '\',this.checked)" title="Droit à la prime de production" style="width:14px;height:14px;vertical-align:middle;accent-color:#f59e0b">' +
             '<select onchange="pmePrimeMode(\'' + e.id + '\',this.value)" title="Sur quoi se calcule sa prime" style="width:70px;padding:2px;margin-left:3px;border:1px solid #ddd;border-radius:4px;font-size:.66rem">' +
@@ -27108,8 +27143,23 @@ if (normalHours > 173.33) {
         };
       }
 
+      /* Cache de memoisation pour calculatePayroll.
+         Chaque appel (emp, mois) est couteux : il scanne les 3725 pointages
+         et calcule toutes les rubriques. Plusieurs modules (livre de paie,
+         ecritures, declarations, conges, dashboard, virements) l'appelaient
+         chaque fois — maintenant le resultat est calcule une seule fois par
+         employe+mois et reutilise. Invalide par setPayeSection. */
+      window._payrollCache = window._payrollCache || {};
+      function _payrollCacheKey(emp, mois) {
+        return (emp.id || emp.matricule || emp.nom || '') + '|' + mois;
+      }
+
       function calculatePayroll(emp, mois) {
-        var isJ = empCategorie(emp) === "journalier";
+        /* Lecture du cache : si le resultat existe deja pour cet employe+mois,
+           on le retourne immediatement sans aucun recalcul. */
+        var _cKey = _payrollCacheKey(emp, mois);
+        if (window._payrollCache[_cKey]) return window._payrollCache[_cKey];
+
         var stats = getMonthStats(emp, mois);
         var base = getSalaireAuMois(emp, mois);
         var hourly = base / 173.33;
@@ -28030,7 +28080,7 @@ if (normalHours > 173.33) {
           var _ricfItem = items.splice(ricfIdx, 1)[0];
           items.splice(itsIdx + 1, 0, _ricfItem);
         }
-        return {
+        var _result = {
           items: items,
           stats: stats,
           totals: {
@@ -28051,19 +28101,19 @@ if (normalHours > 173.33) {
             ricf: ricf,
             conge: congeT,
             gratif: gratifT,
-            /* Champs memo pour la ventilation comptable (squelette) : les
-               avantages en nature gonflent le brut mais ne sont pas une
-               dette (pas de credit) ; l'arrondi non plus. Le journal les
-               neutralise pour rester equilibre au franc pres. */
             avantages: totalAvantages,
             arrondi: arrondi,
             congeRec: {
-              periode: getCongeRecord(emp.id, mois).periode || "",
-              commentaire: getCongeRecord(emp.id, mois).commentaire || "",
+              periode: getCongeRecord(emp.id, mois).periode || '',
+              commentaire: getCongeRecord(emp.id, mois).commentaire || '',
             },
           },
         };
+        /* Mise en cache du resultat (invalide par setPayeSection) */
+        try { window._payrollCache[_cKey] = _result; } catch(eCache) {}
+        return _result;
       }
+
 
       /* ==================== PRIME DE PANIER UI ==================== */
 /* ============ PRIME DE PANIER ============
@@ -30604,15 +30654,8 @@ function panierVerserJour() {
         } else if (declType === "DISA") {
           thead.innerHTML =
             '<tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Salaire Annuel</th><th style="text-align:right">CNPS Salariale</th><th style="text-align:right">ITS Annuel</th><th style="text-align:right">Net Imposable</th></tr>';
-          for (var m = 1; m <= 12; m++) {
-            var mo = year + "-" + (m < 10 ? "0" : "") + m;
-            personnel.forEach(function (emp) {
-              var c = calculatePayroll(emp, mo);
-              t1 += c.totals.brut;
-              t2 += c.totals.cnps;
-              t3 += c.totals.its;
-            });
-          }
+          /* 1 seule boucle annuelle pour calculer salaires, cnps, its et totaux
+             (au lieu de 2 boucles identiques soit 564 recalculs inutiles) */
           personnel.forEach(function (emp) {
             var salAnn = 0,
               cnpsAnn = 0,
@@ -30624,6 +30667,9 @@ function panierVerserJour() {
               cnpsAnn += c2.totals.cnps;
               itsAnn += c2.totals.its;
             }
+            t1 += salAnn;
+            t2 += cnpsAnn;
+            t3 += itsAnn;
             t4 += salAnn;
             rows +=
               "<tr><td>" +
@@ -32348,12 +32394,16 @@ function printCongeIndividuel(empId) {
             var solde = per.conge_du - paye;
             var isSold = solde <= 0;
             var hideRow = !showAll && !isCurrentEmp && isSold;
-            if (!hideRow) visiblePeriods.push(per);
+            if (!hideRow) {
+              per._paye = paye;
+              per._solde = solde;
+              visiblePeriods.push(per);
+            }
           });
           if (visiblePeriods.length === 0) return;
           visiblePeriods.forEach(function (per, pi) {
-            var paye = getCongePeriodePaye(emp.id, per.debutIso, per.finIso);
-            var solde = per.conge_du - paye;
+            var paye = per._paye !== undefined ? per._paye : getCongePeriodePaye(emp.id, per.debutIso, per.finIso);
+            var solde = per._solde !== undefined ? per._solde : (per.conge_du - paye);
             var isSold = solde <= 0;
             var paiements = getCongePeriodePaiements(
               emp.id,
@@ -33126,49 +33176,43 @@ function printCongeIndividuel(empId) {
         document.getElementById("dash-kpi-tit").textContent = titulaires.length;
         document.getElementById("dash-kpi-jour").textContent =
           journaliers.length;
-        var masse = 0,
-          mT = 0,
-          mJ = 0;
+        /* Un seul calcul de paie par employe (etait appele 2x pour brut+net
+           et une 3eme fois pour les departements → 141 calculs lourds).
+           Maintenant : 1 boucle unique, 1 appel calculatePayroll par employe. */
+        var titulaireIds = {};
+        for (var _ti = 0; _ti < titulaires.length; _ti++) titulaireIds[titulaires[_ti].id || titulaires[_ti].matricule || _ti] = true;
+        var masse = 0, mT = 0, mJ = 0, net = 0;
+        var deptData = {};
         personnel.forEach(function (p) {
+          var empKey = p.id || p.matricule || '';
+          var isTit = !!titulaireIds[empKey];
+          var brut = 0, netP = 0;
           try {
             var calc = calculatePayroll(p, mois);
-            var s = calc.totals.brut || 0;
-            masse += s;
-            if (titulaires.indexOf(p) >= 0) mT += s;
-            else mJ += s;
+            brut = calc.totals.brut || 0;
+            netP = calc.totals.net || 0;
           } catch (eEP) {
-            var sf = getSalaireAuMois(p, mois);
-            masse += sf;
-            if (titulaires.indexOf(p) >= 0) mT += sf;
-            else mJ += sf;
+            brut = getSalaireAuMois(p, mois);
+            netP = brut;
           }
+          masse += brut;
+          net += netP;
+          if (isTit) mT += brut; else mJ += brut;
+          var d = p.service || 'Non défini';
+          deptData[d] = (deptData[d] || 0) + brut;
         });
-        document.getElementById("dash-kpi-masse").textContent =
-          fmt(masse) + " FCFA";
+        document.getElementById("dash-kpi-masse").textContent = fmt(masse) + " FCFA";
         document.getElementById("dash-kpi-masse-tit").textContent = fmt(mT);
         document.getElementById("dash-kpi-masse-jour").textContent = fmt(mJ);
         var prets = (getAPList() || []).map(normalizeAP).filter(function (a) {
           return a.type === "pret" && a.statut === "actif";
         });
         document.getElementById("dash-kpi-prets").textContent = prets.length;
-        var net = 0;
-        personnel.forEach(function (p) {
-          try {
-            net += calculatePayroll(p, mois).totals.net;
-          } catch (e) {}
-        });
-        document.getElementById("dash-kpi-net").textContent =
-          fmt(net) + " FCFA";
-        var cdi = personnel.filter(function (p) {
-          return p.type_contrat === "CDI";
-        }).length;
-        var cdd = personnel.filter(function (p) {
-          return p.type_contrat === "CDD";
-        }).length;
+        document.getElementById("dash-kpi-net").textContent = fmt(net) + " FCFA";
+        var cdi = personnel.filter(function (p) { return p.type_contrat === "CDI"; }).length;
+        var cdd = personnel.filter(function (p) { return p.type_contrat === "CDD"; }).length;
         var jour = journaliers.length;
-        var stage = personnel.filter(function (p) {
-          return p.type_contrat === "Stage";
-        }).length;
+        var stage = personnel.filter(function (p) { return p.type_contrat === "Stage"; }).length;
         var ctCtx = document.getElementById("dash-chart-contrats");
         if (ctCtx) {
           if (_dashChartContrats) _dashChartContrats.destroy();
@@ -33176,32 +33220,12 @@ function printCongeIndividuel(empId) {
             type: "doughnut",
             data: {
               labels: ["CDI", "CDD", "Journalier", "Stage"],
-              datasets: [
-                {
-                  data: [cdi, cdd, jour, stage],
-                  backgroundColor: ["#f97316", "#f59e0b", "#3b82f6", "#10b981"],
-                  borderWidth: 2,
-                  borderColor: "#fff",
-                },
-              ],
+              datasets: [{ data: [cdi, cdd, jour, stage], backgroundColor: ["#f97316", "#f59e0b", "#3b82f6", "#10b981"], borderWidth: 2, borderColor: "#fff" }]
             },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: {
-                legend: {
-                  position: "bottom",
-                  labels: { padding: 8, font: { size: 10, weight: "600" } },
-                },
-              },
-            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { padding: 8, font: { size: 10, weight: "600" } } } } }
           });
         }
-        var deptData = {};
-        personnel.forEach(function (p) {
-          var d = p.service || "Non défini";
-          deptData[d] = (deptData[d] || 0) + getSalaireAuMois(p, mois);
-        });
+
         var deCtx = document.getElementById("dash-chart-depts");
         if (deCtx) {
           if (_dashChartDepts) _dashChartDepts.destroy();
@@ -33209,33 +33233,13 @@ function printCongeIndividuel(empId) {
             type: "bar",
             data: {
               labels: Object.keys(deptData),
-              datasets: [
-                {
-                  label: "Masse Salariale (FCFA)",
-                  data: Object.values(deptData),
-                  backgroundColor: "rgba(249,115,22,.8)",
-                  borderRadius: 6,
-                },
-              ],
+              datasets: [{ label: "Masse Salariale (FCFA)", data: Object.values(deptData), backgroundColor: "rgba(249,115,22,.8)", borderRadius: 6 }]
             },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: { legend: { display: false } },
-              scales: {
-                y: {
-                  beginAtZero: true,
-                  ticks: {
-                    callback: function (v) {
-                      return (v / 1000000).toFixed(1) + "M";
-                    },
-                  },
-                },
-              },
-            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { callback: function(v) { return (v/1000000).toFixed(1)+'M'; } } } } }
           });
         }
       }
+
       function dashGlobalSearch(q) {
         var box = document.getElementById("dash-search-results");
         if (!q || q.length < 2) {
