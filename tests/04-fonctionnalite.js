@@ -1841,6 +1841,53 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Reparations : modifier une operation du stock (montant recalcule)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setBasesReparation([{ id:'b1', code:'REPFRIES', designation:'Reparation Friesland', stockInitial: 0,
+        mouvements: [
+          { date:'2026-10-02', sens:'entree', qte: 56, observation:'Entree' },
+          { date:'2026-10-09', sens:'entree', qte: 332, observation:'STOCK APRES LE 09-10 SOIR' }
+        ] }]);
+      /* Clic sur le crayon de la 2e ligne : le formulaire est pre-rempli. */
+      editerMouvementBase('b1', 1);
+      var pre = document.getElementById('mvtQteb1').value;
+      /* On change 332 -> 100 et on enregistre. */
+      document.getElementById('mvtQteb1').value = '100';
+      document.getElementById('mvtDateb1').value = '2026-10-09';
+      document.getElementById('mvtSensb1').value = 'entree';
+      document.getElementById('mvtObsb1').value = 'Corrige';
+      enregistrerMouvementBaseEdit('b1');
+      var b = reparBase('b1');
+      var q = b.mouvements[1].qte, stock = reparStockBase(b);
+      (String(pre) === '332' && q === 100 && stock === 156)
+        ? 'OK : formulaire pre-rempli (332), ligne passee a 100, stock 56+100=156'
+        : 'ECHEC pre=' + pre + ' q=' + q + ' stock=' + stock
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Reparations : supprimer une operation du stock (recalcule)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      confirm2 = function () { return true; };
+      setBasesReparation([{ id:'b1', code:'REPFRIES', designation:'Reparation Friesland', stockInitial: 0,
+        mouvements: [
+          { date:'2026-10-02', sens:'entree', qte: 56, observation:'Entree' },
+          { date:'2026-10-09', sens:'entree', qte: 332, observation:'STOCK APRES LE 09-10 SOIR' }
+        ] }]);
+      supprimerMouvementBase('b1', 0);
+      var b = reparBase('b1');
+      var n = b.mouvements.length, stock = reparStockBase(b);
+      (n === 1 && stock === 332 && b.mouvements[0].qte === 332)
+        ? 'OK : ligne +56 supprimee, reste 332 (stock 332)'
+        : 'ECHEC n=' + n + ' stock=' + stock
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
