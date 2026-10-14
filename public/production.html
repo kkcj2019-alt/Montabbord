@@ -4367,7 +4367,8 @@ function voirReparation(id) {
   m += '<div style="background:#fff;border-radius:12px;max-width:680px;width:100%;max-height:88vh;overflow:auto;padding:1rem">';
   m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem;border-bottom:2px solid #f97316;padding-bottom:.4rem">';
   m += '<h3 style="margin:0;font-size:1rem;font-weight:900">Réparation ' + escH(r.numero || '') + '</h3>';
-  m += '<div style="display:flex;gap:.4rem"><button onclick="imprimerReparation(\'' + r.id + '\')" style="border:none;background:#f97316;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:700">\ud83d\udda8 Imprimer</button>';
+  m += '<div style="display:flex;gap:.4rem"><button onclick="document.getElementById(\'repViewModal\').remove();modifierReparation(\'' + r.id + '\')" title="Modifier cette réparation" style="border:none;background:#2563eb;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:700">\u270e Modifier</button>';
+  m += '<button onclick="imprimerReparation(\'' + r.id + '\')" style="border:none;background:#f97316;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:700">\ud83d\udda8 Imprimer</button>';
   m += '<button onclick="document.getElementById(\'repViewModal\').remove()" style="border:none;background:#0f172a;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:700">Fermer</button></div></div>';
   m += '<table style="width:100%;font-size:.8rem;margin-bottom:.6rem">';
   m += '<tr><td style="padding:3px 6px;color:var(--dim)">Date</td><td style="font-weight:700">' + escH(fmtD(r.date)) + (r.heure ? ' à ' + escH(r.heure) : '') + '</td></tr>';
@@ -4392,6 +4393,217 @@ function voirReparation(id) {
   el.id = 'repViewHolder';
   el.innerHTML = m;
   document.body.appendChild(el);
+}
+
+/* =====================================================================
+   MODIFICATION D'UNE FICHE DE REPARATION DEJA ENREGISTREE
+   On rouvre le formulaire pré-rempli. À l'enregistrement : l'ancien stock
+   est remis (comme une annulation), puis le nouveau est appliqué.
+   ===================================================================== */
+function _repEditOptionsHtml(p) {
+  var dispo = reparPiecesDisponibles();
+  var opts = '<option value="">— choisir une pièce —</option>';
+  var knowId = {}, knowCode = {};
+  dispo.forEach(function(x) {
+    opts += '<option value="' + escH(x.article_id) + '" data-q="' + x.stock + '" data-c="' + x.coutUnite + '" data-code="' + escH(x.code) + '" data-des="' + escH(x.designation) + '" data-cat="' + escH(x.categorie) + '">' + escH((x.code ? x.code + ' — ' : '') + x.designation) + ' (' + fmt(x.stock) + ' ' + x.unite + ')</option>';
+    knowId[String(x.article_id)] = true;
+    if (x.code) knowCode[String(x.code).trim().toUpperCase()] = true;
+  });
+  if (p) {
+    var selId = String(p.article_id || '');
+    var selCode = String(p.code || '').trim().toUpperCase();
+    var present = (selId && knowId[selId]) || (!selId && selCode && knowCode[selCode]);
+    if (!present) {
+      opts += '<option value="' + escH(p.article_id || '') + '" data-q="0" data-c="' + (parseFloat(p.coutUnite) || 0) + '" data-code="' + escH(p.code || '') + '" data-des="' + escH(p.designation || '') + '" data-cat="' + escH(p.categorie || 'stockConsum') + '">' + escH((p.code ? p.code + ' — ' : '') + (p.designation || '')) + ' (déjà sorti)</option>';
+    }
+  }
+  return opts;
+}
+function repEditAjouterLigne(p) {
+  var corps = document.getElementById('repEditLignes');
+  if (!corps) return;
+  var tr = document.createElement('tr');
+  tr.innerHTML = '<td><select class="repEArt" onchange="repELigneChange(this)" style="width:100%;padding:.25rem .3rem;border:1px solid #cbd5e1;border-radius:4px;font-size:.74rem">' + _repEditOptionsHtml(p) + '</select></td>' +
+    '<td class="repEStock" style="text-align:right;color:var(--dim)">—</td>' +
+    '<td><input type="number" min="0" step="1" class="repEQte" oninput="repERecalc()" style="width:72px;text-align:right;padding:.25rem .3rem;border:1.5px solid #2563eb;border-radius:4px;font-size:.74rem;font-weight:700"></td>' +
+    '<td class="repECost" style="text-align:right;font-weight:800">0</td>' +
+    '<td style="text-align:center"><button onclick="this.closest(\'tr\').remove();repERecalc()" title="Retirer cette pièce" style="border:none;background:none;color:#dc2626;cursor:pointer;font-size:.9rem">🗑</button></td>';
+  corps.appendChild(tr);
+  var sel = tr.querySelector('.repEArt');
+  if (p && sel) {
+    var ok = false;
+    for (var i = 0; i < sel.options.length; i++) { if (String(sel.options[i].value) === String(p.article_id || '')) { sel.selectedIndex = i; ok = true; break; } }
+    if (!ok && p.code) {
+      for (var j = 0; j < sel.options.length; j++) { if (String(sel.options[j].getAttribute('data-code') || '').trim().toUpperCase() === String(p.code).trim().toUpperCase()) { sel.selectedIndex = j; break; } }
+    }
+    var q = tr.querySelector('.repEQte'); if (q) q.value = parseFloat(p.qte) || '';
+  }
+  repELigneChange(sel);
+}
+function repELigneChange(sel) {
+  if (!sel) return;
+  var tr = sel.closest('tr');
+  var opt = sel.options[sel.selectedIndex];
+  tr.querySelector('.repEStock').textContent = sel.value ? fmt(parseFloat(opt.getAttribute('data-q')) || 0) : '—';
+  repERecalc();
+}
+function repERecalc() {
+  var total = 0;
+  Array.prototype.forEach.call(document.querySelectorAll('#repEditLignes tr'), function(tr) {
+    var sel = tr.querySelector('.repEArt');
+    var qte = parseFloat(tr.querySelector('.repEQte').value) || 0;
+    var opt = sel.options[sel.selectedIndex];
+    var c = (parseFloat(opt.getAttribute('data-c')) || 0) * qte;
+    tr.querySelector('.repECost').textContent = fmt(c);
+    total += c;
+  });
+  var mo = parseFloat((document.getElementById('mrep_mo') || {}).value) || 0;
+  var depl = parseFloat((document.getElementById('mrep_depl') || {}).value) || 0;
+  var el = document.getElementById('repETotal');
+  if (el) el.textContent = fmt(total + mo + depl) + ' F';
+}
+function modifierReparation(id) {
+  var r = getReparationsPalettes().find(function(x) { return x && String(x.id) === String(id); });
+  if (!r) { toast('Réparation introuvable', 'error'); return; }
+  var clients = [];
+  try { clients = (DB.get('mdb_clients') || []); } catch (e) {}
+  var bases = getBasesReparation();
+  var sS = 'width:100%;padding:.35rem .45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem';
+  var m = '<div id="repEditModal" style="position:fixed;inset:0;background:rgba(15,23,42,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem">';
+  m += '<div style="background:#fff;border-radius:12px;max-width:720px;width:100%;max-height:90vh;overflow:auto;padding:1rem">';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem;border-bottom:2px solid #f97316;padding-bottom:.4rem">';
+  m += '<h3 style="margin:0;font-size:1rem;font-weight:900">✎ Modifier la réparation ' + escH(r.numero || '') + '</h3>';
+  m += '<button onclick="document.getElementById(\'repEditModal\').remove()" style="border:none;background:#0f172a;color:#fff;border-radius:6px;padding:5px 12px;cursor:pointer;font-weight:700">Fermer</button></div>';
+  m += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.5rem;margin-bottom:.6rem">';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Date *</label><input type="date" id="mrep_date" value="' + escH(r.date || today()) + '" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Heure</label><input type="time" id="mrep_heure" value="' + escH(r.heure || '') + '" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Client *</label><input type="text" id="mrep_client" value="' + escH(r.client || '') + '" list="mrepClientList" style="' + sS + '"><datalist id="mrepClientList">';
+  clients.forEach(function(cl) { m += '<option value="' + escH(cl.nom || '') + '">'; });
+  m += '</datalist></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Base (type)</label><select id="mrep_base" style="' + sS + '"><option value="">— aucune —</option>';
+  bases.forEach(function(b) { m += '<option value="' + escH(b.id) + '"' + (String(r.baseId) === String(b.id) ? ' selected' : '') + '>' + escH(b.code + ' — ' + b.designation) + '</option>'; });
+  m += '</select></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Technicien</label><input type="text" id="mrep_tech" value="' + escH(r.technicien || '') + '" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Lieu</label><input type="text" id="mrep_lieu" value="' + escH(r.lieu || '') + '" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Type</label><select id="mrep_type" style="' + sS + '">';
+  ['Réparation','Remplacement','Entretien','Reprise'].forEach(function(t) { m += '<option' + ((r.type || 'Réparation') === t ? ' selected' : '') + '>' + t + '</option>'; });
+  m += '</select></div>';
+  m += '</div>';
+  m += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem">';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Motif</label><input type="text" id="mrep_motif" value="' + escH(r.motif || '') + '" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Travail effectué</label><input type="text" id="mrep_travail" value="' + escH(r.travail || '') + '" style="' + sS + '"></div>';
+  m += '</div>';
+  m += '<div style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:8px;padding:.5rem;margin-bottom:.5rem">';
+  m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem"><span style="font-size:.72rem;font-weight:800;color:#9a3412">Pièces sorties du stock</span>';
+  m += '<button class="btn btn-sm" onclick="repEditAjouterLigne()" style="font-size:.7rem;background:#0f172a;color:#fff">+ Ajouter une pièce</button></div>';
+  m += '<table style="width:100%;border-collapse:collapse;font-size:.74rem"><thead><tr style="background:#f1f5f9"><th style="padding:4px;text-align:left">Article</th><th style="padding:4px;text-align:right">Stock</th><th style="padding:4px;text-align:right">Quantité sortie</th><th style="padding:4px;text-align:right">Coût</th><th style="padding:4px;width:28px"></th></tr></thead><tbody id="repEditLignes"></tbody></table>';
+  m += '</div>';
+  m += '<div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:.5rem;align-items:end">';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Main-d\'œuvre (FCFA)</label><input type="number" id="mrep_mo" min="0" step="500" value="' + (parseFloat(r.mainOeuvre) || 0) + '" oninput="repERecalc()" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Frais de déplacement</label><input type="number" id="mrep_depl" min="0" step="500" value="' + (parseFloat(r.fraisDeplacement) || 0) + '" oninput="repERecalc()" style="' + sS + '"></div>';
+  m += '<div><label style="font-size:.68rem;font-weight:800;color:#334155;display:block;margin-bottom:2px">Total</label><div id="repETotal" style="padding:.35rem .45rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.9rem;font-weight:900">0 F</div></div>';
+  m += '<button class="btn btn-accent" onclick="modifierReparationForm(\'' + String(id).replace(/'/g, "\\'") + '\')" style="padding:.5rem 1rem;background:#f97316;color:#fff;border:none;border-radius:6px;font-weight:800;font-size:.8rem;cursor:pointer">💾 Enregistrer</button>';
+  m += '</div></div></div>';
+  var el = document.createElement('div');
+  el.id = 'repEditHolder';
+  el.innerHTML = m;
+  document.body.appendChild(el);
+  (r.pieces || []).forEach(function(p) { repEditAjouterLigne(p); });
+  repERecalc();
+}
+/* Coeur testable : reçoit {date,heure,client,baseId,lieu,technicien,type,motif,
+   travail,mainOeuvre,fraisDeplacement,pieces} et met à jour la fiche existante.
+   Remet l'ancien stock, contrôle la dispo, applique le nouveau. */
+function reparModifierFiche(id, data) {
+  var list = getReparationsPalettes();
+  var old = list.find(function(x) { return x && String(x.id) === String(id); });
+  if (!old) return { erreur: ['Réparation introuvable'] };
+  data = data || {};
+  var client = String(data.client || '').trim();
+  if (!client) return { erreur: ['Client requis'] };
+  var pieces = data.pieces || [];
+  /* 1) Remise en stock des pièces d'origine. */
+  (old.pieces || []).forEach(function(l) { try { reparSortieStock(l, 'entree', 'Annulation réparation — remise en stock'); } catch (e) {} });
+  /* 2) Contrôle de disponibilité sur les nouvelles pièces. */
+  var manquants = [];
+  pieces.forEach(function(piece) {
+    var dispo = 0;
+    try {
+      var cat = piece.categorie || 'stockConsum';
+      var liste = (cat === 'stockConsum') ? getStockConsum() : (cat === 'stockSemi') ? getStockSemi() : (cat === 'stockMerch') ? getStockMerch() : (cat === 'stockRaw') ? getStockRaw() : getStockFinished();
+      var code = String(piece.code || '').trim().toUpperCase();
+      var l = (liste || []).find(function(s) { if (!s) return false; if (piece.article_id && String(s.article_id) === String(piece.article_id)) return true; return code && String((s.code || '')).trim().toUpperCase() === code; });
+      dispo = l ? (parseFloat(l.quantite) || 0) : 0;
+    } catch (e) { dispo = 0; }
+    if (dispo < (parseFloat(piece.qte) || 0)) manquants.push((piece.code || piece.designation || 'Pièce') + ' : demande ' + fmt(piece.qte) + ', stock ' + fmt(dispo));
+  });
+  if (manquants.length) {
+    (old.pieces || []).forEach(function(l) { try { reparSortieStock(l, 'sortie', 'Rétablissement (modification annulée)'); } catch (e) {} });
+    return { erreur: manquants };
+  }
+  /* 3) Application des nouvelles pièces + mise à jour de la fiche. */
+  var total = 0, lignes = [];
+  pieces.forEach(function(p) {
+    var cout = reparPieceCout(p, p.qte);
+    total += cout;
+    lignes.push({ article_id: p.article_id || '', code: p.code || '', designation: p.designation || '', categorie: p.categorie || 'stockConsum', qte: parseFloat(p.qte) || 0, coutUnite: p.coutUnite || 0, cout: cout });
+  });
+  var res = null;
+  var list2 = list.map(function(x) {
+    if (String(x.id) !== String(id)) return x;
+    var copie = JSON.parse(JSON.stringify(x));
+    copie.date = data.date || copie.date;
+    copie.heure = data.heure || '';
+    copie.client = client;
+    copie.baseId = data.baseId || '';
+    copie.lieu = data.lieu || '';
+    copie.technicien = data.technicien || '';
+    copie.type = data.type || 'Réparation';
+    copie.motif = data.motif || '';
+    copie.travail = data.travail || '';
+    copie.mainOeuvre = parseFloat(data.mainOeuvre) || 0;
+    copie.fraisDeplacement = parseFloat(data.fraisDeplacement) || 0;
+    copie.pieces = lignes;
+    copie.totalPieces = total;
+    copie.total = total + copie.mainOeuvre + copie.fraisDeplacement;
+    copie.updated_at = new Date().toISOString();
+    res = copie;
+    return copie;
+  });
+  setReparationsPalettes(list2);
+  lignes.forEach(function(l) { try { reparSortieStock(l, 'sortie', 'Sortie - Réparation ' + (old.numero || '') + ' (' + client + ')'); } catch (e) {} });
+  return { fiche: res };
+}
+function modifierReparationForm(id) {
+  var pieces = [];
+  Array.prototype.forEach.call(document.querySelectorAll('#repEditLignes tr'), function(tr) {
+    var sel = tr.querySelector('.repEArt');
+    if (!sel || !sel.value) return;
+    var qte = parseFloat(tr.querySelector('.repEQte').value) || 0;
+    if (!(qte > 0)) return;
+    var opt = sel.options[sel.selectedIndex];
+    pieces.push({ article_id: sel.value, code: opt.getAttribute('data-code') || '', designation: opt.getAttribute('data-des') || '', categorie: opt.getAttribute('data-cat') || 'stockConsum', qte: qte, coutUnite: parseFloat(opt.getAttribute('data-c')) || 0 });
+  });
+  var data = {
+    date: (document.getElementById('mrep_date') || {}).value || today(),
+    heure: (document.getElementById('mrep_heure') || {}).value || '',
+    client: (document.getElementById('mrep_client') || {}).value || '',
+    baseId: (document.getElementById('mrep_base') || {}).value || '',
+    lieu: (document.getElementById('mrep_lieu') || {}).value || '',
+    technicien: (document.getElementById('mrep_tech') || {}).value || '',
+    type: (document.getElementById('mrep_type') || {}).value || 'Réparation',
+    motif: (document.getElementById('mrep_motif') || {}).value || '',
+    travail: (document.getElementById('mrep_travail') || {}).value || '',
+    mainOeuvre: parseFloat((document.getElementById('mrep_mo') || {}).value) || 0,
+    fraisDeplacement: parseFloat((document.getElementById('mrep_depl') || {}).value) || 0,
+    pieces: pieces
+  };
+  var r = reparModifierFiche(id, data);
+  if (r && r.erreur && r.erreur.length) { toast(r.erreur[0], 'error'); return; }
+  if (!r || !r.fiche) { toast('Modification impossible', 'error'); return; }
+  var mm = document.getElementById('repEditModal'); if (mm) mm.remove();
+  toast('Réparation ' + (r.fiche.numero || '') + ' mise à jour ✅');
+  renderPage();
 }
 
 /* Une base de reparation */
@@ -4624,7 +4836,7 @@ function render_reparation_palettes() {
         h += '<td style="padding:7px 8px">' + escH(r.motif || r.travail || '\u2014') + '</td>';
         h += '<td style="padding:7px 8px;text-align:right">' + ((r.pieces || []).length) + '</td>';
         h += '<td style="padding:7px 8px;text-align:right;font-weight:800">' + fmt(r.total || 0) + '</td>';
-        h += '<td style="padding:7px 8px;text-align:center;white-space:nowrap"><button onclick="voirReparation(\'' + r.id + '\')" style="border:none;background:none;cursor:pointer;font-size:.9rem">\u270e</button> <button onclick="imprimerReparation(\'' + r.id + '\')" title="Imprimer la fiche" style="border:none;background:none;cursor:pointer;font-size:.9rem">\ud83d\udda8</button></td>';
+        h += '<td style="padding:7px 8px;text-align:center;white-space:nowrap"><button onclick="voirReparation(\'' + r.id + '\')" title="Voir la fiche" style="border:none;background:none;cursor:pointer;font-size:.9rem">\ud83d\udc41</button> <button onclick="modifierReparation(\'' + r.id + '\')" title="Modifier la réparation" style="border:none;background:none;cursor:pointer;font-size:.9rem">\u270e</button> <button onclick="imprimerReparation(\'' + r.id + '\')" title="Imprimer la fiche" style="border:none;background:none;cursor:pointer;font-size:.9rem">\ud83d\udda8</button></td>';
         h += '</tr>';
       });
       h += '</tbody></table></div>';
@@ -7237,7 +7449,7 @@ function _prodFocusSaisie() {
 }
 function _prodEstSaisie() {
   var p = CURRENT_PAGE;
-  return (p === 'production' || p === 'achats' || p === 'livraisons' || p === 'epi');
+  return (p === 'production' || p === 'achats' || p === 'livraisons' || p === 'epi' || p === 'inventory');
 }
 function prodAutoRefresh() {
   _prodAutoRPending = true;
@@ -12481,6 +12693,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
       mvtHtml += '<div style="padding:14px;text-align:center;color:var(--dim);border:1px dashed var(--border);border-radius:8px">Aucun mouvement enregistré pour ce produit</div></div>';
       return mvtHtml;
     }
+    var anyEdit = rows.some(function(r) { return r && !r.estInitial && r.srcId != null && r.estSortie; });
     var _ppcD = 50;
     try { _ppcD = parseInt(localStorage.getItem('mdb_packs_per_carton') || '50', 10) || 50; } catch (eP) {}
     var th = 'padding:4px 6px;font-size:.66rem;font-weight:800;color:#475569;text-transform:uppercase;white-space:nowrap';
@@ -12495,6 +12708,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
       + '<th style="' + thG + '" colspan="2">Sortie</th>'
       + '<th style="' + thG + '" colspan="2">Stock final</th>'
       + '<th style="' + th + ';text-align:left" rowspan="2">Observation</th>'
+      + (anyEdit ? '<th style="' + thG + '" rowspan="2">Actions</th>' : '')
       + '</tr><tr style="background:#f1f5f9">'
       + '<th style="' + th + ';text-align:right">paquet</th><th style="' + th + ';text-align:right">cartons</th>'
       + '<th style="' + th + ';text-align:right">paquet</th><th style="' + th + ';text-align:right">cartons</th>'
@@ -12527,7 +12741,9 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
           + '<td style="' + tdR + ';' + dim + '">-</td>'
           + '<td style="' + tdR + '">' + _pq(r.finalPaq != null ? r.finalPaq : r.initialPaq || 0) + '</td>'
           + '<td style="' + tdR + '">' + _ct(r.finalPaq != null ? r.finalPaq : r.initialPaq || 0) + '</td>'
-          + '<td style="' + td + '">' + escH(r.obs || '') + '</td></tr>';
+          + '<td style="' + td + '">' + escH(r.obs || '') + '</td>'
+          + (anyEdit ? '<td style="' + td + ';text-align:center">-</td>' : '')
+          + '</tr>';
         return;
       }
       var _eP = (parseFloat(r.entreePaq) || 0) + _ajP;
@@ -12542,7 +12758,12 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         + '<td style="' + tdR + ';' + (_sP ? rd : dim) + '">' + (_sP ? _fmtCart(_sP, _pp) : '-') + '</td>'
         + '<td style="' + tdR + ';font-weight:800">' + _pq(r.finalPaq || 0) + '</td>'
         + '<td style="' + tdR + '">' + _ct(r.finalPaq || 0) + '</td>'
-        + '<td style="' + td + ';white-space:normal">' + escH(r.obs || '') + '</td></tr>';
+        + '<td style="' + td + ';white-space:normal">' + escH(r.obs || '') + '</td>'
+        + (anyEdit ? '<td style="' + td + ';text-align:center;white-space:nowrap">' + (r.srcId != null && r.estSortie
+            ? '<button onclick="modifierSortieConso(\'' + String(r.srcId).replace(/'/g, "\\'") + '\')" title="Modifier la quantité" style="border:none;background:none;cursor:pointer;font-size:.85rem">\u270e</button> '
+              + '<button onclick="supprimerSortieConso(\'' + String(r.srcId).replace(/'/g, "\\'") + '\')" title="Supprimer cette sortie" style="border:none;background:none;cursor:pointer;font-size:.85rem">\ud83d\uddd1</button>'
+            : '-') + '</td>' : '')
+        + '</tr>';
     });
     mvtHtml += '</tbody></table></div></div>';
     return mvtHtml;
@@ -12658,7 +12879,8 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         if (!obs && qte < 0 && !estAjust) obs = 'Sortie de stock';
         ecritures.push({ date: date, code: x.code, libelle: libelle, delta: estAjust ? 0 : qte, ajust: ajust,
                          cond: (parseFloat(x.cond) || cond || 0), ppc: _ppc, obs: obs,
-                         cartons: parseFloat(s.cartons) || 0, quantite: qte });
+                         cartons: parseFloat(s.cartons) || 0, quantite: qte,
+                         srcId: (s.id != null ? s.id : null), estSortie: (!estAjust && qte < 0) });
       });
       ecritures.sort(function(a, b) {
         var da = String(a.date || ''), db = String(b.date || '');
@@ -12704,7 +12926,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
           date: e.date, code: e.code, libelle: e.libelle,
           initial: debut, entree: entree, sortie: sortie, ajust: e.ajust || 0, final: cumul,
           cond: c, ppc: e.ppc, cartons: e.cartons, obs: e.obs,
-          qte: e.delta,
+          qte: e.delta, srcId: e.srcId, estSortie: e.estSortie,
           entreePaq: entreePaq, sortiePaq: sortiePaq,
           paquets: c > 0 ? (Math.floor(finMvt / c) - Math.floor(debut / c)) : 0,
           initialPaq: c > 0 ? Math.floor(debut / c) : 0,
@@ -13143,6 +13365,108 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
       toast(fmt(qteSaisie) + ' ' + (info.type === 'POINTE' ? (unit === 'carton' ? 'carton(s)' : unit === 'paquet' ? 'paquet(s)' : 'pointe(s)') : (info.unite || 'pcs')) + ' sorti(es) — ' + motif, 'success');
       renderPage();
     } catch (e) { toast('Sortie impossible : ' + e.message, 'error'); }
+  }
+  /* ---------- MODIFICATION / SUPPRESSION D'UNE SORTIE DE CONSOMMABLE ---------- */
+  function _itreSortieConsoIndex(id) {
+    var stock = getStockConsum();
+    for (var i = 0; i < stock.length; i++) { if (String((stock[i] || {}).id) === String(id)) return i; }
+    return -1;
+  }
+  function modifierSortieConso(id) {
+    try {
+      var idx = _itreSortieConsoIndex(id);
+      if (idx < 0) return toast('Ligne introuvable', 'error');
+      var s = getStockConsum()[idx];
+      var code = String(s.code || '').trim().toUpperCase();
+      var info = soProduitInfo(code);
+      var qteStock = Math.abs(parseFloat(s.quantite) || 0);
+      var date = String(s.created_at || s.date || today()).slice(0, 10) || today();
+      var motif = s.motif || s.obs || 'Sortie de stock';
+      var estPointe = info.type === 'POINTE';
+      var sS = 'width:100%;padding:.35rem .5rem;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem';
+      var m = '<div class="modal-overlay" id="editSortieOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:520px">';
+      m += '<input type="hidden" id="es_code" value="' + escH(code) + '">';
+      m += '<h2>✎ Modifier la sortie — ' + escH(code) + '</h2>';
+      m += '<p style="font-size:.78rem;color:var(--dim);margin:0 0 .8rem">' + escH(s.designation || '') + '</p>';
+      m += '<div class="form-row">' + formField('es_date', 'Date', date, 'date', true) + formField('es_motif', 'Motif', motif, 'text', true) + '</div>';
+      if (estPointe) {
+        m += '<div class="form-row">'
+          + '<div class="form-group" style="flex:2"><label>Quantité *</label><input type="number" id="es_qte" value="' + qteStock + '" min="0" step="any" style="' + sS + '" oninput="esEquiv()"></div>'
+          + '<div class="form-group" style="flex:1"><label>Unité *</label><select id="es_unite" onchange="esEquiv()" style="' + sS + '">'
+          + '<option value="pointe">pointe(s)</option><option value="paquet">paquet(s)</option><option value="carton">carton(s)</option></select></div></div>';
+      } else {
+        m += '<div class="form-row"><div class="form-group"><label>Quantité (' + escH(info.unite || 'pcs') + ') *</label><input type="number" id="es_qte" value="' + qteStock + '" min="0" step="any" style="' + sS + '"></div><input type="hidden" id="es_unite" value="unite"></div>';
+      }
+      m += '<div id="es_equiv" style="font-size:.74rem;color:var(--dim);margin-bottom:.8rem"></div>';
+      m += '<div style="display:flex;gap:.5rem;margin-top:.6rem">';
+      m += '<button class="btn btn-accent" onclick="saveModifierSortieConso(\'' + String(id).replace(/'/g, "\\'") + '\')">✅ Enregistrer</button>';
+      m += '<button class="btn" style="background:#dc2626;color:#fff" onclick="supprimerSortieConso(\'' + String(id).replace(/'/g, "\\'") + '\')">🗑 Supprimer</button>';
+      m += '<button class="btn" onclick="document.getElementById(\'editSortieOverlay\').remove()">Annuler</button>';
+      m += '</div></div></div>';
+      var prev = document.getElementById('editSortieOverlay');
+      if (prev) prev.remove();
+      document.body.insertAdjacentHTML('beforeend', m);
+      esEquiv();
+    } catch (e) { toast('Modification impossible : ' + e.message, 'error'); }
+  }
+  function esEquiv() {
+    try {
+      var box = document.getElementById('es_equiv');
+      if (!box) return;
+      var code = String((document.getElementById('es_code') || {}).value || '').trim();
+      var qte = parseFloat((document.getElementById('es_qte') || {}).value) || 0;
+      var unit = ((document.getElementById('es_unite') || {}).value || '');
+      var info = soProduitInfo(code);
+      if (info.type !== 'POINTE') { box.textContent = '= ' + fmt(qte) + ' ' + (info.unite || 'pcs') + ' en moins au stock.'; return; }
+      var base = soQteEnUnites(qte, unit, info);
+      box.textContent = '= ' + fmt(base) + ' pointes en moins au stock'
+        + (info.cond > 0 ? ' (' + _fmtPaq(base / info.cond) + ' paq · ' + _fmtCart(base / info.cond, soPpc()) + ' cart.)' : '') + '.';
+    } catch (e) {}
+  }
+  function saveModifierSortieConso(id) {
+    try {
+      var idx = _itreSortieConsoIndex(id);
+      if (idx < 0) return toast('Ligne introuvable', 'error');
+      var stock = getStockConsum();
+      var s = stock[idx];
+      var code = String(s.code || '').trim().toUpperCase();
+      var info = soProduitInfo(code);
+      var qteSaisie = parseFloat((document.getElementById('es_qte') || {}).value) || 0;
+      var unit = String((document.getElementById('es_unite') || {}).value || '');
+      if (!(qteSaisie > 0)) return toast('Quantité invalide', 'error');
+      var qte = soQteEnUnites(qteSaisie, unit, info);
+      if (!(qte > 0)) return toast('Quantité invalide', 'error');
+      var date = (document.getElementById('es_date') || {}).value || today();
+      var motif = String((document.getElementById('es_motif') || {}).value || '').trim() || 'Sortie de stock';
+      var uniteTxt = info.type === 'POINTE' ? (unit === 'carton' ? 'carton(s)' : unit === 'paquet' ? 'paquet(s)' : 'pointe(s)') : (info.unite || 'pcs');
+      s.quantite = -qte;
+      s.motif = motif;
+      s.obs = motif + ' — ' + fmt(qteSaisie) + ' ' + uniteTxt;
+      s.created_at = date;
+      s.date = date;
+      setStockConsum(stock);
+      var ov = document.getElementById('editSortieOverlay'); if (ov) ov.remove();
+      toast('Sortie mise à jour — ' + motif, 'success');
+      renderPage();
+      var cd = document.getElementById('consoDetailOverlay');
+      if (cd) { cd.remove(); try { openConsoDetail(code); } catch (eC) {} }
+    } catch (e) { toast('Modification impossible : ' + e.message, 'error'); }
+  }
+  function supprimerSortieConso(id) {
+    try {
+      var idx = _itreSortieConsoIndex(id);
+      if (idx < 0) return toast('Ligne introuvable', 'error');
+      var stock = getStockConsum();
+      var s = stock[idx];
+      if (!confirm('Supprimer cette sortie de ' + (s.code || '') + ' ?\nLe stock sera ré-augmenté de la quantité sortie.')) return;
+      stock.splice(idx, 1);
+      setStockConsum(stock);
+      var ov = document.getElementById('editSortieOverlay'); if (ov) ov.remove();
+      toast('Sortie supprimée — stock rétabli', 'success');
+      renderPage();
+      var cd = document.getElementById('consoDetailOverlay');
+      if (cd) { cd.remove(); try { openConsoDetail(String(s.code || '')); } catch (eC) {} }
+    } catch (e) { toast('Suppression impossible : ' + e.message, 'error'); }
   }
   /* ---------- RECONSTRUCTION DU STOCK DEPUIS LES ACHATS ---------- */
   /* Les achats (BL) sont la source de verite. Cette fonction reconstruit les
@@ -13975,8 +14299,27 @@ function addMovement() {
 var _invMonthCache = null;
 window._invHideZero = false;
 window._invHidden = {};
-window._invType = 'all';
+window._invType = 'tous';
 window._invArticleFilter = 'all';
+window._invShowForm = false;
+function _invStoreLabel(store) {
+  var m = { stockRaw: 'Matière première', stockSemi: 'Semi-finis', stockFinished: 'Produits finis', stockPalettes: 'Produits finis', stockConsum: 'Consommables', stockMerch: 'Marchandises', epiItems: 'ÉPI' };
+  return m[store] || '';
+}
+function _invTypesLabel(inv) {
+  var set = {}, ord = [];
+  ((inv && inv.items) || []).forEach(function(it) {
+    var k = _invStoreLabel(it && it.store);
+    if (k && !set[k]) { set[k] = 1; ord.push(k); }
+  });
+  if (!ord.length && inv && inv.type) {
+    var m2 = { all: 'Matière première', tous: 'Tous types', mp: 'Matière première', mp_bl: 'Matière première (BL)', mp_spec: 'Matière première (Spécifique)', mp_enc: 'Matière première (En cours)', finished: 'Produits finis', semi: 'Semi-finis', consum: 'Consommables', merch: 'Marchandises', epi: 'ÉPI' };
+    if (m2[inv.type]) ord.push(m2[inv.type]);
+  }
+  return ord.length ? ord.join(', ') : '—';
+}
+function demarrerInventaire() { window._invShowForm = true; window._invFromDraft = false; renderPage(); }
+function fermerInventaireForm() { window._invShowForm = false; renderPage(); }
 function render_inventory() {
   var _gmInv = getGlobalMonth();
   /* Les brouillons restent visibles quel que soit le mois affiché (sinon on
@@ -13995,11 +14338,17 @@ function render_inventory() {
   var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">';
   h += '<div><h2 style="margin:0">📊 Fiche d\'Inventaire</h2>';
   h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Générez, remplissez et imprimez votre inventaire de stock</p></div>';
-  h += '<div style="display:flex;gap:.5rem">';
-  h += '<button class="btn" onclick="toggleInvHideZero()" id="btnHideZero" style="background:' + (window._invHideZero ? 'var(--accent)' : '') + ';color:' + (window._invHideZero ? '#fff' : '') + '">👁️ Masquer stock zéro</button>';
-  h += '<button class="btn btn-accent" onclick="printInventory()">🖨️ Imprimer</button>';
+  h += '<div style="display:flex;gap:.5rem;flex-wrap:wrap">';
+  if (window._invShowForm) {
+    h += '<button class="btn" onclick="fermerInventaireForm()">← Historique</button>';
+    h += '<button class="btn" onclick="toggleInvHideZero()" id="btnHideZero" style="background:' + (window._invHideZero ? 'var(--accent)' : '') + ';color:' + (window._invHideZero ? '#fff' : '') + '">👁️ Masquer stock zéro</button>';
+    h += '<button class="btn btn-accent" onclick="printInventory()">🖨️ Imprimer</button>';
+  } else {
+    h += '<button class="btn btn-accent" onclick="demarrerInventaire()">➕ Faire un inventaire</button>';
+  }
   h += '</div></div>';
 
+  if (window._invShowForm) {
   /* === PARAMÈTRES DE L'INVENTAIRE === */
   h += '<div class="card">';
   h += '<h3 style="margin-bottom:.8rem">Paramètres de l\'inventaire</h3>';
@@ -14014,6 +14363,7 @@ function render_inventory() {
   h += '<div class="form-group"><label>Type d\'élément à inventer</label>';
   h += '<select id="inv_type" onchange="_invMemoriserSaisie();window._invType=this.value;window._invHidden={};launchInventory()" style="width:100%;padding:.4rem;border:1px solid var(--border);border-radius:6px;font-size:.85rem">';
   var invTypes = [
+    { v: 'tous', t: 'Tous les types (aucun filtre)' },
     { v: 'all', t: 'Stock actif global (Matière première)' },
     { v: 'mp', t: 'Matière première (Toutes)' },
     { v: 'mp_bl', t: 'Matière première (BL)' },
@@ -14038,17 +14388,22 @@ function render_inventory() {
   h += '</div></div>';
 
   h += '<div id="invContent"></div>';
+  } /* fin if _invShowForm */
 
   /* Inventaires sauvegardés */
   h += '<div class="card" style="margin-top:1rem">';
-  h += '<h3>📋 Historique des inventaires sauvegardés</h3>';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.3rem">';
+  h += '<h3 style="margin:0">📋 Historique des inventaires sauvegardés</h3>';
+  if (!window._invShowForm) h += '<button class="btn btn-accent" onclick="demarrerInventaire()">➕ Faire un inventaire</button>';
+  h += '</div>';
   if (invs.length === 0) h += '<div class="empty">Aucun inventaire sauvegardé pour ce mois.</div>';
   else {
-    h += '<table><tr><th>Mois</th><th>Date</th><th>Éléments</th><th>Écart total</th><th>Statut</th><th>Actions</th></tr>';
+    h += '<table><tr><th>Mois</th><th>Date</th><th>Type</th><th>Éléments</th><th>Écart total</th><th>Statut</th><th>Actions</th></tr>';
     invs.forEach(function(inv) {
       var mIdx = parseInt((inv.month || '').slice(5, 7), 10) - 1;
       var mL = mIdx >= 0 ? _mn[mIdx] + ' ' + (inv.month || '').slice(0, 4) : '-';
       h += '<tr><td>' + mL + '</td><td>' + fmtD(inv.date) + '</td>';
+      h += '<td style="font-size:.72rem">' + escH(_invTypesLabel(inv)) + '</td>';
       h += '<td style="text-align:right">' + (inv.items || []).length + '</td>';
       var ecart = 0;
       (inv.items || []).forEach(function(it) { ecart += Math.abs((parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0)); });
@@ -14072,7 +14427,7 @@ function render_inventory() {
   }
   h += '</div>';
 
-  setTimeout(function() { launchInventory(); }, 50);
+  if (window._invShowForm) setTimeout(function() { launchInventory(); }, 50);
   return h;
 }
 
@@ -14108,6 +14463,7 @@ function launchInventory(preItems) {
   /* Filtrer par type — 'all' = onglet Stock Actif Global (Stock → Matière Première) : stockRaw + règle Actif/Tout */
   function invEtatOk(q) { var et = 'actif'; try { et = getSection('stockRawEtat', 'actif'); } catch (e) {} return et === 'actif' ? (parseFloat(q) || 0) > 0 : true; }
   var filtered = items.filter(function(it) {
+    if (window._invType === 'tous') return true;
     if (window._invType === 'all') return it.store === 'stockRaw' && invEtatOk(it.theo_qte);
     if (window._invType === 'mp') return it.store === 'stockRaw';
     if (window._invType === 'mp_bl') return it.store === 'stockRaw' && (it.source === 'BL' || it.source === 'Matière première (BL)');
@@ -14136,7 +14492,7 @@ function launchInventory(preItems) {
   h += '<h3 style="margin:0">Stock théorique au ' + jourLabel(dateJour) + ' — Saisissez le stock réel</h3>';
   h += '<div style="display:flex;gap:.5rem"><button class="btn" onclick="printInventory()" title="Imprimer l\u2019inventaire en cours">🖨️ Imprimer</button><button class="btn" onclick="saveInventoryDraft(\'' + month + '\')" title="Enregistrer sans toucher au stock, à continuer plus tard">📝 Brouillon</button><button class="btn btn-accent" onclick="validerInventaireCourant(\'' + month + '\')" title="Code requis : applique le réel au stock et verrouille">✅ Valider</button></div>';
   h += '</div>';
-  h += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.6rem">📝 Brouillon = enregistré sans toucher au stock (rouvrez-le pour continuer). ✅ Valider = code requis : le réel devient le stock initial au lendemain (historique précédent clôturé), inventaire verrouillé.</div>';
+  h += '<div style="font-size:.75rem;color:var(--dim);margin-bottom:.6rem">📝 Brouillon = enregistré sans toucher au stock (rouvrez-le pour continuer). ✅ Valider = code requis : le réel devient le stock initial à la date de l\u2019inventaire (historique précédent clôturé), inventaire verrouillé.</div>';
   if (window._invFromDraft) {
     h += '<div style="background:#fffbeb;border:1px solid #fcd34d;color:#92400e;border-radius:10px;padding:.5rem .9rem;margin-bottom:.8rem;font-size:.8rem">'
       + '📝 Lignes du brouillon réaffichées (recalcul du moment incomplet). Modifiez, puis 📝 Brouillon ou ✅ Valider.</div>';
@@ -14158,7 +14514,7 @@ function launchInventory(preItems) {
   if (filtered.length === 0) {
     h += '<div class="empty">Aucun article trouvé pour cette sélection.</div>';
   } else {
-    var hasDim = (window._invType === 'all' || window._invType === 'mp' || window._invType === 'mp_bl' || window._invType === 'mp_spec' || window._invType === 'mp_enc' || window._invType === 'semi');
+    var hasDim = filtered.some(function(it) { return !!it.dimensions; });
     h += '<div style="overflow-x:auto"><table id="invTable">';
     h += '<thead><tr>';
     h += '<th>Code</th><th>Désignation</th><th>Source</th>';
@@ -14683,6 +15039,7 @@ function saveInventoryDraft(month) {
     items: items, statut: 'brouillon', created_at: new Date().toISOString() });
   setInventories(invs);
   toast('Brouillon enregistré 📝 — rouvrez-le pour continuer. « Valider » appliquera le stock (code requis).');
+  window._invShowForm = false;
   renderPage();
 }
 /* Code de validation : celui de l'Entreprise (appli principale), même
@@ -14744,16 +15101,17 @@ function validerInventaireCourant(month, codeOpt) {
   if (!meta.supervisor) return toast('Indiquez le superviseur : son nom figurera sur chaque ligne de stock initial', 'error');
 var suite = function() {
     if (!confirm2('Valider l\u2019inventaire de ' + monthLabel(month) + ' ?\n\n' + (resume ? 'Contenu :\n' + resume + '\n\n' : '')
-      + 'Le réel saisi deviendra le stock initial (ligne au lendemain de la date, historique précédent clôturé).\nInventaire VERROUILLÉ après validation.')) return;
+      + 'Le réel saisi deviendra le stock initial (ligne à la date de l\'inventaire, historique précédent clôturé).\nInventaire VERROUILLÉ après validation.')) return;
     var invId = genId();
-    applyInventoryAsInitial(month, items, { date: meta.date, supervisor: meta.supervisor, invId: invId });
+    var _snap = applyInventoryAsInitial(month, items, { date: meta.date, supervisor: meta.supervisor, invId: invId });
     var invs = getInventories().filter(function(x) { return !(x.month === month && (x.type || 'all') === (meta.type || 'all')); });
     invs.push({ id: invId, month: month, type: meta.type, articleFilter: meta.articleFilter, date: meta.date,
       supervisor: meta.supervisor, executants: meta.executants, heure_debut: meta.heure_debut, heure_fin: meta.heure_fin,
       resume: resume, observations: resume,
-      items: items, statut: 'valide', created_at: new Date().toISOString(), validatedAt: new Date().toISOString() });
+      items: items, _snapshot: _snap, statut: 'valide', created_at: new Date().toISOString(), validatedAt: new Date().toISOString() });
     setInventories(invs);
     toast('Inventaire de ' + monthLabel(month) + ' validé et verrouillé ✅');
+    window._invShowForm = false;
     renderPage();
   };
   /* Tests : code direct. Écran : vrai modal de saisie. */
@@ -14778,13 +15136,14 @@ function validerInventaireBrouillon(id, codeOpt) {
   var resume = inv.resume || invResume(inv.items || []);
   var suite = function() {
     if (!confirm2('Valider cet inventaire ?\n\n' + (resume ? 'Contenu :\n' + resume + '\n\n' : '') + 'Le réel deviendra le stock initial (historique précédent clôturé).\nInventaire VERROUILLÉ après validation.')) return;
-    applyInventoryAsInitial(inv.month, inv.items, { date: inv.date, supervisor: inv.supervisor, invId: inv.id });
+    inv._snapshot = applyInventoryAsInitial(inv.month, inv.items, { date: inv.date, supervisor: inv.supervisor, invId: inv.id });
     inv.statut = 'valide';
     inv.resume = resume;
     inv.observations = resume;
     inv.validatedAt = new Date().toISOString();
     setInventories(invs);
     toast('Inventaire validé et verrouillé ✅');
+    window._invShowForm = false;
     renderPage();
   };
   if (typeof codeOpt !== 'undefined' && codeOpt !== null) {
@@ -14806,8 +15165,11 @@ function reopenInventoryDraft(id) {
   for (var i = 0; i < invs.length; i++) { if (invs[i].id === id) { inv = invs[i]; break; } }
   if (!inv) return;
   if (inv.statut === 'valide') return toast('Inventaire validé et verrouillé (consultation seule)', 'error');
+  window._invShowForm = true;
   if (typeof CURRENT_PAGE !== 'undefined' && CURRENT_PAGE !== 'inventory' && typeof navigate === 'function') {
     try { navigate('inventory'); } catch (eN) {}
+  } else if (typeof renderPage === 'function') {
+    try { renderPage(); } catch (eP) {}
   }
   window._invType = inv.type || 'all';
   if (typeof inv.articleFilter !== 'undefined') window._invArticleFilter = inv.articleFilter;
@@ -15022,7 +15384,7 @@ function infoProduitConso(code) {
 function appliquerBaseInventaireConso(items, dateInv, supervisor, invId, motifBase) {
   var stock = getStockConsum() || [];
   var D = String(dateInv || '').slice(0, 10) || today();
-  var LD = lendemainISO(D);
+  var LD = D; /* la date du stock initial = la date de l'inventaire (plus de J+1) */
   var sup = String(supervisor || '').trim();
   var parCode = {};
   (items || []).forEach(function(it) {
@@ -15087,6 +15449,14 @@ function applyInventoryAsInitial(month, items, opts) {
   var epiMap = {};
   epi.forEach(function(s, i) { epiMap[s.code] = i; });
   var _invLogs = [];
+  /* Instantané (avant/après) de TOUTES les lignes touchées, quel que soit le
+     type et même sans article_id : permet de tout restaurer à la suppression
+     de l'inventaire, sans dépendre du journal des mouvements. */
+  var _snapshot = [];
+  function _snap(store, ref, avant, apres, unitVol) {
+    if (Math.abs((parseFloat(avant) || 0) - (parseFloat(apres) || 0)) < 1e-9) return;
+    _snapshot.push({ store: store, ref: ref, avant: parseFloat(avant) || 0, apres: parseFloat(apres) || 0, unitVol: unitVol });
+  }
   /* La base consommable se joue une fois pour tout l'inventaire. */
   var _baseConsoAppliquee = false;
   function _invLog(list, idx, real) {
@@ -15114,6 +15484,7 @@ function applyInventoryAsInitial(month, items, opts) {
           var _oQ = parseFloat(raw[idx].quantite) || 0;
           var _oV = parseFloat(raw[idx].volume) || 0;
           var _uV = stkUnitVol(raw[idx]) || (_oQ > 0 ? _oV / _oQ : 0);
+          _snap('stockRaw', it.ref, _oQ, it.real_qte, _uV);
           raw[idx].quantite = it.real_qte;
           raw[idx].volume = Math.max(0, _uV * (parseFloat(it.real_qte) || 0));
           raw[idx].volume = Math.round(raw[idx].volume * 10000) / 10000;
@@ -15131,6 +15502,7 @@ function applyInventoryAsInitial(month, items, opts) {
         });
         if (_idxS.length) {
           _idxS.forEach(function(i) { _curS += parseFloat(semi[i].quantite) || 0; });
+          _snap('stockSemi', it.ref, _curS, it.real_qte);
           var _deltaS = (parseFloat(it.real_qte) || 0) - _curS;
           if (Math.abs(_deltaS) > 0.0001) {
             var _tS = _idxS[0];
@@ -15145,11 +15517,11 @@ function applyInventoryAsInitial(month, items, opts) {
       case 'stockFinished':
         /* Les palettes = les produits finis : tout est appliqué au stock finis */
         idx = finMap[it.ref];
-        if (idx !== undefined) { _invLog(finished, idx, it.real_qte); finished[idx].quantite = it.real_qte; }
+        if (idx !== undefined) { _snap('stockFinished', it.ref, parseFloat(finished[idx].quantite) || 0, it.real_qte); _invLog(finished, idx, it.real_qte); finished[idx].quantite = it.real_qte; }
         break;
       case 'stockMerch':
         idx = merchMap[it.ref];
-        if (idx !== undefined) { merch[idx].quantite = it.real_qte; }
+        if (idx !== undefined) { _snap('stockMerch', it.ref, parseFloat(merch[idx].quantite) || 0, it.real_qte); merch[idx].quantite = it.real_qte; }
         break;
 case 'stockConsum':
         /* Grand-livre propre (voir appliquerBaseInventaireConso) : le réel
@@ -15170,7 +15542,7 @@ case 'stockConsum':
         break;
       case 'epiItems':
         idx = epiMap[it.ref];
-        if (idx !== undefined) { epi[idx].quantite_stock = it.real_qte; }
+        if (idx !== undefined) { _snap('epiItems', it.ref, parseFloat(epi[idx].quantite_stock) || 0, it.real_qte); epi[idx].quantite_stock = it.real_qte; }
         break;
     }
   });
@@ -15195,6 +15567,7 @@ case 'stockConsum':
       if (f && f.article_id && !_seen[f.article_id]) { _seen[f.article_id] = true; syncMirrorFinished(f.article_id); }
     });
   } catch (e) {}
+  return _snapshot;
 }
 
 
@@ -15221,9 +15594,11 @@ function deleteInventory(id, codeOpt) {
     else if (s._ajustInv && inv.month && s._invMois === inv.month) nbAjust++;
   });
   var aNonConso = false;
-  try {
-    aNonConso = (inv.items || []).some(function(it) { return it.store && it.store !== 'stockConsum'; });
-  } catch (eN) {}
+  if (!(inv._snapshot && inv._snapshot.length)) {
+    try {
+      aNonConso = (inv.items || []).some(function(it) { return it.store && it.store !== 'stockConsum'; });
+    } catch (eN) {}
+  }
   var suite = function() {
     if (!confirm2('Supprimer ' + (estValide ? 'l\u2019INVENTAIRE VALIDÉ' : 'ce brouillon')
       + ' du ' + fmtD(inv.date || '') + ' ?\n\n'
@@ -15266,20 +15641,55 @@ function deleteInventory(id, codeOpt) {
         gardeMov.push(m);
       });
       if (gardeMov.length !== movs.length) setMovements(gardeMov);
-      Object.keys(_artsInv).forEach(function(aid) {
-        if (_anciens[aid] === undefined || _reels[aid] === undefined) return;
-        var delta = _anciens[aid] - _reels[aid]; /* ancien solde - solde inventaire */
-        if (!delta) return;
-        var fin = getStockFinished();
-        for (var fi = 0; fi < fin.length; fi++) {
-          if (fin[fi] && fin[fi].article_id === aid) { fin[fi].quantite = (parseFloat(fin[fi].quantite) || 0) + delta; setStockFinished(fin); nbFinRev++; break; }
-        }
-        var semi = getStockSemi();
-        for (var si = 0; si < semi.length; si++) {
-          if (semi[si] && semi[si].article_id === aid) { semi[si].quantite = (parseFloat(semi[si].quantite) || 0) + delta; setStockSemi(semi); break; }
-        }
-      });
+      /* Sans instantané (ancien inventaire) : on défait l'écart fini/semi à
+         partir des écritures de rapprochement. Avec instantané : la
+         restauration ci-dessous couvre tous les types, on n'applique donc pas
+         ce delta (sinon double comptage). */
+      if (!(inv._snapshot && inv._snapshot.length)) {
+        Object.keys(_artsInv).forEach(function(aid) {
+          if (_anciens[aid] === undefined || _reels[aid] === undefined) return;
+          var delta = _anciens[aid] - _reels[aid]; /* ancien solde - solde inventaire */
+          if (!delta) return;
+          var fin = getStockFinished();
+          for (var fi = 0; fi < fin.length; fi++) {
+            if (fin[fi] && fin[fi].article_id === aid) { fin[fi].quantite = (parseFloat(fin[fi].quantite) || 0) + delta; setStockFinished(fin); nbFinRev++; break; }
+          }
+          var semi = getStockSemi();
+          for (var si = 0; si < semi.length; si++) {
+            if (semi[si] && semi[si].article_id === aid) { semi[si].quantite = (parseFloat(semi[si].quantite) || 0) + delta; setStockSemi(semi); break; }
+          }
+        });
+      }
     } catch (eMV) {}
+    /* Restauration par instantané : tous les types (MP, semi, finis, palettes,
+       marchandises, ÉPI), même les lignes sans article_id. Delta avant-après
+       appliqué au stock courant : les mouvements postérieurs sont conservés. */
+    try {
+      if (inv._snapshot && inv._snapshot.length) {
+        var _raw = getStockRaw(), _semi = getStockSemi(), _fin = getStockFinished(), _mr = getStockMerch(), _ep = getEpiItems();
+        inv._snapshot.forEach(function(sn) {
+          if (!sn) return;
+          var d2 = (parseFloat(sn.avant) || 0) - (parseFloat(sn.apres) || 0);
+          if (!d2) return;
+          var K = String(sn.ref || '').trim().toUpperCase();
+          if (sn.store === 'stockRaw') {
+            for (var i = 0; i < _raw.length; i++) {
+              var _cR = String((_raw[i] && (_raw[i].code || _raw[i].colis_number)) || '').trim().toUpperCase();
+              if (_cR === K) { _raw[i].quantite = (parseFloat(_raw[i].quantite) || 0) + d2; if (sn.unitVol != null) _raw[i].volume = Math.max(0, Math.round((parseFloat(sn.unitVol) || 0) * _raw[i].quantite * 10000) / 10000); break; }
+            }
+          } else if (sn.store === 'stockSemi') {
+            for (var j = 0; j < _semi.length; j++) { if (String((_semi[j] && _semi[j].code) || '').trim().toUpperCase() === K) { _semi[j].quantite = (parseFloat(_semi[j].quantite) || 0) + d2; break; } }
+          } else if (sn.store === 'stockFinished') {
+            for (var k2 = 0; k2 < _fin.length; k2++) { if (String((_fin[k2] && _fin[k2].code) || '').trim().toUpperCase() === K) { _fin[k2].quantite = (parseFloat(_fin[k2].quantite) || 0) + d2; break; } }
+          } else if (sn.store === 'stockMerch') {
+            for (var m2 = 0; m2 < _mr.length; m2++) { if (String((_mr[m2] && _mr[m2].code) || '').trim().toUpperCase() === K) { _mr[m2].quantite = (parseFloat(_mr[m2].quantite) || 0) + d2; break; } }
+          } else if (sn.store === 'epiItems') {
+            for (var e2 = 0; e2 < _ep.length; e2++) { if (String((_ep[e2] && (_ep[e2].code || _ep[e2].ref)) || '').trim().toUpperCase() === K) { _ep[e2].quantite_stock = (parseFloat(_ep[e2].quantite_stock) || 0) + d2; break; } }
+          }
+        });
+        setStockRaw(_raw); setStockSemi(_semi); setStockFinished(_fin); setStockMerch(_mr); setEpiItems(_ep);
+      }
+    } catch (eSnap) {}
     setInventories(invs.filter(function(x) { return x.id !== id; }));
     toast(estValide
       ? 'Inventaire supprimé — stock remis comme avant (' + nbBases + ' base(s), ' + nbClos + ' rouverte(s), ' + nbAjust + ' ajustement(s)' + (nbFinRev ? ', ' + nbFinRev + ' produit(s) fini(s) restauré(s)' : '') + ')'
@@ -23562,10 +23972,10 @@ function _estEcritureInventaireFini(mm) {
    palette) : sa quantite reelle compte et sa date devient la date de la ligne
    « Stock initial » (au lendemain, comme le grand-livre des consommables).
    Les brouillons sont ignores. */
-function _finBaseInventaire(code) {
+function _finInventairesProduit(code) {
   var K = String(code || '').trim().toUpperCase();
-  if (!K || K === '-') return null;
-  var best = null;
+  if (!K || K === '-') return [];
+  var out = [];
   (getInventories() || []).forEach(function(inv) {
     if (!inv || inv.statut !== 'valide') return;
     var d = String(inv.date || '').slice(0, 10);
@@ -23577,9 +23987,14 @@ function _finBaseInventaire(code) {
       var k = String(it.ref || it.code || '').trim().toUpperCase();
       if (k && k === K) { found = true; q += parseFloat(it.real_qte) || 0; }
     });
-    if (found && (!best || d >= best.date)) best = { date: d, qte: q };
+    if (found) out.push({ date: d, qte: q });
   });
-  return best;
+  out.sort(function(a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  return out;
+}
+function _finBaseInventaire(code) {
+  var all = _finInventairesProduit(code);
+  return all.length ? all[all.length - 1] : null;
 }
 function _finRegistreData(stockId) {
   var fin = getStockFinished();
@@ -23599,7 +24014,9 @@ function _finRegistreData(stockId) {
      les consommables. L'historique anterieur (jusqu'a la date d'inventaire)
      est cloture : seuls les mouvements POSTERIEURS sont rejoues. Sans base on
      retombe sur l'ancien calcul (solde deduit du journal des mouvements). */
-  var base = _finBaseInventaire(code);
+  var _allBases = _finInventairesProduit(code);
+  var base = _allBases.length ? _allBases[_allBases.length - 1] : null;
+  var invsAvant = _allBases.slice(0, -1);
   var movs = getMovements().filter(function(mm) { return artId && mm.article_id === artId; });
   if (base) {
     movs = movs.filter(function(mm) {
@@ -23618,19 +24035,25 @@ function _finRegistreData(stockId) {
   var initial, initDate;
   if (base) {
     initial = base.qte;
-    initDate = fmtD(lendemainISO(base.date));
+    initDate = fmtD(base.date);
   } else {
     initial = actuel - totE + totS - totA;
     initDate = initialRowDate(movs.length ? movs[0].date : '');
   }
-  return { code: code, des: des, actuel: actuel, initial: initial, movs: movs, initDate: initDate };
+  return { code: code, des: des, actuel: actuel, initial: initial, movs: movs, initDate: initDate, invsAvant: invsAvant };
 }
 function _finRegistreHtml(stockId) {
   var d = _finRegistreData(stockId);
   if (!d) return '<div style="padding:14px;text-align:center;color:var(--dim)">Article introuvable</div>';
   function fnum(n) { return (parseFloat(n) || 0); }
   var bal = d.initial;
-  var rows = '<tr style="background:#f8fafc"><td>' + escH(d.initDate) + '</td><td style="color:var(--blue);font-weight:600">' + escH(d.code) + '</td><td style="color:var(--blue);font-weight:600">' + escH(d.des) + '</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(d.initial) + '</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(d.initial) + '</td><td style="color:var(--blue)">Stock initial</td><td style="text-align:center;color:var(--dim)">-</td></tr>';
+  var rows = '';
+  /* Inventaires plus anciens : lignes « Inventaire » (le plus récent reste la
+     ligne « Stock initial », seule base du calcul du solde). */
+  (d.invsAvant || []).forEach(function(iv) {
+    rows += '<tr style="background:#fff7ed"><td>' + escH(fmtD(iv.date)) + '</td><td style="color:var(--blue);font-weight:600">' + escH(d.code) + '</td><td style="color:var(--blue);font-weight:600">' + escH(d.des) + '</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(iv.qte) + '</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(iv.qte) + '</td><td style="color:#b45309;font-weight:700">Inventaire</td><td style="text-align:center;color:var(--dim)">-</td></tr>';
+  });
+  rows += '<tr style="background:#f8fafc"><td>' + escH(d.initDate) + '</td><td style="color:var(--blue);font-weight:600">' + escH(d.code) + '</td><td style="color:var(--blue);font-weight:600">' + escH(d.des) + '</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(d.initial) + '</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:center;color:var(--dim)">-</td><td style="text-align:right;font-weight:700;color:var(--blue)">' + fnum(d.initial) + '</td><td style="color:var(--blue)">Stock initial</td><td style="text-align:center;color:var(--dim)">-</td></tr>';
   d.movs.forEach(function(mm) {
     var q = parseFloat(mm.quantite) || 0;
     var eC = '', sC = '', aC = '';
@@ -23653,7 +24076,7 @@ function showFinishedFiche(stockId) {
   if (!d) return toast('Article introuvable', 'error');
   var fin = getStockFinished();
   var entry = fin.find(function(s) { return String(s.id) === String(stockId); }) || {};
-  window._ficheData = { code: d.code, des: d.des, actuel: d.actuel, initial: d.initial, movs: d.movs, initDate: d.initDate };
+  window._ficheData = { code: d.code, des: d.des, actuel: d.actuel, initial: d.initial, movs: d.movs, initDate: d.initDate, invsAvant: d.invsAvant || [] };
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:1100px">';
   m += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem">';
   m += '<h2 style="margin:0">⇄ HISTORIQUE DES MOUVEMENTS – ' + escH(d.code) + '</h2>';
@@ -23668,14 +24091,18 @@ function showFinishedFiche(stockId) {
 function printFinishedFicheId(stockId) {
   var d = _finRegistreData(stockId);
   if (!d) return toast('Article introuvable', 'error');
-  window._ficheData = { code: d.code, des: d.des, actuel: d.actuel, initial: d.initial, movs: d.movs, initDate: d.initDate };
+  window._ficheData = { code: d.code, des: d.des, actuel: d.actuel, initial: d.initial, movs: d.movs, initDate: d.initDate, invsAvant: d.invsAvant || [] };
   printFinishedFiche();
 }
 function printFinishedFiche() {
   var d = window._ficheData;
   if (!d) return;
   var bal = d.initial;
-  var rows = '<tr><td>' + escH(d.initDate || '-') + '</td><td>' + escH(d.code) + '</td><td>' + escH(d.des) + '</td><td style="text-align:right">' + d.initial + '</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:right">' + d.initial + '</td><td>Stock initial</td><td style="text-align:center">-</td></tr>';
+  var rows = '';
+  (d.invsAvant || []).forEach(function(iv) {
+    rows += '<tr><td>' + escH(fmtD(iv.date)) + '</td><td>' + escH(d.code) + '</td><td>' + escH(d.des) + '</td><td style="text-align:right">' + iv.qte + '</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:right">' + iv.qte + '</td><td>Inventaire</td><td style="text-align:center">-</td></tr>';
+  });
+  rows += '<tr><td>' + escH(d.initDate || '-') + '</td><td>' + escH(d.code) + '</td><td>' + escH(d.des) + '</td><td style="text-align:right">' + d.initial + '</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:center">-</td><td style="text-align:right">' + d.initial + '</td><td>Stock initial</td><td style="text-align:center">-</td></tr>';
   (d.movs || []).forEach(function(mm) {
     var q = parseFloat(mm.quantite) || 0;
     var eC = '-', sC = '-', aC = '0.000';

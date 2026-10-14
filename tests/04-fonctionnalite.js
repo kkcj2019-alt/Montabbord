@@ -358,6 +358,92 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Reparations clients : modification d'une fiche existante ---------- */
+  r.push({
+    nom: 'Reparations clients : modifier une fiche change la quantite et remet le stock juste',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var pieces = reparPiecesDisponibles();
+      var p = pieces[0];
+      var stockAvant = p.stock;
+      var res = enregistrerReparation({ date: '2026-10-01', client: 'Client Z',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 20, coutUnite: p.coutUnite }] });
+      var f = (res && res.fiche) || {};
+      var m = reparModifierFiche(f.id, { client: 'Client Z2', motif: 'modifie', travail: 'essai',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 5, coutUnite: p.coutUnite }] });
+      var apres = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0];
+      (getReparationsPalettes().length === 1 && m && m.fiche && m.fiche.id === f.id
+        && m.fiche.client === 'Client Z2' && m.fiche.pieces[0].qte === 5
+        && apres && Math.abs(apres.stock - (stockAvant - 5)) < 0.001)
+        ? 'OK : fiche ' + f.numero + ' modifiee (20 -> 5), stock ' + stockAvant + ' -> ' + apres.stock
+        : 'ECHEC ' + JSON.stringify(m && m.fiche) + ' stock=' + (apres ? apres.stock : '?')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Reparations clients : modifier avec un stock insuffisant est refuse sans rien changer',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var pieces = reparPiecesDisponibles();
+      var p = pieces[0];
+      var res = enregistrerReparation({ date: '2026-10-01', client: 'Client W',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 10, coutUnite: p.coutUnite }] });
+      var f = (res && res.fiche) || {};
+      var stockSortie = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0].stock;
+      var m = reparModifierFiche(f.id, { client: 'Client W',
+        pieces: [{ article_id: p.article_id, code: p.code, designation: p.designation, categorie: p.categorie, qte: 999999, coutUnite: p.coutUnite }] });
+      var stockFinal = reparPiecesDisponibles().filter(function (x) { return x.code === p.code; })[0].stock;
+      var fiche = getReparationsPalettes()[0];
+      (m && m.erreur && m.erreur.length && fiche.pieces[0].qte === 10 && Math.abs(stockFinal - stockSortie) < 0.001)
+        ? 'OK : refus stock insuffisant, fiche et stock inchanges'
+        : 'ECHEC ' + JSON.stringify(m) + ' qte=' + fiche.pieces[0].qte + ' stock=' + stockFinal + ' vs ' + stockSortie
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Consommables : modification / suppression d'une sortie ---------- */
+  r.push({
+    nom: 'Consommables : une sortie est tracee (id) et propose les boutons modifier/supprimer',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockConsum', [
+        { id: 's1', code: 'P5', designation: 'POINTE5', type: 'POINTE', ctype: 'POINTE', quantite: 1000, cond: 180, created_at: '2026-09-01', obs: 'Stock initial' },
+        { id: 's2', code: 'P5', designation: 'POINTE5', type: 'POINTE', ctype: 'POINTE', quantite: -180, cond: 180, created_at: '2026-09-05', motif: 'Consommation' }
+      ]);
+      var lignes = getStockConsum().map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P5'; });
+      var rows = buildConsoMovements(lignes);
+      var sortie = rows.filter(function (r) { return r.estSortie; })[0] || {};
+      var html = _consoRegistreHtml(lignes);
+      (sortie.srcId === 's2' && sortie.estSortie
+        && html.indexOf('modifierSortieConso') !== -1 && html.indexOf('supprimerSortieConso') !== -1)
+        ? 'OK : sortie tracee (srcId=s2) + boutons modifier/supprimer presents'
+        : 'ECHEC srcId=' + (sortie && sortie.srcId) + ' html=' + (html.indexOf('modifierSortieConso') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Consommables : supprimer une sortie retire la ligne et retablit le stock',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window.confirm = function () { return true; };
+      renderPage = function () {};
+      setSection('stockConsum', [
+        { id: 's1', code: 'P5', designation: 'POINTE5', type: 'POINTE', ctype: 'POINTE', quantite: 1000, cond: 180, created_at: '2026-09-01', obs: 'Stock initial' },
+        { id: 's2', code: 'P5', designation: 'POINTE5', type: 'POINTE', ctype: 'POINTE', quantite: -180, cond: 180, created_at: '2026-09-05', motif: 'Consommation' }
+      ]);
+      supprimerSortieConso('s2');
+      var restants = getStockConsum();
+      var total = 0;
+      restants.forEach(function (l) { total += parseFloat(l.quantite) || 0; });
+      (restants.length === 1 && total === 1000 && !restants.some(function (l) { return String(l.id) === 's2'; }))
+        ? 'OK : sortie supprimee, stock restaure a 1000'
+        : 'ECHEC n=' + restants.length + ' total=' + total
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Reparation : stock initial date + fiches imprimables ---------- */
   r.push({
     nom: 'Reparation : un type cree garde la date de son stock initial et imprime sa fiche de stock',
@@ -506,7 +592,7 @@ CURRENT_PAGE = 'cout-revient';
     nom: 'Inventaire : changer la date de la fiche change le mois d inventaire',
     app: 'production.html', store: storeRealiste,
     code: `
-      CURRENT_PAGE = 'inventory'; renderPage();
+      CURRENT_PAGE = 'inventory'; window._invShowForm = true; renderPage();
       var h = document.getElementById('content').innerHTML || '';
       var i = h.indexOf('id="inv_date"');
       (i !== -1 && h.slice(i, i + 500).indexOf('launchInventory()') !== -1)
@@ -1677,7 +1763,7 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Produits finis : apres inventaire, la fiche ouvre sur « Stock initial » (valeur reelle, date au lendemain), historique cloture',
+    nom: 'Produits finis : apres inventaire, la fiche ouvre sur « Stock initial » (valeur reelle, date de l\u2019inventaire), historique cloture',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
@@ -1696,9 +1782,9 @@ attenduPrefixe: 'OK'
     },
     code: `
       var reg = _finRegistreData('sf1');
-      (reg && reg.initial === 60 && reg.initDate === '01/10/26' && reg.movs.length === 1
+      (reg && reg.initial === 60 && reg.initDate === '30/09/26' && reg.movs.length === 1
         && String(reg.movs[0].motif || '').indexOf('Production 260902') === 0)
-        ? 'OK : Stock initial = 60 au 01/10/26, 1 seul mouvement posterieur, ecritures de rapprochement masquees'
+        ? 'OK : Stock initial = 60 au 30/09/26, 1 seul mouvement posterieur, ecritures de rapprochement masquees'
         : 'ECHEC : ' + JSON.stringify(reg && { initial: reg.initial, initDate: reg.initDate, n: reg.movs.length, m0: reg.movs[0] && reg.movs[0].motif })
     `,
     attenduPrefixe: 'OK'
@@ -2975,16 +3061,16 @@ attenduPrefixe: 'OK'
       /* Mauvais code : rien ne bouge, toujours brouillon */
       validerInventaireBrouillon('d1', 'mauvais');
       var bloque = getInventories()[0].statut === 'brouillon' && getStockConsum().length === 2;
-      /* Bon code : base 16020 au 01/10, ancien historique clôturé */
+      /* Bon code : base 16020 au 30/09 (date de l'inventaire), ancien historique clôturé */
       validerInventaireBrouillon('d1', '1234');
       var lignes = getStockConsum();
       var base = lignes.filter(function (l) { return l._invBase; })[0] || {};
       var totalOuvert = 0;
       lignes.forEach(function (l) { if (!l._invClos) totalOuvert += parseFloat(l.quantite) || 0; });
       var rec = getInventories()[0];
-      (bloque && rec.statut === 'valide' && base.quantite === 16020 && base.date === '2026-10-01'
+      (bloque && rec.statut === 'valide' && base.quantite === 16020 && base.date === '2026-09-30'
         && /Stock initial/.test(base.obs || '') && /SUP/.test(base.obs || '') && totalOuvert === 16020)
-        ? 'OK : code faux bloque, code bon -> base 16020 au 01/10 « Stock initial ... SUP », total ouvert 16020'
+        ? 'OK : code faux bloque, code bon -> base 16020 au 30/09 « Stock initial ... SUP », total ouvert 16020'
         : 'ECHEC bloque=' + bloque + ' statut=' + rec.statut + ' base=' + JSON.stringify(base) + ' total=' + totalOuvert
     `,
     attenduPrefixe: 'OK'
@@ -3732,7 +3818,7 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Inventaire : il fige le réel en stock initial au lendemain, historique clôturé (pas d\u2019ajustement)',
+    nom: 'Inventaire : il fige le réel en stock initial à la date de l\u2019inventaire, historique clôturé (pas d\u2019ajustement)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
@@ -3752,18 +3838,18 @@ attenduPrefixe: 'OK'
       var r = buildConsoMovements(lignes.map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P7'; }));
       var ouverture = r.filter(function (x) { return x.estInitial; })[0] || {};
       var ajusts = r.filter(function (x) { return x.ajust !== 0; });
-      (vieille._invClos === 't1' && base.quantite === 12000 && base.date === '2026-08-01'
+      (vieille._invClos === 't1' && base.quantite === 12000 && base.date === '2026-07-31'
         && /Stock initial/.test(base.obs || '') && /SUP/.test(base.obs || '') && totalOuvert === 12000
-        && ouverture.estInitial && ouverture.initial === 12000 && ouverture.date === '2026-08-01'
+        && ouverture.estInitial && ouverture.initial === 12000 && ouverture.date === '2026-07-31'
         && ajusts.length === 0 && r[r.length - 1].final === 12000)
-        ? 'OK : achat clôturé, base 12 000 au 01/08 « Stock initial ... SUP », registre ouvert à 12 000 sans ajustement'
+        ? 'OK : achat clôturé, base 12 000 au 31/07 « Stock initial ... SUP », registre ouvert à 12 000 sans ajustement'
         : 'ECHEC : vieille=' + JSON.stringify(vieille) + ' base=' + JSON.stringify(base) + ' registre=' + JSON.stringify(r)
     `,
     attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Inventaire : stock 50, reel annonce 10 -> base 10 au lendemain, ancien clos',
+    nom: 'Inventaire : stock 50, reel annonce 10 -> base 10 à la date de l\u2019inventaire, ancien clos',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
@@ -3780,9 +3866,9 @@ attenduPrefixe: 'OK'
       var r = buildConsoMovements(lignes.map(consoNorm).filter(function (x) { return String(x.code).toUpperCase() === 'P5'; }));
       var base = lignes.filter(function (l) { return l._invBase; })[0] || {};
       var fin = r[r.length - 1] || {};
-      (totalOuvert === 10 && agg.unites === 10 && base.date === '2026-08-16' && fin.final === 10
+      (totalOuvert === 10 && agg.unites === 10 && base.date === '2026-08-15' && fin.final === 10
         && r.filter(function (x) { return x.ajust !== 0; }).length === 0)
-        ? 'OK : 50 -> base 10 au 16/08, fiche et registre à 10, sans ajustement'
+        ? 'OK : 50 -> base 10 au 15/08, fiche et registre à 10, sans ajustement'
         : 'ECHEC : total=' + totalOuvert + ' agg=' + JSON.stringify(agg) + ' registre=' + JSON.stringify(r)
     `,
     attenduPrefixe: 'OK'
