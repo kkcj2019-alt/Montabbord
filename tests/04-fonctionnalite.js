@@ -9771,6 +9771,41 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Inventaire : supprimer annule les \u00e9critures produits finis et restaure la quantit\u00e9',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.stockFinished = [{ id: 'f1', article_id: 'A1', code: 'PF1', designation: 'Palette PF1', quantite: 11 }];
+      p.stockPalettes = [];
+      p.stockSemi = [];
+      p.movements = [
+        { id: 'mv1', date: '2026-10-01', type: 'sortie', article_id: 'A1', quantite: 20, motif: 'Annulation inventaire - stock th\u00e9orique', _invBase: true, _invId: 'vF' },
+        { id: 'mv2', date: '2026-10-01', type: 'ajustement', article_id: 'A1', quantite: 8, motif: 'Correction inventaire - stock r\u00e9el', _invBase: true, _invId: 'vF' },
+        { id: 'mv3', date: '2026-10-05', type: 'entree', article_id: 'A1', quantite: 3, motif: 'Production', reference: 'F-1' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      localStorage.setItem('mdb_entreprise', JSON.stringify({ nom: 'T', validationCode: '1234' }));
+      setInventories([{ id: 'vF', month: '2026-09', type: 'global', date: '2026-09-30', supervisor: 'S',
+        items: [{ store: 'stockFinished', ref: 'PF1', code: 'PF1', real_qte: 8 }], statut: 'valide', validatedAt: '2026-10-01' }]);
+      window.confirm2 = function() { return true; };
+      renderPage = function () {};
+      deleteInventory('vF', '1234');
+      var fin = getStockFinished()[0] || {};
+      var movs = getMovements();
+      var restantInv = movs.filter(function (m) { return m._invId === 'vF'; }).length;
+      var entree = movs.filter(function (m) { return m.id === 'mv3'; }).length;
+      var init = _finRegistreData('f1').initial;
+      (getInventories().length === 0 && fin.quantite === 23 && restantInv === 0 && entree === 1 && init === 20)
+        ? 'OK : \u00e9cart annul\u00e9 (8 -> 20) + entr\u00e9e 3 = 23, \u00e9critures d\u2019inventaire retir\u00e9es, stock initial 20'
+        : 'ECHEC : qte=' + fin.quantite + ' restantInv=' + restantInv + ' entree=' + entree + ' init=' + init
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Stock initial MP : c\u2019est le dernier inventaire MP validé (brouillons ignorés)',
     app: 'production.html', store: storeRealiste,
     code: `
@@ -10535,6 +10570,28 @@ function run(rapport) {
     }
   } catch (ePf) {
     rapport.ko('Pointage/synchro : controles statiques illisibles (' + ePf.message + ')');
+  }
+
+  /* Controle statique : correctifs Exploitation — carte Produits finis cliquable,
+     impression d'inventaire qui separe les articles a quantite 0, annulation
+     d'inventaire qui restaure les produits finis, et sondage de synchro
+     periodique (le temps reel seul pouvait etre manque). */
+  try {
+    const fsE = require('fs');
+    const pathE = require('path');
+    const srcE = fsE.readFileSync(pathE.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const iFin = srcE.indexOf('dash-finis');
+    const carteFin = iFin !== -1 && srcE.slice(iFin, iFin + 120).indexOf('stock-finished') !== -1;
+    const impZeros = srcE.indexOf('Articles \u00e0 quantit\u00e9 0') !== -1;
+    const delRev = srcE.indexOf('_anciens[aid] === undefined || _reels[aid] === undefined') !== -1;
+    const poll = srcE.indexOf('function prodPollStart(') !== -1 && srcE.indexOf('_prodPollT = setInterval(') !== -1;
+    if (carteFin && impZeros && delRev && poll) {
+      rapport.ok('Exploitation : carte Produits finis -> stock finis, impression separe les articles a 0, suppression d\u2019inventaire restaure les produits finis, sondage de synchro 30 s actif');
+    } else {
+      rapport.ko('Exploitation correctifs — carte=' + carteFin + ' impZeros=' + impZeros + ' delRev=' + delRev + ' poll=' + poll);
+    }
+  } catch (eE) {
+    rapport.ko('Exploitation : controle statique illisible (' + eE.message + ')');
   }
 
   const liste = controles();

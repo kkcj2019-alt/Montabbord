@@ -7518,12 +7518,30 @@ function prodStartRealtime() {
     _prodSub.subscribe(function(status) {});
   } catch(e) {}
 }
+/* Filet de sécurité de synchro : le temps réel Supabase peut être manqué (mise
+   en veille mobile, réseau qui coupe, table non publiée). Un sondage discret
+   toutes les 30 s, onglet visible et en ligne, rejoue le même pull que le temps
+   réel. Inactif au repos (onglet caché) pour ne pas saturer la base. */
+var _prodPollT = null;
+function prodPollStart() {
+  try { if (_prodPollT) return; } catch (e) {}
+  try {
+    _prodPollT = setInterval(function() {
+      try {
+        if (document.hidden) return;
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+        prodPullNow(true);
+      } catch (e) {}
+    }, 30000);
+  } catch (e) {}
+}
 function prodInitSync() {
   _prodUid = prodEnterpriseUid();
   if (!_prodUid || !prodSb()) { prodSyncStatus('○ non connecté', 'var(--dim)'); return; }
   prodSyncStatus('● synchro…', '#b45309');
   prodPullNow(true);
   prodStartRealtime();
+  prodPollStart();
 }
 try {
   if (document.readyState === 'complete') setTimeout(prodInitSync, 1500);
@@ -7795,7 +7813,7 @@ function render_dashboard() {
   }
   h += '</div></div>';
 
-  h += '<div class="card dash-card"><h3>📦 Produits Finis</h3>';
+  h += '<div class="card dash-card" data-cardkey="dash-finis" onclick="navigate(\'stock-finished\')" style="cursor:pointer" title="Ouvrir le stock des produits finis"><h3>📦 Produits Finis</h3>';
   var stockFin = getStockFinished();
   var topArticles = stockFin.sort(function(a, b) { return (b.quantite || 0) - (a.quantite || 0); }).slice(0, 8);
   if (topArticles.length === 0) h += '<div class="empty">Aucun stock</div>';
@@ -15134,7 +15152,7 @@ function deleteInventory(id, codeOpt) {
       + '- ' + nbBases + ' ligne(s) « Stock initial » retirée(s)\n'
       + '- ' + nbClos + ' ligne(s) d\u2019historique rouverte(s)\n'
       + '- ' + nbAjust + ' ajustement(s) d\u2019inventaire annulé(s)'
-      + (aNonConso ? '\n\n⚠️ MP / semi-finis / finis / marchandises (appliqués en place) : à corriger à la main si besoin.' : '')
+      + (aNonConso ? '\n\n⚠️ Matière première / marchandises / ÉPI (appliqués en place) : à corriger à la main si besoin.\nProduits finis / palettes / semi-finis : écart d\u2019inventaire annulé automatiquement.' : '')
       + (estValide ? '\n\nMouvements postérieurs (achats/sorties après la base) conservés.' : ''))) return;
     var garde = [];
     conso.forEach(function(s) {
@@ -15145,9 +15163,48 @@ function deleteInventory(id, codeOpt) {
       garde.push(s);
     });
     setStockConsum(garde);
+    /* Produits finis / palettes / semi-finis : l'inventaire y écrit un couple
+       d'écritures de rapprochement (_invId : une sortie = ancien solde, un
+       ajustement = solde réel). Ce ne sont pas de vrais mouvements : on les
+       retire du journal ET on défait l'écart de quantité qu'ils ont appliqué,
+       en préservant les mouvements postérieurs. Sans ça, la fiche du produit
+       gardait « Stock initial » = quantité de l'inventaire supprimé. */
+    var nbFinRev = 0;
+    try {
+      var movs = getMovements();
+      var _anciens = {}, _reels = {}, _artsInv = {};
+      var gardeMov = [];
+      movs.forEach(function(m) {
+        if (m && m._invId === id) {
+          var aid = m.article_id || '';
+          if (aid) {
+            _artsInv[aid] = true;
+            var q = parseFloat(m.quantite) || 0;
+            if (m.type === 'sortie') { if (_anciens[aid] === undefined) _anciens[aid] = q; }
+            else if (m.type === 'ajustement') { _reels[aid] = q; }
+          }
+          return; /* écriture d'inventaire : retirée du journal */
+        }
+        gardeMov.push(m);
+      });
+      if (gardeMov.length !== movs.length) setMovements(gardeMov);
+      Object.keys(_artsInv).forEach(function(aid) {
+        if (_anciens[aid] === undefined || _reels[aid] === undefined) return;
+        var delta = _anciens[aid] - _reels[aid]; /* ancien solde - solde inventaire */
+        if (!delta) return;
+        var fin = getStockFinished();
+        for (var fi = 0; fi < fin.length; fi++) {
+          if (fin[fi] && fin[fi].article_id === aid) { fin[fi].quantite = (parseFloat(fin[fi].quantite) || 0) + delta; setStockFinished(fin); nbFinRev++; break; }
+        }
+        var semi = getStockSemi();
+        for (var si = 0; si < semi.length; si++) {
+          if (semi[si] && semi[si].article_id === aid) { semi[si].quantite = (parseFloat(semi[si].quantite) || 0) + delta; setStockSemi(semi); break; }
+        }
+      });
+    } catch (eMV) {}
     setInventories(invs.filter(function(x) { return x.id !== id; }));
     toast(estValide
-      ? 'Inventaire supprimé — stock remis comme avant (' + nbBases + ' base(s), ' + nbClos + ' rouverte(s), ' + nbAjust + ' ajustement(s))'
+      ? 'Inventaire supprimé — stock remis comme avant (' + nbBases + ' base(s), ' + nbClos + ' rouverte(s), ' + nbAjust + ' ajustement(s)' + (nbFinRev ? ', ' + nbFinRev + ' produit(s) fini(s) restauré(s)' : '') + ')'
       : 'Brouillon supprimé (le stock n\u2019avait pas été touché)');
     renderPage();
   };
@@ -15197,17 +15254,31 @@ function printInventory() {
   html += '<th>Réel</th>';
   if (hasPointe) html += '<th>Réel paq/cart</th>';
   html += '<th>Écart</th><th>Commentaire</th></tr>';
-  items.forEach(function(it) {
+  /* Les articles vides (théorique ET réel à 0) ne noient plus la lecture : les
+     articles avec une quantité sont imprimés d'abord, les vides regroupés à la
+     fin dans une section « à 0 » clairement séparée. */
+  var _invPrintRow = function(it) {
     var ecart = (parseFloat(it.real_qte) || 0) - (parseFloat(it.theo_qte) || 0);
-    html += '<tr><td>' + escH(it.code) + '</td><td>' + escH(it.nom) + '</td><td>' + escH(it.source || '-') + '</td>';
-    if (hasDim) html += '<td>' + escH(it.dimensions || '-') + '</td><td>' + (it.volume ? it.volume.toFixed(4) : '-') + '</td>';
-    html += '<td>' + fmt(it.theo_qte) + '</td>';
-    if (hasPointe) html += '<td>' + escH(invPaquetsCartons(it.theo_qte, it)) + '</td>';
-    html += '<td style="font-weight:700">' + fmt(it.real_qte) + '</td>';
-    if (hasPointe) html += '<td style="font-weight:700">' + escH(invPaquetsCartons(it.real_qte, it)) + '</td>';
-    html += '<td>' + (ecart > 0 ? '+' : '') + fmt(ecart) + '</td><td>' + escH(it.comment || '') + '</td></tr>';
-  });
-  html += '</table><p style="margin-top:1rem"><strong>Total articles :</strong> ' + items.length + '</p>';
+    var r = '<tr><td>' + escH(it.code) + '</td><td>' + escH(it.nom) + '</td><td>' + escH(it.source || '-') + '</td>';
+    if (hasDim) r += '<td>' + escH(it.dimensions || '-') + '</td><td>' + (it.volume ? it.volume.toFixed(4) : '-') + '</td>';
+    r += '<td>' + fmt(it.theo_qte) + '</td>';
+    if (hasPointe) r += '<td>' + escH(invPaquetsCartons(it.theo_qte, it)) + '</td>';
+    r += '<td style="font-weight:700">' + fmt(it.real_qte) + '</td>';
+    if (hasPointe) r += '<td style="font-weight:700">' + escH(invPaquetsCartons(it.real_qte, it)) + '</td>';
+    r += '<td>' + (ecart > 0 ? '+' : '') + fmt(ecart) + '</td><td>' + escH(it.comment || '') + '</td></tr>';
+    return r;
+  };
+  var _invVide = function(it) { return (parseFloat(it.real_qte) || 0) === 0 && (parseFloat(it.theo_qte) || 0) === 0; };
+  var _invPleins = items.filter(function(it) { return !_invVide(it); });
+  var _invZeros = items.filter(_invVide);
+  _invPleins.forEach(function(it) { html += _invPrintRow(it); });
+  if (_invZeros.length) {
+    var _nbCols = 4 + (hasDim ? 2 : 0) + (hasPointe ? 2 : 0);
+    html += '<tr><td colspan="' + _nbCols + '" style="background:#f1f5f9;font-weight:700;text-align:left">Articles à quantité 0 (théorique et réel) — ' + _invZeros.length + '</td></tr>';
+    _invZeros.forEach(function(it) { html += _invPrintRow(it); });
+  }
+  html += '</table><p style="margin-top:1rem"><strong>Total articles comptés :</strong> ' + _invPleins.length
+    + (_invZeros.length ? ' · <strong>à quantité 0 :</strong> ' + _invZeros.length : '') + '</p>';
   html += '</body></html>';
   var w = window.open('', '_blank');
   w.document.write(html);
