@@ -36,11 +36,11 @@ setInterval(_mdbCheckVersion,120000);
 document.addEventListener('visibilitychange',function(){if(!document.hidden)setTimeout(_mdbCheckVersion,1500);});
 })();
 </script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
-<script src="vendor/html2canvas.min.js"></script>
-<script src="vendor/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js" defer></script>
+<script src="vendor/html2canvas.min.js" defer></script>
+<script src="vendor/jspdf.umd.min.js" defer></script>
 <style>
 :root{--primary:#f97316;--primary-dark:#ea580c;--primary-light:#ffedd5;--success:#16a34a;--success-light:#dcfce7;--warning:#d97706;--warning-light:#fef3c7;--danger:#dc2626;--danger-light:#fee2e2;--purple:#7c3aed;--purple-light:#ede9fe;--pink:#ec4899;--pink-light:#fce7f3;--indigo:#6366f1;--indigo-light:#ffedd5;--gray-50:#f9fafb;--gray-100:#f3f4f6;--gray-200:#e5e7eb;--gray-300:#d1d5db;--gray-400:#9ca3af;--gray-500:#6b7280;--gray-600:#4b5563;--gray-700:#374151;--gray-800:#1f2937;--gray-900:#111827;--sidebar-w:260px;--sidebar-collapsed-w:70px;--header-h:64px;--radius:8px;--radius-lg:12px;--shadow:0 1px 3px rgba(0,0,0,.1);--shadow-md:0 4px 6px rgba(0,0,0,.1);--shadow-lg:0 10px 15px rgba(0,0,0,.1)}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -5865,7 +5865,7 @@ function cleanupOrphanTransfers() {
 
 function loadCloudData(uid, callback) {
   if (!firebaseDb || !uid) { if (callback) callback(); return; }
-  createFullBackup();
+  setTimeout(function() { try { createFullBackup(); } catch(e) {} }, 8000);
   _loadingCloud = true;
   _receivingSnapshot = true;
   var entRef = firebaseDb.collection('enterprises').doc(uid);
@@ -9380,6 +9380,57 @@ function renderBC() {
   html += '<th class="bc-sort" onclick="sortBCBy(\'statut\')" title="Trier par statut">Statut' + _bcArr('statut') + '</th>';
   if (!readonly) html += '<th class="bc-center">Actions</th>';
   html += '</tr></thead><tbody>';
+  // 1. Pré-agrégation O(BL) des quantités livrées (élimine 500 000 boucles imbriquées)
+  var allBlsForBC = getBLs();
+  var blDeliveriesByBc = {};
+  for (var di = 0; di < allBlsForBC.length; di++) {
+    var blItem = allBlsForBC[di];
+    if (!blItem || !blItem.bcId || !blItem.lignes) continue;
+    if (!blDeliveriesByBc[blItem.bcId]) blDeliveriesByBc[blItem.bcId] = {};
+    var mapD = blDeliveriesByBc[blItem.bcId];
+    for (var dl = 0; dl < blItem.lignes.length; dl++) {
+      var lgn = blItem.lignes[dl];
+      if (!lgn) continue;
+      var artKey = lgn.articleId || lgn.designation || '';
+      mapD[artKey] = (mapD[artKey] || 0) + (lgn.quantite || 0);
+    }
+  }
+
+  // 2. Pré-indexation des couleurs clients
+  var _bcCustomColors = _getBCClientColors() || {};
+  var _bcAllClients = getClients() || [];
+  var _bcClientIndex = {};
+  for (var cci = 0; cci < _bcAllClients.length; cci++) {
+    if (_bcAllClients[cci] && _bcAllClients[cci].id) _bcClientIndex[_bcAllClients[cci].id] = cci;
+  }
+  function _fastClientColorBC(key) {
+    var idS = String(key || '_');
+    if (_bcCustomColors[idS]) {
+      var hex = _bcCustomColors[idS].replace('#', '');
+      var r = parseInt(hex.substr(0, 2), 16) || 37, g = parseInt(hex.substr(2, 2), 16) || 99, b = parseInt(hex.substr(4, 2), 16) || 235;
+      return {
+        bg: 'rgba(' + r + ',' + g + ',' + b + ',0.12)',
+        headerBg: 'rgba(' + r + ',' + g + ',' + b + ',0.25)',
+        border: _bcCustomColors[idS],
+        badgeBg: _bcCustomColors[idS],
+        customHex: _bcCustomColors[idS],
+        isCustom: true
+      };
+    }
+    var _bcPalette = [215, 145, 45, 330, 20, 265, 175, 0, 95, 235, 310, 60, 190, 150, 15, 285];
+    var posC = _bcClientIndex[idS] !== undefined ? _bcClientIndex[idS] : -1;
+    if (posC < 0) { var hh = 0; for (var hq = 0; hq < idS.length; hq++) { hh = (((hh << 5) - hh) + idS.charCodeAt(hq)) & 0x7fffffff; } posC = Math.abs(hh); }
+    var hueC = _bcPalette[posC % _bcPalette.length];
+    return {
+      bg: 'hsl(' + hueC + ',75%,92%)',
+      headerBg: 'hsl(' + hueC + ',65%,82%)',
+      border: 'hsl(' + hueC + ',60%,45%)',
+      badgeBg: 'hsl(' + hueC + ',65%,45%)',
+      customHex: '',
+      isCustom: false
+    };
+  }
+
   var bcRows = [];
   for (var i = 0; i < showBcs.length; i++) {
     var b = showBcs[i];
@@ -9391,16 +9442,8 @@ function renderBC() {
         qteInit += (b.lignes[j].quantite || 0);
       }
     }
+    var deliveredQty = blDeliveriesByBc[b.id] || {};
     var qteLiv = 0;
-    var bls = getBLs();
-    var deliveredQty = {};
-    for (var di = 0; di < bls.length; di++) {
-      if (bls[di].bcId !== b.id || !bls[di].lignes) continue;
-      for (var dl = 0; dl < bls[di].lignes.length; dl++) {
-        var artKey = bls[di].lignes[dl].articleId || bls[di].lignes[dl].designation || '';
-        deliveredQty[artKey] = (deliveredQty[artKey] || 0) + (bls[di].lignes[dl].quantite || 0);
-      }
-    }
     for (var dk in deliveredQty) { qteLiv += deliveredQty[dk]; }
     var reste = Math.max(0, qteInit - qteLiv);
     bcRows.push({b:b, cl:cl, total:total, qteInit:qteInit, qteLiv:qteLiv, reste:reste, deliveredQty:deliveredQty});
@@ -9425,7 +9468,7 @@ function renderBC() {
     var deliveredQty = bcRows[ri].deliveredQty;
     var _pfFlag = !!(b.prefinance || b.prefinancementId);
     var searchStr = (b.numero + ' ' + (cl ? cl.nom : '') + ' ' + b.statut + ' ' + (b.raisonAnnulation || '') + ' ' + (b._fromImport ? 'import ' : '') + (_pfFlag ? 'préfinancé préfinance ' : '') + (cl && cl.type ? cl.type + ' ' : '') + (b.lignes ? b.lignes.map(function(l){return (l.articleId||'')+' '+(l.designation||'');}).join(' ') : '')).toLowerCase();
-    var _ccBC = b.statut === 'annule' ? null : _clientColorBC(b.clientId);
+    var _ccBC = b.statut === 'annule' ? null : _fastClientColorBC(b.clientId);
     var _customHex = _ccBC ? (_ccBC.customHex || '') : '';
     html += '<tr class="section bc-row' + (ri % 2 === 1 ? ' bc-alt' : '') + '" data-bcid="' + escH(b.id || '') + '" data-search="' + escH(searchStr) + '" data-statut="' + b.statut + '" data-type="' + (cl ? (cl.type || '') : '') + '" data-fromimport="' + (b._fromImport ? '1' : '0') + '" data-clientid="' + escH(b.clientId || '') + '">';
     if (!readonly) html += '<td class="bc-center"><input type="checkbox" title="Cocher pour inclure ce BC dans l\u2019export PDF"' + (_bcSelected[b.id] ? ' checked' : '') + ' onclick="event.stopPropagation();toggleBCSel(\'' + escH(b.id || '') + '\', this.checked)" style="width:14px;height:14px;cursor:pointer;accent-color:#f97316"></td>';
@@ -13862,6 +13905,21 @@ function renderBL() {
     else notInvoiced.push(allBls[si]);
   }
   var bls = _blSubTab === 'facture' ? invoiced : notInvoiced;
+  var _blClients = getClients() || [];
+  var _blClMap = {};
+  for (var _bci = 0; _bci < _blClients.length; _bci++) {
+    if (_blClients[_bci]) _blClMap[_blClients[_bci].id] = _blClients[_bci];
+  }
+  var _rawFacs = (typeof getFactures === 'function' ? getFactures() : []) || [];
+  var _blFacMap = {};
+  for (var _bfi = 0; _bfi < _rawFacs.length; _bfi++) {
+    if (_rawFacs[_bfi]) _blFacMap[_rawFacs[_bfi].id] = _rawFacs[_bfi];
+  }
+  var _rawBcs = (typeof getBCs === 'function' ? getBCs() : []) || [];
+  var _blBcMap = {};
+  for (var _bbi = 0; _bbi < _rawBcs.length; _bbi++) {
+    if (_rawBcs[_bbi]) _blBcMap[_rawBcs[_bbi].id] = _rawBcs[_bbi];
+  }
   bls.sort(function(a, b) {
     if (_blSort === 'article') {
       var aArt = (a.lignes && a.lignes[0]) ? (a.lignes[0].designation || getArticleLabel(a.lignes[0].articleId) || '') : '';
@@ -13869,8 +13927,8 @@ function renderBL() {
       return aArt.localeCompare(bArt);
     }
     if (_blSort === 'client') {
-      var aCl = getClientById(a.clientId);
-      var bCl = getClientById(b.clientId);
+      var aCl = _blClMap[a.clientId];
+      var bCl = _blClMap[b.clientId];
       return (aCl ? aCl.nom : '').localeCompare(bCl ? bCl.nom : '');
     }
     return (a.dateLivraison || '').localeCompare(b.dateLivraison || '');
@@ -13892,7 +13950,6 @@ function renderBL() {
   html += '<option value="particulier">Particulier</option><option value="entreprise">Entreprise</option><option value="administration">Administration</option><option value="association">Association</option>';
   html += '</select>';
   html += '<select id="blFilterClient" onchange="filterBL()" style="width:180px"><option value="">Tous clients</option>';
-  var _blClients = getClients() || [];
   for (var ci = 0; ci < _blClients.length; ci++) {
     html += '<option value="' + _blClients[ci].id + '">' + escH(_blClients[ci].nom) + '</option>';
   }
@@ -13912,13 +13969,13 @@ function renderBL() {
 
   for (var i = 0; i < bls.length; i++) {
     var b = bls[i];
-    var cl = getClientById(b.clientId);
+    var cl = _blClMap[b.clientId];
     var blTotal = 0;
     if (b.lignes) { for (var j2 = 0; j2 < b.lignes.length; j2++) { blTotal += (b.lignes[j2].quantite || 0) * (b.lignes[j2].prixUnitaire || 0); } }
     var facText = '<span class="badge badge-warning">Non factur\u00e9</span>';
-    if (b.factureId) { var facObj = getFactureById(b.factureId); facText = facObj ? '<span class="badge badge-success">' + escH(facObj.numero) + '</span>' : '<span class="badge badge-success">Factur\u00e9</span>'; }
+    if (b.factureId) { var facObj = _blFacMap[b.factureId]; facText = facObj ? '<span class="badge badge-success">' + escH(facObj.numero) + '</span>' : '<span class="badge badge-success">Factur\u00e9</span>'; }
     var bcNum = '-';
-    if (b.bcId) { var bcObj = getBCById(b.bcId); bcNum = bcObj ? bcObj.numero : '-'; }
+    if (b.bcId) { var bcObj = _blBcMap[b.bcId]; bcNum = bcObj ? bcObj.numero : '-'; }
     var searchStr = (b.numero + ' ' + (cl ? cl.nom : '') + ' ' + bcNum + ' ' + fmtMoney(blTotal)).toLowerCase();
     var canSelect = !readonly && !b.factureId;
     var nbLignes = (b.lignes && b.lignes.length > 0) ? b.lignes.length : 1;
@@ -14434,14 +14491,18 @@ function printBL(id) {
   win.print();
 }
 
-function getFacturePaymentDetails(factureId) {
+function getFacturePaymentDetails(factureId, regsList) {
   if (!factureId) return null;
-  var regs = getReglements() || [];
   var matched = [];
-  for (var ri = 0; ri < regs.length; ri++) {
-    var r = regs[ri];
-    if (r.factureId === factureId || (r.factureIds && r.factureIds.indexOf(factureId) !== -1)) {
-      matched.push(r);
+  if (regsList && Array.isArray(regsList)) {
+    matched = regsList;
+  } else {
+    var regs = getReglements() || [];
+    for (var ri = 0; ri < regs.length; ri++) {
+      var r = regs[ri];
+      if (r.factureId === factureId || (r.factureIds && r.factureIds.indexOf(factureId) !== -1)) {
+        matched.push(r);
+      }
     }
   }
   if (matched.length === 0) return null;
@@ -14651,7 +14712,40 @@ function renderFactures() {
   html += '<select id="facFilterStatut" onchange="filterFactures()" style="width:160px"><option value="">Tous statuts</option><option value="brouillon">Brouillon</option><option value="validee">Valid\u00e9e</option><option value="payee">Pay\u00e9e</option><option value="partielle">Partielle</option></select>';
   html += '<select id="facFilterClient" onchange="filterFactures()" style="width:180px"><option value="">Tous clients</option>';
   var _facClients = getClients() || [];
-  for (var ci = 0; ci < _facClients.length; ci++) { html += '<option value="' + _facClients[ci].id + '">' + escH(_facClients[ci].nom) + '</option>'; }
+  var _facClMap = {};
+  for (var ci = 0; ci < _facClients.length; ci++) {
+    if (_facClients[ci]) _facClMap[_facClients[ci].id] = _facClients[ci];
+    html += '<option value="' + _facClients[ci].id + '">' + escH(_facClients[ci].nom) + '</option>';
+  }
+  var _rawBcsFac = (typeof getBCs === 'function' ? getBCs() : []) || [];
+  var _facBcMap = {};
+  for (var bi = 0; bi < _rawBcsFac.length; bi++) {
+    if (_rawBcsFac[bi]) _facBcMap[_rawBcsFac[bi].id] = _rawBcsFac[bi];
+  }
+  var _rawBlsFac = (typeof getBLs === 'function' ? getBLs() : []) || [];
+  var _facBlNumMap = {};
+  for (var bli = 0; bli < _rawBlsFac.length; bli++) {
+    if (_rawBlsFac[bli]) _facBlNumMap[_rawBlsFac[bli].id] = _rawBlsFac[bli].numero || '';
+  }
+  var _rawRegsFac = (typeof getReglements === 'function' ? getReglements() : []) || [];
+  var _regsByFac = {};
+  for (var ri = 0; ri < _rawRegsFac.length; ri++) {
+    var _rF = _rawRegsFac[ri];
+    if (!_rF) continue;
+    if (_rF.factureId) {
+      if (!_regsByFac[_rF.factureId]) _regsByFac[_rF.factureId] = [];
+      _regsByFac[_rF.factureId].push(_rF);
+    }
+    if (_rF.factureIds && _rF.factureIds.length) {
+      for (var rfi = 0; rfi < _rF.factureIds.length; rfi++) {
+        var _rfid = _rF.factureIds[rfi];
+        if (_rfid && _rfid !== _rF.factureId) {
+          if (!_regsByFac[_rfid]) _regsByFac[_rfid] = [];
+          _regsByFac[_rfid].push(_rF);
+        }
+      }
+    }
+  }
   html += '</select>';
   html += '<label style="font-size:12px;color:var(--gray-500)">Du :</label><input type="date" id="facDateFrom" value="' + defaultFrom + '" onchange="filterFactures()" oninput="filterFactures()" style="width:135px">';
   html += '<label style="font-size:12px;color:var(--gray-500)">Au :</label><input type="date" id="facDateTo" value="' + defaultTo + '" onchange="filterFactures()" oninput="filterFactures()" style="width:135px">';
@@ -14679,7 +14773,7 @@ function renderFactures() {
       }
       _curMonth = _fMonth;
     }
-    var cl = getClientById(f.clientId);
+    var cl = _facClMap[f.clientId] || null;
     var restant = (f.totalTTC || f.total || 0) - (f.montantPaye || 0);
     var fpStClass = f.statut === 'payee' ? 'fp-st-payee' : (f.statut === 'partielle' ? 'fp-st-part' : (f.statut === 'brouillon' ? 'fp-st-brouillon' : 'fp-st-val'));
     var _ovDays = (typeof getFactureDaysOverdue === 'function') ? getFactureDaysOverdue(f) : 0;
@@ -14689,13 +14783,13 @@ function renderFactures() {
     var fpHt = f.total || 0;
     var fpTva = (f.tva === 'oui' ? (f.tvaAmount || 0) : 0);
     var fpBcList = [];
-    if (f.bcIds && f.bcIds.length > 0) { for (var bci = 0; bci < f.bcIds.length; bci++) { var bcObj = getBCById(f.bcIds[bci]); if (bcObj) fpBcList.push(bcObj); } }
-    else if (f.lignes) { var bcSet2 = {}; for (var bci2 = 0; bci2 < f.lignes.length; bci2++) { if (f.lignes[bci2].bcId) { var bcO2 = getBCById(f.lignes[bci2].bcId); if (bcO2 && !bcSet2[bcO2.numero]) { bcSet2[bcO2.numero] = 1; fpBcList.push(bcO2); } } } }
+    if (f.bcIds && f.bcIds.length > 0) { for (var bci = 0; bci < f.bcIds.length; bci++) { var bcObj = _facBcMap[f.bcIds[bci]]; if (bcObj) fpBcList.push(bcObj); } }
+    else if (f.lignes) { var bcSet2 = {}; for (var bci2 = 0; bci2 < f.lignes.length; bci2++) { if (f.lignes[bci2].bcId) { var bcO2 = _facBcMap[f.lignes[bci2].bcId]; if (bcO2 && !bcSet2[bcO2.numero]) { bcSet2[bcO2.numero] = 1; fpBcList.push(bcO2); } } } }
     var fpBcHtml = '';
     var fpBcNums = [];
     for (var bci3 = 0; bci3 < fpBcList.length; bci3++) { fpBcNums.push(fpBcList[bci3].numero); fpBcHtml += '<span class="fp-bc" title="Voir les livraisons de ce BC" onclick="event.stopPropagation();showBCDeliveries(\'' + fpBcList[bci3].id + '\')">' + escH(fpBcList[bci3].numero) + '</span>'; }
     var fpBlNums = [];
-    if (f.blIds && f.blIds.length > 0) { var allBls2 = getBLs(); for (var bli = 0; bli < f.blIds.length; bli++) { for (var blj = 0; blj < allBls2.length; blj++) { if (allBls2[blj].id === f.blIds[bli]) { fpBlNums.push(allBls2[blj].numero); break; } } } }
+    if (f.blIds && f.blIds.length > 0) { for (var bli = 0; bli < f.blIds.length; bli++) { var blNum = _facBlNumMap[f.blIds[bli]]; if (blNum) fpBlNums.push(blNum); } }
     var fpBlHtml = '';
     for (var bli2 = 0; bli2 < fpBlNums.length; bli2++) fpBlHtml += '<span class="fp-bl">' + escH(fpBlNums[bli2]) + '</span>';
     var fpGroups = [];
@@ -14727,7 +14821,7 @@ function renderFactures() {
     if (!readonly) {
       if (f.statut === 'payee') {
         // Facture réglée : verrouillée + bouton modifier règlement
-        var _regsPayee = getReglements().filter(function(r){ return r.factureId === f.id; });
+        var _regsPayee = _regsByFac[f.id] || [];
         var _editRegBtn = '';
         if (_regsPayee.length > 0) {
           var _lastReg = _regsPayee[_regsPayee.length-1];
@@ -14743,7 +14837,7 @@ function renderFactures() {
         else fpActionsHtml += '<td' + fpRowspan + ' class="fp-actions">';
         fpActionsHtml += '<button class="btn-icon" onclick="openFactureModal(\'' + f.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
         fpActionsHtml += '<button class="btn-icon" onclick="duplicateFacture(\'' + f.id + '\')" title="Dupliquer" style="color:var(--info)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button> ';
-        fpActionsHtml += '<button class="btn-icon danger" onclick="deleteFacture(\'' + f.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1 2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>' + _horsCaLabel + '</td>';
+        fpActionsHtml += '<button class="btn-icon danger" onclick="deleteFacture(\'' + f.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' + _horsCaLabel + '</td>';
       }
     }
     for (var fpg = 0; fpg < fpRows.length; fpg++) {
@@ -14765,7 +14859,7 @@ function renderFactures() {
         html += '<td class="fp-num"' + fpRowspan + '>' + fmtMoney(fpHt) + '</td>';
         html += '<td class="fp-num"' + fpRowspan + '>' + fmtMoney(fpTva) + '</td>';
         html += '<td class="fp-num fp-ttc"' + fpRowspan + '>' + fmtMoney(fpTtc) + '</td>';
-                var _pdPay = getFacturePaymentDetails(f.id);
+        var _pdPay = getFacturePaymentDetails(f.id, _regsByFac[f.id]);
         var _pdHtml = '';
         if (_pdPay && _pdPay.modes && (f.montantPaye || 0) > 0) _pdHtml = '<div style="font-size:9.5px;color:#64748b;margin-top:2px;line-height:1.2;max-width:140px;margin-inline:auto">' + escH(_pdPay.modes) + '</div>';
         
