@@ -1959,6 +1959,27 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Inventaire : le volume suit la quantite reelle saisie, total en bas',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._invItems = [
+        { code:'A4095', volume: 0.0777, theo_qte: 25, real_qte: 20 },
+        { code:'B4141', volume: 0.2218, theo_qte: 10, real_qte: 10 },
+        { code:'C0000', volume: 0, theo_qte: 5, real_qte: 5 }
+      ];
+      calcInvEcart();
+      var v0 = document.getElementById('inv_vol_0').textContent;
+      var v1 = document.getElementById('inv_vol_1').textContent;
+      var vt = document.getElementById('inv_vol_total').textContent;
+      /* 0.0777*20 = 1.554 ; 0.2218*10 = 2.218 ; total 3.772 */
+      (v0 === '1.5540' && v1 === '2.2180' && vt === '3.772')
+        ? 'OK : volume equivalent par ligne (1.5540, 2.2180) et total 3.772'
+        : 'ECHEC v0=' + v0 + ' v1=' + v1 + ' total=' + vt
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
