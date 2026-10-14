@@ -1790,6 +1790,26 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Tableau de bord : produits finis en 2 colonnes, rien retire',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var arts = getArticles();
+      arts.push({ id:'a-pf', code:'PAL114', designation:'PALETTES 114', categorie:'finished' });
+      setArticles(arts);
+      setStockFinished([
+        { id:'f1', article_id:'a-pf', code:'PAL114', quantite: 10 },
+        { id:'f2', article_id:'a-pf', code:'PAL114', quantite: 5 }
+      ]);
+      var h = render_dashboard();
+      var okGrille = (h.indexOf('pf-grid2') !== -1);
+      var nb = (h.match(/pf-row/g) || []).length;
+      (okGrille && nb === 2) ? 'OK : grille 2 colonnes avec 2 lignes produit'
+        : 'ECHEC grille=' + okGrille + ' lignes=' + nb
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
