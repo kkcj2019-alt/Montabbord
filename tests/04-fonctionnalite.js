@@ -358,6 +358,57 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Reparation : stock initial date + fiches imprimables ---------- */
+  r.push({
+    nom: 'Reparation : un type cree garde la date de son stock initial et imprime sa fiche de stock',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var b = reparCreerBase({ code: 'REP TEST', designation: 'Reparation test', stockInitial: 12, stockInitialDate: '2026-09-15' });
+      var garde = getBasesReparation().find(function (x) { return x && x.code === 'REP TEST'; });
+      var st = reparStockBase(garde);
+      var html = imprimerBaseReparation(garde.id);
+      var dateOk = String((garde && garde.stockInitialDate) || '') === '2026-09-15';
+      (garde && dateOk && st === 12 && html.indexOf('Stock initial') !== -1 && html.indexOf('15/09/26') !== -1)
+        ? 'OK : date ' + garde.stockInitialDate + ', stock ' + st + ', fiche de stock imprimable'
+        : 'ECHEC date=' + (garde && garde.stockInitialDate) + ' st=' + st + ' imp=' + (html.indexOf('Stock initial') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+  r.push({
+    nom: 'Reparation : la fiche d intervention s imprime avec son client et son total',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var res = enregistrerReparation({ date: '2026-09-20', client: 'Client Impr', type: 'Reparation', pieces: [], mainOeuvre: 5000, fraisDeplacement: 1000 });
+      var fiche = (res && res.fiche) ? res.fiche : (getReparationsPalettes()[0] || {});
+      var html = imprimerReparation(fiche.id);
+      (html.indexOf('FICHE DE R') !== -1 && html.indexOf('Client Impr') !== -1 && html.indexOf('Signature client') !== -1)
+        ? 'OK : fiche d intervention imprimable (client + signatures + total)'
+        : 'ECHEC : ' + String(html).substr(0, 120)
+    `,
+    attenduPrefixe: 'OK'
+  });
+  r.push({
+    nom: 'Tableau de bord : la carte REPARATIONS liste les types crees avec leur stock actuel',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.basesReparation = [{ id: 'b1', code: 'REP X', designation: 'Repa X', nature: 'Reparation', stockInitial: 7, stockInitialDate: '2026-09-01',
+        mouvements: [{ date: '2026-09-03', sens: 'sortie', qte: 2, observation: 'test' }] }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var i = h.indexOf('R\u00c9PARATIONS');
+      var carte = i === -1 ? '' : h.slice(i, i + 700).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ');
+      (i !== -1 && carte.indexOf('REP X') !== -1 && /5\\b/.test(carte) && carte.indexOf('Aucun type') === -1)
+        ? 'OK : type REP X et stock 5 (7-2) affiches'
+        : 'ECHEC : ' + carte.substr(0, 160)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Menu Qualite : il ne doit plus rester sur l ecran d attente ---------- */
   r.push({
     nom: 'Menu Qualite : la page s affiche au lieu du message de chargement',
@@ -10592,6 +10643,35 @@ function run(rapport) {
     }
   } catch (eE) {
     rapport.ko('Exploitation : controle statique illisible (' + eE.message + ')');
+  }
+
+  /* Controle statique : tableau de bord Exploitation (V2) — la carte
+     REPARATIONS liste les TYPES crees avec leur stock actuel, les cartes
+     « Achats produits finis », « Stock par emplacement » et « Flux de
+     Production » ont disparu, et les impressions de reparation existent
+     (fiche d intervention + fiche de stock d un type). */
+  try {
+    const fsR = require('fs');
+    const pathR = require('path');
+    const srcR = fsR.readFileSync(pathR.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const repCarte = srcR.indexOf('data-cardkey="ach-reparations"') !== -1
+      && srcR.indexOf('getBasesReparation()') !== -1
+      && srcR.indexOf('reparStockBase(b)') !== -1
+      && srcR.indexOf("navigate(\\'reparations-clients\\')") !== -1;
+    const pasAchats = srcR.indexOf('ACHATS PRODUITS FINIS</h3>') === -1;
+    const pasZones = srcR.indexOf('STOCKS PAR EMPLACEMENT</h3>') === -1;
+    const pasFlux = srcR.indexOf('Flux de Production</h3>') === -1;
+    const impRep = srcR.indexOf('function imprimerReparation(') !== -1
+      && srcR.indexOf('function imprimerBaseReparation(') !== -1;
+    const dateInit = srcR.indexOf('stockInitialDate') !== -1
+      && srcR.indexOf('function reparSetStockInitial(') !== -1;
+    if (repCarte && pasAchats && pasZones && pasFlux && impRep && dateInit) {
+      rapport.ok('Exploitation tableau de bord : carte REPARATIONS = types + stock actuel, cartes Achat PF/Stock par emplacement/Flux retirees, impression reparation et date de stock initial presentes');
+    } else {
+      rapport.ko('Exploitation tableau de bord — repCarte=' + repCarte + ' pasAchats=' + pasAchats + ' pasZones=' + pasZones + ' pasFlux=' + pasFlux + ' impRep=' + impRep + ' dateInit=' + dateInit);
+    }
+  } catch (eR) {
+    rapport.ko('Exploitation tableau de bord : controle statique illisible (' + eR.message + ')');
   }
 
   const liste = controles();
