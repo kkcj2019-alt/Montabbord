@@ -5465,7 +5465,10 @@ r.push({
       /* 1) affichage par repli sur Exploitation, SANS ecrire (pas de clignotement) */
       var r = syncProduitsFinisFromExploitation();
       var aff = nomDimTxt(DB.get('mdb_nomenclature')[0]);
-      var stock = DB.get('mdb_nomenclature')[0];
+      /* On lit la valeur STOCKEE (et non une reference a l'objet en memoire,
+         que la reprise manuelle ci-dessous va muter) : le repli ne doit rien
+         ecrire avant la reprise volontaire. */
+      var stock = JSON.parse(localStorage.getItem('mdb_nomenclature'))[0] || {};
       /* 2) la reprise explicite enregistre pour de bon */
       var n = importerDimensionsExploitation();
       var apres = DB.get('mdb_nomenclature')[0] || {};
@@ -10077,16 +10080,20 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     app: 'production.html', store: storeRealiste,
     code: `
       var src = prodGoMainDashboard.toString();
+      /* Comportement voulu (commit 54dad91) : ramener le focus a l'app
+         principale SANS jamais dupliquer index.html (une copie ouvrait une
+         deuxieme session / deconnectait). */
       var okIframe = (src.indexOf('closeProductionOverlay') !== -1);
       var okOnglet = (src.indexOf("op.navigateTo('dashboard')") !== -1);
-      var okCheck = (src.indexOf('isMain') !== -1 && src.indexOf("index.html') !== -1") !== -1);
-      var okNew = (src.indexOf("window.open('index.html', '_blank')") !== -1);
-      var okFilet = (src.indexOf("location.replace('index.html')") !== -1);
+      var okCanal = (src.indexOf('focus_tab') !== -1);
+      var okSansDoublon = (src.indexOf("window.open('index.html'") === -1
+                           && src.indexOf("location.replace('index.html')") === -1);
+      var okFerme = (src.indexOf('window.close()') !== -1);
       var err = '';
       try { prodGoMainDashboard(); } catch (e) { err = String((e && e.message) || e); }
-      (typeof prodGoMainDashboard === 'function' && !err && okIframe && okOnglet && okCheck && okNew && okFilet)
-        ? 'OK : iframe -> mere, onglet principal verifie, sinon nouvel onglet, filet direct'
-        : 'ECHEC : err=' + err + ' iframe=' + okIframe + ' onglet=' + okOnglet + ' check=' + okCheck + ' new=' + okNew + ' filet=' + okFilet
+      (typeof prodGoMainDashboard === 'function' && !err && okIframe && okOnglet && okCanal && okSansDoublon && okFerme)
+        ? 'OK : iframe -> mere, onglet principal refocalise/redirige, aucun doublon index.html, onglet ferme'
+        : 'ECHEC : err=' + err + ' iframe=' + okIframe + ' onglet=' + okOnglet + ' canal=' + okCanal + ' sansDoublon=' + okSansDoublon + ' ferme=' + okFerme
     `,
     attenduPrefixe: 'OK'
   });

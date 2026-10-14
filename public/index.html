@@ -2080,6 +2080,33 @@ function _suspendreSauvegardesLocales() {
     }
   };
 })();
+/* Le cache memoire de DB.get() (_dbMemCache) ne doit JAMAIS servir une valeur
+   perimee quand une ecriture passe OUTRE DB.set : plusieurs fonctions
+   (setBackupMeta, mdb_pendingSync, autres onglets, code hors API) ecrivent
+   directement dans localStorage. Sans cette invalidation, DB.get renvoyait
+   l'ancienne valeur (liste de sauvegardes vide, articles qui ne se mettent
+   pas a jour). On intercepte donc setItem/removeItem/clear du localStorage. */
+(function () {
+  try {
+    var _ls = localStorage;
+    var _setO = _ls.setItem, _remO = _ls.removeItem, _clrO = _ls.clear;
+    _ls.setItem = function (k, v) {
+      var r = _setO.call(_ls, k, v);
+      try { if (typeof _dbMemCache !== 'undefined') delete _dbMemCache[k]; } catch (e) {}
+      return r;
+    };
+    _ls.removeItem = function (k) {
+      var r = _remO.call(_ls, k);
+      try { if (typeof _dbMemCache !== 'undefined') delete _dbMemCache[k]; } catch (e) {}
+      return r;
+    };
+    _ls.clear = function () {
+      var r = _clrO.call(_ls);
+      try { _dbMemCache = {}; } catch (e) {}
+      return r;
+    };
+  } catch (e) {}
+})();
 _quotaJanitor(1);
 /* Le stockage local est-il encore confortable ? */
 function _quotaEtat() {
@@ -2916,6 +2943,9 @@ var DB = {
       _dbMemCache[key] = data;
     }
     try { localStorage.setItem(key, JSON.stringify(data)); } catch(eLS) {}
+    /* setItem vient d'invalider le cache (voir wrapper) : on y remet la
+       valeur ecrite pour eviter un re-parsage inutile au prochain DB.get. */
+    _dbMemCache[key] = data;
     scheduleLocalBackup(key, data);
     if (!_receivingSnapshot && currentUser && currentUser.id) {
       markDirty(key);
@@ -13605,6 +13635,14 @@ function demanderImportExploitation() {
     });
 }
 function renderNomenclature() {
+  /* Garde de re-entrance : importerArticlesExploitation() rappelle
+     renderNomenclature(). Sans ce verrou, l'affichage s'appelait lui-meme en
+     boucle (~1700 niveaux) et figeait l'onglet. */
+  if (window._nomRendering) return;
+  window._nomRendering = true;
+  try { _renderNomenclature(); } finally { window._nomRendering = false; }
+}
+function _renderNomenclature() {
   try { harmoniserNomenclature(); } catch (eH) {}
   try { syncSemiFinisFromExploitation(); } catch (eS1) {}
   try { syncProduitsFinisFromExploitation(); } catch (eSy) {}
