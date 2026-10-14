@@ -10334,6 +10334,57 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     `,
     attenduPrefixe: 'OK'
   });
+  /* Le module Paye tourne souvent dans une iframe : le parent ecrit mdb_paye /
+     mdb_employes en boucle. Sans garde-fou, chaque evenement re-rendait toute
+     la grille recap (lourde) et figeait le poste : la fenetre « Fiches »
+     paraissait ne s'ouvrir qu'une minute plus tard. */
+  r.push({
+    nom: 'Synchro paie : syncFromMain ne reecrit mdb_employes que si necessaire',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      function _pdL() { try { return JSON.parse(localStorage.getItem('mdb_pendingSync') || '{}'); } catch (e) { return {}; } }
+      var complet = [{ id: 'zz1', nom: 'ALPHA', prenoms: 'BETA', salaire_base: 0, type_contrat: 'CDI', nb_parts: 1, situation_matrimoniale: 'celibataire', enfants: 0, enfants_infirmes: 0, status: 'actif', assurance_mensuelle: 0, duree_contrat: 0, en_paie: true }];
+      localStorage.setItem('mdb_employes', JSON.stringify(complet));
+      localStorage.removeItem('mdb_pendingSync');
+      syncFromMain();
+      var sansEcriture = _pdL().mdb_employes === undefined;
+      var incomplet = [{ id: 'zz2', nom: 'GAMMA' }];
+      localStorage.setItem('mdb_employes', JSON.stringify(incomplet));
+      localStorage.removeItem('mdb_pendingSync');
+      syncFromMain();
+      var avecEcriture = _pdL().mdb_employes === true;
+      var pose = JSON.parse(localStorage.getItem('mdb_employes'))[0];
+      var defautsOk = pose.type_contrat === 'CDI' && pose.en_paie === true && pose.nb_parts === 1;
+      (sansEcriture && avecEcriture && defautsOk) ? 'OK : inchange = pas decrit, incomplet = ecrit + defauts poses'
+        : 'ECHEC sansEcriture=' + sansEcriture + ' avecEcriture=' + avecEcriture + ' defautsOk=' + defautsOk;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage : un re-rendu lourd est reporte tant quune fenetre est ouverte',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var ov = document.getElementById('pt-modal-overlay');
+      ov.style.display = 'none';
+      var ferme = _ptModalOuvert() === false;
+      openPtModal('<b>test</b>');
+      var ouvert = _ptModalOuvert() === true;
+      localStorage.setItem('paye_currentSection', 'pointage');
+      window._payeRerenderApresModal = false;
+      var local = getPayeData();
+      var remote = JSON.parse(JSON.stringify(local));
+      remote.pointage = (remote.pointage || []).concat([{ id: 'mod-1', employee_id: 'zz', date: '2026-10-09', present: true }]);
+      _payeApplyRemote({ [PAYE_KEY]: remote });
+      var reporte = window._payeRerenderApresModal === true;
+      closePtModal();
+      var apres = _ptModalOuvert() === false;
+      (ferme && ouvert && reporte && apres) ? 'OK : fenetre detectee, rafraichissement reporte puis fermeture propre'
+        : 'ECHEC ferme=' + ferme + ' ouvert=' + ouvert + ' reporte=' + reporte + ' apres=' + apres;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
@@ -10443,6 +10494,24 @@ function run(rapport) {
     }
   } catch (eS) {
     rapport.ko('Menu Stock : lecture production.html impossible (' + eS.message + ')');
+  }
+  /* Controle statique : garde-fous contre le figement de Paye en iframe. */
+  try {
+    const fsP = require('fs');
+    const pathP = require('path');
+    const srcP = fsP.readFileSync(pathP.join(__dirname, '..', 'public', 'paye.html'), 'utf8');
+    const hasGuard = srcP.indexOf('function _ptModalOuvert') !== -1;
+    const hasDebounce = srcP.indexOf('_payeStorageRerenderTimer') !== -1;
+    const deferInApply = /_payeRerenderApresModal\s*=\s*true/.test(srcP);
+    const condWrite = srcP.indexOf('_empStrApres !== _empStrAvant') !== -1;
+    const optsOnce = srcP.indexOf('_ffOpts') !== -1;
+    if (hasGuard && hasDebounce && deferInApply && condWrite && optsOnce) {
+      rapport.ok('Pointage/synchro : garde fenetre modale, sonde storage regroupee, ecriture employes conditionnelle, options fonction en une passe');
+    } else {
+      rapport.ko('Pointage/synchro : garde-fous — guard=' + hasGuard + ' debounce=' + hasDebounce + ' defer=' + deferInApply + ' condWrite=' + condWrite + ' opts=' + optsOnce);
+    }
+  } catch (ePf) {
+    rapport.ko('Pointage/synchro : controles statiques illisibles (' + ePf.message + ')');
   }
 
   const liste = controles();

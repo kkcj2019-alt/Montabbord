@@ -7372,6 +7372,8 @@ function payeObj(key) {
         _payeDeferredTimer = setTimeout(function () {
           _payeDeferredTimer = null;
           try {
+            /* Ne jamais re-rendre pendant qu'une fenêtre modale est ouverte. */
+            if (typeof _ptModalOuvert === "function" && _ptModalOuvert()) { _payeDeferredRealtime(sec); return; }
             var ae2 = document.activeElement;
             var ptc2 = document.getElementById("pt-container");
             if (ptc2 && ae2 && ptc2.contains(ae2)) { _payeDeferredRealtime(sec); return; }
@@ -7471,6 +7473,12 @@ function payeObj(key) {
             return;
           }
         } catch (eAE) {}
+        /* Fenêtre modale ouverte : ne pas la figer par un re-rendu de section
+           (grille récap lourde). On reporte le rafraîchissement à la fermeture. */
+        if (typeof _ptModalOuvert === "function" && _ptModalOuvert()) {
+          window._payeRerenderApresModal = true;
+          return;
+        }
         showSection(sec);
       }
 
@@ -9635,6 +9643,8 @@ function renderPrimeEmpMatrix() {
         /* 2. Employés : source unique = mdb_employes (fusion des champs enrichis) */
         var mainEmps = payeArr("mdb_employes");
         if (mainEmps.length > 0) {
+          var _empStrAvant = "";
+          try { _empStrAvant = JSON.stringify(mainEmps); } catch (eEA) {}
           mainEmps.forEach(function (me) {
             if (!me.salaire_base) me.salaire_base = 0;
             if (!me.type_contrat) me.type_contrat = "CDI";
@@ -9649,7 +9659,13 @@ function renderPrimeEmpMatrix() {
             if (me.en_paie === undefined)
               me.en_paie = me.type_contrat !== "Externe";
           });
-          DB.setMain("mdb_employes", mainEmps);
+          /* N'écrire que si quelque chose a réellement changé : sinon chaque
+             synchro réécrivait mdb_employes, ce qui déclenchait un événement
+             « storage » dans les autres documents (index/Exploitation) et
+             provoquait des re-rendus en cascade. */
+          var _empStrApres = "";
+          try { _empStrApres = JSON.stringify(mainEmps); } catch (eEB) {}
+          if (_empStrApres !== _empStrAvant) DB.setMain("mdb_employes", mainEmps);
         }
       }
 
@@ -18461,6 +18477,15 @@ html +=
           overlay.style.display = "block";
         }
       }
+      /* Une fenêtre modale est-elle ouverte ? Sert à reporter les re-rendus
+         lourds (grille récap) déclenchés par la synchro : sans cette garde, la
+         fenêtre paraissait figée puis « s'ouvrait » seulement à la fin du rendu. */
+      function _ptModalOuvert() {
+        try {
+          var _ov = document.getElementById("pt-modal-overlay");
+          return !!(_ov && _ov.style.display && _ov.style.display !== "none");
+        } catch (eOv) { return false; }
+      }
       function closePtModal() {
         var overlay = document.getElementById("pt-modal-overlay");
         if (overlay) overlay.style.display = "none";
@@ -18468,6 +18493,16 @@ html +=
           var mainEl = document.querySelector("main");
           if (mainEl) mainEl.style.overflowY = "auto";
         } catch(eM) {}
+        /* Un rafraîchissement avait été reporté pour ne pas figer la fenêtre :
+           on l'applique maintenant qu'elle est fermée. */
+        try {
+          if (window._payeRerenderApresModal) {
+            window._payeRerenderApresModal = false;
+            var _secM = localStorage.getItem("paye_currentSection");
+            if (_secM && typeof showSection === "function")
+              setTimeout(function () { try { showSection(_secM); } catch (eRS) {} }, 60);
+          }
+        } catch (eRM) {}
       }
       /* Fermeture du modal par la touche Echap */
       document.addEventListener("keydown", function(e) {
@@ -19680,7 +19715,13 @@ function peTogglePst() {
         openPtModal(html);
         fichesFilterEmps();
         var ff = document.getElementById("fiches-fonction");
-        if (ff) { getFonctionNames().forEach(function(f){ ff.innerHTML += '<option value="'+escH(f)+'">'+escH(f)+'</option>'; }); }
+        if (ff) {
+          /* Une seule écriture innerHTML (avant : innerHTML += par fonction,
+             qui reparcourait tout le <select> à chaque itération). */
+          var _ffOpts = "";
+          getFonctionNames().forEach(function(f){ _ffOpts += '<option value="'+escH(f)+'">'+escH(f)+'</option>'; });
+          ff.innerHTML += _ffOpts;
+        }
       }
       function fichesFilterEmps() {
         var fonction = (document.getElementById("fiches-fonction")||{}).value || "Toutes les fonctions";
@@ -37413,17 +37454,32 @@ function printCongeIndividuel(empId) {
         } catch (e) {}
       }, 500);
     
-      /* Synchronisation temps réel avec Exploitation (production.html) */
+      /* Synchronisation temps réel avec Exploitation (production.html) / index.
+         L'app Paye tourne souvent dans une IFRAME same-origin : le parent écrit
+         mdb_paye/mdb_employes souvent, ce qui déclenchait à chaque fois un
+         re-rendu COMPLET de la grille récap (lourde) — d'où un poste figé en
+         permanence. On regroupe ces événements, on n'agit que si l'onglet
+         Pointage est réellement affiché, et jamais pendant une fenêtre modale. */
+      var _payeStorageRerenderTimer = null;
+      function _payeRerenderPourSync() {
+        _payeStorageRerenderTimer = null;
+        try {
+          if (typeof _ptModalOuvert === "function" && _ptModalOuvert()) { window._payeRerenderApresModal = true; return; }
+          var _secVis = "";
+          try { _secVis = localStorage.getItem("paye_currentSection") || ""; } catch (eSv) {}
+          if (_secVis !== "pointage") return;
+          if (typeof ptCurrentTab !== 'undefined') {
+            if (ptCurrentTab === 'recap' && typeof renderPtRecap === 'function') renderPtRecap();
+            else if (ptCurrentTab === 'montage' && typeof loadPointageMontage === 'function') loadPointageMontage();
+            else if (typeof loadPointage === 'function') loadPointage();
+          }
+        } catch(e) {}
+      }
       window.addEventListener('storage', function(ev) {
         var k = ev.key || '';
         if (k === 'mdb_paye' || k.indexOf('mdb_paye') === 0 || k === 'mdb_employes') {
-          try {
-            if (typeof ptCurrentTab !== 'undefined') {
-              if (ptCurrentTab === 'recap' && typeof renderPtRecap === 'function') renderPtRecap();
-              else if (ptCurrentTab === 'montage' && typeof loadPointageMontage === 'function') loadPointageMontage();
-              else if (typeof loadPointage === 'function') loadPointage();
-            }
-          } catch(e) {}
+          try { if (_payeStorageRerenderTimer) clearTimeout(_payeStorageRerenderTimer); } catch (eC) {}
+          _payeStorageRerenderTimer = setTimeout(_payeRerenderPourSync, 1200);
         }
       });
 </script>
