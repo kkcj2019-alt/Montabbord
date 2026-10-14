@@ -2535,10 +2535,33 @@ attenduPrefixe: 'OK'
       var h = document.getElementById('content').innerHTML || '';
       (h.indexOf('invCat_0_0') !== -1 && h.indexOf('Fiche —') !== -1)
         ? 'OK : article depliable vers sa fiche'
-        : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').substr(0, 140)
+        : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 140)
     `,
     attenduPrefixe: 'OK'
   });
+
+  r.push({
+    nom: 'Tableau de bord : la carte Stock Initial (Global) ouvre Stock > Matiere premiere > onglet Stock Initial (pas Inventaire)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('stockRawTab', 'actif');
+      CURRENT_PAGE = 'dashboard'; renderPage();
+      var h = document.getElementById('content').innerHTML || '';
+      var i = h.indexOf('kpi-initial');
+      var seg = i >= 0 ? h.slice(Math.max(0, i - 200), i + 220) : '';
+      var okCarte = seg.indexOf('prodGoStockInitial()') !== -1;
+      prodGoStockInitial();
+      var okPage = CURRENT_PAGE === 'stock-raw';
+      var okTab = getSection('stockRawTab') === 'initial';
+      var body = document.getElementById('content').innerHTML || '';
+      var okAff = body.indexOf('Fiche de Stock') !== -1 && body.indexOf('Stock Initial') !== -1;
+      (okCarte && okPage && okTab && okAff)
+        ? 'OK : carte -> prodGoStockInitial, page stock-raw, onglet initial affiche'
+        : 'ECHEC carte=' + okCarte + ' page=' + CURRENT_PAGE + ' tab=' + getSection('stockRawTab') + ' aff=' + okAff
+    `,
+    attenduPrefixe: 'OK'
+  });
+
 
   r.push({
     nom: 'Conso : + Nouveau Consommable ajoute a la fiche existante (coquille non propagee)',
