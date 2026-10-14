@@ -1322,22 +1322,26 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Marchandises : un article du catalogue sans stock sort en fiche et en inventaire',
+    nom: 'Marchandises : article du catalogue sans stock masque par defaut (Actif), visible en Inactif, et en inventaire',
     app: 'production.html', store: storeRealiste,
     code: `
       var arts = getArticles();
       arts.push({ id:'am1', code:'MARCH1', designation:'Marchandise test', categorie:'merch', prix_vente:5000 });
       setArticles(arts);
       setStockMerch([]);
-      var h = render_stock_merch();
-      var enFiche = (h.indexOf('MARCH1') !== -1);
+      setSection('stockEtat_stock-merch', 'actif');
+      var hActif = render_stock_merch();
+      var masque = (hActif.indexOf('MARCH1') === -1);
+      setSection('stockEtat_stock-merch', 'inactif');
+      var hInactif = render_stock_merch();
+      var visible = (hInactif.indexOf('MARCH1') !== -1);
       var items = calcInventoryItems('2026-10', '2026-10-31');
       var enInv = false, qte = null;
       for (var i = 0; i < items.length; i++) {
         if (items[i] && items[i].store === 'stockMerch' && items[i].code === 'MARCH1') { enInv = true; qte = items[i].theo_qte; }
       }
-      (enFiche && enInv && qte === 0) ? 'OK : MARCH1 listee a 0 dans la fiche et l inventaire'
-        : 'ECHEC fiche=' + enFiche + ' inv=' + enInv + ' qte=' + qte
+      (masque && visible && enInv && qte === 0) ? 'OK : MARCH1 cache en Actif (defaut), visible en Inactif, inventorie a 0'
+        : 'ECHEC masque=' + masque + ' visible=' + visible + ' inv=' + enInv + ' qte=' + qte
     `,
     attenduPrefixe: 'OK'
   });
@@ -2558,6 +2562,49 @@ attenduPrefixe: 'OK'
       (okCarte && okPage && okTab && okAff)
         ? 'OK : carte -> prodGoStockInitial, page stock-raw, onglet initial affiche'
         : 'ECHEC carte=' + okCarte + ' page=' + CURRENT_PAGE + ' tab=' + getSection('stockRawTab') + ' aff=' + okAff
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : le type d\u2019article fini (PALETTE / COUVERCLE) est rattache a chaque ligne',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('articles', [
+        { id: 'pa1', code: 'PAL1', designation: 'Palette 114', categorie: 'finished', category_type: 'PALETTE' },
+        { id: 'co1', code: 'CO1', designation: 'Couvercle 114', categorie: 'finished', category_type: 'COUVERCLE' }
+      ]);
+      setSection('stockFinished', [
+        { id: 's1', article_id: 'pa1', code: 'PAL1', quantite: 10 },
+        { id: 's2', article_id: 'co1', code: 'CO1', quantite: 20 }
+      ]);
+      var its = calcInventoryItems('2026-10', '2026-10-31');
+      var pa = its.filter(function(x){ return x.code === 'PAL1'; })[0];
+      var co = its.filter(function(x){ return x.code === 'CO1'; })[0];
+      (pa && co && pa.ctype === 'PALETTE' && co.ctype === 'COUVERCLE')
+        ? 'OK : PAL1 rattache au type PALETTE, CO1 au type COUVERCLE'
+        : 'ECHEC : ' + JSON.stringify([pa && pa.ctype, co && co.ctype])
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire : le bas de tableau separe l\u2019ecart Palette et l\u2019ecart Couvercle',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._invItems = [
+        { code: 'PAL1', store: 'stockFinished', ctype: 'PALETTE', theo_qte: 10, real_qte: 7 },
+        { code: 'CO1', store: 'stockFinished', ctype: 'COUVERCLE', theo_qte: 20, real_qte: 24 },
+        { code: 'X1', store: 'stockRaw', ctype: '', theo_qte: 5, real_qte: 5 }
+      ];
+      document.getElementById('content').innerHTML = '<span id="inv_ecart_total"></span><span id="inv_ecart_palette"></span><span id="inv_ecart_couvercle"></span>';
+      calcInvEcart();
+      var t = document.getElementById('inv_ecart_total').textContent;
+      var p = document.getElementById('inv_ecart_palette').textContent;
+      var c = document.getElementById('inv_ecart_couvercle').textContent;
+      (t === '7.0' && p === '3.0' && c === '4.0')
+        ? 'OK : total 7, ecart Palette 3, ecart Couvercle 4 (valeurs absolues)'
+        : 'ECHEC t=' + t + ' p=' + p + ' c=' + c
     `,
     attenduPrefixe: 'OK'
   });
@@ -10321,6 +10368,30 @@ function run(rapport) {
     }
   } catch (eG) {
     rapport.ko('Saisie protegee : lecture index.html impossible (' + eG.message + ')');
+  }
+
+  /* Controle statique : le menu Stock masque par defaut les articles a
+     quantite nulle. Un filtre Actif/Inactif (helpers stockEtat*) doit exister
+     et etre branche sur chacune des listes : Palettes/Produits finis et
+     Marchandises (renderStockFiche), Matiere premiere (render_stock_raw),
+     Consommables (render_stock_consum), EPI (renderEpiStockTab). */
+  try {
+    const fsS = require('fs');
+    const pathS = require('path');
+    const srcS = fsS.readFileSync(pathS.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const okDef = srcS.indexOf('function stockEtatVisible(') !== -1
+      && srcS.indexOf('function stockEtatBoutons(') !== -1;
+    const okFiche = srcS.indexOf('stockEtatVisible(etatKey, s.quantite)') !== -1;
+    const okConsum = srcS.indexOf("stockEtatVisible('stockConsoEtat'") !== -1;
+    const okEpi = srcS.indexOf("stockEtatVisible('epiStockEtat'") !== -1;
+    const okRaw = srcS.indexOf("stockEtatBoutons('stockRawEtat')") !== -1;
+    if (okDef && okFiche && okConsum && okEpi && okRaw) {
+      rapport.ok('Menu Stock : filtre Actif/Inactif (defaut Actif, qt\u00e9>0) branche sur Palettes/Produits finis, Marchandises, Matiere premiere, Consommables et EPI');
+    } else {
+      rapport.ko('Menu Stock : filtre Actif/Inactif — def=' + okDef + ' fiche=' + okFiche + ' conso=' + okConsum + ' epi=' + okEpi + ' raw=' + okRaw);
+    }
+  } catch (eS) {
+    rapport.ko('Menu Stock : lecture production.html impossible (' + eS.message + ')');
   }
 
   const liste = controles();
