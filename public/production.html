@@ -14999,8 +14999,13 @@ function applyInventoryAsInitial(month, items, opts) {
     var old = parseFloat(s.quantite) || parseFloat(s.quantite_stock) || 0;
     var nw = parseFloat(real) || 0;
     if (old === nw) return;
-    _invLogs.push({ id: genId(), date: today(), type: 'sortie', article_id: s.article_id, quantite: old, reference: '', motif: 'Annulation inventaire - stock théorique', created_at: new Date().toISOString() });
-    _invLogs.push({ id: genId(), date: today(), type: 'ajustement', article_id: s.article_id, quantite: nw, reference: '', motif: 'Correction inventaire - stock réel', created_at: new Date().toISOString() });
+    /* Ecritures de rapprochement d'inventaire : ce ne sont PAS des mouvements
+       reels. On les marque (_invBase) pour que la fiche de stock les remplace
+       par sa ligne « Stock initial » au lieu de les afficher comme des lignes
+       datees du jour. */
+    var _idInv = (opts && opts.invId) || month || '';
+    _invLogs.push({ id: genId(), date: today(), type: 'sortie', article_id: s.article_id, quantite: old, reference: '', motif: 'Annulation inventaire - stock théorique', _invBase: true, _invId: _idInv, created_at: new Date().toISOString() });
+    _invLogs.push({ id: genId(), date: today(), type: 'ajustement', article_id: s.article_id, quantite: nw, reference: '', motif: 'Correction inventaire - stock réel', _invBase: true, _invId: _idInv, created_at: new Date().toISOString() });
   }
   items.forEach(function(it) {
     var idx;
@@ -23394,6 +23399,39 @@ function printLivraison(id) {
 /* ==================== FICHE DE STOCK PRODUIT FINI (clic → historique des mouvements) ==================== */
 /* Donnees du registre d'un produit fini (source : le journal des
    mouvements). Partage entre la fenetre et le deroulement en ligne. */
+/* Une ecriture de rapprochement d'inventaire n'est pas un mouvement reel :
+   elle ne doit pas apparaitre dans le registre du produit (la ligne « Stock
+   initial » la remplace). Reconnue par sa marque _invBase, ou, pour les
+   inventaires deja valides (avant la marque), par son libelle. */
+function _estEcritureInventaireFini(mm) {
+  if (!mm) return false;
+  if (mm._invBase) return true;
+  var mt = String(mm.motif || '');
+  return mt.indexOf('Annulation inventaire') === 0 || mt.indexOf('Correction inventaire') === 0;
+}
+/* Derniere validation d'inventaire incluant ce produit fini (ou cette
+   palette) : sa quantite reelle compte et sa date devient la date de la ligne
+   « Stock initial » (au lendemain, comme le grand-livre des consommables).
+   Les brouillons sont ignores. */
+function _finBaseInventaire(code) {
+  var K = String(code || '').trim().toUpperCase();
+  if (!K || K === '-') return null;
+  var best = null;
+  (getInventories() || []).forEach(function(inv) {
+    if (!inv || inv.statut !== 'valide') return;
+    var d = String(inv.date || '').slice(0, 10);
+    if (!d) return;
+    var q = 0, found = false;
+    (inv.items || []).forEach(function(it) {
+      if (!it) return;
+      if (it.store !== 'stockFinished' && it.store !== 'stockPalettes') return;
+      var k = String(it.ref || it.code || '').trim().toUpperCase();
+      if (k && k === K) { found = true; q += parseFloat(it.real_qte) || 0; }
+    });
+    if (found && (!best || d >= best.date)) best = { date: d, qte: q };
+  });
+  return best;
+}
 function _finRegistreData(stockId) {
   var fin = getStockFinished();
   var entry = fin.find(function(s) { return String(s.id) === String(stockId); });
@@ -23407,7 +23445,19 @@ function _finRegistreData(stockId) {
   var artId = art.id || entry.article_id || '';
   var actuel = 0;
   fin.forEach(function(s) { if (artId ? s.article_id === artId : String(s.id) === String(stockId)) actuel += parseFloat(s.quantite) || 0; });
+  /* Base d'inventaire : la derniere validation incluant ce produit ouvre le
+     registre a sa valeur reelle, datee au lendemain de l'inventaire — comme
+     les consommables. L'historique anterieur (jusqu'a la date d'inventaire)
+     est cloture : seuls les mouvements POSTERIEURS sont rejoues. Sans base on
+     retombe sur l'ancien calcul (solde deduit du journal des mouvements). */
+  var base = _finBaseInventaire(code);
   var movs = getMovements().filter(function(mm) { return artId && mm.article_id === artId; });
+  if (base) {
+    movs = movs.filter(function(mm) {
+      if (_estEcritureInventaireFini(mm)) return false;
+      return String(mm.date || '').slice(0, 10) > base.date;
+    });
+  }
   movs.sort(function(a, b) { return String(a.date).localeCompare(String(b.date)); });
   var totE = 0, totS = 0, totA = 0;
   movs.forEach(function(mm) {
@@ -23416,9 +23466,15 @@ function _finRegistreData(stockId) {
     else if (mm.type === 'sortie') totS += q;
     else if (mm.type === 'ajustement') totA += q;
   });
-  var initial = actuel - totE + totS - totA;
-  return { code: code, des: des, actuel: actuel, initial: initial, movs: movs,
-           initDate: initialRowDate(movs.length ? movs[0].date : '') };
+  var initial, initDate;
+  if (base) {
+    initial = base.qte;
+    initDate = fmtD(lendemainISO(base.date));
+  } else {
+    initial = actuel - totE + totS - totA;
+    initDate = initialRowDate(movs.length ? movs[0].date : '');
+  }
+  return { code: code, des: des, actuel: actuel, initial: initial, movs: movs, initDate: initDate };
 }
 function _finRegistreHtml(stockId) {
   var d = _finRegistreData(stockId);

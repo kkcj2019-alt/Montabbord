@@ -1625,6 +1625,57 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Produits finis : apres inventaire, la fiche ouvre sur « Stock initial » (valeur reelle, date au lendemain), historique cloture',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'PAL', designation: 'Palette', categorie: 'finished' }];
+      p.stockFinished = [{ id: 'sf1', article_id: 'a1', code: 'PAL', quantite: 80 }];
+      p.inventories = [{ id: 'i1', date: '2026-09-30', statut: 'valide',
+        items: [{ store: 'stockFinished', ref: 'PAL', code: 'PAL', real_qte: 60, ctype: '' }] }];
+      p.movements = [
+        { id: 'm1', article_id: 'a1', date: '2026-09-15', type: 'entree', quantite: 50, motif: 'Production 260901' },
+        { id: 'm2', article_id: 'a1', date: '2026-10-14', type: 'sortie', quantite: 50, motif: 'Annulation inventaire - stock theorique' },
+        { id: 'm3', article_id: 'a1', date: '2026-10-14', type: 'ajustement', quantite: 60, motif: 'Correction inventaire - stock reel' },
+        { id: 'm4', article_id: 'a1', date: '2026-10-05', type: 'entree', quantite: 20, motif: 'Production 260902' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var reg = _finRegistreData('sf1');
+      (reg && reg.initial === 60 && reg.initDate === '01/10/26' && reg.movs.length === 1
+        && String(reg.movs[0].motif || '').indexOf('Production 260902') === 0)
+        ? 'OK : Stock initial = 60 au 01/10/26, 1 seul mouvement posterieur, ecritures de rapprochement masquees'
+        : 'ECHEC : ' + JSON.stringify(reg && { initial: reg.initial, initDate: reg.initDate, n: reg.movs.length, m0: reg.movs[0] && reg.movs[0].motif })
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire produits finis : les ecritures de rapprochement sont marquees (_invBase) et le stock porte au reel',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'PAL', designation: 'Palette', categorie: 'finished' }];
+      p.stockFinished = [{ id: 'sf1', article_id: 'a1', code: 'PAL', quantite: 50 }];
+      p.movements = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      applyInventoryAsInitial('2026-09', [{ store: 'stockFinished', ref: 'PAL', real_qte: 60 }],
+        { date: '2026-09-30', supervisor: 'SUP', invId: 'i1' });
+      var rel = getMovements().filter(function(m){ return m._invBase && m._invId === 'i1'; });
+      var f = getStockFinished()[0] || {};
+      (rel.length === 2 && f.quantite === 60)
+        ? 'OK : 2 ecritures de rapprochement marquees _invBase, stock porte au reel 60'
+        : 'ECHEC : rel=' + rel.length + ' qte=' + f.quantite
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Soldes : pas de melange entre caisses ---------- */
   r.push({
     nom: 'Soldes : « Modifier les soldes » ne montre que les pieces de la caisse courante (ABOGOU ne remonte pas dans KM23)',
