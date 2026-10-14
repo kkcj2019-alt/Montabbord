@@ -1810,6 +1810,37 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  r.push({
+    nom: 'Catalogue : le badge HORS INDEX est cliquable et tout reintegrer marche en masse',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      confirm2 = function () { return true; };
+      renderPage = function () {};
+      var arts = getArticles();
+      arts.push({ id:'ax1', code:'PAL114', designation:'PALETTES 114', categorie:'finished', _horsIndex:true });
+      arts.push({ id:'ax2', code:'COUV114', designation:'COUVERCLES 114', categorie:'finished', _horsIndex:true });
+      setArticles(arts);
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n1', code:'PAL112', designation:'PALETTES 112', typeArticle:'produit_fini' }
+      ]));
+      var n = reintegrerTousHorsIndex();
+      var idx = idxNomenclature(), pal = false, couv = false, flag = false;
+      for (var i = 0; i < idx.length; i++) {
+        if (idx[i] && idx[i].typeArticle === 'produit_fini' && idx[i].code === 'PAL114') pal = true;
+        if (idx[i] && idx[i].typeArticle === 'produit_fini' && idx[i].code === 'COUV114') couv = true;
+      }
+      var arts2 = getArticles();
+      for (var j = 0; j < arts2.length; j++) {
+        if ((arts2[j].code === 'PAL114' || arts2[j].code === 'COUV114') && arts2[j]._horsIndex) flag = true;
+      }
+      /* Le bac realiste contient d'autres finis : n >= 2, l'important est
+         PAL114 + COUV114 remis et les drapeaux retires. */
+      (n >= 2 && pal && couv && !flag) ? 'OK : PAL114 et COUV114 remis dans Index (' + n + ' au total), drapeaux retires'
+        : 'ECHEC n=' + n + ' pal=' + pal + ' couv=' + couv + ' flag=' + flag
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Tableau de bord : le stock de pointes compte en CARTONS ---------- */
   r.push({
     nom: 'Tableau de bord Exploitation : la carte « Stock Pointes (Paquets) » est presente',
