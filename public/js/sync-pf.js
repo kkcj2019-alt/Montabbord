@@ -75,16 +75,28 @@ function triSyncGetProduitsFinis() {
         } else {
           px = parseFloat(a.prixUnitaire || a.prix_vente) || 0;
         }
-        map[canon] = {
-          code: canon,
-          designation: a.designation || canon,
-          prix_vente: px,
-          prix_montage: parseFloat(a.prix_montage) || 150,
-          longueur: parseFloat(a.longueur) || 0,
-          largeur: parseFloat(a.largeur) || 0,
-          epaisseur: parseFloat(a.epaisseur) || 0,
-          destination: a.destination || ''
-        };
+        var lVal = parseFloat(a.longueur || a.length) || 0;
+        var wVal = parseFloat(a.largeur || a.width) || 0;
+        var tVal = parseFloat(a.epaisseur || a.thickness) || 0;
+        if (!map[canon]) {
+          map[canon] = {
+            code: canon,
+            designation: a.designation || canon,
+            prix_vente: px,
+            prix_montage: parseFloat(a.prix_montage) || 150,
+            longueur: lVal,
+            largeur: wVal,
+            epaisseur: tVal,
+            destination: a.destination || ''
+          };
+        } else {
+          if (!map[canon].prix_vente && px > 0) map[canon].prix_vente = px;
+          if (!map[canon].longueur && lVal > 0) map[canon].longueur = lVal;
+          if (!map[canon].largeur && wVal > 0) map[canon].largeur = wVal;
+          if (!map[canon].epaisseur && tVal > 0) map[canon].epaisseur = tVal;
+          if (!map[canon].destination && a.destination) map[canon].destination = a.destination;
+          if (a.designation && (!map[canon].designation || map[canon].designation === canon)) map[canon].designation = a.designation;
+        }
       });
     }
   } catch (eN) {}
@@ -102,24 +114,28 @@ function triSyncGetProduitsFinis() {
       if (!isPF) return;
       var canon = triPfCanonique(a.code, a.designation);
       if (!canon) return;
+      var lVal = parseFloat(a.length || a.longueur) || 0;
+      var wVal = parseFloat(a.width || a.largeur) || 0;
+      var tVal = parseFloat(a.thickness || a.epaisseur) || 0;
       if (!map[canon]) {
         map[canon] = {
           code: canon,
           designation: a.designation || canon,
           prix_vente: parseFloat(a.prix_vente) || 0,
           prix_montage: parseFloat(a.prix_montage) || 150,
-          longueur: parseFloat(a.length) || 0,
-          largeur: parseFloat(a.width) || 0,
-          epaisseur: parseFloat(a.thickness) || 0,
+          longueur: lVal,
+          largeur: wVal,
+          epaisseur: tVal,
           destination: a.destination || ''
         };
       } else {
         // Enrichir dimensions / destination si absents
-        if (!map[canon].longueur && parseFloat(a.length) > 0) map[canon].longueur = parseFloat(a.length);
-        if (!map[canon].largeur && parseFloat(a.width) > 0) map[canon].largeur = parseFloat(a.width);
-        if (!map[canon].epaisseur && parseFloat(a.thickness) > 0) map[canon].epaisseur = parseFloat(a.thickness);
+        if (!map[canon].longueur && lVal > 0) map[canon].longueur = lVal;
+        if (!map[canon].largeur && wVal > 0) map[canon].largeur = wVal;
+        if (!map[canon].epaisseur && tVal > 0) map[canon].epaisseur = tVal;
         if (!map[canon].destination && a.destination) map[canon].destination = a.destination;
         if (!map[canon].prix_vente && parseFloat(a.prix_vente) > 0) map[canon].prix_vente = parseFloat(a.prix_vente);
+        if (a.designation && (!map[canon].designation || map[canon].designation === canon)) map[canon].designation = a.designation;
       }
     });
   } catch (eP) {}
@@ -175,10 +191,14 @@ function triSyncHarmoniserTout(forceList) {
     var nom = rawNom ? JSON.parse(rawNom) : [];
     if (!Array.isArray(nom)) nom = [];
 
-    // Conserver les articles NON produits finis (matières premières, semi-finis, consommables)
+    // Conserver UNIQUEMENT les articles NON produits finis (matières premières, semi-finis, consommables)
     var newNom = nom.filter(function (a) {
       if (!a) return false;
-      var isPF = (String(a.typeArticle || '').toLowerCase() === 'produit_fini' || String(a.categorie || '').toLowerCase() === 'finished');
+      var tNorm = String(a.typeArticle || '').toLowerCase().replace(/[^a-z]/g, '');
+      var cNorm = String(a.categorie || '').toLowerCase().replace(/[^a-z]/g, '');
+      var isPF = (tNorm === 'produitfini' || cNorm === 'finished' || cNorm === 'produitfini');
+      var canon = triPfCanonique(a.code, a.designation);
+      if (canon && canonSet[canon]) isPF = true;
       return !isPF;
     });
 
@@ -211,7 +231,11 @@ function triSyncHarmoniserTout(forceList) {
     // Conserver les composants / matières / consommables locaux
     var newPArts = pArts.filter(function (a) {
       if (!a) return false;
-      var isPF = (String(a.categorie || '').toLowerCase() === 'finished' || String(a.typeArticle || '').toLowerCase() === 'produit_fini');
+      var tNorm = String(a.typeArticle || '').toLowerCase().replace(/[^a-z]/g, '');
+      var cNorm = String(a.categorie || '').toLowerCase().replace(/[^a-z]/g, '');
+      var isPF = (cNorm === 'finished' || tNorm === 'produitfini' || cNorm === 'produitfini');
+      var canon = triPfCanonique(a.code, a.designation);
+      if (canon && canonSet[canon]) isPF = true;
       return !isPF;
     });
 

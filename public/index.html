@@ -13542,11 +13542,11 @@ function importerDimensionsExploitation() {
 function nomDimNb(n) {
   try { return (parseFloat(n) || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 }); } catch (e2) { return String(n); }
 }
-/* Fusionne les doublons de la Nomenclature : meme produit porte sous deux
-   codes (112 / PAL112, NES / Nest, Fries120 / FRI120...). Tant que ces
-   doublons subsistent, les deux applications n'affichent pas le meme
-   nombre d'articles. On garde le code deja utilise par l'exploitation
-   (c'est lui qui porte les composants et le stock), l'autre disparait.
+/* Fusionne les doublons de la Nomenclature :
+   - Etape 1 : codes IDENTIQUES (apres normalisation) — supprimer l'entree la
+     moins complete en gardant celle qui porte prixPeriodes, dimensions, etc.
+   - Etape 2 : codes DIFFERENTS mais meme produit (112/PAL112, NES/Nest...) —
+     logique d'origine inchangee.
    Renvoie la liste des fusions faites. */
 function harmoniserNomenclature() {
   var arts = null;
@@ -13558,7 +13558,6 @@ function harmoniserNomenclature() {
   try { p = apProdGet(); } catch (e2) {}
   var expl = ((p && p.articles) || []);
   var links = (p && p.pfLinks) || [];
-  /* Codes reellement utilises en exploitation : c'est eux qu'on garde. */
   var codesExpl = {};
   expl.forEach(function (a) { if (a && a.code) codesExpl[String(a.code).trim().toUpperCase()] = String(a.code).trim(); });
   links.forEach(function (l) {
@@ -13566,6 +13565,45 @@ function harmoniserNomenclature() {
     var ci = String(l.idx || '').trim().toUpperCase(), ce = String(l.expl || '').trim();
     if (ce) codesExpl[ci] = ce;
   });
+
+  /* ── Etape 1 : Doublons EXACTS (meme code apres trim+maj) ── */
+  var norm = function(c) { return String(c || '').trim().toUpperCase(); };
+  var scoreComplet = function(a) {
+    /* Plus l'article est rempli, plus son score est eleve — c'est lui qu'on garde. */
+    return ((a.prixPeriodes && a.prixPeriodes.length) ? 10 : 0)
+      + (parseFloat(a.longueur) > 0 ? 3 : 0)
+      + (a.designation ? 2 : 0)
+      + (parseFloat(a.prix_montage) > 0 ? 1 : 0);
+  };
+  var supprExact = {};
+  var codeMap = {};
+  pf.forEach(function(a) {
+    var c = norm(a.code);
+    if (!c) return;
+    if (!codeMap[c]) { codeMap[c] = a; return; }
+    /* Doublon exact detecte : garder le plus complet */
+    var ancien = codeMap[c];
+    var garde, perd;
+    if (scoreComplet(a) >= scoreComplet(ancien)) { garde = a; perd = ancien; }
+    else { garde = ancien; perd = a; }
+    /* Transferer prixPeriodes / dimensions si le gagnant en est depourvu */
+    if (!(garde.prixPeriodes && garde.prixPeriodes.length) && (perd.prixPeriodes && perd.prixPeriodes.length))
+      garde.prixPeriodes = perd.prixPeriodes;
+    if (!(parseFloat(garde.longueur) > 0) && parseFloat(perd.longueur) > 0) {
+      garde.longueur = perd.longueur; garde.largeur = perd.largeur; garde.epaisseur = perd.epaisseur;
+    }
+    if (!garde.designation && perd.designation) garde.designation = perd.designation;
+    supprExact[String(perd.id || perd.code)] = true;
+    codeMap[c] = garde;
+  });
+  if (Object.keys(supprExact).length) {
+    arts = arts.filter(function(a) { return !a || !supprExact[String(a.id || a.code)]; });
+    pf = [];
+    arts.forEach(function (a) { if (a && a.typeArticle === 'produit_fini') pf.push(a); });
+    try { DB.set('mdb_nomenclature', arts); } catch (e0) {}
+  }
+
+  /* ── Etape 2 : Codes DIFFERENTS mais meme produit ── */
   var sigDes = function (d) {
     var s = String(d || '').toUpperCase();
     try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
@@ -13575,21 +13613,18 @@ function harmoniserNomenclature() {
   varFusion = [];
   var suppr = {};
   pf.forEach(function (a) {
-    var ca = String(a.code || '').trim().toUpperCase();
+    var ca = norm(a.code);
     if (suppr[ca]) return;
     for (var i = 0; i < pf.length; i++) {
       var b = pf[i];
       if (b === a) continue;
-      var cb = String(b.code || '').trim().toUpperCase();
+      var cb = norm(b.code);
       if (!cb || cb === ca || suppr[cb]) continue;
-      /* meme produit ? memes chiffres, ou meme designation, ou l'un des
-         codes contient l'autre (NES / Nest). */
       var memesChiffres = sigChiffres(ca) && sigChiffres(ca) === sigChiffres(cb);
       var memeDes = sigDes(a.designation) && sigDes(a.designation) === sigDes(b.designation);
       var prefixe = ca.length !== cb.length && ca.length >= 2 && cb.length >= 2
         && (ca.indexOf(cb) === 0 || cb.indexOf(ca) === 0);
       if (!memesChiffres && !memeDes && !prefixe) continue;
-      /* On garde celui utilise en exploitation ; sinon le premier. */
       var garde = null, perd = null;
       if (codesExpl[ca] && !codesExpl[cb]) { garde = a; perd = b; }
       else if (codesExpl[cb] && !codesExpl[ca]) { garde = b; perd = a; }
@@ -13600,16 +13635,37 @@ function harmoniserNomenclature() {
       }
       if (!(garde.prixPeriodes || []).length && (perd.prixPeriodes || []).length) garde.prixPeriodes = perd.prixPeriodes;
       if (!garde.designation) garde.designation = perd.designation;
-      suppr[String(perd.code || '').trim().toUpperCase()] = true;
+      suppr[norm(perd.code || '')] = true;
       varFusion.push(String(perd.code) + ' \u2192 ' + String(garde.code));
       break;
     }
   });
-  if (!varFusion.length) return [];
-  var garder = arts.filter(function (a) { return !(a && a.typeArticle === 'produit_fini' && suppr[String(a.code || '').trim().toUpperCase()]); });
+  if (!varFusion.length) return Object.keys(supprExact).length ? ['doublons_exacts'] : [];
+  var garder = arts.filter(function (a) { return !(a && a.typeArticle === 'produit_fini' && suppr[norm(a.code || '')]); });
   try { DB.set('mdb_nomenclature', garder); } catch (e3) { return []; }
-  try { toast('Nomenclature harmonisée : ' + varFusion.join(', ') + ' — même liste que l’Exploitation.'); } catch (e4) {}
+  try { toast('Nomenclature harmonisée : ' + varFusion.join(', ') + ' — même liste que l\u2019Exploitation.'); } catch (e4) {}
   return varFusion;
+}
+/* Analyse et retourne le nombre de doublons exacts dans la Nomenclature (lecture seule). */
+function compterDoublonsNomenclature() {
+  try {
+    var arts = getArticles() || [];
+    var norm = function(c) { return String(c || '').trim().toUpperCase(); };
+    var seen = {}, nb = 0;
+    arts.forEach(function(a) {
+      if (!a || a.typeArticle !== 'produit_fini') return;
+      var c = norm(a.code);
+      if (seen[c]) nb++; else seen[c] = true;
+    });
+    return nb;
+  } catch(e) { return 0; }
+}
+/* Purge manuelle : identique a harmoniserNomenclature mais avec toast explicite. */
+function purgerDoublonsNomenclature() {
+  var fusions = harmoniserNomenclature();
+  var nb = fusions.length;
+  if (!nb) { toast('Aucun doublon détecté — la nomenclature est propre \u2705', 'success'); }
+  else { toast(nb + ' doublon(s) purgé(s) avec succès \u2705', 'success'); renderNomenclature(); }
 }
 /* Articles d'EXPLOITATION absents de la nomenclature.
    - Semi-finis : l'exploitation en est la source (ils y sont fabriques avec
@@ -13708,6 +13764,10 @@ function _renderNomenclature() {
     var _nbPF = 0, _k;
     for (_k = 0; _k < articles.length; _k++) { if (articles[_k].typeArticle === 'produit_fini') _nbPF++; }
     html += '<span style="font-size:12px;font-weight:800;color:var(--primary)">' + articles.length + ' article(s) · ' + _nbPF + ' produit(s) fini(s)</span>';
+    var _nbDoub = (typeof compterDoublonsNomenclature === 'function') ? compterDoublonsNomenclature() : 0;
+    if (_nbDoub > 0) {
+      html += '<button class="btn btn-sm" onclick="purgerDoublonsNomenclature()" title="' + _nbDoub + ' doublon(s) détecté(s). Cliquez pour fusionner automatiquement." style="font-size:11px;background:#fee2e2;color:#b91c1c;border:1px solid #f87171;font-weight:700">⚠️ ' + _nbDoub + ' doublon(s) · Purger</button>';
+    }
     html += '<button class="btn btn-sm btn-outline" onclick="importerDimensionsExploitation()" title="Reprendre les dimensions saisies dans Exploitation et les enregistrer ici" style="font-size:11px">📐 Reprendre les dimensions</button>';
   if (!readonly) {
     html += '<button class="btn btn-sm btn-primary" onclick="demanderImportExploitation()" title="Ajouter dans la nomenclature les articles qui n\u2019existent que dans l\u2019Exploitation" style="font-size:11px">⬇ Ajouter depuis l\u2019Exploitation</button>';
@@ -13719,7 +13779,7 @@ function _renderNomenclature() {
   html += '</div>';
   html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr>'
       + '<th style="width:34px"><input type="checkbox" onclick="nomToutCocher(this)" title="Tout cocher / decocher"></th>'
-      + '<th>Code</th><th>D\u00e9signation</th><th>Type</th><th title="Longueur x Largeur x Epaisseur (cm)">Dimension (cm)</th><th>Prix actuel</th><th>P\u00e9riodes</th>';
+      + '<th>Code</th><th>D\u00e9signation</th><th>Type</th><th title="Longueur x Largeur x Epaisseur (cm) & Volume unitaire en m³">Dimension (cm) & Vol. (m³)</th><th>Prix actuel</th><th>P\u00e9riodes</th>';
   if (!readonly) html += '<th style="width:120px">Actions</th>';
   html += '</tr></thead><tbody id="nomBody">';
   for (var i = 0; i < articles.length; i++) {
@@ -13728,12 +13788,18 @@ function _renderNomenclature() {
     var nbP = a.prixPeriodes ? a.prixPeriodes.length : 0;
     var typeLabel = a.typeArticle === 'marchandise' ? 'Marchandise' : a.typeArticle === 'semi_fini' ? 'Semi-finis' : a.typeArticle === 'consommable' ? 'Consommable' : a.typeArticle === 'autres' ? 'Autres' : '-';
     var commDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + (a.commercialise !== false ? 'var(--success)' : 'var(--gray-400)') + ';margin-left:4px" title="' + (a.commercialise !== false ? 'Commercialis\u00e9' : 'Non commercialis\u00e9') + '"></span>';
+    var _uL = parseFloat(a.longueur != null ? a.longueur : a.length) || 0;
+    var _uW = parseFloat(a.largeur != null ? a.largeur : a.width) || 0;
+    var _uT = parseFloat(a.epaisseur != null ? a.epaisseur : a.thickness) || 0;
+    var _uVol = (_uL > 0 && _uW > 0 && _uT > 0) ? ((_uL * _uW * _uT) / 1000000) : 0;
+    var dimHtml = escH(nomDimTxt(a));
+    if (_uVol > 0) dimHtml += '<div style="font-size:10.5px;color:#ea580c;font-weight:700">' + _uVol.toFixed(4) + ' m³</div>';
     html += '<tr data-id="' + a.id + '" data-search="' + escH((a.code + ' ' + a.designation + ' ' + nomDimTxt(a)).toLowerCase()) + '" data-type="' + (a.typeArticle || '') + '">';
     html += '<td style="text-align:center"><input type="checkbox" data-nom-sel="' + escH(a.id) + '" onclick="try{var l=document.getElementById(\'nomSelInfo\');if(l)l.textContent=document.querySelectorAll(\'#nomBody input[data-nom-sel]:checked\').length+\' sélectionné(s)\';}catch(e){}" title="Cocher pour supprimer en lot"></td>';
     html += '<td class="fw-600">' + escH(a.code) + '</td>';
     html += '<td>' + escH(a.designation) + '</td>';
     html += '<td>' + escH(typeLabel) + commDot + '</td>';
-    html += '<td style="white-space:nowrap;font-size:12px;font-weight:600;color:var(--primary)">' + escH(nomDimTxt(a)) + '</td>';
+    html += '<td style="white-space:nowrap;font-size:12px;font-weight:600;color:var(--primary)">' + dimHtml + '</td>';
     html += '<td class="fw-600" id="nomArticles_' + a.id + '_prixUnitaire"><span class="inline-edit" onclick="inlineMontant(\'nomArticles\',\'' + a.id + '\',\'prixUnitaire\',' + prix + ')">' + fmtMoney(prix) + '</span></td>';
     html += '<td>' + nbP + ' p\u00e9riode(s)</td>';
     if (!readonly) {
@@ -13825,21 +13891,31 @@ function nomDimApercu() {
   var box = document.getElementById('aDimApercu');
   if (!box) return;
   var v = function(id) { try { return parseFloat((document.getElementById(id) || {}).value) || 0; } catch (e) { return 0; } };
-  var txt = nomDimTxt({ longueur: v('aLong'), largeur: v('aLarg'), epaisseur: v('aEpais') });
-  box.innerHTML = txt === '-' ? '' : '<label style="font-size:11px;color:var(--gray-500)">Dimension</label><div style="font-weight:800;color:var(--primary);padding-top:.4rem">' + escH(txt) + ' cm</div>';
+  var L = v('aLong'), W = v('aLarg'), T = v('aEpais');
+  var txt = nomDimTxt({ longueur: L, largeur: W, epaisseur: T });
+  var volTxt = (L > 0 && W > 0 && T > 0) ? '<span style="color:#ea580c;margin-left:8px;font-weight:700">(' + ((L * W * T) / 1000000).toFixed(4) + ' m³)</span>' : '';
+  box.innerHTML = txt === '-' ? '' : '<label style="font-size:11px;color:var(--gray-500)">Dimension & Volume</label><div style="font-weight:800;color:var(--primary);padding-top:.4rem">' + escH(txt) + ' cm ' + volTxt + '</div>';
 }
 
 function saveNomenclature(id) {
   var code = document.getElementById('aCode').value.trim();
   var desig = document.getElementById('aDesig').value.trim();
   if (!code || !desig) { toast('Code et d\u00e9signation sont obligatoires', 'error'); return; }
+  var articles = getArticles();
+  if (!id) {
+    var cNorm = String(code).trim().toUpperCase();
+    var doublon = articles.find(function(x) { return x && String(x.code || '').trim().toUpperCase() === cNorm; });
+    if (doublon) {
+      toast('Un article avec le code « ' + code + ' » existe déjà dans la nomenclature !', 'error');
+      return;
+    }
+  }
   /* Dimensions : Longueur x Largeur x Epaisseur. Cet article est la SOURCE des
    produits finis : l'exploitation reprend ce trio pour sa colonne Dimension
    et ses fiches techniques. */
-var _dimLong = parseFloat((document.getElementById('aLong') || {}).value) || 0;
-var _dimLarg = parseFloat((document.getElementById('aLarg') || {}).value) || 0;
-var _dimEpais = parseFloat((document.getElementById('aEpais') || {}).value) || 0;
-  var articles = getArticles();
+  var _dimLong = parseFloat((document.getElementById('aLong') || {}).value) || 0;
+  var _dimLarg = parseFloat((document.getElementById('aLarg') || {}).value) || 0;
+  var _dimEpais = parseFloat((document.getElementById('aEpais') || {}).value) || 0;
   if (id) {
     for (var i = 0; i < articles.length; i++) {
       if (articles[i].id === id) { articles[i].code = code; articles[i].designation = desig; articles[i].typeArticle = document.getElementById('aType').value; articles[i].commercialise = document.getElementById('aCommercialise').value === '1'; articles[i].prixPeriodes = formPeriods.slice(); articles[i].longueur = _dimLong; articles[i].largeur = _dimLarg; articles[i].epaisseur = _dimEpais; break; }
@@ -40295,11 +40371,14 @@ function calcVolume(length, width, thickness) {
 }
 function artUnitVol(a) {
   if (!a) return 0;
+  var l = parseFloat(a.length != null ? a.length : a.longueur) || 0;
+  var w = parseFloat(a.width != null ? a.width : a.largeur) || 0;
+  var t = parseFloat(a.thickness != null ? a.thickness : a.epaisseur) || 0;
+  if (l > 0 && w > 0 && t > 0) return (l * w * t) / 1000000;
   if (a.dimensions && typeof a.dimensions === 'string' && a.dimensions.indexOf('x') > -1) {
     var d = a.dimensions.split('x');
     if (d.length === 3) return calcVolume(d[0], d[1], d[2]);
   }
-  if (a.length && a.width && a.thickness) return calcVolume(a.length, a.width, a.thickness);
   return 0;
 }
 
