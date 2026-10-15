@@ -36,17 +36,9 @@ function triPfNorm(s) {
 }
 
 function triPfCanonique(code, desig) {
-  var cN = triPfNorm(code);
-  var dN = triPfNorm(desig);
-  for (var canon in TRI_PF_ALIASES) {
-    if (cN === canon) return canon;
-    var list = TRI_PF_ALIASES[canon];
-    for (var i = 0; i < list.length; i++) {
-      var aN = triPfNorm(list[i]);
-      if (cN === aN || dN === aN) return canon;
-    }
-  }
-  return code ? String(code).trim().toUpperCase() : '';
+  /* Le code saisi par l'utilisateur est respecte strictement : pas de renommage arbitraire */
+  if (!code) return '';
+  return String(code).trim().toUpperCase();
 }
 
 /**
@@ -164,41 +156,39 @@ function triSyncHarmoniserTout(forceList) {
   var canonSet = {};
   list.forEach(function (x) { canonSet[x.code] = x; });
 
-  // 1. Mettre à jour mdb_nomenclature
+  // 1. mdb_nomenclature est la SOURCE UNIQUE : on ne la vide JAMAIS !
+  // On s'assure seulement que les PF y sont bien marques typeArticle = 'produit_fini'
+  // sans toucher aux IDs existants ni aux prixPeriodes ni aux destinations.
   try {
     var rawNom = localStorage.getItem('mdb_nomenclature');
     var nom = rawNom ? JSON.parse(rawNom) : [];
-    if (!Array.isArray(nom)) nom = [];
-
-    // Conserver UNIQUEMENT les articles NON produits finis (matières premières, semi-finis, consommables)
-    var newNom = nom.filter(function (a) {
-      if (!a) return false;
-      var tNorm = String(a.typeArticle || '').toLowerCase().replace(/[^a-z]/g, '');
-      var cNorm = String(a.categorie || '').toLowerCase().replace(/[^a-z]/g, '');
-      var isPF = (tNorm === 'produitfini' || cNorm === 'finished' || cNorm === 'produitfini');
-      var canon = triPfCanonique(a.code, a.designation);
-      if (canon && canonSet[canon]) isPF = true;
-      return !isPF;
-    });
-
-    // Ajouter chaque Produit Fini canonique
-    list.forEach(function (pf) {
-      newNom.push({
-        id: 'pf_' + pf.code,
-        code: pf.code,
-        designation: pf.designation,
-        typeArticle: 'produit_fini',
-        commercialise: true,
-        longueur: pf.longueur || 0,
-        largeur: pf.largeur || 0,
-        epaisseur: pf.epaisseur || 0,
-        destination: pf.destination || '',
-        prix_montage: pf.prix_montage || 150,
-        prixPeriodes: pf.prix_vente > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: pf.prix_vente }] : []
+    if (Array.isArray(nom)) {
+      var nomMod = false;
+      list.forEach(function (pf) {
+        var existing = nom.find(function(a) { return a && String(a.code||'').trim().toUpperCase() === pf.code; });
+        if (existing) {
+          if (!existing.destination && pf.destination) { existing.destination = pf.destination; nomMod = true; }
+        } else {
+          nom.push({
+            id: 'id_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+            code: pf.code,
+            designation: pf.designation || pf.code,
+            typeArticle: 'produit_fini',
+            commercialise: true,
+            longueur: pf.longueur || 0,
+            largeur: pf.largeur || 0,
+            epaisseur: pf.epaisseur || 0,
+            destination: pf.destination || '',
+            prixPeriodes: pf.prix_vente > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: pf.prix_vente }] : []
+          });
+          nomMod = true;
+        }
       });
-    });
-
-    localStorage.setItem('mdb_nomenclature', JSON.stringify(newNom));
+      if (nomMod) {
+        localStorage.setItem('mdb_nomenclature', JSON.stringify(nom));
+        if (typeof _dbMemCache !== 'undefined' && _dbMemCache) delete _dbMemCache['mdb_nomenclature'];
+      }
+    }
   } catch (e1) {}
 
   // 2. Mettre à jour mdb_production.articles
@@ -380,13 +370,5 @@ if (typeof window !== 'undefined') {
   /* Auto-harmonisation au demarrage : nettoie les orphelins et aligne
      les 3 applications sur la Nomenclature comme source de verite.
      Delai de 3s pour laisser la page initialiser ses propres donnees. */
-  try {
-    window.addEventListener('DOMContentLoaded', function() {
-      setTimeout(function() {
-        try {
-          if (typeof triSyncHarmoniserTout === 'function') triSyncHarmoniserTout();
-        } catch(eAuto) {}
-      }, 3000);
-    });
-  } catch(eEv) {}
+  /* Auto-harmonisation aveugle supprimee */
 }

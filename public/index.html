@@ -3523,6 +3523,19 @@ var formLignes = [];
 var _blEditId = '';
 var _prefillFactureData = null;
 var formPeriods = [];
+  _formDestinations = [];
+  if (a) {
+    if (Array.isArray(a.destinations) && a.destinations.length) {
+      _formDestinations = a.destinations.map(function(d) {
+        return typeof d === 'object' ? { nom: d.nom, defaut: !!d.defaut } : { nom: String(d), defaut: false };
+      });
+    } else if (a.destination) {
+      _formDestinations = [{ nom: a.destination, defaut: true }];
+    }
+    if (_formDestinations.length && !_formDestinations.some(function(d){ return d.defaut; })) {
+      _formDestinations[0].defaut = true;
+    }
+  }
 var _forfaitPermissions = null;
 
 var AJAX_FLASH_DISABLED = true;
@@ -11313,6 +11326,7 @@ function addFormPeriod() {
   var y = new Date().getFullYear();
   formPeriods.push({dateDebut:y+'-01-01', dateFin:y+'-12-31', prixUnitaire:0});
   renderFormPeriods();
+  renderFormDestinations();
 }
 
 function removeFormPeriod(idx) {
@@ -13603,47 +13617,9 @@ function harmoniserNomenclature() {
     try { DB.set('mdb_nomenclature', arts); } catch (e0) {}
   }
 
-  /* ── Etape 2 : Codes DIFFERENTS mais meme produit ── */
-  var sigDes = function (d) {
-    var s = String(d || '').toUpperCase();
-    try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
-    return s.replace(/[^A-Z0-9]/g, '');
-  };
-  var sigChiffres = function (c) { return String(c || '').toUpperCase().replace(/[^0-9]/g, ''); };
-  varFusion = [];
-  var suppr = {};
-  pf.forEach(function (a) {
-    var ca = norm(a.code);
-    if (suppr[ca]) return;
-    for (var i = 0; i < pf.length; i++) {
-      var b = pf[i];
-      if (b === a) continue;
-      var cb = norm(b.code);
-      if (!cb || cb === ca || suppr[cb]) continue;
-      var canonA = (typeof triPfCanonique === 'function') ? triPfCanonique(a.code, a.designation) : ca;
-      var canonB = (typeof triPfCanonique === 'function') ? triPfCanonique(b.code, b.designation) : cb;
-      var memeProduit = (canonA && canonB && canonA === canonB);
-      if (!memeProduit) continue;
-      var garde = null, perd = null;
-      if (codesExpl[ca] && !codesExpl[cb]) { garde = a; perd = b; }
-      else if (codesExpl[cb] && !codesExpl[ca]) { garde = b; perd = a; }
-      else { garde = a; perd = b; }
-      if (!garde || !perd) continue;
-      if (!(parseFloat(garde.longueur) > 0) && parseFloat(perd.longueur) > 0) {
-        garde.longueur = perd.longueur; garde.largeur = perd.largeur; garde.epaisseur = perd.epaisseur;
-      }
-      if (!(garde.prixPeriodes || []).length && (perd.prixPeriodes || []).length) garde.prixPeriodes = perd.prixPeriodes;
-      if (!garde.designation) garde.designation = perd.designation;
-      suppr[norm(perd.code || '')] = true;
-      varFusion.push(String(perd.code) + ' \u2192 ' + String(garde.code));
-      break;
-    }
-  });
-  if (!varFusion.length) return Object.keys(supprExact).length ? ['doublons_exacts'] : [];
-  var garder = arts.filter(function (a) { return !(a && a.typeArticle === 'produit_fini' && suppr[norm(a.code || '')]); });
-  try { DB.set('mdb_nomenclature', garder); } catch (e3) { return []; }
-  try { toast('Nomenclature harmonisée : ' + varFusion.join(', ') + ' — même liste que l\u2019Exploitation.'); } catch (e4) {}
-  return varFusion;
+    /* Etape 2 desactivee : on ne supprime JAMAIS des articles aux codes differents
+     (ex: COUV, COUV112, COUV114, FRI140 sont des articles distincts voulus par l'utilisateur). */
+  return Object.keys(supprExact).length ? ['doublons_exacts'] : [];
 }
 /* Analyse et retourne le nombre de doublons exacts dans la Nomenclature (lecture seule). */
 function compterDoublonsNomenclature() {
@@ -13745,6 +13721,51 @@ function demanderImportExploitation() {
 /* Volume unitaire d'un Produit Fini calcule depuis ses composants (lattes/plots/CP)
    stockes dans mdb_production (Exploitation). Si aucun composant, retourne 0
    et renderNomenclature utilisera les dimensions L*l*e comme fallback. */
+/* Auto-reparation : retablit les Produits Finis legitimes s'ils ont ete supprimes
+   accidentellement par l'ancien script de sync. */
+function reparerArticlesManquantsNomenclature() {
+  try {
+    var raw = localStorage.getItem('mdb_nomenclature');
+    var arts = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(arts)) return;
+    var artsCodes = {};
+    arts.forEach(function(a) { if (a && a.code) artsCodes[String(a.code).trim().toUpperCase()] = true; });
+
+    // Verifier si Exploitation a des articles absents de la Nomenclature
+    var rawP = localStorage.getItem('mdb_production');
+    var pData = rawP ? JSON.parse(rawP) : {};
+    var pArts = Array.isArray(pData.articles) ? pData.articles : [];
+    var mod = false;
+
+    pArts.forEach(function(pa) {
+      if (!pa || !pa.code || pa.categorie !== 'finished') return;
+      var codeU = String(pa.code).trim().toUpperCase();
+      if (!artsCodes[codeU]) {
+        arts.push({
+          id: 'id_rest_' + codeU + '_' + Date.now(),
+          code: codeU,
+          designation: pa.designation || codeU,
+          typeArticle: 'produit_fini',
+          commercialise: true,
+          longueur: parseFloat(pa.length || pa.longueur) || 0,
+          largeur: parseFloat(pa.width || pa.largeur) || 0,
+          epaisseur: parseFloat(pa.thickness || pa.epaisseur) || 0,
+          destination: pa.destination || '',
+          destinations: pa.destination ? [{ nom: pa.destination, defaut: true }] : [],
+          prixPeriodes: parseFloat(pa.prix_vente) > 0 ? [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: parseFloat(pa.prix_vente) }] : []
+        });
+        artsCodes[codeU] = true;
+        mod = true;
+      }
+    });
+
+    if (mod) {
+      localStorage.setItem('mdb_nomenclature', JSON.stringify(arts));
+      if (typeof _dbMemCache !== 'undefined' && _dbMemCache) delete _dbMemCache['mdb_nomenclature'];
+    }
+  } catch(eR) {}
+}
+
 function nomVolDepuisComposants(code) {
   try {
     var _pRaw = localStorage.getItem('mdb_production');
@@ -13795,14 +13816,36 @@ function renderNomenclature() {
   try { _renderNomenclature(); } finally { window._nomRendering = false; }
 }
 function _renderNomenclature() {
+  try { reparerArticlesManquantsNomenclature(); } catch (eRep) {}
   try { harmoniserNomenclature(); } catch (eH) {}
   try { syncSemiFinisFromExploitation(); } catch (eS1) {}
   try { syncProduitsFinisFromExploitation(); } catch (eSy) {}
   var articles = getArticles();
   var readonly = isReadonly('nomenclature');
+  if (window._nomSortDest) {
+    articles = articles.slice().sort(function(a, b) {
+      var da = getArticleDefaultDestination(a) || 'ZZZ';
+      var db = getArticleDefaultDestination(b) || 'ZZZ';
+      return da.localeCompare(db);
+    });
+  }
   var html = '<div class="toolbar">';
   html += '<input type="text" id="nomSearch" placeholder="Rechercher..." oninput="filterNomenclature()" value="' + escH(window._nomSearch || '') + '" style="width:280px">';
   html += '<select id="nomFilterType" onchange="filterNomenclature()" style="width:180px"><option value="">Tous les types</option><option value="produit_fini"' + (window._nomFilterType === 'produit_fini' ? ' selected' : '') + '>Produit fini</option><option value="marchandise"' + (window._nomFilterType === 'marchandise' ? ' selected' : '') + '>Marchandise</option><option value="semi_fini"' + (window._nomFilterType === 'semi_fini' ? ' selected' : '') + '>Semi-finis</option><option value="consommable"' + (window._nomFilterType === 'consommable' ? ' selected' : '') + '>Consommable</option><option value="autres"' + (window._nomFilterType === 'autres' ? ' selected' : '') + '>Autres</option></select>';
+  /* Filtre par destination pour les Produits Finis */
+  var _allDestsMap = {};
+  for (var _di = 0; _di < articles.length; _di++) {
+    var _aDList = getArticleDestinationsList(articles[_di]);
+    _aDList.forEach(function(_dn) { if (_dn) _allDestsMap[_dn] = true; });
+  }
+  var _allDests = Object.keys(_allDestsMap).sort();
+  html += '<select id="nomFilterDest" onchange="filterNomenclature()" style="width:180px;border:1.5px solid #0284c7;border-radius:6px;font-size:12px;font-weight:600;color:#0369a1">';
+  html += '<option value="">📍 Toutes destinations (' + _allDests.length + ')</option>';
+  _allDests.forEach(function(_dn) {
+    html += '<option value="' + escH(_dn) + '"' + (window._nomFilterDest === _dn ? ' selected' : '') + '>📍 ' + escH(_dn) + '</option>';
+  });
+  html += '</select>';
+  html += '<button type="button" class="btn btn-sm btn-outline" onclick="nomTrierParDestination()" title="Trier les articles par destination" style="font-size:11px;font-weight:700">⇅ Trier par destination' + (window._nomSortDest ? ' ✓' : '') + '</button>';
   try {
     var _nbPF = 0, _k;
     for (_k = 0; _k < articles.length; _k++) { if (articles[_k].typeArticle === 'produit_fini') _nbPF++; }
@@ -13822,7 +13865,7 @@ function _renderNomenclature() {
   html += '</div>';
   html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr>'
       + '<th style="width:34px"><input type="checkbox" onclick="nomToutCocher(this)" title="Tout cocher / decocher"></th>'
-      + '<th>Code</th><th>D\u00e9signation</th><th>Type</th><th title="Longueur x Largeur x Epaisseur (cm) & Volume unitaire en m³">Dimension (cm) & Vol. (m³)</th><th>Prix actuel</th><th>P\u00e9riodes</th>';
+      + '<th>Code</th><th>D\u00e9signation</th><th>Type</th><th title="Longueur x Largeur x Epaisseur (cm) & Volume unitaire en m³">Dimension (cm) & Vol. (m³)</th><th title="Destination(s) du produit fini (client / usine)">Destination(s)</th><th>Prix actuel</th><th>P\u00e9riodes</th>';
   if (!readonly) html += '<th style="width:120px">Actions</th>';
   html += '</tr></thead><tbody id="nomBody">';
   for (var i = 0; i < articles.length; i++) {
@@ -13842,12 +13885,23 @@ function _renderNomenclature() {
     if (_uVol <= 0 && _uL > 0 && _uW > 0 && _uT > 0) _uVol = (_uL * _uW * _uT) / 1000000;
     var dimHtml = escH(nomDimTxt(a));
     if (_uVol > 0) dimHtml += '<div style="font-size:10.5px;color:#ea580c;font-weight:700" title="Volume unitaire = somme des composants (lattes/plots/CP)">' + _uVol.toFixed(4) + ' m³</div>';
-    html += '<tr data-id="' + a.id + '" data-search="' + escH((a.code + ' ' + a.designation + ' ' + nomDimTxt(a)).toLowerCase()) + '" data-type="' + (a.typeArticle || '') + '">';
+    var _rowDests = getArticleDestinationsList(a);
+    var _defDestName = getArticleDefaultDestination(a);
+    var _destBadges = '<span style="color:#94a3b8">-</span>';
+    if (_defDestName) {
+      _destBadges = '<span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:700;color:#0369a1;background:#e0f2fe;padding:2px 7px;border-radius:6px;border:1px solid #bae6fd"><span style="color:#f59e0b">★</span> ' + escH(_defDestName) + '</span>';
+      if (_rowDests.length > 1) {
+        var _autres = _rowDests.filter(function(d){ return d !== _defDestName; });
+        _destBadges += ' <span style="font-size:10px;color:#475569;background:#f1f5f9;padding:2px 5px;border-radius:4px" title="Autres destinations : ' + escH(_autres.join(', ')) + '">+' + _autres.length + '</span>';
+      }
+    }
+    html += '<tr data-id="' + a.id + '" data-search="' + escH((a.code + ' ' + a.designation + ' ' + nomDimTxt(a) + ' ' + _rowDests.join(' ')).toLowerCase()) + '" data-type="' + (a.typeArticle || '') + '" data-destinations="' + escH(_rowDests.join('|')) + '">';
     html += '<td style="text-align:center"><input type="checkbox" data-nom-sel="' + escH(a.id) + '" onclick="try{var l=document.getElementById(\'nomSelInfo\');if(l)l.textContent=document.querySelectorAll(\'#nomBody input[data-nom-sel]:checked\').length+\' sélectionné(s)\';}catch(e){}" title="Cocher pour supprimer en lot"></td>';
     html += '<td class="fw-600">' + escH(a.code) + '</td>';
     html += '<td>' + escH(a.designation) + '</td>';
     html += '<td>' + escH(typeLabel) + commDot + '</td>';
     html += '<td style="white-space:nowrap;font-size:12px;font-weight:600;color:var(--primary)">' + dimHtml + '</td>';
+    html += '<td style="font-size:11.5px">' + _destBadges + '</td>';
     html += '<td class="fw-600" id="nomArticles_' + a.id + '_prixUnitaire"><span class="inline-edit" onclick="inlineMontant(\'nomArticles\',\'' + a.id + '\',\'prixUnitaire\',' + prix + ')">' + fmtMoney(prix) + '</span></td>';
     html += '<td>' + nbP + ' p\u00e9riode(s)</td>';
     if (!readonly) {
@@ -13867,24 +13921,114 @@ function _renderNomenclature() {
 }
 
 function filterNomenclature() {
-  /* Memorise les filtres : un re-rendu periodique (synchro, sauvegarde,
-     rafraichissement) recreait le select a vide et effacait le choix. */
   try {
     var _q = document.getElementById('nomSearch');
     var _f = document.getElementById('nomFilterType');
+    var _fd = document.getElementById('nomFilterDest');
     window._nomSearch = _q ? (_q.value || '') : (window._nomSearch || '');
     window._nomFilterType = _f ? (_f.value || '') : (window._nomFilterType || '');
+    window._nomFilterDest = _fd ? (_fd.value || '') : (window._nomFilterDest || '');
   } catch (eM) {}
   var q = (document.getElementById('nomSearch') ? (document.getElementById('nomSearch').value || '') : '').toLowerCase();
   var ft = document.getElementById('nomFilterType') ? document.getElementById('nomFilterType').value : '';
+  var fd = (document.getElementById('nomFilterDest') ? (document.getElementById('nomFilterDest').value || '') : '');
   var body = document.getElementById('nomBody');
   if (!body) return;
   var rows = body.getElementsByTagName('tr');
   for (var i = 0; i < rows.length; i++) {
     var matchSearch = (rows[i].getAttribute('data-search') || '').indexOf(q) !== -1;
     var matchType = !ft || rows[i].getAttribute('data-type') === ft;
-    rows[i].style.display = (matchSearch && matchType) ? '' : 'none';
+    var rowDests = (rows[i].getAttribute('data-destinations') || '').split('|');
+    var matchDest = !fd || rowDests.indexOf(fd) !== -1;
+    rows[i].style.display = (matchSearch && matchType && matchDest) ? '' : 'none';
   }
+}
+
+
+/* Helpers Destinations pour Produits Finis */
+function getArticleDestinationsList(a) {
+  if (!a) return [];
+  var list = [];
+  if (Array.isArray(a.destinations) && a.destinations.length) {
+    a.destinations.forEach(function(d) {
+      var n = typeof d === 'object' ? (d.nom || '') : String(d || '');
+      if (n && list.indexOf(n) === -1) list.push(n);
+    });
+  } else if (a.destination) {
+    list.push(String(a.destination).trim());
+  }
+  return list;
+}
+
+function getArticleDefaultDestination(a) {
+  if (!a) return '';
+  if (Array.isArray(a.destinations) && a.destinations.length) {
+    for (var i = 0; i < a.destinations.length; i++) {
+      if (typeof a.destinations[i] === 'object' && a.destinations[i].defaut && a.destinations[i].nom) {
+        return a.destinations[i].nom;
+      }
+    }
+    var first = a.destinations[0];
+    return typeof first === 'object' ? (first.nom || '') : String(first || '');
+  }
+  return a.destination || '';
+}
+
+var _formDestinations = [];
+function renderFormDestinations() {
+  var box = document.getElementById('destListContainer');
+  if (!box) return;
+  if (!_formDestinations.length) {
+    box.innerHTML = '<span style="font-size:11px;color:var(--gray-400);font-style:italic">Aucune destination assignée</span>';
+    return;
+  }
+  var h = '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">';
+  _formDestinations.forEach(function(d, idx) {
+    var isDef = !!d.defaut;
+    h += '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11.5px;font-weight:700;' +
+      (isDef ? 'background:#e0f2fe;color:#0369a1;border:1.5px solid #0284c7' : 'background:#f1f5f9;color:#334155;border:1px solid #cbd5e1') + '">';
+    h += '<button type="button" onclick="setFormDestDefaut(' + idx + ')" title="' + (isDef ? 'Destination par défaut' : 'Cliquer pour définir comme destination par défaut') + '" style="background:none;border:none;cursor:pointer;padding:0;font-size:13px;line-height:1">' + (isDef ? '⭐' : '☆') + '</button> ';
+    h += escH(d.nom);
+    if (isDef) h += ' <span style="font-size:9.5px;background:#0284c7;color:#fff;padding:1px 4px;border-radius:4px;font-weight:800">DÉFAUT</span>';
+    h += '<button type="button" onclick="removeFormDest(' + idx + ')" title="Retirer" style="background:none;border:none;cursor:pointer;color:#94a3b8;margin-left:4px;font-weight:bold;font-size:12px;line-height:1">✕</button>';
+    h += '</span>';
+  });
+  h += '</div>';
+  box.innerHTML = h;
+}
+
+function addFormDest(name) {
+  var n = String(name || (document.getElementById('aNewDest') || {}).value || '').trim();
+  if (!n) return;
+  var exists = _formDestinations.some(function(d) { return d.nom.toLowerCase() === n.toLowerCase(); });
+  if (exists) {
+    if (typeof toast === 'function') toast('Cette destination est déjà ajoutée', 'error');
+    return;
+  }
+  var isFirst = _formDestinations.length === 0;
+  _formDestinations.push({ nom: n, defaut: isFirst });
+  var inp = document.getElementById('aNewDest');
+  if (inp) inp.value = '';
+  renderFormDestinations();
+}
+
+function removeFormDest(idx) {
+  if (idx < 0 || idx >= _formDestinations.length) return;
+  var wasDef = _formDestinations[idx].defaut;
+  _formDestinations.splice(idx, 1);
+  if (wasDef && _formDestinations.length > 0) _formDestinations[0].defaut = true;
+  renderFormDestinations();
+}
+
+function setFormDestDefaut(idx) {
+  if (idx < 0 || idx >= _formDestinations.length) return;
+  _formDestinations.forEach(function(d, i) { d.defaut = (i === idx); });
+  renderFormDestinations();
+}
+
+function nomTrierParDestination() {
+  window._nomSortDest = !window._nomSortDest;
+  renderNomenclature();
 }
 
 function openNomenclatureModal(id) {
@@ -13925,6 +14069,29 @@ function openNomenclatureModal(id) {
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Epaisseur (cm)</label><input type="number" step="0.01" oninput="nomDimApercu()" id="aEpais" value="' + (a && a.epaisseur ? a.epaisseur : '') + '" placeholder="Ex: 12"></div>';
   html += '<div class="form-group" id="aDimApercu"></div>';
+  html += '</div>';
+  /* Destinations multiples du Produit Fini */
+  html += '<div class="form-group" style="background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin:8px 0">';
+  html += '<label style="font-weight:800;color:#0f172a;margin-bottom:4px;display:flex;align-items:center;gap:6px">';
+  html += '<span>📍 Destinations du Produit Fini (Clients / Usines)</span>';
+  html += '<span style="font-size:10.5px;font-weight:600;color:#64748b">(Cliquer sur ⭐ pour définir la destination par défaut)</span>';
+  html += '</label>';
+  html += '<div style="display:flex;gap:6px;margin-bottom:8px">';
+  html += '<input type="text" id="aNewDest" placeholder="Ex: MONDI ABIDJAN, CEMOI-CI..." onkeydown="if(event.key===\'Enter\'){event.preventDefault();addFormDest();}" style="flex:1;padding:6px 10px;font-size:12px;border:1px solid #cbd5e1;border-radius:6px">';
+  html += '<button type="button" class="btn btn-sm" onclick="addFormDest()" style="background:#0284c7;color:#fff;border:none;font-weight:700;padding:4px 12px;border-radius:6px;cursor:pointer">+ Ajouter</button>';
+  html += '</div>';
+  html += '<div style="margin-bottom:6px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">';
+  html += '<span style="font-size:10px;color:#64748b;font-weight:700">Suggestions :</span>';
+  html += '<button type="button" onclick="addFormDest(&quot;MONDI ABIDJAN&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ MONDI ABIDJAN</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;CEMOI-CI&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ CEMOI-CI</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;SIVEM&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ SIVEM</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;CEMOI CHOCOLAT&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ CEMOI CHOCOLAT</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;FRIESLAND CAMPINA&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ FRIESLAND CAMPINA</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;NESTLE&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ NESTLE</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;COMAFRUIT MALI&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ COMAFRUIT MALI</button>';
+  html += '<button type="button" onclick="addFormDest(&quot;SIVACO&quot;)" style="background:#fff;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;font-size:10.5px;cursor:pointer;color:#334155">+ SIVACO</button>';
+  html += '</div>';
+  html += '<div id="destListContainer"></div>';
   html += '</div>';
   html += '<div class="form-group"><label>P\u00e9riodes de prix</label><div id="periodsContainer"></div></div>';
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
@@ -13967,13 +14134,24 @@ function saveNomenclature(id) {
   var oldCode = null;
   if (id) {
     for (var i = 0; i < articles.length; i++) {
-      if (articles[i].id === id) { oldCode = articles[i].code; articles[i].code = code; articles[i].designation = desig; articles[i].typeArticle = document.getElementById('aType').value; articles[i].commercialise = document.getElementById('aCommercialise').value === '1'; articles[i].prixPeriodes = formPeriods.slice(); articles[i].longueur = _dimLong; articles[i].largeur = _dimLarg; articles[i].epaisseur = _dimEpais; break; }
+      if (articles[i].id === id) { oldCode = articles[i].code; articles[i].code = code; articles[i].designation = desig; articles[i].typeArticle = document.getElementById('aType').value; articles[i].commercialise = document.getElementById('aCommercialise').value === '1'; articles[i].prixPeriodes = formPeriods.slice(); articles[i].longueur = _dimLong; articles[i].largeur = _dimLarg; articles[i].epaisseur = _dimEpais;
+        var _defDest = '';
+        var _allD = [];
+        if (_formDestinations && _formDestinations.length) {
+          _allD = _formDestinations.slice();
+          var _defObj = _allD.find(function(d){ return d.defaut; }) || _allD[0];
+          _defDest = _defObj ? _defObj.nom : '';
+        }
+        articles[i].destination = _defDest;
+        articles[i].destinations = _allD; break; }
     }
   } else {
-    articles.push({id:DB.genId(), code:code, designation:desig, typeArticle:document.getElementById('aType').value, commercialise:document.getElementById('aCommercialise').value === '1', prixPeriodes:formPeriods.slice(), longueur:_dimLong, largeur:_dimLarg, epaisseur:_dimEpais});
+    articles.push({id:DB.genId(), code:code, designation:desig, typeArticle:document.getElementById('aType').value, commercialise:document.getElementById('aCommercialise').value === '1', prixPeriodes:formPeriods.slice(), longueur:_dimLong, largeur:_dimLarg, epaisseur:_dimEpais,
+      destination: (_formDestinations.find(function(d){ return d.defaut; }) || _formDestinations[0] || {}).nom || '',
+      destinations: _formDestinations.slice() });
   }
   DB.set('mdb_nomenclature', articles);
-  if (document.getElementById('aType').value === 'produit_fini' && typeof triSyncSauvegarderProduitFini === 'function') { triSyncSauvegarderProduitFini({ code: code, designation: desig, longueur: _dimLong, largeur: _dimLarg, epaisseur: _dimEpais }, oldCode); }
+  if (document.getElementById('aType').value === 'produit_fini' && typeof triSyncSauvegarderProduitFini === 'function') { var _defD = (_formDestinations.find(function(d){ return d.defaut; }) || _formDestinations[0] || {}).nom || ''; triSyncSauvegarderProduitFini({ code: code, designation: desig, longueur: _dimLong, largeur: _dimLarg, epaisseur: _dimEpais, destination: _defD, destinations: _formDestinations.slice() }, oldCode); }
   closeModal();
   renderNomenclature();
 }
