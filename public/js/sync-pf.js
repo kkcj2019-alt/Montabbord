@@ -101,7 +101,9 @@ function triSyncGetProduitsFinis() {
     }
   } catch (eN) {}
 
-  // 2. Depuis mdb_production
+  // 2. Depuis mdb_production — ENRICHISSEMENT UNIQUEMENT (la Nomenclature est le maitre)
+  //    Un PF present dans production mais ABSENT de mdb_nomenclature est ignore :
+  //    il ne doit pas « contaminer » les autres applications.
   try {
     var rawProd = localStorage.getItem('mdb_production');
     var pData = rawProd ? JSON.parse(rawProd) : {};
@@ -113,34 +115,22 @@ function triSyncGetProduitsFinis() {
       var isPF = (cat === 'finished' || cat === 'produit_fini' || typ === 'produit_fini');
       if (!isPF) return;
       var canon = triPfCanonique(a.code, a.designation);
-      if (!canon) return;
+      if (!canon || !map[canon]) return; /* PAS dans la Nomenclature -> ignore */
       var lVal = parseFloat(a.length || a.longueur) || 0;
       var wVal = parseFloat(a.width || a.largeur) || 0;
       var tVal = parseFloat(a.thickness || a.epaisseur) || 0;
-      if (!map[canon]) {
-        map[canon] = {
-          code: canon,
-          designation: a.designation || canon,
-          prix_vente: parseFloat(a.prix_vente) || 0,
-          prix_montage: parseFloat(a.prix_montage) || 150,
-          longueur: lVal,
-          largeur: wVal,
-          epaisseur: tVal,
-          destination: a.destination || ''
-        };
-      } else {
-        // Enrichir dimensions / destination si absents
-        if (!map[canon].longueur && lVal > 0) map[canon].longueur = lVal;
-        if (!map[canon].largeur && wVal > 0) map[canon].largeur = wVal;
-        if (!map[canon].epaisseur && tVal > 0) map[canon].epaisseur = tVal;
-        if (!map[canon].destination && a.destination) map[canon].destination = a.destination;
-        if (!map[canon].prix_vente && parseFloat(a.prix_vente) > 0) map[canon].prix_vente = parseFloat(a.prix_vente);
-        if (a.designation && (!map[canon].designation || map[canon].designation === canon)) map[canon].designation = a.designation;
-      }
+      /* Enrichir dimensions / prix / destination si absents dans la Nomenclature */
+      if (!map[canon].longueur && lVal > 0) map[canon].longueur = lVal;
+      if (!map[canon].largeur && wVal > 0) map[canon].largeur = wVal;
+      if (!map[canon].epaisseur && tVal > 0) map[canon].epaisseur = tVal;
+      if (!map[canon].destination && a.destination) map[canon].destination = a.destination;
+      if (!map[canon].prix_vente && parseFloat(a.prix_vente) > 0) map[canon].prix_vente = parseFloat(a.prix_vente);
+      if (a.designation && (!map[canon].designation || map[canon].designation === canon)) map[canon].designation = a.designation;
     });
   } catch (eP) {}
 
-  // 3. Depuis mdb_paye (Articles Montage)
+  // 3. Depuis mdb_paye (Articles Montage) — ENRICHISSEMENT prix_montage UNIQUEMENT
+  //    Un article present dans paye mais ABSENT de la Nomenclature est ignore.
   try {
     var rawPaye = localStorage.getItem('mdb_paye');
     var payData = rawPaye ? JSON.parse(rawPaye) : {};
@@ -148,19 +138,8 @@ function triSyncGetProduitsFinis() {
     ams.forEach(function (a) {
       if (!a || !a.code) return;
       var canon = triPfCanonique(a.code, a.designation);
-      if (!canon) return;
-      if (!map[canon]) {
-        map[canon] = {
-          code: canon,
-          designation: a.designation || canon,
-          prix_vente: 0,
-          prix_montage: parseFloat(a.prix) || 150,
-          longueur: 0, largeur: 0, epaisseur: 0,
-          destination: ''
-        };
-      } else {
-        if (parseFloat(a.prix) > 0) map[canon].prix_montage = parseFloat(a.prix);
-      }
+      if (!canon || !map[canon]) return; /* PAS dans la Nomenclature -> ignore */
+      if (parseFloat(a.prix) > 0) map[canon].prix_montage = parseFloat(a.prix);
     });
   } catch (eM) {}
 
@@ -397,4 +376,17 @@ if (typeof window !== 'undefined') {
     window.triSyncSupprimerProduitFini = triSyncSupprimerProduitFini;
     window.triSyncSauvegarderProduitFini = triSyncSauvegarderProduitFini;
   } catch (eW) {}
+
+  /* Auto-harmonisation au demarrage : nettoie les orphelins et aligne
+     les 3 applications sur la Nomenclature comme source de verite.
+     Delai de 3s pour laisser la page initialiser ses propres donnees. */
+  try {
+    window.addEventListener('DOMContentLoaded', function() {
+      setTimeout(function() {
+        try {
+          if (typeof triSyncHarmoniserTout === 'function') triSyncHarmoniserTout();
+        } catch(eAuto) {}
+      }, 3000);
+    });
+  } catch(eEv) {}
 }
