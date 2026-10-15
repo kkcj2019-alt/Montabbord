@@ -41288,18 +41288,22 @@ function acLaborSave() {
   var l = Object.assign({}, oldL);
   var hDefEl = document.getElementById('acCHeuresDefaut');
   if (hDefEl) l.heuresDefaut = parseFloat(hDefEl.value) || 8;
-  l.articleId = (document.getElementById('acCArt') || {}).value || '';
-  l.quantite = parseFloat((document.getElementById('acCQte') || {}).value) || 0;
-  l.jours = parseFloat((document.getElementById('acCJrs') || {}).value) || 0;
-  l.tauxPerte = parseFloat((document.getElementById('acCPerte') || {}).value) || 0;
-  l.prixM3 = parseFloat((document.getElementById('acCPxM3') || {}).value) || 0;
-  l.structParM3 = parseFloat((document.getElementById('acCSM3') || {}).value) || 0;
-  l.prixVente = parseFloat((document.getElementById('acCPV') || {}).value) || 0;
+  if (document.getElementById('acCArt')) l.articleId = document.getElementById('acCArt').value || l.articleId || '';
+  if (document.getElementById('acCQte')) l.quantite = parseFloat(document.getElementById('acCQte').value) || 0;
+  if (document.getElementById('acCJrs')) l.jours = parseFloat(document.getElementById('acCJrs').value) || 0;
+  if (document.getElementById('acCPerte')) l.tauxPerte = parseFloat(document.getElementById('acCPerte').value) || 0;
+  if (document.getElementById('acCPxM3')) l.prixM3 = parseFloat(document.getElementById('acCPxM3').value) || 0;
+  if (document.getElementById('acCSM3')) l.structParM3 = parseFloat(document.getElementById('acCSM3').value) || 0;
+  if (document.getElementById('acCPV')) l.prixVente = parseFloat(document.getElementById('acCPV').value) || 0;
+
   for (var i = 0; i < AC_POSTES.length; i++) {
     var k = AC_POSTES[i].cle;
-    var nb = parseFloat((document.getElementById('acCNb_' + k) || {}).value) || 0;
-    var txH = parseFloat((document.getElementById('acCTxH_' + k) || {}).value) || 0;
-    var nbH = parseFloat((document.getElementById('acCNbH_' + k) || {}).value) || 8;
+    var elNb = document.getElementById('acCNb_' + k);
+    var elTx = document.getElementById('acCTxH_' + k);
+    var elNbH = document.getElementById('acCNbH_' + k);
+    var nb = elNb ? (parseFloat(elNb.value) || 0) : ((l[k] && l[k].nb) || 0);
+    var txH = elTx ? (parseFloat(elTx.value) || 0) : ((l[k] && l[k].tauxH) || 0);
+    var nbH = elNbH ? (parseFloat(elNbH.value) || 8) : ((l[k] && l[k].nbH) || 8);
     l[k] = {
       nb: nb,
       tauxH: txH,
@@ -41308,6 +41312,22 @@ function acLaborSave() {
     };
   }
   setSection('costLabor', l);
+
+  // Synchronise le prix de vente saisi avec la ligne correspondante de la composition
+  var comp = getSection('costComposition', []);
+  if (Array.isArray(comp) && comp.length) {
+    var compModif = false;
+    comp.forEach(function (item) {
+      if (item && String(item.article_id) === String(l.articleId)) {
+        if (l.prixVente > 0 && (!item.prixVente || item.prixVente !== l.prixVente)) {
+          item.prixVente = l.prixVente;
+          compModif = true;
+        }
+      }
+    });
+    if (compModif) setSection('costComposition', comp);
+  }
+
   toast('Paramètres enregistrés');
   renderPage();
 }
@@ -41608,14 +41628,48 @@ function acDeleteCustomRow(id) {
   renderPage();
 }
 
+/* Prix de vente unitaire HT retenu pour un article de la campagne.
+   Ordre de priorite :
+     1. optPv passe explicitement
+     2. prix saisi sur la ligne de composition (comp[i].prixVente)
+     3. prix du catalogue de l'article (art.prix_vente)
+     4. prix de vente client saisi en haut si l'article correspond (cfg.prixVente) */
+function acPrixVenteArticle(artId, optPv) {
+  if (parseFloat(optPv) > 0) return parseFloat(optPv);
+  try {
+    var comp = getSection('costComposition', []);
+    if (Array.isArray(comp)) {
+      for (var i = 0; i < comp.length; i++) {
+        var l = comp[i];
+        if (l && String(l.article_id) === String(artId) && parseFloat(l.prixVente) > 0) {
+          return parseFloat(l.prixVente);
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    var arts = getArticles();
+    var a = arts.find(function (x) { return String(x.id) === String(artId); });
+    if (a && parseFloat(a.prix_vente) > 0) return parseFloat(a.prix_vente);
+  } catch (e) {}
+  try {
+    var cfg = acLaborCfg();
+    if (String(artId) === String(cfg.articleId) && parseFloat(cfg.prixVente) > 0) {
+      return parseFloat(cfg.prixVente);
+    }
+  } catch (e) {}
+  return 0;
+}
+
 /* ==== acChangePalette ==== */
 function acChangePalette(artId) {
   var arts = getArticles();
   var a = arts.find(function(x) { return String(x.id) === String(artId); });
   var cfg = acLaborCfg();
   cfg.articleId = artId;
-  if (a && parseFloat(a.prix_vente) > 0) {
-    cfg.prixVente = parseFloat(a.prix_vente);
+  var pv = acPrixVenteArticle(artId);
+  if (pv > 0) {
+    cfg.prixVente = pv;
   }
   setSection('costLabor', cfg);
   renderPage();
@@ -41736,7 +41790,7 @@ function acCompositionEditor() {
       var a = null;
       for (var i = 0; i < arts.length; i++) if (String(arts[i].id) === String(l.article_id)) { a = arts[i]; break; }
       var qte = parseFloat(l.qte) || 0;
-      var pv = parseFloat(a && a.prix_vente) || 0;
+      var pv = acPrixVenteArticle(l.article_id, l.prixVente);
       h += '<tr>';
       h += '<td style="padding:3px 6px"><select onchange="acCompositionMaj(' + idx + ',\'article\',this.value)" style="width:100%;padding:2px 4px;font-size:.74rem;border:1px solid #94a3b8;border-radius:4px">';
       arts.forEach(function (x) {
@@ -41744,8 +41798,8 @@ function acCompositionEditor() {
       });
       h += '</select></td>';
       h += '<td style="padding:3px 6px;text-align:right"><input type="number" min="0" step="1" value="' + qte + '" onchange="acCompositionMaj(' + idx + ',\'qte\',this.value)" style="width:72px;text-align:right;padding:2px 4px;border:1.5px solid #2563eb;border-radius:4px;font-size:.74rem;font-weight:700"></td>';
-      h += '<td style="padding:3px 6px;text-align:right">' + (pv > 0 ? fmt(pv) + ' F' : '<span style="color:#b91c1c">à saisir</span>') + '</td>';
-      h += '<td style="padding:3px 6px;text-align:right;font-weight:800">' + fmt(pv * qte) + ' F</td>';
+      h += '<td style="padding:3px 6px;text-align:right"><input type="number" min="0" step="500" value="' + (pv > 0 ? pv : '') + '" placeholder="FCFA" onchange="acCompositionMaj(' + idx + ',\'prixVente\',this.value)" title="Prix de vente unitaire HT de cet article (modifiable)" style="width:85px;text-align:right;padding:2px 4px;border:1.5px solid #16a34a;border-radius:4px;font-size:.74rem;font-weight:700;color:#166534;background:#f0fdf4"></td>';
+      h += '<td style="padding:3px 6px;text-align:right;font-weight:800;color:' + (pv > 0 ? '#0f172a' : '#dc2626') + '">' + (pv > 0 ? fmt(pv * qte) + ' F' : '0 F') + '</td>';
       h += '<td style="padding:3px 6px;text-align:center"><button onclick="acCompositionSupprimer(' + idx + ')" style="border:none;background:none;cursor:pointer;color:#dc2626;font-size:.85rem" title="Retirer">🗑️</button></td>';
       h += '</tr>';
     });
@@ -41760,8 +41814,21 @@ function acCompositionEditor() {
 function acCompositionMaj(idx, champ, val) {
   var comp = getSection('costComposition', []);
   if (!Array.isArray(comp) || !comp[idx]) return;
-  if (champ === 'article') comp[idx].article_id = val;
-  else comp[idx].qte = parseFloat(val) || 0;
+  if (champ === 'article') {
+    comp[idx].article_id = val;
+    var pvAuto = acPrixVenteArticle(val);
+    if (pvAuto > 0) comp[idx].prixVente = pvAuto;
+  } else if (champ === 'qte') {
+    comp[idx].qte = parseFloat(val) || 0;
+  } else if (champ === 'prixVente') {
+    var v = parseFloat(val) || 0;
+    comp[idx].prixVente = v;
+    var cfg = acLaborCfg();
+    if (String(comp[idx].article_id) === String(cfg.articleId)) {
+      cfg.prixVente = v;
+      setSection('costLabor', cfg);
+    }
+  }
   setSection('costComposition', comp);
   renderPage();
 }
@@ -41774,7 +41841,8 @@ function acCompositionAjouter() {
     var arts = getArticles();
     for (var i = 0; i < arts.length; i++) if (String(arts[i].categorie) === 'finished') { artId = arts[i].id; break; }
   }
-  comp.push({ article_id: artId, qte: 0 });
+  var pv = acPrixVenteArticle(artId);
+  comp.push({ article_id: artId, qte: 0, prixVente: pv > 0 ? pv : 0 });
   setSection('costComposition', comp);
   renderPage();
 }
@@ -41806,7 +41874,10 @@ function acCompositionDepuisFiches() {
       cumul[id] = (cumul[id] || 0) + qte;
     });
   });
-  var comp = Object.keys(cumul).map(function (id) { return { article_id: id, qte: Math.round(cumul[id]) }; });
+  var comp = Object.keys(cumul).map(function (id) {
+    var pv = acPrixVenteArticle(id);
+    return { article_id: id, qte: Math.round(cumul[id]), prixVente: pv };
+  });
   if (!comp.length) { crToast('Aucun assemblage d article reconnu sur la periode', 'error'); return; }
   setSection('costComposition', comp);
   crToast(comp.length + ' article(s) repris des fiches de production');
@@ -41825,22 +41896,20 @@ function acCompositionDepuisFiches() {
    ===================================================================== */
 
 /* Liste des articles de la campagne : [{ article_id, qte }] */
-/* Le bandeau du haut est desormais calcule A PARTIR de la composition :
-     il ne peut donc plus diverger du tableau. Les 4 champs en dur
-     (palette, prix du m3, prix de vente, taux de chute) ont disparu :
-     ils se reglent dans la composition et dans le tableau. */
 function acBandeauResumeHtml() {
   var comp = acComposition().filter(function (l) { return (parseFloat(l.qte) || 0) > 0; });
   var arts = getArticles();
   var tq = 0, ca = 0;
   comp.forEach(function (l) {
     var a = arts.find(function (x) { return String(x.id) === String(l.article_id); }) || {};
-    tq += parseFloat(l.qte) || 0;
-    ca += (parseFloat(l.qte) || 0) * (parseFloat(a.prix_vente) || 0);
+    var pv = acPrixVenteArticle(l.article_id, l.prixVente);
+    var q = parseFloat(l.qte) || 0;
+    tq += q;
+    ca += q * pv;
   });
   var h = '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;padding:.4rem .6rem;margin-bottom:.6rem;border:1.5px solid #cbd5e1;border-radius:6px;background:#f8fafc;font-size:.76rem">';
   h += '<span style="color:#475569;font-weight:700">Campagne : <strong style="color:#0f172a">' + comp.length + '</strong> article(s) — <strong style="color:#0f172a">' + fmt(tq) + '</strong> palette(s)</span>';
-  h += '<span style="color:#475569;font-weight:700">Chiffre d\'affaires : <strong style="color:#0f172a">' + fmt(Math.round(ca)) + ' F</strong></span>';
+  h += '<span style="color:#475569;font-weight:700">Chiffre d\'affaires : <strong style="color:#16a34a">' + fmt(Math.round(ca)) + ' F</strong></span>';
   h += '<span style="color:#64748b;font-size:.7rem">Modifier la composition ci-dessous — tout le tableau se recalcule</span>';
   h += '</div>';
   return h;
@@ -43009,6 +43078,7 @@ function acCoutArticleCampagne(artId, qte) {
     coutConso += mt;
   });
 
+  var pvReel = acPrixVenteArticle(artId);
   return {
     art: art || {},
     qte: Q,
@@ -43017,8 +43087,8 @@ function acCoutArticleCampagne(artId, qte) {
     volNet: volNet, volAchat: volAchat, chute: c.chute, pxM3: c.pxM3,
     coutBois: coutBois, coutConso: coutConso,
     matiere: coutBois + coutConso,
-    pv: parseFloat(art && art.prix_vente) || 0,
-    ca: Math.round((parseFloat(art && art.prix_vente) || 0) * Q),
+    pv: pvReel,
+    ca: Math.round(pvReel * Q),
     manquants: c.manquants || []
   };
 }
@@ -44247,47 +44317,110 @@ function render_cout_revient() {
   var amPayeCorrespondant = artCodeSel ? amsPaye.find(function(a) { return a && String(a.code || '').trim().toUpperCase() === artCodeSel; }) : null;
   var prixClouagePaye = amPayeCorrespondant ? (parseFloat(amPayeCorrespondant.prix) || 0) : 0;
 
+  /* Mode multi-campagne vs mono-article */
+  var comp = acComposition();
+  var compActifs = comp.filter(function (l) { return (parseFloat(l.qte) || 0) > 0; });
+  var isMultiCampagne = compActifs.length > 1;
+  var compQ = compActifs.reduce(function (s, l) { return s + (parseFloat(l.qte) || 0); }, 0);
+
   var h = '';
 
   /* Bandeau supérieur de pilotage */
   h += '<div class="card" style="padding:.7rem;margin-bottom:.8rem;background:#ffffff;border:1px solid #cbd5e1;box-shadow:0 2px 6px rgba(0,0,0,.04)">';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem;margin-bottom:.6rem;padding-bottom:.5rem;border-bottom:1px solid #e2e8f0">';
   h += '<div><h2 style="font-size:1.15rem;font-weight:900;color:#0f172a;margin:0">Coût de Production Analytique — Tableau Continu & Rentabilité</h2>' +
-       '<div style="font-size:.72rem;color:var(--dim)">Modèle d’exploitation complet (CVAMP · CVPPF · CVD · Structure & Marge nette)</div></div>';
+       '<div style="font-size:.72rem;color:var(--dim)">Modèle d\'exploitation complet (CVAMP · CVPPF · CVD · Structure & Marge nette)</div></div>';
   h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
   h += '<button class="btn btn-sm" onclick="printCoutCampagneTable()" style="background:#0f172a;color:#fff;font-weight:800" title="Imprimer le tableau complet de coût de revient de la campagne">🖨️ Imprimer Tableau Campagne</button>';
-  h += '<button class="btn btn-sm btn-sec" onclick="printCoutArticle(document.getElementById(\'acCArt\').value)" title="Imprimer la fiche condensée pour 1 seule palette">📄 Fiche 1 palette</button>';
+  var artIdPrint = (document.getElementById('acCArt') || {}).value || cfg.articleId || (curArt && curArt.id) || '';
+  h += '<button class="btn btn-sm btn-sec" onclick="printCoutArticle(\'' + escH(artIdPrint) + '\')" title="Imprimer la fiche condensée pour 1 seule palette">📄 Fiche 1 palette</button>';
   h += '</div></div>';
 
-  /* Ligne 1 : Paramètres de la palette */
-  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem;align-items:flex-end;margin-bottom:.8rem">';
+  /* OPTION 2 : Affichage contextuel selon mono-article ou multi-campagne */
+  if (isMultiCampagne) {
+    var showMono = !!window._acShowMono;
+    var nomsArts = compActifs.map(function(l) {
+      var a = arts.find(function(x) { return String(x.id) === String(l.article_id); });
+      return (a && a.code) ? a.code : ((a && a.designation) || 'Art');
+    }).join(' + ');
 
-  h += '<div><label style="font-size:.66rem;font-weight:800;color:#1e293b;display:block;margin-bottom:2px">1. Palette (Article)</label><select id="acCArt" onchange="acChangePalette(this.value)" style="width:100%;padding:.38rem .5rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.82rem;font-weight:700">';
-  for (var i = 0; i < arts.length; i++) {
-    var a = arts[i] || {};
-    h += '<option value="' + escH(a.id) + '"' + (String(a.id) === String(cfg.articleId) ? ' selected' : '') + '>' + escH((a.code ? a.code + ' · ' : '') + (a.designation || 'Article')) + '</option>';
+    h += '<div style="background:linear-gradient(135deg,#eff6ff 0%,#f0fdf4 100%);border:1.5px solid #93c5fd;border-radius:8px;padding:.6rem .8rem;margin-bottom:.8rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.6rem">';
+    h += '  <div style="display:flex;align-items:center;gap:.6rem">';
+    h += '    <div style="width:34px;height:34px;border-radius:8px;background:#2563eb;color:#ffffff;display:flex;align-items:center;justify-content:center;font-size:1.1rem;box-shadow:0 2px 4px rgba(37,99,235,.2)">📦</div>';
+    h += '    <div>';
+    h += '      <div style="font-size:.82rem;font-weight:900;color:#1e3a8a">Mode Campagne Multi-Articles Actif <span style="font-size:.7rem;font-weight:700;color:#2563eb;background:#dbeafe;padding:1px 7px;border-radius:10px;margin-left:4px">' + compActifs.length + ' articles · ' + fmt(compQ) + ' pal</span></div>';
+    h += '      <div style="font-size:.71rem;color:#475569">Articles groupés : <strong>' + escH(nomsArts) + '</strong>. Les quantités et prix se règlent dans la <strong>Composition de la campagne</strong> ci-dessous.</div>';
+    h += '    </div>';
+    h += '  </div>';
+    h += '  <button type="button" onclick="window._acShowMono=!window._acShowMono;renderPage()" class="btn btn-sm" style="font-size:.7rem;font-weight:700;background:#ffffff;border:1px solid #cbd5e1;color:#1e293b;cursor:pointer">';
+    h += '    ' + (showMono ? '▲ Masquer réglages mono-palette' : '⚙️ Paramètres mono-palette (Fiche 1 pal)');
+    h += '  </button>';
+    h += '</div>';
+
+    if (showMono) {
+      /* Bloc mono-palette déplié */
+      h += '<div style="background:#f8fafc;border:1px dashed #94a3b8;border-radius:8px;padding:.6rem .8rem;margin-bottom:.8rem">';
+      h += '<div style="font-size:.7rem;font-weight:800;color:#475569;margin-bottom:.4rem">⚙️ Sélection mono-palette (pour impression fiche 1 palette unitaire) :</div>';
+      h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem;align-items:flex-end">';
+      h += '<div><label style="font-size:.66rem;font-weight:800;color:#1e293b;display:block;margin-bottom:2px">1. Palette (Article)</label><select id="acCArt" onchange="acChangePalette(this.value)" style="width:100%;padding:.38rem .5rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.82rem;font-weight:700">';
+      for (var i = 0; i < arts.length; i++) {
+        var a = arts[i] || {};
+        h += '<option value="' + escH(a.id) + '"' + (String(a.id) === String(cfg.articleId) ? ' selected' : '') + '>' + escH((a.code ? a.code + ' · ' : '') + (a.designation || 'Article')) + '</option>';
+      }
+      h += '</select></div>';
+      h += '<div><label style="font-size:.66rem;font-weight:800;color:#92400e;display:block;margin-bottom:2px">2. Prix Bois au m³ (FCFA)</label>' +
+           '<input type="number" id="acCPxM3" min="0" step="5000" value="' + prixM3Defaut + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #d97706;border-radius:6px;font-size:.82rem;font-weight:700;color:#92400e;background:#fffbeb">' +
+           '</div>';
+      h += '<div><label style="font-size:.66rem;font-weight:800;color:#166534;display:block;margin-bottom:2px">3. Prix de Vente Client (FCFA) <span style="font-size:.58rem;color:#15803d;font-weight:700">[Catalogue]</span></label>' +
+           '<input type="number" id="acCPV" min="0" step="500" value="' + pvAffiche + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #16a34a;border-radius:6px;font-size:.82rem;font-weight:700;color:#166534;background:#f0fdf4">' +
+           '</div>';
+      h += '<div><label style="font-size:.66rem;font-weight:800;color:#475569;display:block;margin-bottom:2px">4. Taux de Perte Chute (%)</label>' +
+           '<input type="number" id="acCPerte" min="0" step="1" value="' + cfg.tauxPerte + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1px solid #94a3b8;border-radius:6px;font-size:.82rem">' +
+           '</div>';
+      h += '<div><label style="font-size:.66rem;font-weight:700;color:var(--dim);display:block;margin-bottom:2px">Période achats : ' + escH(acPeriodeLabel(p)) + '</label>' +
+           '<div style="display:flex;gap:.25rem">' +
+           '<button class="btn btn-sm" onclick="acRaccourci(\'mois\')">Mois</button>' +
+           '<button class="btn btn-sm" onclick="window._acTout=true;renderPage()">Tout</button>' +
+           '</div></div>';
+      h += '</div></div>';
+    } else {
+      /* Mode compact en multi-campagne : uniquement les paramètres globaux (Prix Bois + Période) */
+      h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.6rem;align-items:flex-end;margin-bottom:.8rem;background:#f8fafc;padding:.6rem .8rem;border-radius:8px;border:1px solid #e2e8f0">';
+      h += '<div><label style="font-size:.66rem;font-weight:800;color:#92400e;display:block;margin-bottom:2px">🪵 Prix Bois Général au m³ (FCFA)</label>' +
+           '<input type="number" id="acCPxM3" min="0" step="5000" value="' + prixM3Defaut + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #d97706;border-radius:6px;font-size:.82rem;font-weight:700;color:#92400e;background:#fffbeb">' +
+           '</div>';
+      h += '<div><label style="font-size:.66rem;font-weight:700;color:var(--dim);display:block;margin-bottom:2px">📅 Période achats : ' + escH(acPeriodeLabel(p)) + '</label>' +
+           '<div style="display:flex;gap:.25rem">' +
+           '<button class="btn btn-sm" onclick="acRaccourci(\'mois\')">Mois</button>' +
+           '<button class="btn btn-sm" onclick="window._acTout=true;renderPage()">Tout</button>' +
+           '</div></div>';
+      h += '</div>';
+    }
+  } else {
+    /* Mode Mono-article standard (si 0 ou 1 seul article) */
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem;align-items:flex-end;margin-bottom:.8rem">';
+    h += '<div><label style="font-size:.66rem;font-weight:800;color:#1e293b;display:block;margin-bottom:2px">1. Palette (Article)</label><select id="acCArt" onchange="acChangePalette(this.value)" style="width:100%;padding:.38rem .5rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.82rem;font-weight:700">';
+    for (var i = 0; i < arts.length; i++) {
+      var a = arts[i] || {};
+      h += '<option value="' + escH(a.id) + '"' + (String(a.id) === String(cfg.articleId) ? ' selected' : '') + '>' + escH((a.code ? a.code + ' · ' : '') + (a.designation || 'Article')) + '</option>';
+    }
+    h += '</select></div>';
+    h += '<div><label style="font-size:.66rem;font-weight:800;color:#92400e;display:block;margin-bottom:2px">2. Prix Bois au m³ (FCFA)</label>' +
+         '<input type="number" id="acCPxM3" min="0" step="5000" value="' + prixM3Defaut + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #d97706;border-radius:6px;font-size:.82rem;font-weight:700;color:#92400e;background:#fffbeb">' +
+         '</div>';
+    h += '<div><label style="font-size:.66rem;font-weight:800;color:#166534;display:block;margin-bottom:2px">3. Prix de Vente Client (FCFA) <span style="font-size:.58rem;color:#15803d;font-weight:700">[Catalogue]</span></label>' +
+         '<input type="number" id="acCPV" min="0" step="500" value="' + pvAffiche + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #16a34a;border-radius:6px;font-size:.82rem;font-weight:700;color:#166534;background:#f0fdf4">' +
+         '</div>';
+    h += '<div><label style="font-size:.66rem;font-weight:800;color:#475569;display:block;margin-bottom:2px">4. Taux de Perte Chute (%)</label>' +
+         '<input type="number" id="acCPerte" min="0" step="1" value="' + cfg.tauxPerte + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1px solid #94a3b8;border-radius:6px;font-size:.82rem">' +
+         '</div>';
+    h += '<div><label style="font-size:.66rem;font-weight:700;color:var(--dim);display:block;margin-bottom:2px">Période achats : ' + escH(acPeriodeLabel(p)) + '</label>' +
+         '<div style="display:flex;gap:.25rem">' +
+         '<button class="btn btn-sm" onclick="acRaccourci(\'mois\')">Mois</button>' +
+         '<button class="btn btn-sm" onclick="window._acTout=true;renderPage()">Tout</button>' +
+         '</div></div>';
+    h += '</div>';
   }
-  h += '</select></div>';
-
-  h += '<div><label style="font-size:.66rem;font-weight:800;color:#92400e;display:block;margin-bottom:2px">2. Prix Bois au m³ (FCFA)</label>' +
-       '<input type="number" id="acCPxM3" min="0" step="5000" value="' + prixM3Defaut + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #d97706;border-radius:6px;font-size:.82rem;font-weight:700;color:#92400e;background:#fffbeb">' +
-       '</div>';
-
-  h += '<div><label style="font-size:.66rem;font-weight:800;color:#166534;display:block;margin-bottom:2px">3. Prix de Vente Client (FCFA) <span style="font-size:.58rem;color:#15803d;font-weight:700">[Catalogue]</span></label>' +
-       '<input type="number" id="acCPV" min="0" step="500" value="' + pvAffiche + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #16a34a;border-radius:6px;font-size:.82rem;font-weight:700;color:#166534;background:#f0fdf4">' +
-       '</div>';
-
-  h += '<div><label style="font-size:.66rem;font-weight:800;color:#475569;display:block;margin-bottom:2px">4. Taux de Perte Chute (%)</label>' +
-       '<input type="number" id="acCPerte" min="0" step="1" value="' + cfg.tauxPerte + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1px solid #94a3b8;border-radius:6px;font-size:.82rem">' +
-       '</div>';
-
-  h += '<div><label style="font-size:.66rem;font-weight:700;color:var(--dim);display:block;margin-bottom:2px">Période achats : ' + escH(acPeriodeLabel(p)) + '</label>' +
-       '<div style="display:flex;gap:.25rem">' +
-       '<button class="btn btn-sm" onclick="acRaccourci(\'mois\')">Mois</button>' +
-       '<button class="btn btn-sm" onclick="window._acTout=true;renderPage()">Tout</button>' +
-       '</div></div>';
-
-  h += '</div>';
 
   /* Ligne 2 : SIMULATION DE CAMPAGNE (Quantité Q, Durée J, Effectifs et Taux Horaires) */
   h += '<div style="background:#f8fafc;border:1.5px solid #cbd5e1;border-radius:6px;padding:.7rem .9rem;margin-bottom:.6rem">';
@@ -44304,8 +44437,12 @@ function render_cout_revient() {
 
   h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.6rem;align-items:flex-end">';
 
-  h += '<div><label style="font-size:.66rem;font-weight:800;color:#0f172a;display:block;margin-bottom:2px">Palettes produites (Q)</label>' +
-       '<input type="number" id="acCQte" min="0" step="10" value="' + (cfg.quantite || 0) + '" placeholder="ex: 500" onchange="acLaborSave()" style="width:100%;padding:.32rem .45rem;border:1.5px solid #2563eb;border-radius:4px;font-size:.82rem;font-weight:800;background:#eff6ff;color:#1e40af">' +
+  var qAffichee = isMultiCampagne ? compQ : (cfg.quantite || 0);
+  h += '<div><label style="font-size:.66rem;font-weight:800;color:#0f172a;display:block;margin-bottom:2px">Palettes produites (Q)' +
+       (isMultiCampagne ? ' <span style="font-size:.6rem;color:#2563eb;font-weight:800">[Total Campagne]</span>' : '') + '</label>' +
+       '<input type="number" id="acCQte" min="0" step="10" value="' + qAffichee + '" placeholder="ex: 500" ' +
+       (isMultiCampagne ? 'readonly title="En mode multi-articles, la quantité totale est calculée automatiquement depuis la composition"' : 'onchange="acLaborSave()"') +
+       ' style="width:100%;padding:.32rem .45rem;border:1.5px solid #2563eb;border-radius:4px;font-size:.82rem;font-weight:800;background:#eff6ff;color:#1e40af' + (isMultiCampagne ? ';cursor:default' : '') + '">' +
        '</div>';
 
   h += '<div><label style="font-size:.66rem;font-weight:800;color:#0f172a;display:block;margin-bottom:2px">Durée en jours (J)</label>' +
@@ -44317,7 +44454,6 @@ function render_cout_revient() {
        '</div>';
 
   var curDatePt = cfg.datePointage || new Date().toISOString().substring(0, 10);
-  /* isAutoPt is already declared at the top of this function */
   var badgeAuto = cfg._autoPointageActif
     ? '<span style="font-size:.62rem;color:#16a34a;font-weight:800">● Pointage actif</span>'
     : '<span style="font-size:.62rem;color:var(--dim)">manuel</span>';
@@ -44389,6 +44525,7 @@ function render_cout_revient() {
 
   return h;
 }
+
 
 /* ==== render_cout_production ==== */
 
