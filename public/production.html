@@ -18299,6 +18299,7 @@ function saveArticleModal(id) {
   /* Recréer volontairement un code precedemment supprime : on leve le
      marquage, sinon l'article serait filtre a la lecture. */
   pfOublierSupprime(code);
+  var oldCode = a ? a.code : null;
   var oldCat = a ? (a.categorie || 'finished') : null;
   if (!a) { a = { id: genId(), created_at: new Date().toISOString() }; articles.push(a); }
   a.code = code;
@@ -18328,7 +18329,7 @@ function saveArticleModal(id) {
         prix_vente: a.prix_vente,
         prix_montage: a.prix_montage || 150,
         destination: a.destination
-      });
+      }, oldCode);
     } catch(eSy) {}
   }
   /* Nomenclature : remplace les composants de l'article */
@@ -18826,7 +18827,9 @@ function syncProduitsFinisFromIndex() {
 }
 /* Reintegre un produit absent de la Nomenclature en le CREANT dans l'index
    (c'est l'index la source : on deplace le produit vers elle).
-   silencieux = usage en masse (un seul message final, un seul rendu). */
+   silencieux = usage en masse (un seul message final, un seul rendu).
+   Synchronise aussi vers paye.articlesMontage avec exactement le meme
+   code, designation et dimensions. */
 function restaurerProduitHorsIndex(code, silencieux) {
   var n = pfNormCode(code);
   if (!n) return false;
@@ -18841,16 +18844,52 @@ function restaurerProduitHorsIndex(code, silencieux) {
       return true;
     }
   }
+  var _lon = parseFloat(art.length || art.longueur) || 0;
+  var _lar = parseFloat(art.width || art.largeur) || 0;
+  var _ep  = parseFloat(art.thickness || art.epaisseur) || 0;
   idx.push({ id: 'nf_' + Date.now() + '_' + Math.floor(Math.random() * 1e6), code: art.code, designation: art.designation || art.code,
     typeArticle: 'produit_fini', prixUnitaire: art.prix_vente || 0,
-    longueur: art.length || 0, largeur: art.width || 0, epaisseur: art.thickness || 0,
+    longueur: _lon, largeur: _lar, epaisseur: _ep,
     created_at: new Date().toISOString() });
   localStorage.setItem('mdb_nomenclature', JSON.stringify(idx));
   try { window._prodNomModifie = true; } catch (eM) {}
   try { if (typeof art._horsIndex !== 'undefined') delete art._horsIndex; } catch (eH) {}
   setArticles(arts);
+  /* --- Synchroniser aussi vers paye.articlesMontage (meme code, designation, dimensions) --- */
+  try {
+    var _pfObj = {
+      code: art.code,
+      designation: art.designation || art.code,
+      prix_vente: art.prix_vente || 0,
+      prix_montage: art.prix_montage || 150,
+      longueur: _lon,
+      largeur: _lar,
+      epaisseur: _ep,
+      destination: art.destination || ''
+    };
+    if (typeof triSyncSauvegarderProduitFini === 'function') {
+      triSyncSauvegarderProduitFini(_pfObj);
+    } else {
+      /* Fallback direct si sync-pf.js non encore charge */
+      var _rawPaye = localStorage.getItem('mdb_paye');
+      var _payData = _rawPaye ? JSON.parse(_rawPaye) : {};
+      if (!_payData || typeof _payData !== 'object') _payData = {};
+      var _ams = Array.isArray(_payData.articlesMontage) ? _payData.articlesMontage : [];
+      var _aCodeN = String(art.code || '').trim().toUpperCase();
+      var _existAM = false;
+      for (var _k = 0; _k < _ams.length; _k++) {
+        if (String(_ams[_k].code || '').trim().toUpperCase() === _aCodeN) { _existAM = true; break; }
+      }
+      if (!_existAM) {
+        _ams.push({ code: art.code, designation: art.designation || art.code,
+          prix: art.prix_montage || 150, compte_prime: true, estProduitFini: true, updatedAt: Date.now() });
+        _payData.articlesMontage = _ams;
+        localStorage.setItem('mdb_paye', JSON.stringify(_payData));
+      }
+    }
+  } catch (ePay) {}
   if (!silencieux) {
-    toast(code + ' remis dans la Nomenclature : il reste dans les deux applications ✅');
+    toast(code + ' réintégré dans la Nomenclature et dans Paye ✅');
     renderPage();
   }
   return true;

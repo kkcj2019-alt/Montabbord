@@ -11,7 +11,7 @@
 var TRI_PF_ALIASES = {
   'PAL114': ['114', 'PALETTES 114*114*12', 'PAL 114'],
   'PAL112': ['112', 'PALETTES 112*112*12', 'PAL 112'],
-  'COUV114': ['COUVERCLES 114*114*4', 'COUVERCLE 114', 'COUV 114'],
+  'COUV114': ['COUVERCLES 114*114*4', 'COUVERCLE 114', 'COUV 114', 'COUV', 'COUVERCLES', 'COUVERCLE'],
   'COUV112': ['COUVERCLE 112', 'COUVERCLES 112', 'COUV 112'],
   'BBAG': ['BBAG', 'BBAG4V', 'BIG BAG', 'BIGBAG'],
   'BBOX': ['BBOXB', 'BBOX B', 'BIG BOX BANANE', 'BIG BOX'],
@@ -342,10 +342,20 @@ function triSyncSupprimerProduitFini(codeOrId) {
 /**
  * Ajoute ou met à jour un Produit Fini dans les 3 applications simultanément.
  */
-function triSyncSauvegarderProduitFini(art) {
+function triSyncSauvegarderProduitFini(art, oldCode) {
   if (!art || !art.code) return;
   var canon = triPfCanonique(art.code, art.designation);
   var list = triSyncGetProduitsFinis();
+
+  if (oldCode) {
+    var oldCanon = triPfCanonique(oldCode, '');
+    if (oldCanon && oldCanon !== canon) {
+      list = list.filter(function (x) {
+        return x.code !== oldCanon && triPfNorm(x.code) !== triPfNorm(oldCode);
+      });
+    }
+  }
+
   var found = false;
 
   list.forEach(function (item) {
@@ -380,6 +390,8 @@ function triSyncSauvegarderProduitFini(art) {
 // Initialisation automatique au chargement
 if (typeof window !== 'undefined') {
   try {
+    window.triPfNorm = triPfNorm;
+    window.triPfCanonique = triPfCanonique;
     window.triSyncGetProduitsFinis = triSyncGetProduitsFinis;
     window.triSyncHarmoniserTout = triSyncHarmoniserTout;
     window.triSyncSupprimerProduitFini = triSyncSupprimerProduitFini;
