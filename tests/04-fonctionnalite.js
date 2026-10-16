@@ -11027,6 +11027,60 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Caisse : une remise collective en cours de modification met a jour la piece au lieu d\u2019en creer',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* L'edition d'une piece « Remise a repartir » retombait sur
+         saveRemiseCollectiveSansDetail : une NOUVELLE piece a chaque
+         enregistrement (les lignes s'empilaient, le solde partait en vrille). */
+      var src = saveCaisse.toString();
+      var garde = src.indexOf('_csCollectifEditMasterOpId') !== -1;
+      var metAJour = /_cible\\.montant = montant/.test(src);
+      var pasDeCreation = src.indexOf('_cible.id = DB.genId') === -1;
+      var repli = src.indexOf('saveRemiseCollectiveSansDetail') !== -1;
+      (garde && metAJour && pasDeCreation && repli)
+        ? 'OK : la piece existante est mise a jour (montant, mois, observations) avant tout repli'
+        : 'ECHEC garde=' + garde + ' maj=' + metAJour + ' creation=' + pasDeCreation
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : dedoublonnage — la cle d\u2019identite ignore le libelle',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Le libelle porte le mois de deduction : il change entre deux
+         enregistrements, les doublons empiles echappaient donc au nettoyage. */
+      DB.set('mdb_operationsCaisse', [
+        { id:'a1', groupeId:'g', numeroPiece:'P1', date:'2026-08-09', montant:960000, beneficiaireId:'', libelle:'ACOMPTE/SALAIRE/Mois de Juillet 2026', caisseId:'c', collective:true },
+        { id:'a2', groupeId:'g', numeroPiece:'P1', date:'2026-08-09', montant:960000, beneficiaireId:'', libelle:'ACOMPTE/SALAIRE/Mois de Octobre 2026', caisseId:'c', collective:true }
+      ]);
+      var n = _csDedupliquerCollectif();
+      var reste = getOperationsCaisse().length;
+      (n === 1 && reste === 1)
+        ? 'OK : deux pieces de meme identite mais libelles differents -> 1 seule conservée'
+        : 'ECHEC retire=' + n + ' reste=' + reste
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Recherche globale : la page utilise le haystack partage (observations incluses)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = renderGlobalSearchAll.toString();
+      /* La page gardait son propre haystack SANS observations : THIERRY etait
+         trouve par le menu deroulant mais invisible sur la page. */
+      var utilisePartage = /_gsAllMatch\\(_gsHayOperation\\(o\\)/.test(src);
+      var banquePartage = /_gsAllMatch\\(_gsHayBanque\\(bo\\)/.test(src);
+      (utilisePartage && banquePartage)
+        ? 'OK : pieces et operations bancaires passent par les haystacks partages'
+        : 'ECHEC ops=' + utilisePartage + ' banque=' + banquePartage
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse : dedoublonnage des lignes collectives identiques (piece en double)',
     app: 'index.html', store: storeRealiste,
     code: `

@@ -19046,10 +19046,11 @@ function _csDedupliquerCollectif() {
     var o = ops[i];
     if (!o) continue;
     var ben = String(o.beneficiaireId || '').trim();
-    /* pas d'id bénéficiaire (pièce « à répartir » maîtresse) : on retombe
-       sur le n° de pièce, sans quoi deux lignes vierges seraient fusionnées */
+    /* Clé d'IDENTITÉ, jamais le libellé : celui-ci change d'un enregistrement
+       à l'autre (le mois de déduction y est écrit), et les doublons empilés
+       passaient alors au travers du dédoublonnage. */
     var cle = ben ? (String(o.groupeId || '') + '|' + ben + '|' + (o.numeroPiece || ''))
-                  : ('OP|' + (o.numeroPiece || '') + '|' + (o.date || '') + '|' + (o.montant || 0) + '|' + (o.libelle || ''));
+                  : ('OP|' + (o.numeroPiece || '') + '|' + (o.date || '') + '|' + (o.montant || 0));
     if (vus[cle]) {
       removed++;
       /* la ligne jetée garde son lien : on le reporte sur la survivante */
@@ -33087,7 +33088,7 @@ function renderGlobalSearchAll() {
   for (var i = 0; i < bls.length; i++) { var bl = bls[i]; var blcn = bl.clientNom || (function(){ var c=getClientById(bl.clientId); return c?c.nom:''; })() || ''; if (((bl.numero||bl.numeroBL||'')+' '+(blcn||'')+' '+(bl.chauffeur||'')).toLowerCase().indexOf(ql) === -1) continue; nBl++; rBl += row(escH(bl.numero||bl.numeroBL||bl.id), escH(blcn+(bl.dateLivraison?' \u00b7 '+fmtDate(bl.dateLivraison):'')), "globalGoBL('"+bl.id+"')"); }
   addSec('Bons de livraison', rBl, nBl);
   var ops = getOperationsCaisse() || [], rOp = '', nOp = 0;
-  for (var i = 0; i < ops.length; i++) { var o = ops[i]; if (!_gsAllMatch(((o.libelle||'')+' '+(o.numeroPiece||'')+' '+(o.beneficiaireNom||'')+' '+(o.categorie||'')+' '+(o.tiers||'')+' '+(o.remettant||'')+' '+(o.executant||'')+' '+(o.numeroTransaction||'')).toLowerCase(), _gsIdxMontant(o.montant)+' '+_gsIdxMontant(o.montantCharge)+' '+_gsIdxMontant(o.frais))) continue; nOp++; rOp += rowDate(escH(fmtDate(o.date)), escH((o.numeroPiece?o.numeroPiece+' \u2013 ':'')+(o.libelle||o.id)), escH((o.beneficiaireNom||'')+(o.montant?' \u00b7 '+fmtMoney(o.montant):'')), "globalGoOpCaisse('"+o.id+"')"); }
+  for (var i = 0; i < ops.length; i++) { var o = ops[i]; if (!_gsAllMatch(_gsHayOperation(o), _gsIdxMontant(o.montant)+' '+_gsIdxMontant(o.montantCharge)+' '+_gsIdxMontant(o.frais))) continue; nOp++; rOp += rowDate(escH(fmtDate(o.date)), escH((o.numeroPiece?o.numeroPiece+' \u2013 ':'')+(o.libelle||o.id)), escH((o.beneficiaireNom||'')+(o.montant?' \u00b7 '+fmtMoney(o.montant):'')), "globalGoOpCaisse('"+o.id+"')"); }
   addSecDate('Pi\u00e8ces de caisse', rOp, nOp);
   /* Acomptes & prets : absents de cette page, alors que c'est la que les
      montants des prets sont le plus souvent cherches. */
@@ -33109,7 +33110,7 @@ function renderGlobalSearchAll() {
   for (var i = 0; i < fours.length; i++) { var fo = fours[i]; if (!_gsAllMatch(_gsHayFournisseur(fo), '')) continue; nFou++; rFou += row(escH(fo.nom), escH([fo.adresse,fo.telephone].filter(Boolean).join(' \u00b7 ')), "closeGlobalSearch();showExtraitFournisseur('"+fo.id+"')"); }
   addSec('Fournisseurs', rFou, nFou);
   var bankOps = dbArr('mdb_banqueOperations'), rBo = '', nBo = 0;
-  for (var i = 0; i < bankOps.length; i++) { var bo = bankOps[i]; if (!_gsAllMatch(((bo.libelle||'')+' '+(bo.numero||'')+' '+(bo.beneficiaire||'')+' '+(bo.reference||'')).toLowerCase(), _gsIdxMontant(bo.montant))) continue; nBo++; rBo += row(escH(bo.libelle||bo.id), escH((bo.beneficiaire||'')+(bo.montant?' \u00b7 '+fmtMoney(bo.montant):'')), "globalGoBanque()"); }
+  for (var i = 0; i < bankOps.length; i++) { var bo = bankOps[i]; if (!_gsAllMatch(_gsHayBanque(bo), _gsIdxMontant(bo.montant))) continue; nBo++; rBo += row(escH(bo.libelle||bo.id), escH((bo.beneficiaire||'')+(bo.montant?' \u00b7 '+fmtMoney(bo.montant):'')), "globalGoBanque()"); }
   addSec('Op\u00e9rations bancaires', rBo, nBo);
   var tachesArr = (typeof getTaches==='function'?getTaches():[]) || [], rTa = '', nTa = 0;
   for (var i = 0; i < tachesArr.length; i++) { var tk = tachesArr[i]; if (((tk.titre||'')+' '+(tk.description||'')).toLowerCase().indexOf(ql) === -1) continue; nTa++; rTa += row(escH(tk.titre||tk.id), escH(tk.statut||''), "globalGoPage('taches')"); }
@@ -37501,7 +37502,48 @@ function saveCaisse(id, asDraft) {
       return;
     }
     if (!_isSoldeColl) {
-      /* Remise sans d\u00e9tail : enregistrer UNE pi\u00e8ce (le total) \u2014 r\u00e9partition possible plus tard via "Modifier" */
+      /* Remise collective EN COURS DE MODIFICATION : on met a jour la piece
+         « à répartir » existante au lieu d'en creer une nouvelle. Sans ce
+         garde, chaque enregistrement empilait une nouvelle piece identique
+         (les lignes « Remise à répartir » s'accumulaient et le solde partait
+         en vrille). */
+      var _edRef = window._csCollectifEditMasterOpId || window._csCollectifEditGroupeId || '';
+      if (_edRef && montant > 0) {
+        var _opsE = getOperationsCaisse();
+        var _cible = null;
+        for (var _iE = 0; _iE < _opsE.length; _iE++) {
+          if (_opsE[_iE].id === _edRef || (window._csCollectifEditGroupeId && _opsE[_iE].groupeId === window._csCollectifEditGroupeId)) { _cible = _opsE[_iE]; break; }
+        }
+        if (_cible) {
+          var _remE = document.getElementById('csRemettantContainerHidden');
+          var _exeE = document.getElementById('csExecutant');
+          var _moisE = document.getElementById('csAPMoisDeduction');
+          _cible.date = fullDate;
+          _cible.libelle = libelle;
+          _cible.montant = montant;
+          _cible.montantCharge = 0;
+          _cible.codeId = codeId;
+          _cible.code = (function(){ var _cA = getCodesCaisse() || []; for (var _iC = 0; _iC < _cA.length; _iC++) if (_cA[_iC].id === codeId) return _cA[_iC].code || ''; return _cible.code || ''; })();
+          _cible.moyenPaiement = moyenPaiement;
+          _cible.numeroTransaction = numeroTransaction;
+          _cible.observations = tiers;
+          _cible.remettant = (_remE ? _remE.value : '') || _cible.remettant || '';
+          _cible.executant = (_exeE ? _exeE.value.trim() : '') || _cible.executant || '';
+          _cible.sens = 'sortie';
+          _cible.apType = (typeOp === 'pret') ? 'pret' : (_cible.apType || 'acompte');
+          if (_moisE && _moisE.value) _cible.apMoisDeduction = _moisE.value;
+          try { DB.set('mdb_operationsCaisse', _opsE); _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (eSE) {}
+          window._csCollectifEditMasterOpId = '';
+          window._csCollectifEditGroupeId = '';
+          window._csEditId = '';
+          window._csEditingId = '';
+          try { toast('Remise mise à jour (pièce n° ' + (_cible.numeroPiece || '') + ')', 'success'); } catch (eTSE) {}
+          if (window._csModalMode) { var _cmE = document.getElementById('tresorerieContentQuick') || document.getElementById('tresorerieContent'); if (_cmE) renderCaisseIn(_cmE); }
+          else renderTresorerie();
+          return;
+        }
+      }
+      /* Remise sans détail : enregistrer UNE pièce (le total) — répartition possible plus tard via "Modifier" */
       if (montant > 0) { try { saveRemiseCollectiveSansDetail(caisseId, fullDate, typeOp); } catch(e) { toast('Erreur: ' + e.message, 'error'); } return; }
       toast('Saisissez le montant total de la remise (champ Montant) ou r\u00e9partissez entre employ\u00e9s', 'error');
       return;
