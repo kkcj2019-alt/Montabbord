@@ -75,7 +75,8 @@
       var code = String(err.code || '');
       var msg = String(err.message || '');
       var det = String(err.details || '') + ' ' + String(err.hint || '');
-      if (code === '42P01') return true;
+      if (code === '42P01' || code === 'PGRST205') return true;
+      if (/could not find the table/i.test(msg + ' ' + det) && /enterprise_data/i.test(msg + ' ' + det)) return true;
       if (/enterprise_data/i.test(msg + ' ' + det) &&
           (/does not exist|not exist|not found|42P01/i.test(msg + ' ' + det))) return true;
       if ((err.status === 404 || err.statusCode === 404) && /enterprise_data/i.test(msg)) return true;
@@ -709,6 +710,12 @@
     splitAssemble: splitAssemble,
     splitEstTableManquante: splitEstTableManquante,
     SPLIT_MIGRATION_CLE: SPLIT_MIGRATION_CLE
+  };
+  /* Diagnostic console : window.__MDB_ADAPTER__.__splitEtat()
+     -> {split: true} = decoupe active, {split: false} = repli legacy,
+        {split: null} = pas encore determine (recharger la page). */
+  adapter.__splitEtat = function() {
+    return { split: _splitOK };
   };
 
   console.log('[MDB] Adaptateur Supabase prêt (' + SUPABASE_URL + ')');

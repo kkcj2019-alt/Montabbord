@@ -206,6 +206,14 @@ async function run(rapport) {
     } else {
       rapport.ko('identite enterprises manquante : ' + JSON.stringify(ident));
     }
+    const det = ad.__splitInternals.splitEstTableManquante;
+    if (typeof ad.__splitEtat === 'function' &&
+        det({ code: 'PGRST205', message: 'Could not find the table public.enterprise_data in the schema cache' }) === true &&
+        det({ code: '57014', message: 'canceling statement due to statement timeout' }) === false) {
+      rapport.ok('diagnostic __splitEtat + detection PGRST205 (sans confondre avec timeout)');
+    } else {
+      rapport.ko('diagnostic/detection PGRST205 inattendus');
+    }
 
     /* ---------- 2. Lecture : re-assemble a l'identique ---------- */
     const snap = await ad.collection('enterprises').doc('ENT1').get();
@@ -304,6 +312,7 @@ async function run(rapport) {
         var okAsm = asm.articles && asm.articles.length === 1 && asm.__prodUpdatedAt === 123;
         var okMiss = prodSplitEstTableManquante({ code: '42P01', message: 'x' }) === true
           && prodSplitEstTableManquante({ message: 'relation "public.enterprise_data" does not exist' }) === true
+          && prodSplitEstTableManquante({ code: 'PGRST205', message: 'Could not find the table public.enterprise_data in the schema cache' }) === true
           && prodSplitEstTableManquante({ message: 'timeout' }) === false;
         return (okAsm && okMiss) ? 'OK : assemble + detecte table manquante' : 'ECHEC asm=' + okAsm + ' miss=' + okMiss;
       })()
