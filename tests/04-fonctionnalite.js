@@ -11027,6 +11027,29 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Prime production : les tranches sont contiguës (3000 puis 3001, jamais de doublon)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Regle : « de 0 à 3000 » couvre les articles 1..3000 ; la tranche
+         suivante commence à 3001. Le calcul s'appuyait sur le plafond
+         précédent, donc il ne comptait rien deux fois — mais l'affichage
+         montrait « 3000→ », trompeur. */
+      window._ppBandes = [{ jusqu_a: 3000, taux: 0 }, { jusqu_a: 4000, taux: 25 }, { jusqu_a: null, taux: 75 }];
+      var m3000 = ptPrimeProdMontant(3000);
+      var m3001 = ptPrimeProdMontant(3001);
+      var m4000 = ptPrimeProdMontant(4000);
+      var m4001 = ptPrimeProdMontant(4001);
+      var srcResume = renderPrimeProdResume.toString();
+      var affichePlusUn = /parseFloat\\(b\\[i - 1\\].jusqu_a\\) \\+ 1/.test(srcResume);
+      /* 4001 articles = 3000@0 + 1000@25 + 1@75 = 25075 */
+      (m3000 === 0 && m3001 === 25 && m4000 === 25000 && m4001 === 25075 && affichePlusUn)
+        ? 'OK : tranches contiguës (3001 puis 4001), aucun article compté deux fois, DE affiché en clair'
+        : 'ECHEC m3000=' + m3000 + ' m3001=' + m3001 + ' m4000=' + m4000 + ' m4001=' + m4001 + ' affichage=' + affichePlusUn
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Pointage montage : suppression possible (cellule + journée entière)',
     app: 'paye.html', store: storeRealiste,
     code: `

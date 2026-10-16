@@ -18926,7 +18926,7 @@ function pfExplDe(idxCode) {
 /* Sens Index -> Exploitation : crée les manquants, suit les prix.
    Idempotent : ne réécrit que si quelque chose change. */
 function syncProduitsFinisFromIndex() {
-  var res = { crees: 0, prixMaj: 0, supprimes: 0, liens: 0 };
+  var res = { crees: 0, prixMaj: 0, supprimes: 0, liens: 0, doublons: [], horsIndex: [] };
   try {
     var arts = getArticles();
     var idxArts = idxNomenclature();
@@ -19019,12 +19019,23 @@ function syncProduitsFinisFromIndex() {
         if (chg) change = true;
       }
     }
-    /* 3) Abandon des produits finis locaux absents de la Nomenclature :
-       l'index est la source unique, donc un produit supprime la-bas doit
-       disparaitre ici — meme s'il avait ete cree directement en Exploitation
-       (c'etait precisement le cas de BBOXB). On ne supprime que ce qui
-       n'est reference par AUCUN stock ni nomenclature ; sinon la fiche est
-       conservee et signalee « hors Index ». */
+    /* 3) MIROIR STRICT — l'Index fait autorite absolue.
+       Deux defauts corriges ici :
+       a) les DOUBLONS par code n'etaient pas traites : deux fiches peuvent
+          porter le meme code avec des id differents (post a 32 au lieu de 16,
+          le composant affichant « CP-2 », « BBOXH »). La boucle d'edition ne
+          touche que la 1re trouvee, donc le doublon devenait permanent.
+       b) les produits « hors Index » etaient CONSERVES. Un posteAutre, ayant
+          pousse sa copie, laissait 15 produits etrangers ici : « Synchro
+          depuis l'Index » ne retirait rien, d'ou le « 47 » bloque. */
+    var retires = [];
+    /* GARDE DE SECURITE : si l'Index ne contient aucun produit fini, on ne
+       purge rien. Une Nomenclature vide ou pas encore synchronisee ne doit
+       jamais vider le catalogue d'Exploitation. */
+    if (!pfIdx.length) {
+      try { toast('Nomenclature sans produit fini : aucune suppression appliquée.', 'info'); } catch (eGuard) {}
+      return res;
+    }
     var codesIdx = {};
     for (var q = 0; q < pfIdx.length; q++) {
       var cc = pfNormCode(pfIdx[q].code);
@@ -19040,35 +19051,61 @@ function syncProduitsFinisFromIndex() {
       for (var s2 = 0; s2 < _stkSemi.length; s2++) { if (_stkSemi[s2] && _stkSemi[s2].article_id === aid) return true; }
       return false;
     };
-    var retires = [], conserves = [];
-    arts = arts.filter(function (a) {
-      if (!a || a.categorie !== 'finished') return true;
+    /* Score de preference : on garde la fiche la plus «耘anchor » —
+       venue de l'Index, puis referencee par un stock/composant. */
+    var _score = function (a) { return (a._fromIndex ? 2 : 0) + (_refere(a.id) ? 1 : 0); };
+    var _bestParCode = {}, _sansCode = [];
+    for (var b1 = 0; b1 < arts.length; b1++) {
+      var b1a = arts[b1];
+      if (!b1a || b1a.categorie !== 'finished') { _sansCode.push(b1a); continue; }
+      var b1n = pfNormCode(b1a.code);
+      if (!b1n) { _sansCode.push(b1a); continue; }
+      if (codesIdx[b1n] && b1a._horsIndex) { try { delete b1a._horsIndex; } catch (eH1) {} }
+      var b1c = _bestParCode[b1n];
+      if (!b1c) { _bestParCode[b1n] = b1a; continue; }
+      /* doublon de code : on garde le mieux note, l'autre part */
+      if (_score(b1a) > _score(b1c)) {
+        _bestParCode[b1n] = b1a; _sansCode.push(b1c); res.doublons.push(b1c.code);
+      } else {
+        _sansCode.push(b1a); res.doublons.push(b1a.code);
+      }
+    }
+    /* Reconstruction : un seul article par code, et rien hors de l'Index
+       (hors Index, on retire vraiment : c'est la consequence logique d'une
+       suppression faite dans la Nomenclature). */
+    var _final = [];
+    for (var b2 = 0; b2 < arts.length; b2++) {
+      var a = arts[b2];
+      if (!a || a.categorie !== 'finished') { _final.push(a); continue; }
       var n = pfNormCode(a.code);
-      if (codesIdx[n]) { if (a._horsIndex) { try { delete a._horsIndex; } catch (eH) {} } return true; }
-      if (pfEstIgnore(n)) return true;
-      /* Fiche venue de l'index (miroir) et disparue de l'index -> on retire,
-         c'est la consequence logique d'une suppression faite la-bas. */
-      if (a._fromIndex && !_refere(a.id)) { retires.push(a.code); return false; }
-      /* Fiche creee directement en Exploitation : on ne la supprime PAS (le
-         travail local ne disparait pas), on la signale « hors Index » pour que
-         l'utilisateur tranche. */
-      a._horsIndex = true; conserves.push(a.code);
-      return true;
-    });
-    res.supprimes = retires.length;
+      if (!n) { _final.push(a); continue; }
+      if (codesIdx[n]) {
+        if (_bestParCode[n] === a) _final.push(a);
+        continue; /* doublon : deja emit ci-dessus */
+      }
+      if (pfEstIgnore(n)) { _final.push(a); continue; }
+      retires.push(a.code); res.supprimes++;
+    }
+    arts = _final;
     res.supprimesCodes = retires;
-    res.horsIndex = conserves;
-    if (retires.length > 0 || conserves.length > 0) change = true;
+    res.horsIndex = retires;
+    if (retires.length || res.doublons.length) change = true;
 
     if (change) setArticles(arts);
     /* Information : ce qui a disparu doit etre visible, sinon l'utilisateur
-       a l'impression que la suppression n'a pas marche. */
-    if (retires.length) {
-      try {
-        toast(retires.length + ' produit(s) retiré(s) du catalogue (absents de la Nomenclature, source unique) : '
-          + retires.join(', ') + '. Pour en garder un : restaurerProduitHorsIndex(\'' + retires[0] + '\')', 'info');
-      } catch (eT2) {}
-    }
+       a l'impression que la synchronisation n'a pas marche. */
+    try {
+      if (res.doublons.length) {
+        toast(res.doublons.length + ' doublon(s) supprimé(s) (même code, fiches multiples) : ' + res.doublons.join(', '), 'info');
+      }
+      if (retires.length) {
+        toast(retires.length + ' produit(s) retiré(s) — absents de l\u2019Index (source unique) : '
+          + retires.join(', ') + '. Pour en garder un : le créer dans la Nomenclature.', 'info');
+      }
+      if (!res.doublons.length && !retires.length && !res.crees) {
+        toast('Catalogue conforme à l\u2019Index (' + pfIdx.length + ' produits finis).', 'success');
+      }
+    } catch (eT2) {}
   } catch (eS) {}
   return res;
 }
