@@ -5372,6 +5372,8 @@ r.push({
     app: 'index.html', store: storeRealiste,
     code: `
       DB.set('mdb_nomenclature', []);
+      /* Production vide : l'auto-reparation ne doit rien ajouter toute seule */
+      localStorage.setItem('mdb_production', JSON.stringify({ articles: [], stockFinished: [] }));
       apProdGet = function () {
         return { articles: [
                   { id:'p1', code:'PAL114', designation:'PALETTES 114', categorie:'finished', prix_vente: 6000 },
@@ -5381,6 +5383,7 @@ r.push({
       /* Sans produits finis */
       importerArticlesExploitation({ produitsFinis: false });
       var sansPf = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
+      var sansSemi = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'semi_fini'; }).length;
       /* Avec produits finis */
       importerArticlesExploitation({ produitsFinis: true });
       var avecPf = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
@@ -5388,20 +5391,21 @@ r.push({
       try { isReadonly = function () { return false; }; renderNomenclature(); h = (document.getElementById('facturationContent') || document.getElementById('content') || { innerHTML: '' }).innerHTML || ''; } catch (e) {}
       if (!h) h = (document.getElementById('content') || { innerHTML: '' }).innerHTML || '';
       var okBouton = h.indexOf('demanderImportExploitation') !== -1;
-      (sansPf === 0 && avecPf === 1 && okBouton)
-        ? 'OK : rien ajoute par defaut, produit fini ajoute sur demande, et le bouton est present'
-        : 'ECHEC sansPf=' + sansPf + ' avecPf=' + avecPf + ' bouton=' + okBouton + ' len=' + h.length
+      (sansPf === 0 && sansSemi === 1 && avecPf === 1 && okBouton)
+        ? 'OK : semi toujours importe, fini ajoute sur demande (1), bouton present'
+        : 'ECHEC sansPf=' + sansPf + ' sansSemi=' + sansSemi + ' avecPf=' + avecPf + ' bouton=' + okBouton
     `,
     attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Nomenclature : les doublons 112/PAL112 et NES/Nest sont fusionnés automatiquement',
+    nom: 'Nomenclature : seuls les doublons EXACTS fusionnent (112/PAL112 gardes)',
     app: 'index.html', store: storeRealiste,
     code: `
       DB.set('mdb_nomenclature', [
-        { id:'n1', code:'112', designation:'PALETTE 112*112*13', typeArticle:'produit_fini' },
-        { id:'n2', code:'PAL112', designation:'PALETTES 112*112*12', typeArticle:'produit_fini' },
+        { id:'n1', code:'PAL112', designation:'PALETTES 112', typeArticle:'produit_fini' },
+        { id:'n1b', code:'PAL112', designation:'PALETTES 112 doublon', typeArticle:'produit_fini' },
+        { id:'n2', code:'112', designation:'PALETTE 112*112*13', typeArticle:'produit_fini' },
         { id:'n3', code:'NES', designation:'NESTLE', typeArticle:'produit_fini' },
         { id:'n4', code:'Nest', designation:'Nestle 120x10x20', typeArticle:'produit_fini' },
         { id:'n5', code:'CAFE', designation:'Café Cacao', typeArticle:'produit_fini' }
@@ -5410,11 +5414,11 @@ r.push({
       apProdGet = function () { return { articles: [{ code:'PAL112' }, { code:'NES' }], pfLinks: [], pfIgnores: [] }; };
       var fusions = harmoniserNomenclature();
       var codes = DB.get('mdb_nomenclature').map(function (a) { return a.code; });
-      var pfRestants = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
-      (fusions.length === 2 && codes.length === 3 && pfRestants === 3
-        && codes.indexOf('PAL112') !== -1 && codes.indexOf('NES') !== -1 && codes.indexOf('CAFE') !== -1
-        && codes.indexOf('112') === -1 && codes.indexOf('Nest') === -1)
-        ? 'OK : 112 et Nest fusionnés dans PAL112 et NES — 3 produits finis, comme l’exploitation'
+      var nbPal = codes.filter(function (c) { return c === 'PAL112'; }).length;
+      /* Doublon exact purge, codes differents preserves (produits distincts voulus) */
+      (fusions.length === 1 && nbPal === 1 && codes.length === 5
+        && codes.indexOf('112') !== -1 && codes.indexOf('NES') !== -1 && codes.indexOf('Nest') !== -1 && codes.indexOf('CAFE') !== -1)
+        ? 'OK : doublon exact purge, 112/PAL112 et NES/Nest conserves (produits distincts)'
         : 'ECHEC fusions=' + JSON.stringify(fusions) + ' codes=' + JSON.stringify(codes)
     `,
     attenduPrefixe: 'OK'
