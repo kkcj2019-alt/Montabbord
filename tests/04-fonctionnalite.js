@@ -10963,14 +10963,53 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
-    nom: 'Compte fournisseur : le detail deroule affiche Moyen, N deg. transaction et Observations',
+    nom: 'Compte fournisseur : le detail deroule affiche Remettant, Executant, Moyen, N deg. transaction et Observations',
     app: 'index.html', store: storeRealiste,
     code: `
       var src = toggleFournisseurSimpleDetail.toString();
-      (/_oo\.moyen \|\| _oo\.moyenPaiement/.test(src) && /_oo\.numeroTransaction/.test(src) && /_oo\.observations/.test(src)
-        && /N\u00b0 trans\./.test(src) && /Observations/.test(src) && /colspan=\\"9\\"/.test(src))
-        ? 'OK : les 3 colonnes sont dans le tableau du detail (9 colonnes au total)'
-        : 'ECHEC : colonnes moyen / transaction / observations absentes'
+      (/Remettant/.test(src) && /Ex\\u00e9cutant/.test(src) && /_oo\\.remettant/.test(src) && /_oo\\.executant/.test(src)
+        && /_oo\\.moyen \\|\\| _oo\\.moyenPaiement/.test(src) && /_oo\\.numeroTransaction/.test(src) && /_oo\\.observations/.test(src)
+        && /N\\u00b0 trans\\./.test(src) && /Observations/.test(src) && /colspan=\\"11\\"/.test(src))
+        ? 'OK : Remettant + Executant + Moyen + Transaction + Observations, 11 colonnes, aucun texte tronque'
+        : 'ECHEC : colonnes ou colspan=11 absents'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Compte fournisseur : les colonnes ne sont plus tronquees (pas d ellipsis dans le detail)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = toggleFournisseurSimpleDetail.toString();
+      var showSrc = showExtraitFournisseur.toString();
+      /* max-width + text-overflow:ellipsis tronquait le texte des observations */
+      var tronqueDetail = /text-overflow:ellipsis/.test(src) && /max-width:1[0-9][0-9]px/.test(src);
+      var tronqueEcran = /text-overflow:ellipsis/.test(showSrc);
+      (!tronqueDetail && !tronqueEcran)
+        ? 'OK : plus aucune troncature, le texte se replie (word-break)'
+        : 'ECHEC : troncature encore presente (detail=' + tronqueDetail + ' ecran=' + tronqueEcran + ')'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Impression compte tiers : le bouton rapide et le bouton du haut passent par le meme moteur',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var srcRapideF = printSingleFournisseurCompte.toString();
+      var srcRapideC = printSingleClientCompte.toString();
+      var srcHautF = printComptesFournisseurs.toString();
+      var srcHautC = printComptesClients.toString();
+      /* Les 4 passent par _cdImprimer (meme gabarit + meme feuille de style) */
+      var commun = srcRapideF.indexOf('_cdImprimer(') !== -1
+        && srcRapideC.indexOf('_cdImprimer(') !== -1
+        && srcHautF.indexOf('_cdImprimer(') !== -1
+        && srcHautC.indexOf('_cdImprimer(') !== -1;
+      /* plus de CSS nth-child code en dur dans l impression rapide */
+      var brittle = /nth-child/.test(srcRapideF) || /nth-child/.test(srcRapideC);
+      (commun && !brittle)
+        ? 'OK : les 4 boutons partagent _cdImprimer, aucun nth-child fragile'
+        : 'ECHEC : commun=' + commun + ' brittle=' + brittle
     `,
     attenduPrefixe: 'OK'
   });
