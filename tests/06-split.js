@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /* =====================================================================
    tests/06-split.js
    Decoupage anti-timeouts : 1 ligne par rubrique dans enterprise_data
@@ -320,6 +320,48 @@ async function run(rapport) {
     if (res.indexOf('OK') === 0) rapport.ok('production.html : ' + res);
     else rapport.ko('production.html : ' + res);
   } catch (e) { rapport.ko('production.html : exception ' + e.message); }
+
+  /* ---------- 7. PUSH loti (anti-504) ---------- */
+  try {
+    const lignes = [];
+    for (let i = 0; i < 40; i++) {
+      lignes.push({ enterprise_id: 'ENT1', cle: 'mdb_paye.bloc' + i, data: { texte: 'x'.repeat(30000) }, updated_at: 'x' });
+    }
+    const faux = creerFauxSupabase({ enterprises: [], enterprise_data: [] });
+    const ad = chargerAdaptateur(faux);
+    const lots = ad.__splitInternals.splitLignesParLots(lignes);
+    let tailles = [];
+    let okPoids = true;
+    for (const l of lots) tailles.push(JSON.stringify(l).length);
+    for (const t of tailles) if (t > 400 * 1024) okPoids = false;
+    if (lots.length > 1 && okPoids) {
+      rapport.ok('push loti : ' + lignes.length + ' lignes -> ' + lots.length + ' lot(s), aucun > 400 Ko');
+    } else {
+      rapport.ko('push loti : ' + lots.length + ' lot(s), tailles=' + JSON.stringify(tailles));
+    }
+  } catch (e) { rapport.ko('push loti : exception ' + (e && e.message)); }
+
+  /* ---------- 8. Pas de repli legacy sur erreur passagere ---------- */
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'supabase-sdk', 'mdb-supabase.js'), 'utf8');
+    /* Le bloc writeEnterpriseSplit(...).catch ne doit remettre _splitOK a
+       false QUE si la table est reellement absente, et PROPAGER l'erreur
+       sinon. C'etait la cause du « synchro en attente » permanent : un seul
+       504 faisait basculer definitivement sur le RPC legacy de 2,3 Mo. */
+    const idx = src.indexOf('writeEnterpriseSplit(docId, data).catch');
+    const zone = idx === -1 ? '' : src.substring(idx, idx + 900);
+    const repliConditionne = /splitEstTableManquante\(e\)/.test(zone)
+      && /_splitOK = false/.test(zone)
+      && /throw e;/.test(zone);
+    const repliLibre = /writeEnterpriseSplit\(docId, data\)\.catch\(function\(e\) \{\s*_splitOK = false;/.test(zone);
+    if (idx !== -1 && repliConditionne && !repliLibre) {
+      rapport.ok('push : le repli legacy ne se declenche que si la table est absente (504 = retry)');
+    } else {
+      rapport.ko('repli legacy sur erreur passagere : idx=' + idx + ' conditionne=' + repliConditionne + ' libre=' + repliLibre);
+    }
+  } catch (e) { rapport.ko('pas de repli legacy : exception ' + (e && e.message)); }
 }
 
 module.exports = { run };

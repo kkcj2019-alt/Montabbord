@@ -150,18 +150,52 @@
     return out;
   }
 
-  /* Ecriture decoupee : 1 upsert de petites lignes + bump updated_at leger
-     (c'est lui que lisent les sondes des autres postes). La sentinelle est
-     posee EN DERNIER : elle seule dit que le decoupe fait foi. Sans elle
-     (echec intermediaire), la lecture reprend le legacy + migration. */
+  /* Ecriture decoupee : le PUSH est lui-meme decoupe en lots.
+     Decouper les LIGNES ne suffisait pas : toutes etaient envoyees en un
+     seul POST (~2,3 Mo), que PostgREST ne finissait pas de traiter -> 504
+     Gateway Timeout et « synchro en attente » a chaque poste. On regroupe
+     donc les lignes par taille de JSON pour qu'aucune requete nApproche
+     la limite. Le bump updated_at vient apres, puis la sentinelle. */
+  var SPLIT_LOT_CIBLES = 320 * 1024; /* ~320 Ko par requete */
+
+  function splitLignesParLots(lignes) {
+    var lots = [], courant = [], poids = 0;
+    for (var i = 0; i < (lignes || []).length; i++) {
+      var l = lignes[i];
+      var p;
+      try { p = JSON.stringify(l).length + 1; } catch (e) { p = 2048; }
+      /* Une ligne plus grosse que la cible part seule (rien a faire). */
+      if (courant.length && poids + p > SPLIT_LOT_CIBLES) { lots.push(courant); courant = []; poids = 0; }
+      courant.push(l); poids += p;
+    }
+    if (courant.length) lots.push(courant);
+    return lots;
+  }
+
+  /* Lot par lot, 2 en parallele : assez rapide, sans saturer PostgREST. */
+  function upsertLots(lots) {
+    var i = 0, parallel = 2;
+    function worker() {
+      if (i >= lots.length) return Promise.resolve();
+      var lot = lots[i++];
+      return sb.from(SPLIT_TABLE).upsert(lot, { onConflict: 'enterprise_id,cle' })
+        .then(function (r) { if (r.error) throw r.error; })
+        .then(worker);
+    }
+    var workers = [];
+    for (var w = 0; w < Math.min(parallel, lots.length); w++) workers.push(worker());
+    return Promise.all(workers);
+  }
+
   function writeEnterpriseSplit(uid, data) {
     var lignes = splitDocEnLignes(uid, data);
     var ident = splitIdentite(data);
     var upsertIdent = { id: uid, updated_at: isoNow() };
     for (var k in ident) { if (ident.hasOwnProperty(k)) upsertIdent[k] = ident[k]; }
+    var lots = splitLignesParLots(lignes);
+    try { console.log('[mdb] push decoupe en ' + lots.length + ' lot(s) pour ' + lignes.length + ' ligne(s)'); } catch (eL) {}
     var p1 = (lignes.length > 0)
-      ? sb.from(SPLIT_TABLE).upsert(lignes, { onConflict: 'enterprise_id,cle' })
-          .then(function(r) { if (r.error) throw r.error; })
+      ? upsertLots(lots)
       : Promise.resolve();
     return p1.then(function() {
       return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' })
@@ -374,12 +408,23 @@
     data = deepClean(data || {});
 
     /* Document entreprise : ecriture decoupee (petites lignes), repli legacy
-       si la table enterprise_data n'existe pas encore. */
+       UNIQUEMENT si la table enterprise_data n'existe vraiment pas.
+       Avant, TOUTE erreur (504, delai depasse, reseau) faisait basculer en
+       legacy : le RPC de 2,3 Mo repartait en timeoute, puis l'erreur
+       recommençait, et « synchro en attente » devenait permanente. Sur une
+       erreur passagere on la remonte : les cles sales restent en file et
+       repartent au prochain essai. */
     if (table === 'enterprises' && !parentTable) {
       if (_splitOK === false) return writeEnterpriseLegacy(docId, data);
       return writeEnterpriseSplit(docId, data).catch(function(e) {
-        _splitOK = false;
-        return writeEnterpriseLegacy(docId, data);
+        if (splitEstTableManquante(e)) {
+          _splitOK = false;
+          try { console.warn('[mdb] table enterprise_data absente : repli legacy'); } catch (eC) {}
+          return writeEnterpriseLegacy(docId, data);
+        }
+        /* 504 / delai / reseau : a reessayer, PAS de repli legacy. */
+        try { console.warn('[mdb] push echoue (repli desactive) :', (e && e.message) || e); } catch (eC2) {}
+        throw e;
       });
     }
     var conv = docToRow(table, docId, data);
@@ -474,10 +519,13 @@
        auto), repli legacy si la table n'existe pas encore. */
     if (table === 'enterprises' && !parentTable) {
       if (_splitOK === false) return _tmo(fetchEnterpriseLegacy(docId));
+      /* Lecture complete du dossier (~2,3 Mo repartis) : 12 s est trop court
+         sur une connexion lente et provoquait « Delai reseau depasse », donc
+         envoi avec le cache. Seul le dossier entreprise a ce delai. */
       return _tmo(fetchEnterpriseSplit(docId).catch(function(e) {
         if (splitEstTableManquante(e)) { _splitOK = false; return fetchEnterpriseLegacy(docId); }
         throw e;
-      }));
+      }), 45000);
     }
     switch (table) {
       case 'enterprises':
@@ -709,6 +757,8 @@
     splitDocEnLignes: splitDocEnLignes,
     splitAssemble: splitAssemble,
     splitEstTableManquante: splitEstTableManquante,
+    splitLignesParLots: splitLignesParLots,
+    SPLIT_LOT_CIBLES: SPLIT_LOT_CIBLES,
     SPLIT_MIGRATION_CLE: SPLIT_MIGRATION_CLE
   };
   /* Diagnostic console : window.__MDB_ADAPTER__.__splitEtat()
