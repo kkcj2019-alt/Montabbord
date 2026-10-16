@@ -4521,13 +4521,22 @@ function csExtractPeriodeFromLibelle(lib) {
 }
 function csExtractPeriodeFromOp(o) {
   if (!o) return '';
+  /* Le LIBELLE fait foi : il est écrit à la saisie avec le mois choisi.
+     apMoisDeduction pouvait rester sur un ancien mois (pièce en septembre
+     dans le libellé mais octobre en apMoisDeduction) ; il était testé en
+     premier, donc « Modifier » repartait sur ce mauvais mois — voire sur le
+     mois courant quand le champ était vide. */
+  if (o.libelle) {
+    var pL = csExtractPeriodeFromLibelle(o.libelle);
+    if (pL) return pL;
+  }
+  if (o.observations) {
+    var pO = csExtractPeriodeFromLibelle(o.observations);
+    if (pO) return pO;
+  }
   if (o.periode && /^\d{4}-\d{2}$/.test(o.periode)) return o.periode;
   if (o.mois && /^\d{4}-\d{2}$/.test(o.mois)) return o.mois;
   if (o.apMoisDeduction && /^\d{4}-\d{2}$/.test(o.apMoisDeduction)) return o.apMoisDeduction;
-  if (o.libelle) {
-    var p = csExtractPeriodeFromLibelle(o.libelle);
-    if (p) return p;
-  }
   return (o.date || '').substring(0, 7);
 }
 function updatePeriodeVisibility() {
@@ -6421,10 +6430,16 @@ var local = DB.get(key);
         var cloudStr = JSON.stringify(data[key]);
         var localStr = JSON.stringify(local);
         /* Objet partage : on fusionne au lieu d'ecraser, sinon une copie cloud
-           incomplete (module ouvert ailleurs) efface des donnees locales. */
+           incomplete (module ouvert ailleurs) efface des donnees locales.
+           ATTENTION à l'ordre : mergeObjetPartage(cloud, local) donne la
+           priorite au SECOND argument. La branche « cle sale » appelle donc
+           mergeObjetPartage(data[key], _dl) pour que le local gagne ; meme
+           ordre obligatoire ici, sinon le cloud ecrasait le local des que la
+           cle n'etait plus sale — c'est ce qui faisait revenir les 8 articles
+           de pointage absents de l'Index, pousses par un autre poste. */
         if (data[key] && typeof data[key] === 'object' && !Array.isArray(data[key])
             && local && typeof local === 'object' && !Array.isArray(local)) {
-          var _mgPartage = mergeObjetPartage(local, data[key]);
+          var _mgPartage = mergeObjetPartage(data[key], local);
           if (JSON.stringify(_mgPartage) !== localStr) { DB.set(key, _mgPartage); changed = true; }
           continue;
         }
@@ -31433,10 +31448,20 @@ function editCaisseCollectifNewUI(opId) {
     if (gid) { for (gi = 0; gi < opsAll.length; gi++) { if (opsAll[gi].groupeId === gid && (!_caisseEdit || opsAll[gi].caisseId === _caisseEdit)) groupOps.push(opsAll[gi]); } }
     if (groupOps.length === 0 && pieceNo) { for (gi = 0; gi < opsAll.length; gi++) { if (!opsAll[gi].groupeId && opsAll[gi].numeroPiece === pieceNo && (!_caisseEdit || opsAll[gi].caisseId === _caisseEdit)) groupOps.push(opsAll[gi]); } }
     if (groupOps.length === 0) groupOps.push(masterOp);
-    /* Sécurité : tout membre du lot doit avoir une ligne (sinon repli ancien éditeur, aucune perte) */
-    var _vis = {}, _emps = getEmployes() || [], ei;
+    /* Sécurité : un membre hors période ne doit plus BLOQUER toute l'édition.
+       On l'annonçait par « Remise collective non éditable pour cette période »,
+       sans explication : l'utilisateur ne pouvait plus corriger sa pièce du
+       mois de juillet alors qu'il travaille en octobre. On ouvre, et on
+       signale les employés hors période. */
+    var _vis = {}, _horsPeriode = [], _emps = getEmployes() || [], ei;
     for (ei = 0; ei < _emps.length; ei++) { try { if ((typeof _empVisibleMonthI !== 'function') || _empVisibleMonthI(_emps[ei])) _vis[_emps[ei].id] = true; } catch(eV) { _vis[_emps[ei].id] = true; } }
-    for (gi = 0; gi < groupOps.length; gi++) { var _bid = groupOps[gi].beneficiaireId; if (_bid && !_vis[_bid]) return false; }
+    for (gi = 0; gi < groupOps.length; gi++) {
+      var _bid = groupOps[gi].beneficiaireId;
+      if (_bid && !_vis[_bid] && _horsPeriode.indexOf(_bid) === -1) _horsPeriode.push(_bid);
+    }
+    if (_horsPeriode.length) {
+      try { console.warn('[Remise collective] employés hors période courante :', _horsPeriode.join(', ')); } catch (eHP) {}
+    }
     /* Contexte édition (sinon la sauvegarde créerait un doublon) */
     window._csEditId = '';
     window._csEditingId = '';
@@ -31471,9 +31496,22 @@ function editCaisseCollectifNewUI(opId) {
     setV('csTiers', masterOp.observations || ((fiches.length > 0 && fiches[0].notes) ? fiches[0].notes : ''));
     var _f0 = fiches.length > 0 ? fiches[0] : null;
     var _duree = (_f0 && _f0.dureeMois) || 0;
-    var _moisDed = masterOp.apMoisDeduction || ((_f0 && _f0.moisDeduction) ? _f0.moisDeduction : '') || (window._csSelYear + '-' + window._csSelMonth);
+    /* Mois de la PIÈCE : le libellé fait foi (« … /Mois de Juillet 2026 »).
+       On le préfère à apMoisDeduction, qui pouvait rester sur un autre mois et
+       faisait basculer l'édition vers le mois courant. */
+    var _moisPiece = '';
+    try { _moisPiece = (typeof _apMoisDepuisLibelle === 'function') ? (_apMoisDepuisLibelle(masterOp.libelle || '') || _apMoisDepuisLibelle(masterOp.observations || '') || '') : ''; } catch (eMP) {}
+    if (!_moisPiece) _moisPiece = masterOp.periode || '';
+    var _moisDed = _moisPiece || masterOp.apMoisDeduction || ((_f0 && _f0.moisDeduction) ? _f0.moisDeduction : '') || (window._csSelYear + '-' + window._csSelMonth);
     setV('csAPDuree', _duree);
     setV('csAPMoisDeduction', _moisDed);
+    /* Champ « Mois » global : il doit être REMPLI à l'ouverture, sinon
+       « Appliquer aux cochés » neinosait rien et les lignes gardaient
+       le mois courant. */
+    setV('csGlobMois', _moisDed);
+    if (_horsPeriode.length) {
+      try { toast(_horsPeriode.length + ' employé(s) hors période courante : vérifiez leur mois de prélèvement.', 'info'); } catch (eHO) {}
+    }
     try { if (typeof calcCsAPMensualite === 'function') calcCsAPMensualite(); } catch(eC) {}
     try { if (typeof syncCsCollectifDureeVisibility === 'function') syncCsCollectifDureeVisibility(); } catch(eD) {}
     /* --- Tableau collectif : reconstruire puis pré-remplir --- */
@@ -31483,9 +31521,13 @@ function editCaisseCollectifNewUI(opId) {
     _cb.checked = true;
     toggleCsCollectif();
     var _pre = {};
-    for (fi = 0; fi < fiches.length; fi++) { var _f = fiches[fi]; if (_f.employeId) _pre[_f.employeId] = { montant: _f.montant || 0, mois: _f.moisDeduction || '', moyen: _f.moyen || '', remettant: _f.remettant || '', executant: _f.executant || '', obs: _f.notes || '', duree: _f.dureeMois || 0, frais: 0 }; }
+    /* Toutes les lignes du lot portent le mois de la PIÈCE : auparavant
+       chacune gardait son propre mois (souvent le mois courant), d'où
+       « octobre » sur les lignes alors que la pièce est en juillet. */
+    var _moisLigne = _moisDed || '';
+    for (fi = 0; fi < fiches.length; fi++) { var _f = fiches[fi]; if (_f.employeId) _pre[_f.employeId] = { montant: _f.montant || 0, mois: _moisLigne || _f.moisDeduction || '', moyen: _f.moyen || '', remettant: _f.remettant || '', executant: _f.executant || '', obs: _f.notes || '', duree: _f.dureeMois || 0, frais: 0 }; }
     for (gi = 0; gi < groupOps.length; gi++) { var _go = groupOps[gi]; if (!_go.beneficiaireId || _pre[_go.beneficiaireId]) continue;
-      _pre[_go.beneficiaireId] = { montant: _go.montant || 0, mois: _go.apMoisDeduction || '', moyen: _go.moyenPaiement || '', remettant: _go.remettant || '', executant: _go.executant || '', obs: _go.observations || '', duree: 0, numtrans: _go.numeroTransaction || '', frais: _go.frais || 0 }; }
+      _pre[_go.beneficiaireId] = { montant: _go.montant || 0, mois: _moisLigne || _go.apMoisDeduction || '', moyen: _go.moyenPaiement || '', remettant: _go.remettant || '', executant: _go.executant || '', obs: _go.observations || '', duree: 0, numtrans: _go.numeroTransaction || '', frais: _go.frais || 0 }; }
     var _rows = _tb.querySelectorAll('tr'), _n = 0, _inLot = {};
     for (gi = 0; gi < groupOps.length; gi++) { if (groupOps[gi].beneficiaireId) _inLot[groupOps[gi].beneficiaireId] = true; }
     for (fi = 0; fi < fiches.length; fi++) { if (fiches[fi].employeId) _inLot[fiches[fi].employeId] = true; }
@@ -31667,10 +31709,12 @@ function editCaisseOpSimple(id) {
   if (transEl && o.numeroTransaction) transEl.value = o.numeroTransaction;
   if (tiersEl) tiersEl.value = o.observations || '';
   var periodeMoisEl = document.getElementById('csPeriodeMois');
-  if (periodeMoisEl && typeof csExtractPeriodeFromOp === 'function') {
-    var pExtracted = csExtractPeriodeFromOp(o);
-    if (pExtracted) periodeMoisEl.value = pExtracted;
-  }
+  var _moisOp = (typeof csExtractPeriodeFromOp === 'function') ? csExtractPeriodeFromOp(o) : '';
+  if (periodeMoisEl && _moisOp) periodeMoisEl.value = _moisOp;
+  /* Le champ « mois de prélèvement » doit repartir de la PIÈCE, sinon il
+     restait vide et l'enregistrement retombait sur le mois courant. */
+  var _moisElAP = document.getElementById('csAPMoisDeduction');
+  if (_moisElAP && _moisOp && (o.apType === 'acompte' || o.apType === 'pret')) _moisElAP.value = _moisOp;
   /* Restore montantCharge */
   var chargeEl = document.getElementById('csMontantCharge');
   if (chargeEl) chargeEl.value = o.montantCharge || 0;
@@ -37783,9 +37827,18 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
         }
         if (existingApIdx >= 0) apPrev = apList[existingApIdx];
       }
-      /* Acompte : le mois de deduction est celui de l'operation, pas un champ separe */
-      var apMoisDeduction = (typeOp === 'acompte') ? String(fullDate || '').substring(0, 7) : (document.getElementById('csAPMoisDeduction') ? document.getElementById('csAPMoisDeduction').value : '');
+      /* Acompte : le mois de deduction suit le mois CHOSI à l'écran. Sinon la
+         règle historique (mois de la date de saisie) écrasait le choix, et
+         « Modifier » sur une pièce de septembreDonnait octobre parce que
+         nous sommes en octobre. On ne bascule sur la date que si le champ est
+         vide ou porte exactement le mois de la date (saisie classique). */
+      var _apChoisi = (document.getElementById('csAPMoisDeduction') || {}).value || '';
+      var _moisDateOp = String(fullDate || '').substring(0, 7);
+      var _apMoisFinal = (typeOp === 'acompte')
+        ? ((/^\d{4}-\d{2}$/.test(_apChoisi) && _apChoisi !== _moisDateOp) ? _apChoisi : _moisDateOp)
+        : _apChoisi;
       /* En modification, un mois choisi deliberement (moisManuel) n'est jamais ecrase. */
+      var apMoisDeduction = _apMoisFinal;
       if (existingApIdx >= 0 && typeOp === 'acompte') {
         try {
           if (apPrev && apPrev.moisManuel === true && /^\d{4}-\d{2}$/.test(apPrev.moisDeduction || '')) apMoisDeduction = apPrev.moisDeduction;

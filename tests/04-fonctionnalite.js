@@ -11027,6 +11027,87 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Synchro cloud : le local garde la main sur les objets partages (mdb_paye)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* mergeObjetPartage(cloud, local) : la priorite va au SECOND argument.
+         applySnapshot l'appelait (local, data[key]) dans sa branche normale :
+         le CLOUD gagnait. Consequence : le miroir pointage (16 articles) etait
+         reecrase par le jeu ancien (24) des qu'un autre poste poussait. */
+      var fusion = mergeObjetPartage(
+        { articlesMontage: [{ code: 'A' }, { code: 'B' }, { code: 'C' }, { code: 'D' }], autre: 'cloud' },
+        { articlesMontage: [{ code: 'A' }], autre: 'local' }
+      );
+      var gardeLocal = Array.isArray(fusion.articlesMontage) && fusion.articlesMontage.length === 1
+        && fusion.articlesMontage[0].code === 'A' && fusion.autre === 'local';
+      /* aucune section du cloud ne doit disparaitre */
+      var gardeSections = Object.prototype.hasOwnProperty.call(fusion, 'articlesMontage');
+      (gardeLocal && gardeSections)
+        ? 'OK : le local prime (1 article garde) et les sections du cloud restent mergees'
+        : 'ECHEC local=' + gardeLocal + ' sections=' + gardeSections + ' fusion=' + JSON.stringify(fusion)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage : un article absent de l\u2019Index relance automatiquement le miroir strict',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Le pointage affichait 24 articles alors que le miroirannonait 16 :
+         un poste réécrivait son ancien jeu et le cloud le réimposait. */
+      var existe = (typeof _ptPfListeContientDesExtras === 'function');
+      var srcLoad = loadArticlesMontage.toString();
+      var declenche = /_ptPfListeContientDesExtras\\(\\)/.test(srcLoad);
+      var protegeVide = /Index vide/.test(_ptPfListeContientDesExtras ? _ptPfListeContientDesExtras.toString() : '');
+      (existe && declenche && protegeVide)
+        ? 'OK : les extras relancent le miroir, et un Index vide ne purge rien'
+        : 'ECHEC existe=' + existe + ' declenche=' + declenche + ' protegeVide=' + protegeVide
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : le mois choisi reste le mois choisi en modification (pas le mois courant)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Le libellé porte le mois réel (« /Mois de Juillet 2026 ») mais
+         apMoisDeduction gardait un ancien mois : il était testé AVANT le
+         libellé, donc « Modifier » repartait sur ce mauvais mois (octobre
+         parce que nous sommes en octobre). */
+      var src = csExtractPeriodeFromOp.toString();
+      var libelleEnTete = src.indexOf('csExtractPeriodeFromLibelle(o.libelle)') < src.indexOf('o.apMoisDeduction');
+      var bon = (csExtractPeriodeFromOp({ libelle: 'ACOMPTE/SALAIRE/Mois de Juillet 2026', apMoisDeduction: '2026-10', date: '2026-08-09' }) === '2026-07');
+      var srcSave = saveCaisse.toString();
+      var moisChoisiGagne = srcSave.indexOf('_apMoisFinal') !== -1;
+      (libelleEnTete && bon && moisChoisiGagne)
+        ? 'OK : le libellé fait foi (2026-07) et le mois choisi est prioritaire a l\\'enregistrement'
+        : 'ECHEC libelleEnTete=' + libelleEnTete + ' bon=' + bon + ' moisChoisiGagne=' + moisChoisiGagne
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Remise collective : le mois de la piece est repris dans le modal et sur les lignes',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = editCaisseCollectifNewUI.toString();
+      /* 1) le champ « Mois » global etait vide a l'ouverture ;
+         2) les lignes gardaient le mois courant ;
+         3) un employe hors periode bloquait toute l'edition avec un message
+            incomprehensible (« non editable pour cette periode »). */
+      var globalRempli = /setV\\('csGlobMois'/.test(src);
+      var moisPiece = /_moisPiece/.test(src);
+      var lignes = /mois: _moisLigne/.test(src);
+      var pasDeBlocage = !/if \\(_bid && !_vis\\[_bid\\]\\) return false;/.test(src);
+      var enConsoleSeulement = /console\\.warn/.test(src);
+      (globalRempli && moisPiece && lignes && pasDeBlocage && enConsoleSeulement)
+        ? 'OK : mois global pre-rempli, lignes alignees sur le mois de la piece, aucun blocage'
+        : 'ECHEC global=' + globalRempli + ' moisPiece=' + moisPiece + ' lignes=' + lignes + ' pasDeBlocage=' + pasDeBlocage + ' console=' + enConsoleSeulement
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse : une remise collective en cours de modification met a jour la piece au lieu d\u2019en creer',
     app: 'index.html', store: storeRealiste,
     code: `
