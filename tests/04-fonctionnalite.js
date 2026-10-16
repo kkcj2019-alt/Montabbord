@@ -10219,9 +10219,38 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       window._payeDerniereChargeKo = 1554;
       var dGros = _payeDelaiMini();
       window._payeDerniereChargeKo = 0;
-      (d0 === 20000 && dPetit === 3000 && dMoyen === 8000 && dGros === 20000)
-        ? 'OK : inconnu=20s, 50Ko=3s, 400Ko=8s, 1554Ko=20s'
+      (d0 === 12000 && dPetit === 2000 && dMoyen === 5000 && dGros === 12000)
+        ? 'OK : inconnu=12s, 50Ko=2s, 400Ko=5s, 1554Ko=12s'
         : 'ECHEC defaut=' + d0 + ' petit=' + dPetit + ' moyen=' + dMoyen + ' gros=' + dGros
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro reception : le filtre tombstone generique protege toutes les listes (pas 2-3 cles)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      DB.set('mdb_deletedBLs', [{ id: 'blX', deletedAt: '2026-10-01' }]);
+      localStorage.setItem('mdb_tombstones', JSON.stringify({ mdb_notes: { n1: 123 } }));
+      var f1 = _syncFiltreTombstonesGenerique('mdb_bl', [{ id: 'blX' }, { id: 'blY' }]);
+      var f2 = _syncFiltreTombstonesGenerique('mdb_notes', [{ id: 'n1' }, { id: 'n2' }]);
+      var f3 = _syncFiltreTombstonesGenerique('mdb_bl', 'pas-un-tableau');
+      ((f1.length === 1 && f1[0].id === 'blY') && (f2.length === 1 && f2[0].id === 'n2') && f3 === 'pas-un-tableau')
+        ? 'OK : blX et n1 filtres, non-tableau intact'
+        : 'ECHEC bl=' + JSON.stringify(f1) + ' notes=' + JSON.stringify(f2)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro reception : en conflit le cloud gagne (convergence), a la poussee le local gagne',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var rec = syncUnionTableaux([{ id: 'a', v: 1 }], [{ id: 'a', v: 2 }], true);
+      var pous = syncUnionTableaux([{ id: 'a', v: 1 }], [{ id: 'a', v: 2 }]);
+      (rec.length === 1 && rec[0].v === 2 && pous.length === 1 && pous[0].v === 1)
+        ? 'OK : reception=cloud (2), poussee=local (1)'
+        : 'ECHEC reception=' + JSON.stringify(rec) + ' poussee=' + JSON.stringify(pous)
     `,
     attenduPrefixe: 'OK'
   });

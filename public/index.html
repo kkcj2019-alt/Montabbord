@@ -2052,7 +2052,7 @@ function pushToCloud() {
         /* Autres tableaux : union additive (cle metier, id, signature) — les
            lignes cloud sans id ne sont plus abandonnees a la poussee. */
         var mergedArr = (k === 'mdb_employes') ? mergeEmployesPreferRecent(lv, base) : syncUnionTableaux(lv, base);
-        data[k] = stripTombstoned(k, mergedArr);
+        data[k] = _syncFiltreTombstonesGenerique(k, mergedArr);
       } else if (lv && typeof lv === 'object' && !Array.isArray(lv) && cloud[k] && typeof cloud[k] === 'object' && !Array.isArray(cloud[k])) {
         /* Objet partage (mdb_paye, mdb_production) : NE JAMAIS renvoyer la copie
            locale en bloc. L'app principale peut etre perimee (module Paie ou
@@ -3025,6 +3025,23 @@ function stripTombstoned(entityKey, arr) {
     if (r && r.id && t[r.id]) continue;
     out.push(r);
   }
+  return out;
+}
+/* Filtre tombstone GENERIQUE (reception + poussee) : applique TOUS les
+   mecanismes de suppression connus au lieu de 2-3 cles en dur. Sans ca,
+   une ligne supprimee sur un poste ressuscitait via la copie d'un autre
+   poste des qu'elle n'etait pas dans la liste des cles protegees. */
+function _syncFiltreTombstonesGenerique(key, arr) {
+  if (!Array.isArray(arr)) return arr;
+  var out = stripTombstoned(key, arr);
+  try {
+    if (key === 'mdb_operationsCaisse') out = removeDeletedOperations(out);
+    else if (key === 'mdb_bl') out = removeByTombstone('mdb_deletedBLs', out);
+    else if (key === 'mdb_factures') out = removeByTombstone('mdb_deletedFactures', out);
+    else if (key === 'mdb_proformas') out = removeByTombstone('mdb_deletedProformas', out);
+    else if (key === 'mdb_tauxPerteJour') out = removeByTombstone('mdb_deletedTauxPerte', out);
+    else if (key === 'mdb_stocks') out = removeByTombstone('mdb_deletedStocks', out);
+  } catch (eF) {}
   return out;
 }
 function mergeTombstonesFromCloud(cloudT) {
@@ -6256,7 +6273,25 @@ function startRealtimeSync(uid) {
     for (var i = 0; i < DATA_KEYS.length; i++) {
       var key = DATA_KEYS[i];
       if (data[key] === undefined || data[key] === null) continue;
-      if (_dirtyKeys[key] && !_loadingCloud) continue;
+      /* Cle sale = saisie locale pas encore poussee : avant on IGNORAIT le
+         distant, donc si le push restait bloque la page divergeait pour
+         toujours. Maintenant on FUSIONNE (union additive, le local gagne en
+         conflit) au lieu d'ignorer : rien ne se perd des deux cotes et les
+         postes convergent des que le push passe. */
+      if (_dirtyKeys[key] && !_loadingCloud) {
+        try {
+          var _dl = DB.get(key);
+          if (Array.isArray(_dl) && Array.isArray(data[key])) {
+            var _dm = syncUnionTableaux(_dl, data[key]);
+            _dm = _syncFiltreTombstonesGenerique(key, _dm);
+            if (JSON.stringify(_dm) !== JSON.stringify(_dl)) { DB.set(key, _dm); changed = true; }
+          } else if (_dl && data[key] && typeof _dl === 'object' && typeof data[key] === 'object' && !Array.isArray(_dl) && !Array.isArray(data[key])) {
+            var _do = mergeObjetPartage(data[key], _dl);
+            if (JSON.stringify(_do) !== JSON.stringify(_dl)) { DB.set(key, _do); changed = true; }
+          }
+        } catch (eDG) {}
+        continue;
+      }
       if (key === 'mdb_tombstones') { mergeTombstonesFromCloud(data[key]); continue; }
       if (key === 'mdb_reportReserve') {
         var _rrLocal = DB.get(key);
@@ -6310,33 +6345,20 @@ var local = DB.get(key);
           continue;
         }
         if (localStr !== cloudStr) {
-        /* Merge arrays without losing local-only records; cloud wins same IDs. */
+        /* Reception alignee sur la poussee : union additive par cle metier
+           (syncUnionTableaux, le cloud gagne en conflit) + filtre tombstone
+           GENERIQUE. Avant, la reception utilisait mergeArraysPreferCloud
+           (id uniquement) avec filtre sur 2-3 cles : toute suppression sur
+           une autre liste ressuscitait via la copie d'un autre poste. */
         if (Array.isArray(data[key]) && Array.isArray(local) && local.length > 0 && data[key].length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
-           var mergedRealtime = (key === 'mdb_employes') ? mergeEmployesPreferRecent(local, data[key]) : mergeArraysPreferCloud(local, data[key]);
-           if (key === 'mdb_operationsCaisse') mergedRealtime = removeDeletedOperations(mergedRealtime);
-           if (key === 'mdb_acomptesPrets') mergedRealtime = stripTombstoned(key, mergedRealtime);
-           if (key === 'mdb_reglements') mergedRealtime = stripTombstoned(key, mergedRealtime);
-           if (key === 'mdb_bl') mergedRealtime = removeByTombstone('mdb_deletedBLs', mergedRealtime);
-           if (key === 'mdb_factures') mergedRealtime = removeByTombstone('mdb_deletedFactures', mergedRealtime);
-              if (key === 'mdb_proformas') mergedRealtime = removeByTombstone('mdb_deletedProformas', mergedRealtime);
-              if (key === 'mdb_tauxPerteJour') mergedRealtime = removeByTombstone('mdb_deletedTauxPerte', mergedRealtime);
-           if (key === 'mdb_stocks') mergedRealtime = removeByTombstone('mdb_deletedStocks', mergedRealtime);
-           if (key === 'mdb_employes') mergedRealtime = stripTombstoned(key, mergedRealtime);
+           var mergedRealtime = (key === 'mdb_employes') ? mergeEmployesPreferRecent(local, data[key]) : syncUnionTableaux(local, data[key], true);
+           mergedRealtime = _syncFiltreTombstonesGenerique(key, mergedRealtime);
            if (key === 'mdb_dashboardCreances') { var seen = {}; for (var dci3 = mergedRealtime.length - 1; dci3 >= 0; dci3--) { if (!mergedRealtime[dci3].id) mergedRealtime[dci3].id = 'dcr_' + DB.genId(); var dk2 = mergedRealtime[dci3].clientId || mergedRealtime[dci3].id; if (seen[dk2]) mergedRealtime.splice(dci3, 1); else seen[dk2] = true; } }
            if (key === 'mdb_dashboardDettesF') { var seenF2 = {}; for (var dfi4 = mergedRealtime.length - 1; dfi4 >= 0; dfi4--) { if (!mergedRealtime[dfi4].id) mergedRealtime[dfi4].id = 'dfm_' + DB.genId(); var dkF2 = mergedRealtime[dfi4].fournisseurId || mergedRealtime[dfi4].id; if (seenF2[dkF2]) mergedRealtime.splice(dfi4, 1); else seenF2[dkF2] = true; } }
            DB.set(key, mergedRealtime);
         } else {
           var rtVal = data[key];
-          if (Array.isArray(rtVal)) {
-            if (key === 'mdb_acomptesPrets') rtVal = stripTombstoned(key, rtVal);
-            if (key === 'mdb_reglements') rtVal = stripTombstoned(key, rtVal);
-            if (key === 'mdb_bl') rtVal = removeByTombstone('mdb_deletedBLs', rtVal);
-            if (key === 'mdb_factures') rtVal = removeByTombstone('mdb_deletedFactures', rtVal);
-              if (key === 'mdb_proformas') rtVal = removeByTombstone('mdb_deletedProformas', rtVal);
-              if (key === 'mdb_tauxPerteJour') rtVal = removeByTombstone('mdb_deletedTauxPerte', rtVal);
-            if (key === 'mdb_stocks') rtVal = removeByTombstone('mdb_deletedStocks', rtVal);
-            if (key === 'mdb_employes') rtVal = stripTombstoned(key, rtVal);
-          }
+          if (Array.isArray(rtVal)) rtVal = _syncFiltreTombstonesGenerique(key, rtVal);
           DB.set(key, rtVal);
         }
         changed = true;
@@ -6368,7 +6390,7 @@ var local = DB.get(key);
      (ce qui faisait perdre definitivement une saisie distante), on les met en attente
      et on les applique des que la fenetre est passee. */
   var _rtPendingDoc = null, _rtTimer = null;
-  var _rtWindow = 5000;
+  var _rtWindow = 2000;
   function scheduleApply(doc) {
     _rtPendingDoc = doc;
     if (_rtTimer) return;

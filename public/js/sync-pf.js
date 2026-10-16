@@ -41,6 +41,41 @@ function triPfCanonique(code, desig) {
   return String(code).trim().toUpperCase();
 }
 
+/* Tombstones PF : une suppression dans UNE application ne doit jamais
+   ressusciter via l'harmonisation qui reconstruit Production/Paye depuis la
+   Nomenclature. Sans ca, supprimer dans Production puis re-synchroniser
+   re-ajoutait l'article (la Nomenclature l'avait encore). */
+var TRI_PF_TOMBSTONE_KEY = 'mdb_pf_tombstones';
+function triPfTombstonesLire() {
+  try {
+    var raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(TRI_PF_TOMBSTONE_KEY) : null;
+    var t = raw ? JSON.parse(raw) : {};
+    return (t && typeof t === 'object' && !Array.isArray(t)) ? t : {};
+  } catch (e) { return {}; }
+}
+function triPfEstSupprime(code) {
+  if (!code) return false;
+  try { return !!triPfTombstonesLire()[String(code).trim().toUpperCase()]; } catch (e) { return false; }
+}
+function triPfMarquerSupprime(code) {
+  if (!code) return;
+  try {
+    var t = triPfTombstonesLire();
+    t[String(code).trim().toUpperCase()] = Date.now();
+    if (typeof localStorage !== 'undefined') localStorage.setItem(TRI_PF_TOMBSTONE_KEY, JSON.stringify(t));
+  } catch (e) {}
+}
+function triPfAnnulerSuppression(code) {
+  /* Re-ajouter (sauvegarder) un code annule sa suppression : sinon un article
+     supprime par erreur serait impossible a recreer. */
+  if (!code) return;
+  try {
+    var t = triPfTombstonesLire();
+    var c = String(code).trim().toUpperCase();
+    if (t[c]) { delete t[c]; if (typeof localStorage !== 'undefined') localStorage.setItem(TRI_PF_TOMBSTONE_KEY, JSON.stringify(t)); }
+  } catch (e) {}
+}
+
 /**
  * Lit et fusionne les Produits Finis des 3 applications, élimine les doublons,
  * et renvoie la liste canonique uniforme.
@@ -149,8 +184,18 @@ function triSyncGetProduitsFinis() {
  * 3. mdb_paye.articlesMontage
  */
 function triSyncHarmoniserTout(forceList) {
-  var list = Array.isArray(forceList) ? forceList : triSyncGetProduitsFinis();
-  if (!list.length) return;
+  var _force = Array.isArray(forceList);
+  var list = _force ? forceList : triSyncGetProduitsFinis();
+  /* Respecter les suppressions : un code tombstone ne doit jamais etre
+     re-ajoute par l'harmonisation (sauf re-sauvegarde explicite qui a leve
+     le tombstone via triPfAnnulerSuppression). */
+  try {
+    list = (list || []).filter(function (x) { return x && x.code && !triPfEstSupprime(x.code); });
+  } catch (eT) {}
+  /* Liste vide = rien a propager, sauf ordre explicite de suppression
+     (forceList, meme vide) qui doit vider Production/Paye. Avant, le
+     `return` premature empechait de propager la suppression du dernier PF. */
+  if (!list.length && !_force) return;
 
   var an = new Date().getFullYear();
   var canonSet = {};
@@ -272,6 +317,10 @@ function triSyncSupprimerProduitFini(codeOrId) {
   var cStr = String(codeOrId).trim().toUpperCase();
   var canon = triPfCanonique(cStr, '');
 
+  /* Memoriser la suppression : sans tombstone, la prochaine harmonisation
+     reconstruisait l'article depuis la Nomenclature restante. */
+  try { if (canon) triPfMarquerSupprime(canon); } catch (eTS) {}
+
   var list = triSyncGetProduitsFinis();
   var filtered = list.filter(function (x) {
     return x.code !== canon && triPfNorm(x.code) !== triPfNorm(cStr);
@@ -314,11 +363,15 @@ function triSyncSupprimerProduitFini(codeOrId) {
 function triSyncSauvegarderProduitFini(art, oldCode) {
   if (!art || !art.code) return;
   var canon = triPfCanonique(art.code, art.designation);
+  /* Re-creation explicite : lever le tombstone, sinon l'harmonisation
+     filtrerait le code qu'on est en train de re-ajouter. */
+  try { triPfAnnulerSuppression(canon); } catch (eTA) {}
   var list = triSyncGetProduitsFinis();
 
   if (oldCode) {
     var oldCanon = triPfCanonique(oldCode, '');
     if (oldCanon && oldCanon !== canon) {
+      try { triPfMarquerSupprime(oldCanon); } catch (eTO) {}
       list = list.filter(function (x) {
         return x.code !== oldCanon && triPfNorm(x.code) !== triPfNorm(oldCode);
       });
@@ -365,6 +418,8 @@ if (typeof window !== 'undefined') {
     window.triSyncHarmoniserTout = triSyncHarmoniserTout;
     window.triSyncSupprimerProduitFini = triSyncSupprimerProduitFini;
     window.triSyncSauvegarderProduitFini = triSyncSauvegarderProduitFini;
+    window.triPfTombstonesLire = triPfTombstonesLire;
+    window.triPfEstSupprime = triPfEstSupprime;
   } catch (eW) {}
 
   /* Auto-harmonisation au demarrage : nettoie les orphelins et aligne
