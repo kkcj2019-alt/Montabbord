@@ -10963,6 +10963,70 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Recherche globale : un montant saisi retrouve l\u2019operation (960 trouve 960000)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* La recherche globale n'indexait que du texte : taper « 960 » ne
+         trouvait pas une piece de 960 000, alors que le filtre Caisse, lui,
+         indexe deja o.montant. */
+      var src = globalSearchInput.toString();
+      var aide = _gsIdxMontant.toString();
+      var idx = (function(){ DB.set('mdb_operationsCaisse', [{ id:'o960', date:'2026-10-13', numeroPiece:'S71101', code:'ACOMPTE', libelle:'Acompte', montant:960000, sens:'sortie', beneficiaireNom:'ABOGOU', moyenPaiement:'Wave', numeroTransaction:'0748411007', caisseId:'S71101' }]);
+        return _gsIdxMontant(960000); })();
+      /* « 960 » doit etre un sous-chaine de l'index du montant.
+         Comportement volontairement identique au filtre Caisse (sous-chaine) :
+         « 250 » retrouve donc aussi 2500 — c'est le contrat attendu. */
+      var idx960 = _gsIdxMontant(960000).indexOf('960') !== -1;
+      var idxGroupe = _gsIdxMontant(960000).indexOf('960 000') !== -1;
+      var idxPoint = _gsIdxMontant(960000).indexOf('960.000') !== -1;
+      (idx960 && idxGroupe && idxPoint
+        && src.indexOf('_gsIdxMontant') !== -1 && src.indexOf('qNum') !== -1)
+        ? 'OK : 960 / 960000 / 960 000 / 960.000 retomment sur la meme ecriture'
+        : 'ECHEC idx960=' + idx960 + ' groupe=' + idxGroupe + ' point=' + idxPoint
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Acomptes et prêts : le mois de prélèvement se change directement dans les DEUX cas',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var srcRendu = renderAcomptesPrets.toString();
+      /* Avant : <input type="month"> seulement pour type === 'acompte',
+         les prêts affichaient du texte figé. */
+      var brancheAncienne = /a4\\.type === 'acompte'\\) \\{\\s*html \\+= '<td><input type="month"/.test(srcRendu);
+      var commun = /apChangerMois\\(/.test(srcRendu) && /type="month"/.test(srcRendu);
+      var srcChanger = apChangerMois.toString();
+      /* un prêt décale aussi ses échéances non prélevées */
+      var decale = /type === 'pret'/.test(srcChanger) && /_apMoisShift/.test(srcChanger) && /preleve === true/.test(srcChanger);
+      (commun && !brancheAncienne && decale)
+        ? 'OK : champ mois commun acompte+pret, et le plan d\u2019échéances suit le décalage'
+        : 'ECHEC commun=' + commun + ' ancienneBranche=' + brancheAncienne + ' decale=' + decale
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Alertes de deduction : grille de fiches (ni tableau etire, ni tableau tasse a gauche)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = renderAcomptesPrets.toString();
+      /* width:auto + table-layout:fixed tasseait le tableau a gauche ;
+         width:100% l'etirait sur toute la largeur avec des trous. */
+      var cass = false;
+      cass = cass || /table-layout:fixed;width:auto/.test(src);
+      cass = cass || /min-width:min\\(/.test(src);
+      var grille = /grid-template-columns:repeat\\(auto-fill,minmax\\(/.test(src);
+      var scroll = /max-height:340px;overflow:auto/.test(src);
+      var synthese = src.indexOf('_alertTotalReste') !== -1 && /alertItems\\.length/.test(src);
+      (!cass && grille && scroll && synthese)
+        ? 'OK : grille responsive avec scroll, plus de largeur cassee'
+        : 'ECHEC casse=' + cass + ' grille=' + grille + ' scroll=' + scroll + ' synthese=' + synthese
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Compte fournisseur : le detail deroule affiche Remettant, Executant, Moyen, N deg. transaction et Observations',
     app: 'index.html', store: storeRealiste,
     code: `
