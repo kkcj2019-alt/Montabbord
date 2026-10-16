@@ -3464,7 +3464,7 @@
               <h3 style="margin-bottom: 0.5rem; font-size: 0.9rem">
                 Articles de Montage (Production) — Produits Finis
                 <span id="am-count-badge" style="font-size:0.75rem;font-weight:700;background:#dbeafe;color:#1e40af;border-radius:6px;padding:2px 10px;margin-left:8px;display:inline-block">0 articles</span>
-              </h3><div style="margin-bottom:0.8rem"><button type="button" class="btn btn-sm" onclick="harmoniserArticlesMontageAvecProduitsFinis(true);loadArticlesMontage()" style="background:#047857;color:#fff;font-size:0.75rem;font-weight:800;padding:5px 12px;border-radius:6px;border:none;box-shadow:0 1px 3px rgba(4,120,87,.25);cursor:pointer" title="Détecter intelligemment et synchroniser avec les Produits Finis de la Nomenclature et de l'Exploitation">✨ Synchroniser avec les Produits Finis</button> <button type="button" class="btn btn-sm" onclick="syncArticlesMontageDepuisIndex()" style="background:#1d4ed8;color:#fff;font-size:0.75rem;font-weight:800;padding:5px 12px;border-radius:6px;border:none;box-shadow:0 1px 3px rgba(29,78,216,.25);cursor:pointer" title="Recopier EXACTEMENT la Nomenclature (Index, source unique) : ajoute les produits manquants, retire ceux qui n'y sont plus. Tarifs et cases prime conservés.">🔄 Synchro depuis l’Index</button></div>
+              </h3><div style="margin-bottom:0.8rem"><button type="button" class="btn btn-sm" onclick="syncArticlesMontageDepuisIndex()" style="background:#1d4ed8;color:#fff;font-size:0.75rem;font-weight:800;padding:5px 12px;border-radius:6px;border:none;box-shadow:0 1px 3px rgba(29,78,216,.25);cursor:pointer" title="Recopier EXACTEMENT la Nomenclature (Index, source unique) : ajoute les produits manquants, retire ceux qui n'y sont plus. Tarifs et cases prime conservés.">🔄 Synchro depuis l’Index</button></div>
               </h3>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-6px 0 12px;padding:9px 12px;background:#fdf2f8;border:1px solid #fbcfe8;border-radius:10px">
                 <span style="font-size:.76rem;color:#9d174d;font-weight:700">🏷 Prix unitaires</span>
@@ -12720,7 +12720,7 @@ function showSection(id) {
          recopie EXACTEMENT la Nomenclature — ajoute les manquants, retire
          ceux qui n'y sont plus (10 dans l'Index = 10 ici). Les tarifs et
          cases prime existants sont conserves. N'ecrit QUE mdb_paye. */
-      function syncArticlesMontageDepuisIndex() {
+      function syncArticlesMontageDepuisIndex(silent) {
         var list = null;
         try {
           if (typeof triSyncGetProduitsFinis === 'function') list = triSyncGetProduitsFinis();
@@ -12789,7 +12789,7 @@ function showSection(id) {
         try { loadArticlesMontage(); } catch (eR) {}
         try {
           var n = ams.length;
-          toast('Liste calée sur l’Index : ' + n + ' produit(s) fini(s).', 'success');
+          if (!silent) toast('Liste calée sur l’Index : ' + n + ' produit(s) fini(s).', 'success');
         } catch (eT2) {}
         return ams.length;
       }
@@ -12890,7 +12890,11 @@ function showSection(id) {
       }
 
       function loadArticlesMontage() {
-        try { if (!window._amHarmoniseInit) { window._amHarmoniseInit = true; harmoniserArticlesMontageAvecProduitsFinis(false); } } catch (eH) {}
+        /* Premier affichage : on cale sur l'INDEX (source unique). L'ancien
+           harmoniserArticlesMontageAvecProduitsFinis fusionnait la copie
+           Exploitation et reintroduisait des produits absents de l'Index
+           (16 dans l'Index mais 24 dans le pointage). */
+        try { if (!window._amHarmoniseInit) { window._amHarmoniseInit = true; syncArticlesMontageDepuisIndex(true); } } catch (eH) {}
         var allAms = getArticlesMontage();
         /* Mise a jour du badge compteur */
         try { var _badge = document.getElementById("am-count-badge"); if (_badge) _badge.textContent = allAms.length + " article" + (allAms.length > 1 ? "s" : ""); } catch (eCnt) {}
@@ -18380,7 +18384,11 @@ html +=
             if (deptSel && (p.service || "Non défini").toLowerCase() !== deptSel.toLowerCase()) return false;
             if (tsel === "Forfait" && !ptEstForfait(p)) return false;
             if (tsel === "Journalier" && ptEstForfait(p)) return false;
-            if (typeof ptHideStandard !== "undefined" && ptHideStandard && empCategorie(p) === "titulaire") return false;
+            /* "Masquer Standard" = masquer le pointage forfait (le regime
+               standard 173.33h), PAS les autres : avant on filtrait sur le
+               contrat ("titulaire"), ce qui cachait aussi les CDI en mode
+               journalier. Le mode de pointage fait foi, comme le filtre Type. */
+            if (typeof ptHideStandard !== "undefined" && ptHideStandard && ptEstForfait(p)) return false;
             if (searchQ) {
               var haystack = ((p.matricule || "") + " " + (p.nom || "") + " " + (p.prenoms || "") + " " + (p.fonction || "") + " " + (p.service || "")).toLowerCase();
               if (!ptMatchSearch(haystack, searchQ)) return false;
@@ -31904,6 +31912,40 @@ function panierVerserJour() {
       }
       /* ===== MODALE : BARRES DE LA PRIME DE PRODUCTION ===== */
 /* Résumé barème dans Données de Salaire (onglet Articles Montage). */
+      /* Tranches a afficher dans le resume : celles de la VERSION du mois
+         affiche (et non cfg.bandes, liste generale figee), en supprimant les
+         bornes repetees / non croissantes qui donnaient un resume bancal
+         (« 3000→3000 : ... F/article » en boucle). */
+      function ptPrimeProdBandesResume(mois) {
+        var b = null;
+        try { b = ptPrimeProdBandes(mois || "", ""); } catch (e) {}
+        if (!Array.isArray(b) || !b.length) {
+          try { b = (getPrimeProdConfig() || {}).bandes || []; } catch (e2) { b = []; }
+        }
+        var out = [];
+        var prev = null;  /* derniere borne finie Rencontree */
+        var done = false; /* une tranche sans plafond a deja ete posee */
+        for (var i = 0; i < b.length; i++) {
+          var r = b[i];
+          if (!r || done) continue;
+          var va = (r.jusqu_a === null || r.jusqu_a === undefined || r.jusqu_a === "") ? null : parseFloat(r.jusqu_a);
+          if (va !== null && isNaN(va)) va = null;
+          if (va === null) {
+            out.push({ jusqu_a: null, taux: parseFloat(r.taux) || 0 });
+            done = true;
+            continue;
+          }
+          /* borne identique a la precedente = doublon ; borne inferieure = incoherent */
+          if (prev !== null && va <= prev) continue;
+          out.push({ jusqu_a: va, taux: parseFloat(r.taux) || 0 });
+          prev = va;
+        }
+        if (!out.length) return [];
+        if (out[out.length - 1].jusqu_a !== null) {
+          out.push({ jusqu_a: null, taux: parseFloat(out[out.length - 1].taux) || 0 });
+        }
+        return out;
+      }
       function renderPrimeProdResume() {
         try { renderBarresPanel(); } catch (eB) {}
         var box = document.getElementById("pp-resume");
@@ -31912,16 +31954,14 @@ function panierVerserJour() {
         try {
           cfg = getPrimeProdConfig() || {};
         } catch (eC) {}
-        var b = cfg.bandes || [];
+        var moisEl = document.getElementById("pt-mois");
+        var b = ptPrimeProdBandesResume(moisEl ? moisEl.value : "");
         var txt = "aucune tranche";
         if (b.length) {
           var parts = [];
           for (var i = 0; i < b.length; i++) {
             var de = i === 0 ? 0 : b[i - 1].jusqu_a;
-            var a =
-              b[i].jusqu_a === null || b[i].jusqu_a === undefined || b[i].jusqu_a === ""
-                ? "∞"
-                : b[i].jusqu_a;
+            var a = b[i].jusqu_a === null ? "∞" : b[i].jusqu_a;
             parts.push(de + "→" + a + " : " + (parseFloat(b[i].taux) || 0) + " F/article");
           }
           txt = parts.join(" · ");

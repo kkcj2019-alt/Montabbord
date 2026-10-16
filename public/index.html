@@ -3044,6 +3044,66 @@ function _syncFiltreTombstonesGenerique(key, arr) {
   } catch (eF) {}
   return out;
 }
+/* Reception d'une cle hors DATA_KEYS (miroir de la boucle principale :
+   fusion si sale, union prudente + filtre tombstones, jamais de vide sur
+   du plein). Rend true si le local a change. */
+function _syncAppliquerCleExtra(key, val) {
+  if (val === undefined || val === null) return false;
+  try {
+    if (_dirtyKeys[key] && !_loadingCloud) {
+      var _dl = DB.get(key);
+      if (Array.isArray(_dl) && Array.isArray(val)) {
+        var _dm = syncUnionTableaux(_dl, val);
+        _dm = _syncFiltreTombstonesGenerique(key, _dm);
+        if (JSON.stringify(_dm) !== JSON.stringify(_dl)) { DB.set(key, _dm); return true; }
+      } else if (_dl && val && typeof _dl === 'object' && typeof val === 'object' && !Array.isArray(_dl) && !Array.isArray(val)) {
+        var _do = mergeObjetPartage(val, _dl);
+        if (JSON.stringify(_do) !== JSON.stringify(_dl)) { DB.set(key, _do); return true; }
+      }
+      return false;
+    }
+    var local = DB.get(key);
+    if ((Array.isArray(val) && val.length === 0) && local && (!Array.isArray(local) || local.length > 0)) return false;
+    if (Array.isArray(val) && Array.isArray(local) && local.length > 0 && val.length > 0) {
+      var merged = syncUnionTableaux(local, val, true);
+      merged = _syncFiltreTombstonesGenerique(key, merged);
+      if (JSON.stringify(merged) !== JSON.stringify(local)) { DB.set(key, merged); return true; }
+      return false;
+    }
+    var nv = Array.isArray(val) ? _syncFiltreTombstonesGenerique(key, val) : val;
+    try { if (JSON.stringify(nv) === JSON.stringify(local)) return false; } catch (eJ) {}
+    DB.set(key, nv);
+    return true;
+  } catch (e) { return false; }
+}
+/* Premier remplissage des cles par-utilisateur : si le local est vide et le
+   cloud plein, on prend. Sinon le local gagne (ordonancements personnels). */
+function _syncPremierRemplissage(key, val) {
+  if (val === undefined || val === null) return false;
+  var local = null;
+  try { local = DB.get(key); } catch (e) { local = null; }
+  var videLocal = (local === undefined || local === null || local === '' || (Array.isArray(local) && local.length === 0));
+  if (!videLocal) return false;
+  if (val === '' || val === null || (Array.isArray(val) && val.length === 0)) return false;
+  try { DB.set(key, val); } catch (e2) { return false; }
+  return true;
+}
+/* Balaye les cles cloud par-utilisateur (suffixe variable). */
+function _syncBalayerClesPrefixees(data) {
+  for (var ck in data) {
+    if (!data.hasOwnProperty(ck) || !isSyncable(ck)) continue;
+    var connu = false, di;
+    for (di = 0; di < DATA_KEYS.length; di++) { if (DATA_KEYS[di] === ck) { connu = true; break; } }
+    if (connu || DATA_KEYS_EXTRA.indexOf(ck) !== -1) continue;
+    var pref = false;
+    for (var pi2 = 0; pi2 < DATA_KEY_PREFIXES_PREMIER.length; pi2++) {
+      if (ck.indexOf(DATA_KEY_PREFIXES_PREMIER[pi2]) === 0) { pref = true; break; }
+    }
+    if (!pref) continue;
+    if (ck.indexOf('mdb_pinned_') === 0) continue; /* epingles : schema fav_* horodate */
+    _syncPremierRemplissage(ck, data[ck]);
+  }
+}
 function mergeTombstonesFromCloud(cloudT) {
   if (!cloudT || typeof cloudT !== 'object' || Array.isArray(cloudT)) return;
   var local = getTombstones();
@@ -5875,6 +5935,13 @@ function doLogout() {
 }
 
 var DATA_KEYS = ['mdb_tombstones','mdb_clients','mdb_nomenclature','mdb_bc','mdb_deletedBLs','mdb_deletedFactures','mdb_deletedProformas','mdb_deletedTauxPerte','mdb_deletedOps','mdb_deletedStocks','mdb_bl','mdb_factures','mdb_proformas','mdb_tauxPerteJour','mdb_reglements','mdb_prefinancement','mdb_taches','mdb_comptabilite','mdb_actif','mdb_entreprise','mdb_pinnedClients','mdb_fournisseurs','mdb_dettesFournisseurs','mdb_employes','mdb_codesCaisse','mdb_operationsCaisse','mdb_modelesCaisse','mdb_caisses','mdb_banques','mdb_banqueOperations','mdb_reportReserve','mdb_bankSoldeOverrides','mdb_users','mdb_prodCode','mdb_previsions','mdb_stocks','mdb_creancesDouteuses','mdb_acomptesPrets','mdb_typeElementsAchats','mdb_elementsAchats','mdb_bonsCommandeFournisseurs','mdb_paye','mdb_importHistory','mdb_dashboardCreances','mdb_dashboardDettesF','mdb_notes','mdb_journal_ventes','mdb_actif_hiddenFournisseurs','mdb_actif_pin','mdb_actif_hideZero','mdb_bc_colors','mdb_immobilisations','mdb_echanges','mdb_echangeGroups','mdb_dash_order','mdb_cardPos','mdb_cardQO','mdb_dashSectOrder','mdb_dashboardCreances','mdb_dashboardDettesF','mdb_rh_demandes','mdb_rh_sanctions','mdb_rh_conges','mdb_missions','mdb_production'];
+/* Cles metier ecrites par l'app mais absentes de DATA_KEYS : elles partaient
+   au cloud (DB.set marque sale) sans jamais en revenir -> boucle
+   "donnees locales vides / cloud plein" + bandeau rouge permanent. */
+var DATA_KEYS_EXTRA = ['mdb_alertesRepartition','mdb_factures_hors_prime_ca','mdb_salairesPaiements','mdb_feries'];
+/* Cles par utilisateur (suffixe variable) : premier remplissage uniquement,
+   le local gagne ensuite. Les epingles passent par le schema fav_* horodate. */
+var DATA_KEY_PREFIXES_PREMIER = ['mdb_menuOrder_','mdb_modOrder_','mdb_dash_order_','mdb_cardPos_','mdb_dashSectOrder_','mdb_cardQO_'];
 var _loadingCloud = false;
 
 /* Employés : par id, la version la PLUS RÉCENTE gagne (updatedAt, posé à
@@ -6204,6 +6271,16 @@ entRef.get().then(function(doc) {
             DB.set(key, finalVal);
           }
         }
+        /* Cles hors DATA_KEYS : sinon poussees mais jamais recues (bandeau
+           "locales vides / cloud plein" en boucle). */
+        try {
+          for (var xi = 0; xi < DATA_KEYS_EXTRA.length; xi++) {
+            var xk = DATA_KEYS_EXTRA[xi];
+            if (data[xk] === undefined) continue;
+            _syncAppliquerCleExtra(xk, data[xk]);
+          }
+          _syncBalayerClesPrefixees(data);
+        } catch (eX) {}
       } finally {
         _receivingSnapshot = false;
       }
@@ -6364,6 +6441,15 @@ var local = DB.get(key);
         changed = true;
       }
     }
+    /* Cles hors DATA_KEYS : cf. loadCloudData (bandeau en boucle sinon). */
+    try {
+      for (var xi2 = 0; xi2 < DATA_KEYS_EXTRA.length; xi2++) {
+        var xk2 = DATA_KEYS_EXTRA[xi2];
+        if (data[xk2] === undefined) continue;
+        if (_syncAppliquerCleExtra(xk2, data[xk2])) changed = true;
+      }
+      _syncBalayerClesPrefixees(data);
+    } catch (eX2) {}
     } finally {
       /* Jamais bloquer la synchro : le flag doit \u00eatre rel\u00e2ch\u00e9 m\u00eame en cas d'erreur */
       _receivingSnapshot = false;
@@ -7213,12 +7299,67 @@ function filterModuleItems() {
     if (!modPages[baseKey]) items[i].style.display = 'none';
   }
 }
+/* Favoris multi-appareils : dernier ecrivain gagne (horodatage).
+   Le local garde la liste, le cloud (section fav_<uid> de mdb_paye) porte
+   {pins, updatedAt}. Les cles *_ts/*_cts sont LOCALES (jamais synchronisees).
+   uid = IDENTIFIANT DU COMPTE (subUserId) : currentUser.id est l'entreprise,
+   il fusionnait les favoris de tous les comptes de la société. */
+function _mdbFavUid() {
+  var u = currentUser || {};
+  return String((u.subUserId || u.id) || '_anon');
+}
+/* Migration : les favoris historiques étaient rangés sous la clé entreprise. */
+function _mdbFavMigration(uid) {
+  try {
+    var cur = DB.get('mdb_pinned_' + uid);
+    if (Array.isArray(cur) && cur.length) return;
+    var u = currentUser || {};
+    var legacyUid = String(u.id || '');
+    if (!legacyUid || legacyUid === uid) return;
+    var legacy = DB.get('mdb_pinned_' + legacyUid);
+    if (Array.isArray(legacy) && legacy.length) {
+      DB.set('mdb_pinned_' + uid, legacy);
+      try { favPublier(uid, legacy); } catch (eM) {}
+    }
+  } catch (eMig) {}
+}
+function favLireTs(k) { try { return parseInt(localStorage.getItem(k) || '0', 10) || 0; } catch (e) { return 0; } }
+function favEcrireTs(k, v) { try { localStorage.setItem(k, String(v)); } catch (e) {} }
+function favNormaliserCloud(cf) {
+  if (Array.isArray(cf)) return { pins: cf, updatedAt: 0 }; /* format historique */
+  if (cf && Array.isArray(cf.pins)) return { pins: cf.pins, updatedAt: parseInt(cf.updatedAt, 10) || 0 };
+  return { pins: [], updatedAt: 0 };
+}
+function favPublier(uid, pinned) {
+  var now = Date.now();
+  try {
+    DB.set('mdb_pinned_' + uid, pinned);
+    favEcrireTs('mdb_pinned_' + uid + '_ts', now);
+    setPayeSectionI('fav_' + uid, { pins: pinned, updatedAt: now });
+    if (typeof markDirty === 'function') markDirty('mdb_paye');
+  } catch (e) {}
+}
 function getPinnedMenus() {
-  var uid = currentUser ? currentUser.id : '_anon';
+  var uid = _mdbFavUid();
+  try { _mdbFavMigration(uid); } catch (eMig2) {}
   var pinned = DB.get('mdb_pinned_' + uid) || [];
-  if (!pinned.length) {
-    try { var cloudFav = getPayeSectionI('fav_' + uid, null); if (cloudFav && cloudFav.length) { pinned = cloudFav; DB.set('mdb_pinned_' + uid, pinned); } } catch (eCF) {}
-  }
+  if (!Array.isArray(pinned)) pinned = [];
+  /* Convergence multi-appareils (PC/tel) : le cloud porte {pins, updatedAt},
+     le dernier ecrivain gagne. Avant, le cloud n'etait lu que si le local
+     etait vide : chaque appareil gardait ses epingles pour toujours. */
+  try {
+    var cf = favNormaliserCloud(getPayeSectionI('fav_' + uid, null));
+    var lts = favLireTs('mdb_pinned_' + uid + '_ts');
+    var cts = favLireTs('mdb_pinned_' + uid + '_cts');
+    var adopter = false;
+    if (!pinned.length && cf.pins.length) adopter = true; /* 1er remplissage */
+    else if (cf.updatedAt > cts && cf.updatedAt >= lts) adopter = true; /* cloud plus recent (meme vide : tout-desepingler se propage) */
+    if (adopter) {
+      pinned = cf.pins;
+      DB.set('mdb_pinned_' + uid, pinned);
+      favEcrireTs('mdb_pinned_' + uid + '_cts', cf.updatedAt);
+    }
+  } catch (eCF) {}
   /* Anciennes listes de favoris pouvaient contenir la meme cle plusieurs fois
      (fusion cloud/locale) : on garde la 1re occurrence et on repare le stockage. */
   var _seenPin = {};
@@ -7236,19 +7377,18 @@ function getPinnedMenus() {
   for (var i = 0; i < pinned.length; i++) { if (pinned[i].key === 'dashboard') { hasDash = true; if (i !== 0) { pinned.splice(i, 1); pinned.unshift({key:'dashboard', label:'Tableau de bord'}); } break; } }
   if (!hasDash) pinned.unshift({key:'dashboard', label:'Tableau de bord'});
   if (_changed) {
-    try { DB.set('mdb_pinned_' + uid, pinned); setPayeSectionI('fav_' + uid, pinned); markDirty('mdb_paye'); } catch (ePDedup) {}
+    try { favPublier(uid, pinned); } catch (ePDedup) {}
   }
   return pinned;
 }
 function togglePinMenu(key, label) {
-  var uid = currentUser ? currentUser.id : '_anon';
+  var uid = _mdbFavUid();
   var pinned = DB.get('mdb_pinned_' + uid) || [];
   var idx = -1;
   for (var i = 0; i < pinned.length; i++) { if (pinned[i].key === key) { idx = i; break; } }
   if (idx !== -1) pinned.splice(idx, 1);
   else pinned.push({key: key, label: label});
-  DB.set('mdb_pinned_' + uid, pinned);
-  try { setPayeSectionI('fav_' + uid, pinned); markDirty('mdb_paye'); } catch (ePC1) {}
+  try { favPublier(uid, pinned); } catch (ePC1) {}
 }
 function dragStartPin(ev, idx) {
   window._pinDragActive = true;
@@ -7275,14 +7415,13 @@ function dropPin(ev, toIdx) {
   window._pinDragActive = false;
   var fromIdx = parseInt(ev.dataTransfer.getData('text/plain'), 10);
   if (isNaN(fromIdx) || fromIdx === toIdx) return;
-  var uid = currentUser ? currentUser.id : '_anon';
+  var uid = _mdbFavUid();
   var pinned = DB.get('mdb_pinned_' + uid) || [];
   if (fromIdx < 0 || fromIdx >= pinned.length || toIdx < 0 || toIdx >= pinned.length) return;
   var item = pinned.splice(fromIdx, 1)[0];
   if (!item) return;
   pinned.splice(toIdx, 0, item);
-  DB.set('mdb_pinned_' + uid, pinned);
-  try { setPayeSectionI('fav_' + uid, pinned); markDirty('mdb_paye'); } catch (ePC2) {}
+  try { favPublier(uid, pinned); } catch (ePC2) {}
   buildSidebar();
 }
 
@@ -13989,23 +14128,29 @@ function importerArticlesExploitation(options) {
   } catch (e2) {}
   var ajoute = [];
   var nSemi = 0, nPf = 0;
+  var _pfRefuses = 0;
   expl.forEach(function (a) {
     if (!a || !a.code) return;
     var cat = String(a.categorie || '').toLowerCase();
     var estSemi = (cat === 'semi' || cat === 'semi_fini' || cat === 'semifini');
     var estPf = (cat === 'finished' || cat === 'produit_fini');
-    if (!estSemi && !(opt.produitsFinis && estPf)) return;
+    /* SOURCE UNIQUE : l'Index est le seul createur de produits finis. Le
+       drapeau produitsFinis est ignore (et le bouton d'import retire) : un
+       PF cree en Exploitation ne doit JAMAIS entrer dans la Nomenclature,
+       sinon une suppression faite dans l'Index ressuscite au rendu suivant. */
+    if (estPf && !estSemi) { _pfRefuses++; return; }
+    if (!estSemi) return;
     var code = String(a.code).trim().toUpperCase();
     if (deja[code]) return;
     var px0 = parseFloat(a.prix_vente) || 0;
     var an = new Date().getFullYear();
     arts.push({ id: DB.genId(), code: a.code, designation: a.designation || a.code,
-      typeArticle: estSemi ? 'semi_fini' : 'produit_fini', commercialise: true,
+      typeArticle: 'semi_fini', commercialise: true,
       longueur: parseFloat(a.length) || 0, largeur: parseFloat(a.width) || 0, epaisseur: parseFloat(a.thickness) || 0,
       prixPeriodes: px0 > 0 ? [{ dateDebut: an + '-01-01', dateFin: an + '-12-31', prixUnitaire: px0 }] : [] });
     deja[code] = true;
     ajoute.push(a.code);
-    if (estSemi) nSemi++; else nPf++;
+    nSemi++;
   });
   if (ajoute.length) {
     DB.set('mdb_nomenclature', arts);
@@ -14014,7 +14159,7 @@ function importerArticlesExploitation(options) {
     toast('Rien à ajouter : tout ce que l\u2019Exploitation produit est déjà dans la nomenclature.', 'info');
   }
   renderNomenclature();
-  return { ajoutes: ajoute, semi: nSemi, produits: nPf };
+  return { ajoutes: ajoute, semi: nSemi, produits: nPf, pfRefuses: _pfRefuses };
 }
 /* Les semi-finis de l'exploitation sont repris automatiquement : sans cela
    la nomenclature en etait vide alors qu'ils sont fabriques la-bas. */
@@ -14023,65 +14168,21 @@ function syncSemiFinisFromExploitation() {
     return importerArticlesExploitation({ produitsFinis: false });
   } catch (e) { return { ajoutes: [] }; }
 }
-/* Choix avant import : semi-finis (source Exploitation) et, si demande,
-   produits finis (l'index reste la source, l'import est explicite). */
-function demanderImportExploitation() {
-  openConfirm('Que faut-il ajouter depuis l\u2019Exploitation ?\n\n'
-    + '• Semi-finis : ils sont toujours repris automatiquement.\n'
-    + '• Produits finis : ils ne sont ajoutés que si vous le demandez.', function () {
-      if (confirm2('Ajouter aussi les PRODUITS FINIS qui ne sont pas encore dans la nomenclature ?')) {
-        importerArticlesExploitation({ produitsFinis: true });
-      } else {
-        importerArticlesExploitation({ produitsFinis: false });
-      }
-    });
-}
+/* Retiree (source unique) : l'import de produits finis depuis l'Exploitation
+   n'a plus de sens, l'Index etant le seul createur. Seul
+   syncSemiFinisFromExploitation() subsiste. */
 /* Volume unitaire d'un Produit Fini calcule depuis ses composants (lattes/plots/CP)
    stockes dans mdb_production (Exploitation). Si aucun composant, retourne 0
    et renderNomenclature utilisera les dimensions L*l*e comme fallback. */
-/* Auto-reparation : retablit les Produits Finis legitimes s'ils ont ete supprimes
-   accidentellement par l'ancien script de sync. */
+/* DESACTIVEE (source unique) : cette auto-reparation recreait dans la
+   Nomenclature tout produit fini present dans la copie Exploitation locale.
+   Resultat : une suppression dans l'Index (24 -> 16) revenait toute seule
+   (16 -> 24) au prochain affichage, puisque la copie Exploitation contenait
+   encore les 8 supprimes. Desormais, seul l'Index cree/supprime : les
+   suppressions restent supprimees, et l'Exploitation recoit via sa synchro.
+   Fonction conservee (vide) pour ne rien casser chez les appelants. */
 function reparerArticlesManquantsNomenclature() {
-  try {
-    var raw = localStorage.getItem('mdb_nomenclature');
-    var arts = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(arts)) return;
-    var artsCodes = {};
-    arts.forEach(function(a) { if (a && a.code) artsCodes[String(a.code).trim().toUpperCase()] = true; });
-
-    // Verifier si Exploitation a des articles absents de la Nomenclature
-    var rawP = localStorage.getItem('mdb_production');
-    var pData = rawP ? JSON.parse(rawP) : {};
-    var pArts = Array.isArray(pData.articles) ? pData.articles : [];
-    var mod = false;
-
-    pArts.forEach(function(pa) {
-      if (!pa || !pa.code || pa.categorie !== 'finished') return;
-      var codeU = String(pa.code).trim().toUpperCase();
-      if (!artsCodes[codeU]) {
-        arts.push({
-          id: 'id_rest_' + codeU + '_' + Date.now(),
-          code: codeU,
-          designation: pa.designation || codeU,
-          typeArticle: 'produit_fini',
-          commercialise: true,
-          longueur: parseFloat(pa.length || pa.longueur) || 0,
-          largeur: parseFloat(pa.width || pa.largeur) || 0,
-          epaisseur: parseFloat(pa.thickness || pa.epaisseur) || 0,
-          destination: pa.destination || '',
-          destinations: pa.destination ? [{ nom: pa.destination, defaut: true }] : [],
-          prixPeriodes: parseFloat(pa.prix_vente) > 0 ? [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: parseFloat(pa.prix_vente) }] : []
-        });
-        artsCodes[codeU] = true;
-        mod = true;
-      }
-    });
-
-    if (mod) {
-      localStorage.setItem('mdb_nomenclature', JSON.stringify(arts));
-      if (typeof _dbMemCache !== 'undefined' && _dbMemCache) delete _dbMemCache['mdb_nomenclature'];
-    }
-  } catch(eR) {}
+  return;
 }
 
 function nomVolDepuisComposants(code) {
@@ -14138,7 +14239,8 @@ function _renderNomenclature() {
   try { reparerArticlesManquantsNomenclature(); } catch (eRep) {}
   try { harmoniserNomenclature(); } catch (eH) {}
   try { syncSemiFinisFromExploitation(); } catch (eS1) {}
-  try { syncProduitsFinisFromExploitation(); } catch (eSy) {}
+  /* PAS de syncProduitsFinisFromExploitation ici (source unique) : il recreait
+     dans l'Index les produits finis supprimes, au rendu suivant. */
   var articles = getArticles();
   var readonly = isReadonly('nomenclature');
   if (window._nomSortDest) {
@@ -14199,9 +14301,9 @@ function _renderNomenclature() {
       html += '<button class="btn btn-sm" onclick="purgerDoublonsNomenclature()" title="' + _nbDoub + ' doublon(s) détecté(s). Cliquez pour fusionner automatiquement." style="font-size:11px;background:#fee2e2;color:#b91c1c;border:1px solid #f87171;font-weight:700">⚠️ ' + _nbDoub + ' doublon(s) · Purger</button>';
     }
     html += '<button class="btn btn-sm btn-outline" onclick="importerDimensionsExploitation()" title="Reprendre les dimensions saisies dans Exploitation et les enregistrer ici" style="font-size:11px">📐 Reprendre les dimensions</button>';
-  if (!readonly) {
-    html += '<button class="btn btn-sm btn-primary" onclick="demanderImportExploitation()" title="Ajouter dans la nomenclature les articles qui n\u2019existent que dans l\u2019Exploitation" style="font-size:11px">⬇ Ajouter depuis l\u2019Exploitation</button>';
-  }
+  /* Source unique : les semi-finis arrivent deja automatiquement
+     (syncSemiFinisFromExploitation a chaque rendu) et les produits finis
+     se creent ICI, jamais depuis l'Exploitation. Bouton d'import retire. */
     html += '<span id="nomSelInfo" style="font-size:11px;color:var(--gray-500)"></span>';
   if (!readonly) html += '<button class="btn btn-outline" onclick="supprimerNomenclatureSelection()" title="Supprimer tous les articles cochés" style="font-size:12px">🗑 Supprimer la sélection</button>';
   } catch (eC) {}
@@ -15412,14 +15514,13 @@ function getFacturePaymentDetails(factureId, regsList) {
 }
 
 function movePin(fromIdx, toIdx) {
-  var uid = currentUser ? currentUser.id : '_anon';
+  var uid = _mdbFavUid();
   var pinned = DB.get('mdb_pinned_' + uid) || [];
   if (fromIdx < 0 || fromIdx >= pinned.length || toIdx < 0 || toIdx >= pinned.length) return;
   var item = pinned.splice(fromIdx, 1)[0];
   if (!item) return;
   pinned.splice(toIdx, 0, item);
-  DB.set('mdb_pinned_' + uid, pinned);
-  try { setPayeSectionI('fav_' + uid, pinned); markDirty('mdb_paye'); } catch (ePC2) {}
+  try { favPublier(uid, pinned); } catch (ePC2) {}
   buildSidebar();
 }
 
@@ -18985,7 +19086,12 @@ function _cleanGhostAcomptes(){
       // (la nature vient de apType ou du code : une pièce ACOMPTE* sans apType reste légitime)
       if (_op){
         var _nat = (typeof _apNatureOp === 'function') ? _apNatureOp(_op) : (_op.apType || '');
-        if (_nat !== _g.type || !_op.acomptePretId || _op.acomptePretId !== _g.id) _isGhost = true;
+        /* On ne qualifie de fantôme que sur une nature CONNUE et différente.
+           _apNatureOp renvoie '' quand apType/code est inconnu (fusion cloud
+           partielle) : la ligne était alors supprimée puis recréée par
+           _reconcileAcomptesPretsFromCaisse au rendu suivant, en boucle
+           (« N prêt(s)/acompte(s) restauré(s) depuis la caisse »). */
+        if ((_nat && _nat !== _g.type) || !_op.acomptePretId || _op.acomptePretId !== _g.id) _isGhost = true;
       }
     }
     // Règle 2 : acompte dont le libellé est manifestement une pièce non-acompte (frais/encaissement/dépense).
@@ -19215,12 +19321,17 @@ function _relierAcomptesPrets() {
     var o = ops[i];
     if (!o || !o.id || o.acomptePretId) continue;
     var nat = (typeof _apNatureOp === 'function') ? _apNatureOp(o) : (o.apType || '');
-    if (nat !== 'acompte' && nat !== 'pret') continue;
+    /* Nature INCONNUE (apType/code perdu dans une fusion cloud partielle) :
+       le lien explicite ligne.caisseOpId === o.id suffit a prouver le
+       rattachement. Sans cela, le nettoyeur de fantomes effacait la ligne,
+       puis la reconciliation la recreait — boucle « restore(s) depuis la
+       caisse » a chaque rendu. */
+    if (nat !== 'acompte' && nat !== 'pret' && nat !== '') continue;
     var choix = null;
     for (var j = 0; j < list.length; j++) {
       var a = list[j];
       if (!a || a.caisseOpId !== o.id) continue;
-      if (a.type !== nat) continue;
+      if (nat && a.type !== nat) continue;
       if (!choix || (a.valide === true && choix.valide !== true)) choix = a;
       if (choix && choix.valide === true) break;
     }
@@ -19336,7 +19447,14 @@ function _reconcileAcomptesPretsFromCaisse() {
     try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e1) {}
     try { DB.set('mdb_operationsCaisse', ops); try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e2) {} } catch (e3) {}
     console.log('Reconstitution de ' + created + ' acompte(s)/prêt(s) depuis les pièces de caisse' + (fixed ? ' + ' + fixed + ' mois remis sur période' : ''));
-    if (typeof toast === 'function') { try { toast(created + ' prêt(s)/acompte(s) restauré(s) depuis la caisse' + (fixed ? ' — ' + fixed + ' mois remis sur période' : ''), 'success'); } catch (e4) {} }
+    /* Notification une seule fois par jeu de lignes recréé : sinon le même
+       message revient à chaque rendu du module. */
+    var _sig = '';
+    try { _sig = list.map(function(x){ return (x && x.caisseOpId) + '~' + (x && x.moisDeduction); }).sort().join('|'); } catch (eS) { _sig = String(created) + '#' + String(fixed); }
+    if (created > 0 && typeof toast === 'function' && window._apNotifSig !== _sig) {
+      window._apNotifSig = _sig;
+      try { toast(created + ' prêt(s)/acompte(s) restauré(s) depuis la caisse' + (fixed ? ' — ' + fixed + ' mois remis sur période' : ''), 'success'); } catch (e4) {}
+    }
   }
 }
 
@@ -20841,8 +20959,8 @@ function openCsCollectifModal() {
   openFormModal('Remise collective',
     '<div id="csCollectifModalHost"></div>',
     '<button class="btn btn-ghost" onclick="closeCsCollectifModal()">Fermer</button>' +
-    '<button class="btn btn-outline" onclick="closeCsCollectifModal();saveCaisse(true)" style="color:#d97706;border-color:#f59e0b">Brouillon</button>' +
-    '<button class="btn btn-success" onclick="closeCsCollectifModal();saveCaisse(false)">Valider</button>',
+    '<button class="btn btn-outline" onclick="csCollectifEnregistrer(true)" style="color:#d97706;border-color:#f59e0b">Brouillon</button>' +
+    '<button class="btn btn-success" onclick="csCollectifEnregistrer(false)">Valider</button>',
     '1250px');
   document.getElementById('csCollectifModalHost').appendChild(block);
   block.style.display = '';
@@ -20851,6 +20969,14 @@ function closeCsCollectifModal() {
   window._csCollModalOpen = false;
   restoreCsCollectifBlock();
   closeModal();
+}
+/* Sauvegarde AVANT fermeture : closeCsCollectifModal() re-rendait la caisse et
+   remettait window._csEditId / _csCollectifEditGroupeId à zéro — l'enregistrement
+   partait alors en « création » et laissait l'ancienne pièce en doublon. */
+function csCollectifEnregistrer(asDraft) {
+  try { saveCaisse(asDraft); }
+  catch (e) { try { toast('Erreur: ' + e.message, 'error'); } catch (e2) {} }
+  finally { try { closeCsCollectifModal(); } catch (e3) {} }
 }
 function toggleCsCollectif() {
   var checked = document.getElementById('csCollectif').checked;
@@ -30323,7 +30449,18 @@ function csCollFraisManual(el) {
 
 function renderCaisseIn(el) {
   if (window._seeAllCaisses === undefined) window._seeAllCaisses = false;
+  /* Un snapshot temps réel peut re-rendre le module PENDANT une modification.
+     Sans cette conservation, l'id d'édition disparaissait et « Modifier »
+     enregistrait une seconde pièce au lieu de modifier l'ancienne. */
+  var _csEditSticky = window._csEditingId || '';
   window._csEditId = '';
+  if (_csEditSticky) {
+    window._csEditId = _csEditSticky;
+    setTimeout(function () {
+      var _bEd = document.getElementById('csValiderBtn');
+      if (_bEd) _bEd.textContent = 'Modifier';
+    }, 0);
+  }
   /* Anti-doublon barre filtres : vider le slot avant reconstruction (sinon l'ancienne barre déplacée + la nouvelle coexistent) */
   try { var _oldSlot = document.getElementById('csFilterSlot'); if (_oldSlot) _oldSlot.innerHTML = ''; } catch(eOS) {}
   var allOps = getOperationsCaisse();
@@ -31097,27 +31234,29 @@ function openCollectifNewUIByGroupe(groupeId) {
     if (!target) { for (i = 0; i < opsAll.length; i++) { if (opsAll[i].id === groupeId) { target = opsAll[i]; break; } } }
     if (!target) { toast('Pi\u00e8ce collective introuvable en caisse', 'error'); return false; }
     window._apFromCaisse = true;
+    /* Forcer l'onglet qui contient le formulaire collectif : avec un autre
+       onglet (ou ''), la page reste vide, csCollectifBody n'existe pas et
+       on finissait sur "Impossible d'ouvrir la remise collective". */
+    try { window._tresorerieContext = 'caisse'; window._tresorerieTab = 'caisse'; } catch(eT0) {}
     var needNav = (typeof currentPage === 'undefined' || currentPage !== 'tresorerie') || !document.getElementById('csCollectifBody');
     if (needNav && typeof navigateTo === 'function') {
       try {
-        try { window._tresorerieTab = ''; } catch(eT0) {}
         navigateTo('tresorerie');
       } catch(eN) {}
     }
-    try { if (typeof editCaisseCollectifNewUI === 'function' && editCaisseCollectifNewUI(target.id)) return true; } catch(eE) {}
-    /* Dernier recours : réessai court après rendu (navigation éventuellement asynchrone) */
-    try {
-      var _tid = target.id;
-      setTimeout(function() {
-        try {
-          if (!document.getElementById('csCollectifBody')) { toast('Impossible d\u2019ouvrir la remise collective', 'error'); return; }
-          if (typeof editCaisseCollectifNewUI === 'function' && !editCaisseCollectifNewUI(_tid)) toast('Remise collective non \u00e9ditable pour cette p\u00e9riode', 'error');
-        } catch(eR) {}
-      }, 400);
-      return true;
-    } catch(eT) {}
-    toast('Impossible d\u2019ouvrir la remise collective', 'error');
-    return false;
+    /* Le rendu pouvant etre legerement differe, on reessaie plusieurs fois
+       avant d'abandonner (au lieu d'un seul essai a 400 ms). */
+    var _essaisColl = 0;
+    var _tenterColl = function() {
+      try {
+        if (typeof editCaisseCollectifNewUI === 'function' && document.getElementById('csCollectifBody') && editCaisseCollectifNewUI(target.id)) return true;
+      } catch(eE) {}
+      _essaisColl++;
+      if (_essaisColl < 6) { setTimeout(_tenterColl, 400); return false; }
+      try { toast('Impossible d\u2019ouvrir la remise collective', 'error'); } catch(eT) {}
+      return false;
+    };
+    return _tenterColl();
   } catch(eO) { try { toast('Impossible d\u2019ouvrir la remise collective', 'error'); } catch(eT2) {} return false; }
 }
 function editCaisseCollectifNewUI(opId) {
@@ -31159,6 +31298,7 @@ function editCaisseCollectifNewUI(opId) {
     for (gi = 0; gi < groupOps.length; gi++) { var _bid = groupOps[gi].beneficiaireId; if (_bid && !_vis[_bid]) return false; }
     /* Contexte édition (sinon la sauvegarde créerait un doublon) */
     window._csEditId = '';
+    window._csEditingId = '';
     window._csCollectifEditGroupeId = gid;
     window._csCollectifEditMasterOpId = masterOp.id || '';
     /* --- Formulaire --- */
@@ -31266,11 +31406,12 @@ function editCaisseOp(id) {
 }
 function editCaisseOpSimple(id) {
   window._csEditId = id;
+  window._csEditingId = id;
   window._csPreserveLibelle = true;
   var ops = getOperationsCaisse();
   var o = null;
   for (var i = 0; i < ops.length; i++) { if (String(ops[i].id) === String(id)) { o = ops[i]; break; } }
-  if (!o) { window._csPreserveLibelle = false; return; }
+  if (!o) { window._csPreserveLibelle = false; window._csEditingId = ''; window._csEditId = ''; return; }
   var dateEl = document.getElementById('csDate');
   var heureEl = document.getElementById('csHeure');
   var sensEl = document.getElementById('csSens');
@@ -31403,6 +31544,7 @@ function editCaisseOpSimple(id) {
   if (linkedEl) linkedEl.value = o.linkedOpId || '';
   /* Store edit id */
   window._csEditId = id;
+  window._csEditingId = id;
   /* Update button */
   var btn = document.getElementById('csValiderBtn');
   if (btn) btn.textContent = 'Modifier';
@@ -37374,23 +37516,28 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
       if (!beneficiaireId) { toast('Veuillez s\u00e9lectionner un employ\u00e9', 'error'); return; }
       var apList = dbArr('mdb_acomptesPrets');
       var apDuree = parseInt(document.getElementById('csAPDuree').value) || 0;
-      /* Acompte : le mois de deduction est celui de l'operation, pas un champ separe */
-      var apMoisDeduction = (typeOp === 'acompte') ? String(fullDate || '').substring(0, 7) : (document.getElementById('csAPMoisDeduction') ? document.getElementById('csAPMoisDeduction').value : '');
-      /* En modification, un mois choisi deliberement (moisManuel) n'est jamais ecrase. */
-      if (existingApIdx >= 0 && typeOp === 'acompte') {
-        try {
-          var _prevApM = apList[existingApIdx];
-          if (_prevApM && _prevApM.moisManuel === true && /^\d{4}-\d{2}$/.test(_prevApM.moisDeduction || '')) apMoisDeduction = _prevApM.moisDeduction;
-        } catch (eMM) {}
-      }
+      /* Index de la ligne déjà rattachée à CETTE pièce (édition) — calculé AVANT
+         d'être utilisé : lu avant sa déclaration, il valait toujours undefined
+         (hoisting) et la préservation du mois manuel ne partait jamais. */
       var existingApIdx = -1;
+      var apPrev = null;
       if (editId) {
         var opEditing = null;
         for (var opi = 0; opi < ops.length; opi++) { if (ops[opi].id === editId) { opEditing = ops[opi]; break; } }
         for (var api = 0; api < apList.length; api++) {
           if (apList[api].caisseOpId === editId || (opEditing && apList[api].id === opEditing.acomptePretId)) { existingApIdx = api; break; }
         }
+        if (existingApIdx >= 0) apPrev = apList[existingApIdx];
       }
+      /* Acompte : le mois de deduction est celui de l'operation, pas un champ separe */
+      var apMoisDeduction = (typeOp === 'acompte') ? String(fullDate || '').substring(0, 7) : (document.getElementById('csAPMoisDeduction') ? document.getElementById('csAPMoisDeduction').value : '');
+      /* En modification, un mois choisi deliberement (moisManuel) n'est jamais ecrase. */
+      if (existingApIdx >= 0 && typeOp === 'acompte') {
+        try {
+          if (apPrev && apPrev.moisManuel === true && /^\d{4}-\d{2}$/.test(apPrev.moisDeduction || '')) apMoisDeduction = apPrev.moisDeduction;
+        } catch (eMM) {}
+      }
+      var apMoisManuel = !!(existingApIdx >= 0 && apPrev && apPrev.moisManuel === true);
       var montantMensuel = (typeOp === 'pret' && apDuree > 0) ? Math.round(montant / apDuree) : montant;
       var apData = {
         id: existingApIdx >= 0 ? apList[existingApIdx].id : DB.genId(),
@@ -37401,7 +37548,7 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
         dureeMois: typeOp === 'pret' ? apDuree : 0,
         montantMensuel: montantMensuel,
         moisDeduction: apMoisDeduction,
-        moisManuel: (function(){ try { if (existingApIdx >= 0 && apList[existingApIdx] && apList[existingApIdx].moisManuel === true) return true; } catch(e){} return false; })(),
+        moisManuel: apMoisManuel,
         motif: libelle,
         notes: tiers || '',
         date: fullDate || getToday(),
@@ -37444,10 +37591,19 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
         apList.push(apData);
       }
       DB.set('mdb_acomptesPrets', apList);
-      /* Link caisse op to acompte/pret */
+      /* Link caisse op to acompte/pret — on reporte aussi le mois choisi et la
+         durée, sinon la pièce affichait encore l'ancien mois
+         (« Prélèvement <mois de saisie> ») après modification. */
       var opIdToLink = savedOpId || editId || '';
       for (var _apOi = 0; _apOi < ops.length; _apOi++) {
-        if (ops[_apOi].id === opIdToLink) { ops[_apOi].acomptePretId = apData.id; ops[_apOi].apMoisDeduction = apMoisDeduction; break; }
+        if (ops[_apOi].id === opIdToLink) {
+          ops[_apOi].acomptePretId = apData.id;
+          ops[_apOi].apMoisDeduction = apMoisDeduction;
+          ops[_apOi].moisManuel = apMoisManuel;
+          ops[_apOi].apDureeMois = (typeOp === 'pret') ? apDuree : 0;
+          ops[_apOi].apMontantMensuel = montantMensuel;
+          break;
+        }
       }
 DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
     toast(isDraft ? 'Brouillon enregistré (Pièce n° ' + numeroPiece + '). Retrouvez-le via le filtre « Brouillons » en haut du tableau caisse (ou « Toutes ») pour le modifier ou le valider.' : 'Op\u00e9ration enregistr\u00e9e (Pi\u00e8ce n\u00b0 ' + numeroPiece + ')');
@@ -37456,6 +37612,7 @@ DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=tru
   }
 
   if (!editId) {
+    window._csEditingId = '';
     /* Save date before re-render */
     var dateEl = document.getElementById('csDate');
     if (dateEl) window._csLastDate = dateEl.value;
@@ -37503,6 +37660,7 @@ DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=tru
     toggleBeneficiaire();
   } else {
     window._csEditId = '';
+    window._csEditingId = '';
     var btn = document.getElementById('csValiderBtn');
     if (btn) btn.textContent = 'Valider';
   }

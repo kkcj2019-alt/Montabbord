@@ -2293,6 +2293,37 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Acomptes : une piece de nature inconnue ne declenche pas la boucle « restauré(s) depuis la caisse »',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Piece dont apType/code ont ete perdus (fusion cloud partielle) :
+         _apNatureOp renvoie ''. Avant, la ligne etait classee fantome, supprimee,
+         puis recreee par la reconciliation — message repete a chaque rendu. */
+      var ops = getOperationsCaisse();
+      ops.push({ id: 'opNB', numeroPiece: 'NB-1', date: '2026-10-02', code: 'ZZ', libelle: 'Acompte Octobre 2026', periode: '2026-10', montant: 96000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', caisseId: 'c1' });
+      DB.set('mdb_operationsCaisse', ops);
+      var l0 = dbArr('mdb_acomptesPrets');
+      l0.push({ id: 'apNB', type: 'acompte', employeId: 'e1', employeNom: 'Diallo A', montant: 96000, moisDeduction: '2026-10', date: '2026-10-02', statut: 'en_cours', caisseOpId: 'opNB', numeroPiece: 'NB-1', provenance: 'caisse' });
+      DB.set('mdb_acomptesPrets', l0);
+      /* Passe complete de rendu, trois fois de suite */
+      varstable: for (var pass = 0; pass < 3; pass++) {
+        _relierAcomptesPrets();
+        _cleanGhostAcomptes();
+        _reconcileAcomptesPretsFromCaisse();
+      }
+      var l1 = dbArr('mdb_acomptesPrets');
+      var kept = 0;
+      for (var i = 0; i < l1.length; i++) { if (l1[i] && l1[i].caisseOpId === 'opNB') kept++; }
+      var op2 = getOperationsCaisse(); var back = '';
+      for (var j = 0; j < op2.length; j++) { if (op2[j] && op2[j].id === 'opNB') back = op2[j].acomptePretId || ''; }
+      (kept === 1 && back === 'apNB')
+        ? 'OK : 1 seule ligne conservee apres 3 rendus, lien retour intact'
+        : 'ECHEC kept=' + kept + ' back=' + back
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Caisse : supprimer une piece supprime l\u2019acompte lie meme sans apType (pas d\u2019orphelin)',
     app: 'index.html', store: storeRealiste,
     code: `
@@ -5367,7 +5398,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Index : le bouton d\u2019import peut ajouter aussi les produits finis, sur demande',
+    nom: 'Index : plus aucun bouton d\u2019import Exploitation, et les produits finis ne rentrent plus par l\u2019Index',
     app: 'index.html', store: storeRealiste,
     code: `
       DB.set('mdb_nomenclature', []);
@@ -5383,16 +5414,16 @@ r.push({
       importerArticlesExploitation({ produitsFinis: false });
       var sansPf = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
       var sansSemi = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'semi_fini'; }).length;
-      /* Avec produits finis */
+      /* Meme demande explicite : les produits finis restent refuses (source unique) */
       importerArticlesExploitation({ produitsFinis: true });
       var avecPf = DB.get('mdb_nomenclature').filter(function (a) { return a.typeArticle === 'produit_fini'; }).length;
       var h = '';
       try { isReadonly = function () { return false; }; renderNomenclature(); h = (document.getElementById('facturationContent') || document.getElementById('content') || { innerHTML: '' }).innerHTML || ''; } catch (e) {}
       if (!h) h = (document.getElementById('content') || { innerHTML: '' }).innerHTML || '';
-      var okBouton = h.indexOf('demanderImportExploitation') !== -1;
-      (sansPf === 0 && sansSemi === 1 && avecPf === 1 && okBouton)
-        ? 'OK : semi toujours importe, fini ajoute sur demande (1), bouton present'
-        : 'ECHEC sansPf=' + sansPf + ' sansSemi=' + sansSemi + ' avecPf=' + avecPf + ' bouton=' + okBouton
+      var okBouton = h.indexOf('demanderImportExploitation') === -1;
+      (sansPf === 0 && sansSemi === 1 && avecPf === 0 && okBouton)
+        ? 'OK : semi importe, fini toujours refuse (0), bouton absent'
+        : 'ECHEC sansPf=' + sansPf + ' sansSemi=' + sansSemi + ' avecPf=' + avecPf + ' boutonAbsent=' + okBouton
     `,
     attenduPrefixe: 'OK'
   });
@@ -9932,6 +9963,46 @@ attenduPrefixe: 'OK'
       (okVide && okIds && okStock && okRelu && okCp)
         ? 'OK : nouveau=vide, ids uniques, modifs relues, copie conforme'
         : 'ECHEC vide=' + okVide + ' ids=' + okIds + ' stock=' + stockes.length + ' relu=' + okRelu + ' copie=' + okCp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Prime production : le resume du barème n\u2019affiche ni tranche repetee ni l\u2019ancienne version',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var cfg = getPrimeProdConfig();
+      /* Liste generale figee sur l'ancien barème + version 2026 avec une
+         borne dupliquée (fusion cloud) : le resume doit suivre la version
+         du mois affiché et ne jamais sortir « 3000→3000 ». */
+      cfg.bandes = [{ jusqu_a: 3000, taux: 0 }, { jusqu_a: 4000, taux: 25 }, { jusqu_a: null, taux: 75 }];
+      cfg.versions = [{ id: 'vA', debut: '2000-01', fin: '', label: 'Origine', bandes: cfg.bandes, taux_ca_ht: 0, articles_exclus: [], factures_exclus: [] }];
+      setPrimeProdConfig(cfg);
+      document.getElementById('pt-mois').value = '2026-10';
+      var bandOk = ptPrimeProdBandesResume('2026-10');
+      var bornDup = 0, ordreOk = true, prevB = null;
+      for (var i = 0; i < bandOk.length; i++) {
+        var v = bandOk[i].jusqu_a;
+        if (v === null) continue;
+        if (prevB !== null && v <= prevB) { ordreOk = false; }
+        if (v === prevB) bornDup++;
+        prevB = v;
+      }
+      /* Version differente pour le mois affiche : elle doit primer */
+      var cfg2 = getPrimeProdConfig();
+      cfg2.versions.push({ id: 'vB', debut: '2026-10', fin: '', label: 'Nouveau', bandes: [{ jusqu_a: 2000, taux: 0 }, { jusqu_a: 2000, taux: 10 }, { jusqu_a: 9000, taux: 50 }], taux_ca_ht: 0, articles_exclus: [], factures_exclus: [] });
+      setPrimeProdConfig(cfg2);
+      var b2 = ptPrimeProdBandesResume('2026-10');
+      var codes = [];
+      for (var j = 0; j < b2.length; j++) {
+        var de = j === 0 ? 0 : b2[j - 1].jusqu_a;
+        var a = b2[j].jusqu_a === null ? 'inf' : b2[j].jusqu_a;
+        codes.push(de + '-' + a);
+      }
+      var txtOk = codes.join(',');
+      (ordreOk && bornDup === 0 && txtOk === '0-2000,2000-9000,9000-inf')
+        ? 'OK : tranches sans doublon, version du mois appliqué (' + txtOk + ')'
+        : 'ECHEC ordreOk=' + ordreOk + ' bornDup=' + bornDup + ' txt=' + txtOk
     `,
     attenduPrefixe: 'OK'
   });
