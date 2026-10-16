@@ -18202,10 +18202,28 @@ function catToggleAll(el) {
    sens, la colonne est donc masquee pour ces types (demande explicite).
    Le POIDS est toujours affiché : c'est la seule valeur comparable entre
    toutes les matières. */
-var FT_DENSITE_BOIS = 750; /* kg/m³ — masse volumique moyenne du bois */
+/* Densités REALES des bois (kg/m³, à humidité ~12 %). La densité dépend de
+   l'espèce : c'est elle qui donne le poids de la palette, pas un 750
+   générique appliqué à tout. */
+var FT_DENSITES = {
+  'blanc': 700,      /* bois clairs / feuillus lightweight */
+  'rouge': 800,      /* bois rouges (okoumé, framiré, iroko…) */
+  'divers': 750
+};
+function ftDensite(essence) {
+  var e = String(essence || '').trim().toLowerCase();
+  if (!e) return FT_DENSITES.divers;
+  for (var k in FT_DENSITES) {
+    if (Object.prototype.hasOwnProperty.call(FT_DENSITES, k) && e.indexOf(k) !== -1) return FT_DENSITES[k];
+  }
+  return FT_DENSITES.divers;
+}
+/* Un type n'a de volume que s'il porte des dimensions exploitables.
+   PLOT = lattes 12×8×9 : son volume est réel, il doit rester affiché.
+   POINTE (P6, P7) n'a que des quantités : volume sans sens. */
 function ftEstSansVolume(type) {
   var t = String(type || '').trim().toUpperCase();
-  return (t === 'PLOT' || t === 'POINTE' || t === 'POINTES');
+  return (t === 'POINTE' || t === 'POINTES' || t === 'VIS' || t === 'CLOU' || t === 'CLOU');
 }
 function ficheTechCorpsHtml(articleId) {
   var articles = getArticles();
@@ -18218,6 +18236,7 @@ function ficheTechCorpsHtml(articleId) {
   if (!comp.length) return '<p>Aucune nomenclature pour ' + escH(a.code || '') + '</p>';
   var groups = {};
   comp.forEach(function(c) { (groups[c.type || 'AUTRE'] = groups[c.type || 'AUTRE'] || []).push(c); });
+  var densite = ftDensite(a.essence || a.typeBois);
   var totVol = 0, totPoids = 0, h = '';
   Object.keys(groups).forEach(function(t) {
     var sansVol = ftEstSansVolume(t);
@@ -18231,13 +18250,14 @@ function ficheTechCorpsHtml(articleId) {
     groups[t].forEach(function(c) {
       var v = (c.volume != null ? c.volume : ((c.length || 0) * (c.width || 0) * (c.thickness || 0) / 1000000));
       var vNum = parseFloat(v) || 0;
-      /* Poids : saisie si elle existe, sinon déduit du volume. */
+      /* Poids : saisie si elle existe, sinon volume x DENSITÉ DE L'ESSENCE
+         (pas une masse volumique unique). */
       var poids = (c.poids != null && c.poids !== '' && !isNaN(parseFloat(c.poids)))
-        ? parseFloat(c.poids) : (vNum * FT_DENSITE_BOIS);
+        ? parseFloat(c.poids) : (vNum * densite * (c.quantity || 1));
       poidsGrp += poids;
-      if (!sansVol) volGrp += vNum;
+      if (!sansVol) volGrp += vNum * (c.quantity || 1);
       h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(c.code) + '</td><td>' + escH(c.designation || c.code) + '</td><td style="text-align:right">' + (c.quantity || 0) + '</td><td style="text-align:right">' + (c.length || '-') + '</td><td style="text-align:right">' + (c.width || '-') + '</td><td style="text-align:right">' + (c.thickness || '-') + '</td><td>' + escH(c.placement || '-') + '</td>'
-        + (sansVol ? '' : '<td style="text-align:right;font-weight:700">' + vNum.toFixed(4) + '</td>')
+        + (sansVol ? '' : '<td style="text-align:right;font-weight:700">' + (vNum * (c.quantity || 1)).toFixed(4) + '</td>')
         + '<td style="text-align:right;font-weight:700">' + poids.toFixed(1) + '</td></tr>';
     });
     h += '<tr><td colspan="7" style="background:#f8fafc"><strong>Total ' + escH(t) + '</strong></td>'
@@ -18246,8 +18266,19 @@ function ficheTechCorpsHtml(articleId) {
     h += '</table>';
     totVol += volGrp; totPoids += poidsGrp;
   });
-  h += '<p><strong>Nomenclature ' + escH(a.code || '') + ' : ' + comp.length + ' composant(s) — Poids total ' + totPoids.toFixed(1) + ' kg'
-    + (totVol > 0 ? ' — Volume total ' + totVol.toFixed(4) + ' m³' : '') + '</strong></p>';
+  h += '<p><strong>Nomenclature ' + escH(a.code || '') + ' : ' + comp.length + ' composant(s)</strong></p>';
+  h += '<table style="margin-bottom:.3rem"><tr><th style="text-align:left">Poids de la palette</th>'
+    + '<th style="text-align:right">Charge utile estimée</th><th style="text-align:right">Charge totale</th></tr>'
+    + '<tr>'
+    + '<td style="font-weight:800">' + totPoids.toFixed(1) + ' kg</td>'
+    + '<td style="font-weight:800;color:#b45309">' + (parseFloat(a.portance) || 0).toFixed(0) + ' kg</td>'
+    + '<td style="font-weight:800;color:#166534">' + (totPoids + (parseFloat(a.portance) || 0)).toFixed(1) + ' kg</td>'
+    + '</tr></table>'
+    + '<p style="font-size:.62rem;color:#666;margin-top:0">Poids calculé avec la densité de l\u2019essence '
+    + (a.essence ? escH(a.essence) + ' (' + densite + ' kg/m³)' : 'non précisée (' + densite + ' kg/m³ par défaut)')
+    + '. Charge utile = champ « Charge utile » de la fiche (à valider par votre transporteur, non normatif).'
+    + (totVol > 0 ? ' Volume total ' + totVol.toFixed(4) + ' m³.' : '')
+    + '</p>';
   return h;
 }
 /* Imprime (PDF via le dialogue) les fiches techniques des produits donnés. */
@@ -18524,6 +18555,14 @@ function openArticleModal(id) {
     + '</datalist>'
     + '<div style="font-size:10px;color:var(--gray-500);margin-top:2px">Blanc, rouge, divers, ou une essence précise (saisissez-la, elle sera proposée ensuite). Affichée sur la fiche technique.</div>'
     + '</div>';
+  /* CHARGE UTILE (portance) : champ SAISI, jamais calcule. Une portance
+     depend du montage, de l'empilage et du transporteur : afficher un chiffre
+     « normatif » serait irresponsable. L'utilisateur saisit ce que son
+     transporteur autorise ; on additionne poids + charge utile. */
+  m += '<div class="form-row">'
+    + '<div class="form-group"><label>Charge utile (kg) — portance</label><input type="number" id="art_portance" min="0" step="50" placeholder="Ex: 500" value="' + escH(v('portance', '')) + '">'
+    + '<div style="font-size:10px;color:var(--gray-500);margin-top:2px">À confirmer avec votre transporteur. Sert à afficher « poids + charge utile » sur la fiche technique.</div></div>'
+    + '</div>';
   /* Prix / coût / marge : gérés dans la Nomenclature de l'appli principale.
      Champs conservés cachés pour ne pas écraser les valeurs à l'enregistrement. */
   m += '<input type="hidden" id="art_pu" value="' + v('prix_vente', 0) + '">';
@@ -18627,6 +18666,7 @@ function saveArticleModal(id) {
   a.designation = designation;
   a.destination = (document.getElementById('art_dest') || {}).value || '';
   a.essence = ((document.getElementById('art_essence') || {}).value || '').trim();
+  a.portance = parseFloat((document.getElementById('art_portance') || {}).value) || 0;
   a.treatment_code = (document.getElementById('art_treat') || {}).value || '';
   a.prix_vente = parseFloat((document.getElementById('art_pu') || {}).value) || 0;
   a.prix_revient = parseFloat((document.getElementById('art_cr') || {}).value) || 0;

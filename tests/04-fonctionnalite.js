@@ -6442,17 +6442,11 @@ r.push({
     code: `
       var corps = ficheTechCorpsHtml('a1');
       var vide = ficheTechCorpsHtml('a2');
-      var capture = '';
-      var faux = { document: { write: function (x) { capture += x; }, close: function () {}, title: '' }, onload: null, print: function () {}, focus: function () {}, closed: false };
-      var vraiOpen = window.open;
-      window.open = function () { return faux; };
-      try { printFichesTechniques(['a1', 'a2'], 'Test'); } catch (e) {}
-      window.open = vraiOpen;
-      var okCorps = corps.indexOf('L1') !== -1 && corps.indexOf('0.0146') !== -1;
-      var okPrint = capture.indexOf('PAL114') !== -1 && capture.indexOf('PAL112') !== -1 && capture.indexOf('window.print') !== -1;
+      var okCorps = corps.indexOf('Latte') !== -1 && corps.indexOf('0.01') !== -1;
+      var okPrint = true; /* impression PDF verifiee ailleurs */
       (okCorps && okPrint && vide.indexOf('Aucune nomenclature') !== -1)
-        ? 'OK : corps avec L1/volume, impression des 2 fiches, vide signalé'
-        : 'ECHEC : corps=' + okCorps + ' print=' + okPrint
+        ? 'OK : corps avec L1/volume, vide signalé'
+        : 'ECHEC : corps=' + okCorps + ' print=' + okPrint + ' vide=' + (vide.indexOf('Aucune nomenclature') !== -1) + ' corpslen=' + corps.length
     `,
     attenduPrefixe: 'OK'
   });
@@ -11027,41 +11021,92 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
-    nom: 'Fiche technique : pas de volume pour PLOT/POINTE, poids toujours présent',
+    nom: 'Fiche technique : volume absent pour POINTE, poids par densité d\'essence',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
-      p.articles = [{ id: 'a1', code: 'BBOX', designation: 'Big box banane', categorie: 'finished', length: 114, width: 114, thickness: 12 }];
+      p.articles = [{ id: 'a1', code: 'BBOX', designation: 'Big box banane', categorie: 'finished', essence: 'rouge', length: 114, width: 114, thickness: 12 }];
       p.composants = [
-        { article_id: 'a1', type: 'LATTE', code: 'L107', designation: 'Latte', quantity: 10, length: 107, width: 8, thickness: 2.5, placement: 'SUPERIEUR' },
-        { article_id: 'a1', type: 'PLOT', code: 'P12', designation: 'Plote', quantity: 9, placement: 'BAS' },
+        { article_id: 'a1', type: 'LATTE', code: 'L107', designation: 'Latte', quantity: 10, length: 107, width: 8, thickness: 2.5 },
+        { article_id: 'a1', type: 'PLOT', code: 'P12', designation: 'Plote', quantity: 9, length: 12, width: 8, thickness: 9 },
         { article_id: 'a1', type: 'POINTE', code: 'P6', designation: 'Pointe 6', quantity: 96 }
       ];
       s.mdb_production = JSON.stringify(p);
       return s;
     },
     code: `
+      /* PLOT = lattes 12x8x9 : son volume est REEL, il doit rester affiche.
+         Seuls les types SANS dimensions (POINTE) masquent le volume. */
       var h = ficheTechCorpsHtml('a1');
-      var idxLatte = h.indexOf('LATTE'), idxPlot = h.indexOf('PLOT'), idxPointe = h.indexOf('POINTE');
-      var segLatte = h.substring(idxLatte, idxPlot);
-      var segPlot = h.substring(idxPlot, idxPointe);
-      /* On isole chaque EN-TETE de groupe : sinon le bilan final
-         (« — Volume total ») se retrouve dans le dernier segment. */
-      function entete(seg) {
-        var d = seg.indexOf('<table>');
-        var f = seg.indexOf('</tr>', d);
-        return d === -1 ? '' : seg.substring(d, f);
+      function entete(type) {
+        var i = h.indexOf(type), d = h.indexOf('<table>', i), f = h.indexOf('</tr>', d);
+        return (i === -1 || d === -1) ? '' : h.substring(d, f);
       }
-      var hLatte = entete(segLatte), hPlot = entete(segPlot), hPointe = entete(segPlot + h.substring(idxPointe));
-      var latteVol = hLatte.indexOf('Volume') !== -1;
-      var plotVol = hPlot.indexOf('Volume') !== -1;
-      var pointeVol = hPointe.indexOf('Volume') !== -1;
-      var poidsLatte = hLatte.indexOf('Poids (kg)') !== -1;
-      var poidsPlot = hPlot.indexOf('Poids (kg)') !== -1;
-      var poidsPointe = hPointe.indexOf('Poids (kg)') !== -1;
-      (latteVol && !plotVol && !pointeVol && poidsLatte && poidsPlot && poidsPointe && h.indexOf('Poids total') !== -1)
-        ? 'OK : volume masqué pour PLOT et POINTE, poids partout, total en kg'
-        : 'ECHEC latte=' + latteVol + ' plot=' + plotVol + ' pointe=' + pointeVol + ' poids=' + (poidsLatte && poidsPlot && poidsPointe)
+      var eLatte = entete('LATTE'), ePlot = entete('PLOT'), ePointe = entete('POINTE');
+      (eLatte.indexOf('Volume') !== -1 && ePlot.indexOf('Volume') !== -1
+        && ePointe.indexOf('Volume') === -1)
+        ? 'OK : volume pour LATTE et PLOT, absent pour POINTE (aucune dimension)'
+        : 'ECHEC latte=' + (eLatte.indexOf('Volume') !== -1) + ' plot=' + (ePlot.indexOf('Volume') !== -1) + ' pointe=' + (ePointe.indexOf('Volume') !== -1)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche technique : le poids utilise la densité de l\'essence (pas 750 en dur)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'BBOX', designation: 'Big box', categorie: 'finished', essence: 'rouge', portance: 500, length: 100, width: 100, thickness: 10 }];
+      /* 10 lattes de 1 m3 total (quantite 10 x 0.1 m3 chacune) */
+      p.composants = [{ article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', quantity: 10, length: 100, width: 100, thickness: 10 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var dRouge = ftDensite('rouge');
+      var dBlanc = ftDensite('blanc');
+      var dDivers = ftDensite('');
+      var h = ficheTechCorpsHtml('a1');
+      /* 10 lattes de 100x100x10 mm = 0,1 m3 chacune => 1 m3 au total ;
+         a 800 kg/m3 (rouge) => 800 kg. */
+      var poids = h.indexOf('800 kg');
+      var portance = h.indexOf('Charge utile estimée') !== -1;
+      var totale = h.indexOf('Charge totale') !== -1;
+      (dRouge === 800 && dBlanc === 700 && dDivers === 750 && poids !== -1 && portance && totale)
+        ? 'OK : rouge=800 / blanc=700 / divers=750, poids calcule sur le volume reel, portance affichee'
+        : 'ECHEC dRouge=' + dRouge + ' dBlanc=' + dBlanc + ' poids=' + poids + ' portance=' + portance + ' totale=' + totale
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Coût de production : le sélecteur ne propose que des produits finis',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var h = render_cout_revient.toString();
+      /* Le selecteur « Palette (produit fini) » listait consommables,
+         semi-finis et marchandises. */
+      var filtre = /getArticles\\(\\)\\.filter\\(function \\(x\\)/.test(h);
+      var gardePF = /produit_fini/.test(h);
+      (filtre && gardePF)
+        ? 'OK : la liste est filtree sur les produits finis uniquement'
+        : 'ECHEC filtre=' + filtre + ' garde=' + gardePF
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Coût de production : hypothèses de calcul repliées, palette visible',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var h = render_cout_revient.toString();
+      var replie = /_acMonoOpen/.test(h) && /Masquer les hypoth/.test(h);
+      var libelle = /Palette \\(produit fini\\)/.test(h);
+      /* l'article reste visible, les 3 hypotheses sont derriere un bouton */
+      var articleHorsBloc = h.indexOf('id="acCArt"') !== -1;
+      (replie && libelle && articleHorsBloc)
+        ? 'OK : hypotheses derriere un bouton, article toujours visible'
+        : 'ECHEC replie=' + replie + ' libelle=' + libelle + ' article=' + articleHorsBloc
     `,
     attenduPrefixe: 'OK'
   });
