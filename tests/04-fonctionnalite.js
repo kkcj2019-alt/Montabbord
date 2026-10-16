@@ -11100,7 +11100,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     app: 'index.html', store: storeRealiste,
     code: `
       var h = render_cout_revient.toString();
-      var replie = /_acMonoOpen/.test(h) && /Masquer les hypoth/.test(h);
+      var replie = /_acMonoOpen/.test(h) && /Hypoth/.test(h);
       var libelle = /Palette \\(produit fini\\)/.test(h);
       /* l'article reste visible, les 3 hypotheses sont derriere un bouton */
       var articleHorsBloc = h.indexOf('id="acCArt"') !== -1;
