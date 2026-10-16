@@ -18197,8 +18197,16 @@ function catToggleAll(el) {
     for (var i = 0; i < boxes.length; i++) { boxes[i].checked = on; }
   } catch (e) {}
 }
-/* Corps HTML d'une fiche technique (groupes de composants + total volume),
-   réutilisé à l'écran et à l'impression. */
+/* Corps HTML d'une fiche technique (groupes de composants, poids et volume).
+   PLOT et POINTE n'ont pas de dimensions exploitables : leur volume n'a aucun
+   sens, la colonne est donc masquee pour ces types (demande explicite).
+   Le POIDS est toujours affiché : c'est la seule valeur comparable entre
+   toutes les matières. */
+var FT_DENSITE_BOIS = 750; /* kg/m³ — masse volumique moyenne du bois */
+function ftEstSansVolume(type) {
+  var t = String(type || '').trim().toUpperCase();
+  return (t === 'PLOT' || t === 'POINTE' || t === 'POINTES');
+}
 function ficheTechCorpsHtml(articleId) {
   var articles = getArticles();
   var a = null, i;
@@ -18210,18 +18218,36 @@ function ficheTechCorpsHtml(articleId) {
   if (!comp.length) return '<p>Aucune nomenclature pour ' + escH(a.code || '') + '</p>';
   var groups = {};
   comp.forEach(function(c) { (groups[c.type || 'AUTRE'] = groups[c.type || 'AUTRE'] || []).push(c); });
-  var totVol = 0, h = '';
+  var totVol = 0, totPoids = 0, h = '';
   Object.keys(groups).forEach(function(t) {
+    var sansVol = ftEstSansVolume(t);
+    var volGrp = 0, poidsGrp = 0;
     h += '<h3>🧩 ' + escH(t) + '</h3>';
-    h += '<table><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th><th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th><th>Emplacement</th><th style="text-align:right">Volume (m³)</th></tr>';
+    h += '<table><tr><th>Code</th><th>Désignation</th><th style="text-align:right">Qté</th>'
+      + '<th style="text-align:right">Long</th><th style="text-align:right">Larg</th><th style="text-align:right">Épais</th>'
+      + '<th>Emplacement</th>'
+      + (sansVol ? '' : '<th style="text-align:right">Volume (m³)</th>')
+      + '<th style="text-align:right">Poids (kg)</th></tr>';
     groups[t].forEach(function(c) {
       var v = (c.volume != null ? c.volume : ((c.length || 0) * (c.width || 0) * (c.thickness || 0) / 1000000));
-      totVol += v;
-      h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(c.code) + '</td><td>' + escH(c.designation || c.code) + '</td><td style="text-align:right">' + (c.quantity || 0) + '</td><td style="text-align:right">' + (c.length || '-') + '</td><td style="text-align:right">' + (c.width || '-') + '</td><td style="text-align:right">' + (c.thickness || '-') + '</td><td>' + escH(c.placement || '-') + '</td><td style="text-align:right;font-weight:700">' + v.toFixed(4) + '</td></tr>';
+      var vNum = parseFloat(v) || 0;
+      /* Poids : saisie si elle existe, sinon déduit du volume. */
+      var poids = (c.poids != null && c.poids !== '' && !isNaN(parseFloat(c.poids)))
+        ? parseFloat(c.poids) : (vNum * FT_DENSITE_BOIS);
+      poidsGrp += poids;
+      if (!sansVol) volGrp += vNum;
+      h += '<tr><td style="font-weight:600;color:var(--accent)">' + escH(c.code) + '</td><td>' + escH(c.designation || c.code) + '</td><td style="text-align:right">' + (c.quantity || 0) + '</td><td style="text-align:right">' + (c.length || '-') + '</td><td style="text-align:right">' + (c.width || '-') + '</td><td style="text-align:right">' + (c.thickness || '-') + '</td><td>' + escH(c.placement || '-') + '</td>'
+        + (sansVol ? '' : '<td style="text-align:right;font-weight:700">' + vNum.toFixed(4) + '</td>')
+        + '<td style="text-align:right;font-weight:700">' + poids.toFixed(1) + '</td></tr>';
     });
+    h += '<tr><td colspan="7" style="background:#f8fafc"><strong>Total ' + escH(t) + '</strong></td>'
+      + (sansVol ? '' : '<td style="text-align:right;background:#f8fafc"><strong>' + volGrp.toFixed(4) + '</strong></td>')
+      + '<td style="text-align:right;background:#f8fafc"><strong>' + poidsGrp.toFixed(1) + '</strong></td></tr>';
     h += '</table>';
+    totVol += volGrp; totPoids += poidsGrp;
   });
-  h += '<p><strong>Nomenclature ' + escH(a.code || '') + ' : ' + comp.length + ' composant(s) — Volume total ' + totVol.toFixed(4) + ' m³</strong></p>';
+  h += '<p><strong>Nomenclature ' + escH(a.code || '') + ' : ' + comp.length + ' composant(s) — Poids total ' + totPoids.toFixed(1) + ' kg'
+    + (totVol > 0 ? ' — Volume total ' + totVol.toFixed(4) + ' m³' : '') + '</strong></p>';
   return h;
 }
 /* Imprime (PDF via le dialogue) les fiches techniques des produits donnés. */
@@ -18240,9 +18266,17 @@ function printFichesTechniques(ids, titre) {
     var a = null;
     for (var k = 0; k < articles.length; k++) { if (articles[k].id === id) { a = articles[k]; break; } }
     if (!a) return;
-    h += '<h2>' + (i + 1) + '. ' + escH(a.code || '') + ' — ' + escH(a.designation || '') + (a.destination ? ' (' + escH(a.destination) + ')' : '') + '</h2>';
-    var _dim = pfDimTxt(a);
-    if (_dim !== '-') h += '<p style="margin:.1rem 0"><strong>Dimensions :</strong> ' + escH(_dim) + ' cm</p>';
+    /* Titre : la DIMENSION FINIE du produit va dans l'intitulé
+       (« Big box banane 114 × 114 × 12 ») — ce sont les dimensions du
+       produit fini, saisies à la création. La destination client est
+       retirée : elle pollue l'en-tête de la fiche technique. */
+    var _dimT = pfDimTxt(a);
+    var _titreFt = (a.code || '') + ' — ' + (a.designation || '')
+      + (_dimT !== '-' ? ' ' + _dimT + ' cm' : '');
+    h += '<h2>' + (i + 1) + '. ' + escH(_titreFt) + '</h2>';
+    var _ess = (a.essence || a.typeBois || a.essenceBois || '');
+    if (_ess) h += '<p style="margin:.1rem 0"><strong>Essence :</strong> ' + escH(_ess) + '</p>';
+    if (_dimT !== '-') h += '<p style="margin:.1rem 0"><strong>Dimensions finies :</strong> ' + escH(_dimT) + ' cm</p>';
     h += ficheTechCorpsHtml(id);
     h += '<div class="saut"></div>';
   });
@@ -18480,6 +18514,16 @@ function openArticleModal(id) {
   m += '<div class="form-group"><label>Destination</label><input type="text" id="art_dest" placeholder="Ex: Dakar, Sénégal" value="' + escH(v('destination', '')) + '"></div>';
   m += '<div class="form-group"><label>Code Traitement</label><input type="text" id="art_treat" placeholder="Ex: 20" value="' + escH(v('treatment_code', '')) + '"></div>';
   m += '</div>';
+  /* ESSENCE DU BOIS : blanc / rouge / divers, plus les 5 essences saisies
+     librement (liste de propositions, sans les figer). */
+  m += '<div class="form-group"><label>Matière / Essence du bois</label>'
+    + '<input type="text" id="art_essence" list="artEssenceList" placeholder="Ex: blanc, rouge, divers…" value="' + escH(v('essence', v('typeBois', ''))) + '">'
+    + '<datalist id="artEssenceList">'
+    + '<option value="blanc (bois blanc)"></option><option value="rouge (bois rouge)"></option>'
+    + '<option value="divers"></option><option value="blanc + rouge (mixte)"></option>'
+    + '</datalist>'
+    + '<div style="font-size:10px;color:var(--gray-500);margin-top:2px">Blanc, rouge, divers, ou une essence précise (saisissez-la, elle sera proposée ensuite). Affichée sur la fiche technique.</div>'
+    + '</div>';
   /* Prix / coût / marge : gérés dans la Nomenclature de l'appli principale.
      Champs conservés cachés pour ne pas écraser les valeurs à l'enregistrement. */
   m += '<input type="hidden" id="art_pu" value="' + v('prix_vente', 0) + '">';
@@ -18582,6 +18626,7 @@ function saveArticleModal(id) {
   a.code = code;
   a.designation = designation;
   a.destination = (document.getElementById('art_dest') || {}).value || '';
+  a.essence = ((document.getElementById('art_essence') || {}).value || '').trim();
   a.treatment_code = (document.getElementById('art_treat') || {}).value || '';
   a.prix_vente = parseFloat((document.getElementById('art_pu') || {}).value) || 0;
   a.prix_revient = parseFloat((document.getElementById('art_cr') || {}).value) || 0;

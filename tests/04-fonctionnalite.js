@@ -11027,6 +11027,88 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Fiche technique : pas de volume pour PLOT/POINTE, poids toujours présent',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'BBOX', designation: 'Big box banane', categorie: 'finished', length: 114, width: 114, thickness: 12 }];
+      p.composants = [
+        { article_id: 'a1', type: 'LATTE', code: 'L107', designation: 'Latte', quantity: 10, length: 107, width: 8, thickness: 2.5, placement: 'SUPERIEUR' },
+        { article_id: 'a1', type: 'PLOT', code: 'P12', designation: 'Plote', quantity: 9, placement: 'BAS' },
+        { article_id: 'a1', type: 'POINTE', code: 'P6', designation: 'Pointe 6', quantity: 96 }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var h = ficheTechCorpsHtml('a1');
+      var idxLatte = h.indexOf('LATTE'), idxPlot = h.indexOf('PLOT'), idxPointe = h.indexOf('POINTE');
+      var segLatte = h.substring(idxLatte, idxPlot);
+      var segPlot = h.substring(idxPlot, idxPointe);
+      /* On isole chaque EN-TETE de groupe : sinon le bilan final
+         (« — Volume total ») se retrouve dans le dernier segment. */
+      function entete(seg) {
+        var d = seg.indexOf('<table>');
+        var f = seg.indexOf('</tr>', d);
+        return d === -1 ? '' : seg.substring(d, f);
+      }
+      var hLatte = entete(segLatte), hPlot = entete(segPlot), hPointe = entete(segPlot + h.substring(idxPointe));
+      var latteVol = hLatte.indexOf('Volume') !== -1;
+      var plotVol = hPlot.indexOf('Volume') !== -1;
+      var pointeVol = hPointe.indexOf('Volume') !== -1;
+      var poidsLatte = hLatte.indexOf('Poids (kg)') !== -1;
+      var poidsPlot = hPlot.indexOf('Poids (kg)') !== -1;
+      var poidsPointe = hPointe.indexOf('Poids (kg)') !== -1;
+      (latteVol && !plotVol && !pointeVol && poidsLatte && poidsPlot && poidsPointe && h.indexOf('Poids total') !== -1)
+        ? 'OK : volume masqué pour PLOT et POINTE, poids partout, total en kg'
+        : 'ECHEC latte=' + latteVol + ' plot=' + plotVol + ' pointe=' + pointeVol + ' poids=' + (poidsLatte && poidsPlot && poidsPointe)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche technique : dimensions finies dans le titre, destination retirée, essence affichée',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'a1', code: 'BBOX', designation: 'Big box banane', categorie: 'finished', destination: 'CEMOI-CI', essence: 'blanc', length: 114, width: 114, thickness: 12 }];
+      p.composants = [{ article_id: 'a1', type: 'LATTE', code: 'L107', designation: 'Latte', quantity: 10, length: 107, width: 8, thickness: 2.5 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var src = printFichesTechniques.toString();
+      var dimsDansTitre = /pfDimTxt\\(a\\)/.test(src) && /_titreFt/.test(src);
+      /* la destination ne doit plus être concaténée au titre */
+      var pasDestination = /a\\.destination \\? ' \\('/.test(src) === false;
+      var essence = /a\\.essence/.test(src);
+      var champCreation = /art_essence/.test(src) === false; /* le champ est dans le formulaire, pas ici */
+      (dimsDansTitre && pasDestination && essence)
+        ? 'OK : titre = code + désignation + dimensions finies, pas de destination, essence affichée'
+        : 'ECHEC dims=' + dimsDansTitre + ' pasDest=' + pasDestination + ' essence=' + essence + ' x=' + champCreation
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche technique : le champ essence existe à la création d\u2019un article',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* BLANC / ROUGE / DIVERS + saisie libre des 5 essences.
+         Le formulaire d'article est rendu par afBlockHTML(). */
+      var src = openArticleModal.toString();
+      var aChamp = src.indexOf('art_essence') !== -1;
+      var aListe = src.indexOf('artEssenceList') !== -1;
+      var aBlanc = /blanc/.test(src) && /rouge/.test(src) && /divers/.test(src);
+      var aEnregistre = /a\\.essence =/.test(saveArticleModal.toString());
+      (aChamp && aListe && aBlanc && aEnregistre)
+        ? 'OK : champ Matière/Essence avec propositions blanc, rouge, divers + saisie libre, enregistré'
+        : 'ECHEC champ=' + aChamp + ' liste=' + aListe + ' valeurs=' + aBlanc + ' enregistre=' + aEnregistre
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Prime production : les tranches sont contiguës (3000 puis 3001, jamais de doublon)',
     app: 'paye.html', store: storeRealiste,
     code: `
