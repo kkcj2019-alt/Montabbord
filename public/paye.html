@@ -12832,15 +12832,11 @@ var _ptWizStep = 1;
       }
 
       function openPtWizardModal(dayToEdit) {
-        var ams = getArticlesMontage();
-        if (!ams || ams.length === 0) {
-          toast("Veuillez d'abord ajouter au moins un article", "error");
-          return;
-        }
-        var mois = document.getElementById("pt-mois").value;
+        var ams = getArticlesMontage() || [];
+        var mois = document.getElementById("pt-mois") ? document.getElementById("pt-mois").value : "";
         if (!mois) {
           mois = new Date().toISOString().slice(0, 7);
-          document.getElementById("pt-mois").value = mois;
+          if (document.getElementById("pt-mois")) document.getElementById("pt-mois").value = mois;
         }
         var year = parseInt(mois.split("-")[0]),
           mIdx = parseInt(mois.split("-")[1]) - 1;
@@ -12852,14 +12848,45 @@ var _ptWizStep = 1;
         var occCount = rendWorkers.filter(function(w){ return w.rendement !== true; }).length;
         var rendCount = rendWorkers.filter(function(w){ return w.rendement === true; }).length;
 
-        var existingPt = (getPointageMontage() || []).filter(function(p){ return p.date === today && (p.quantite || 0) > 0; });
+        var existingPt = (getPointageMontage() || []).filter(function(p){ return p.date === today && (parseFloat(p.quantite) || 0) > 0; });
         var existingEmpIds = {};
-        var existingArtCodes = {};
+        var existingArtCodesRaw = {};
+        var existingArtCodesNorm = {};
         existingPt.forEach(function(p){
-          existingEmpIds[p.employee_id] = true;
-          existingArtCodes[p.article_code] = true;
+          if (p.employee_id) existingEmpIds[p.employee_id] = true;
+          var raw = String(p.article_code || '').trim();
+          if (raw) {
+            existingArtCodesRaw[raw] = true;
+            existingArtCodesNorm[raw.toLowerCase().replace(/[^a-z0-9]/g, '')] = raw;
+          }
         });
         var hasExisting = existingPt.length > 0;
+
+        /* Inclure automatiquement tout article pointé ce jour qui ne serait pas encore dans ams */
+        var nomArts = [];
+        try { nomArts = (typeof getArticles === 'function') ? getArticles() : []; } catch(eN) {}
+        Object.keys(existingArtCodesRaw).forEach(function(rawCode) {
+          var norm = rawCode.toLowerCase().replace(/[^a-z0-9]/g, '');
+          var inAms = ams.some(function(a) {
+            return String(a && a.code || '').toLowerCase().replace(/[^a-z0-9]/g, '') === norm;
+          });
+          if (!inAms) {
+            var desig = rawCode;
+            var px = 0;
+            var matchNom = nomArts.find(function(na) {
+              return String(na && na.code || '').toLowerCase().replace(/[^a-z0-9]/g, '') === norm;
+            });
+            if (matchNom) {
+              desig = matchNom.designation || rawCode;
+            }
+            ams.push({ code: rawCode, designation: desig, prix: px, _fromPointage: true });
+          }
+        });
+
+        if (!ams || ams.length === 0) {
+          toast("Veuillez d'abord ajouter au moins un article", "error");
+          return;
+        }
 
         var modalContent = '<div class="pt-wiz-root" style="padding:1.75rem">';
         modalContent += '<div class="pt-wiz-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid #e2e8f0">';
@@ -12894,8 +12921,9 @@ var _ptWizStep = 1;
         modalContent += '<div id="pt-montage-arts" class="pt-chip-group" style="max-height:160px">';
         ams.forEach(function (a) {
           var lbl = (escH(a.code) + " " + escH(a.designation || "")).trim();
-          var isArtChecked = hasExisting ? (existingArtCodes[a.code] === true) : true;
-          modalContent += '<label data-search="' + lbl.toLowerCase() + '" class="pt-chip" style="font-size:0.8rem;padding:6px 12px"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '"' + (isArtChecked ? ' checked' : '') + ' onchange="ptMontSelCount()"> ' + escH(a.code) + ' — <small style="color:#64748b">' + escH(a.designation || '') + '</small></label>';
+          var norm = String(a.code || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          var isArtChecked = hasExisting ? (existingArtCodesRaw[a.code] === true || existingArtCodesNorm[norm] !== undefined) : true;
+          modalContent += '<label data-search="' + lbl.toLowerCase() + '" class="pt-chip" style="font-size:0.8rem;padding:6px 12px' + (a._fromPointage ? ';background:#fef3c7;border-color:#f59e0b' : '') + '"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '"' + (isArtChecked ? ' checked' : '') + ' onchange="ptMontSelCount()"> ' + escH(a.code) + ' — <small style="color:#64748b">' + escH(a.designation || '') + '</small>' + (a._fromPointage ? ' <span style="font-size:0.65rem;color:#b45309;font-weight:800">(Pointé ce jour)</span>' : '') + '</label>';
         });
         modalContent += '</div>';
         modalContent += '<div style="font-size:0.7rem;color:#64748b;margin-top:6px;font-weight:600"><span id="pt-montage-art-count"></span></div>';
@@ -13003,8 +13031,8 @@ var _ptWizStep = 1;
       }
 
       function buildMontageModalGrid(day, selectedArts, presentWorkers) {
-        var ams = getArticlesMontage();
-        var ptMont = getPointageMontage().filter(function (p) { return p.date === day; });
+        var ams = getArticlesMontage() || [];
+        var ptMont = (getPointageMontage() || []).filter(function (p) { return p.date === day; });
         var grid = document.getElementById("wiz-step-3");
         window._ptMontArts = selectedArts.slice();
         
@@ -13023,9 +13051,12 @@ var _ptWizStep = 1;
           '<input type="text" id="pt-montage-facture" value="' + escH(factJour) + '" placeholder="ex : FA001 — optionnel" style="padding:5px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem">' +
           '<span style="font-size:.68rem;color:#94a3b8">Se saisit sur la journée ; sert à exclure cette facture de la prime CA d\'un employé (Prime → Barres & taux).</span></div>';
         html += '<div class="pt-mont-scroll" style="overflow-x:auto;max-height:50vh;overflow-y:auto;border:2px solid #cbd5e1;border-radius:10px;margin-bottom:1.25rem"><table class="pt-mont-grid" style="margin-top:0;font-size:0.75rem;border-collapse:collapse;width:100%"><thead><tr style="background:#0f172a;color:#ffffff"><th style="min-width:170px;padding:10px;text-align:left;font-weight:800;border-right:1px solid #334155;position:sticky;top:0;left:0;z-index:4;background:#0f172a">TRAVAILLEUR</th>';
+        
         selectedArts.forEach(function (art) {
-          var am = ams.find(function (a) { return a.code === art; });
-          var am = ams.find(function (a) { return a.code === art; });
+          var artNorm = String(art || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          var am = ams.find(function (a) {
+            return String(a && a.code || '').toLowerCase().replace(/[^a-z0-9]/g, '') === artNorm;
+          });
           html += '<th style="text-align:center;min-width:110px;padding:10px 8px;border-right:1px solid #334155;position:sticky;top:0;z-index:2;background:#0f172a;color:#ffffff">';
           html += '<div style="font-size:0.95rem;font-weight:800;color:#ffffff;letter-spacing:0.5px">📦 ' + escH(art) + '</div>';
           if (am && am.designation) {
@@ -13041,33 +13072,65 @@ var _ptWizStep = 1;
             '<div style="width:22px;height:22px;border-radius:50%;background:#dbeafe;color:#1e40af;display:flex;align-items:center;justify-content:center;font-size:0.58rem;font-weight:800;flex:0 0 auto">' + (wk.nom || "").slice(0,2).toUpperCase() + '</div><span class="pt-mont-name">' + escH(wk.nom) + '</span>' + ptMontMoveBtns(wk.id, true, "ptMontBougerGrid") + '</div></td>';
           var rowTotal = 0;
           selectedArts.forEach(function (art) {
-            var rec = ptMont.find(function (p) { return p.employee_id === wk.id && p.article_code === art; });
-            var qte = rec ? rec.quantite || 0 : 0;
-            var am2 = ams.find(function (a) { return a.code === art; });
-            if (qte > 0 && am2) rowTotal += qte * am2.prix;
-            
-            html += '<td style="text-align:center;padding:6px;border-right:1px solid #cbd5e1;background:#ffffff"><input type="text" inputmode="numeric" data-emp="' + wk.id + '" data-date="' + day + '" data-article="' + escH(art) + '" value="' + (qte || "") + '" oninput="ptMontAutoAdvance(this);ptMontMajTotaux()" onkeydown="ptMontKeyNav(event,this)" onfocus="this.select()" style="width:64px;height:36px;padding:4px;text-align:center;font-size:1rem;font-weight:800;border:2px solid #3b82f6;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.05);' + (qte > 0 ? "background:#dbeafe;border-color:#1d4ed8;color:#1e40af" : "background:#ffffff;color:#0f172a") + '"></td>';
+            var artNorm = String(art || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            var rec = ptMont.find(function (p) {
+              if (p.employee_id !== wk.id) return false;
+              if (p.article_code === art) return true;
+              var cNorm = String(p.article_code || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+              return cNorm && cNorm === artNorm;
+            });
+            var qte = rec ? (rec.quantite || 0) : 0;
+            var am2 = ams.find(function (a) {
+              return String(a && a.code || '').toLowerCase().replace(/[^a-z0-9]/g, '') === artNorm;
+            });
+            var prix = am2 ? (am2.prix || 0) : 0;
+            rowTotal += qte * prix;
+            html += '<td style="padding:6px;text-align:center;border-right:1px solid #cbd5e1">' +
+              '<input type="number" min="0" value="' + (qte > 0 ? qte : '') + '" placeholder="0" ' +
+              'data-emp="' + wk.id + '" data-article="' + escH(art) + '" data-date="' + day + '" ' +
+              'class="pt-mont-input" oninput="ptMontMajTotaux()" ' +
+              'style="width:70px;padding:6px 4px;border:1.5px solid #cbd5e1;border-radius:6px;text-align:center;font-weight:800;font-size:0.85rem;color:#0f172a;background:#fff">' +
+              '</td>';
           });
-          html += '<td data-rowtot="' + wk.id + '" style="text-align:right;font-weight:800;font-size:0.8rem;color:#7c3aed;padding:8px 10px;background:#f8fafc">' + (rowTotal > 0 ? fmt(rowTotal) + " F" : "0 F") + '</td></tr>';
+          html += '<td style="padding:8px 12px;text-align:right;font-weight:800;font-size:0.85rem;color:#7c3aed;background:#faf5ff" class="pt-mont-row-total" data-row-emp="' + wk.id + '">' + fmt(rowTotal) + ' F</td></tr>';
         });
-        /* Pied : total par article (Yapo 1 + Yekre 1 = 2 sur le même article)
-           + grand total, recalculés à chaque frappe. */
-        var _foot = '<tr style="background:#f8fafc;font-weight:800;border-top:2px solid #0f172a"><td style="padding:8px 10px">TOTAL</td>';
-        for (var _fi = 0; _fi < selectedArts.length; _fi++) {
-          _foot += '<td id="pt-mont-totart-' + _fi + '" style="text-align:center;padding:6px;font-size:.75rem">—</td>';
-        }
-        _foot += '<td id="pt-mont-grand" style="text-align:right;font-weight:900;padding:8px 10px">—</td></tr>';
-        html += _foot;
+        
+        /* Footer totals */
+        html += '<tr style="background:#f1f5f9;font-weight:800;border-top:2px solid #cbd5e1;position:sticky;bottom:0;z-index:3"><td style="padding:10px;border-right:2px solid #cbd5e1;position:sticky;left:0;background:#f1f5f9;z-index:4">TOTAL</td>';
+        var grandTotal = 0;
+        selectedArts.forEach(function (art) {
+          var artNorm = String(art || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          var am3 = ams.find(function (a) {
+            return String(a && a.code || '').toLowerCase().replace(/[^a-z0-9]/g, '') === artNorm;
+          });
+          var prix = am3 ? (am3.prix || 0) : 0;
+          var colQte = 0;
+          presentWorkers.forEach(function (wk) {
+            var rec = ptMont.find(function (p) {
+              if (p.employee_id !== wk.id) return false;
+              if (p.article_code === art) return true;
+              var cNorm = String(p.article_code || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+              return cNorm && cNorm === artNorm;
+            });
+            colQte += rec ? (rec.quantite || 0) : 0;
+          });
+          grandTotal += colQte * prix;
+          html += '<td style="padding:8px;text-align:center;border-right:1px solid #cbd5e1" class="pt-mont-col-total" data-col-art="' + escH(art) + '"><div>' + colQte + '</div><div style="font-size:0.65rem;color:#64748b">' + fmt(colQte * prix) + ' F</div></td>';
+        });
+        html += '<td style="padding:10px 12px;text-align:right;font-size:0.95rem;color:#7c3aed;background:#ede9fe" id="pt-mont-grand-total">' + fmt(grandTotal) + ' F</td></tr>';
         html += '</tbody></table></div>';
         
-        html += '<div class="pt-mont-actions" style="display:flex;justify-content:space-between;align-items:center"><button class="btn btn-sec" onclick="ptWizNextStep(2)">⬅️ Modifier Participants</button><button type="button" title="Revenir à l’ordre par défaut (matricule) pour tout le monde" onclick="ptMontOrdreDefautGrid()" style="padding:10px 16px;font-size:.8rem;font-weight:700;border-radius:8px;border:1px solid #cbd5e1;background:#fff;color:#475569;cursor:pointer">↺ Défaut</button><button class="btn" style="padding:10px 24px;font-size:0.85rem;font-weight:800;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;box-shadow:0 4px 14px rgba(22,163,74,0.3)" onclick="ptMontValidate(\'' + day + '\');closePtModal()">💾 Enregistrer la Journée</button></div>';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding-top:10px;border-top:1px solid #e2e8f0">';
+        html += '<button type="button" class="btn btn-sec" onclick="showWizStep(2)">⬅️ Modifier Participants</button>';
+        html += '<button type="button" class="btn btn-sec" onclick="document.querySelectorAll(\'.pt-mont-input\').forEach(function(i){i.value=\'\'});ptMontMajTotaux()">↺ Défaut</button>';
+        html += '<button type="button" class="btn" style="background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;padding:11px 28px;font-size:0.9rem;font-weight:800;border-radius:8px;box-shadow:0 4px 14px rgba(22,163,74,0.3)" onclick="ptMontValidate(\'' + day + '\');closePtModal()">💾 Enregistrer la Journée</button></div>';
         html += '</div>';
         grid.innerHTML = html;
         try {
           ptMontMajTotaux();
         } catch (eMMT) {}
       }
-      /* Totaux montage purs (testés) : par article, par employé, grand total. */
+/* Totaux montage purs (testés) : par article, par employé, grand total. */
       function ptMontTotaux(lignes, prixParArt) {
         var parArt = {},
           parEmp = {},
