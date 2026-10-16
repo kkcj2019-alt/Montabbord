@@ -11027,6 +11027,42 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Recherche globale (page) : meme index montants que la liste deroulante',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = renderGlobalSearchAll.toString();
+      /* La page avait sa propre correspondance, purely textuelle : le menu
+         deroulant trouvait 960 000, la page repondait « Aucun resultat ». */
+      var aMatcher = /_gsAllMatch\\(/.test(src);
+      var aQNum = /qNumAll/.test(src);
+      var aIdx = /_gsIdxMontant\\(/.test(src);
+      var aAcomptes = /Acomptes & pr/.test(src);
+      var resteAncien = /indexOf\\(ql\\) === -1\\) continue; nOp/.test(src);
+      (aMatcher && aQNum && aIdx && aAcomptes && !resteAncien)
+        ? 'OK : page et liste deroulante partagent l\u2019index montants, section Acomptes & prets ajoutee'
+        : 'ECHEC matcher=' + aMatcher + ' qNum=' + aQNum + ' idx=' + aIdx + ' acomptes=' + aAcomptes
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Export PDF fournisseurs : la liste affiche le NOM, pas l\u2019id technique',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var src = exportPDFComptesFournisseurs.toString();
+      /* Avant : escH(fid) => « id_1790253986964_gqbsur », illisible, et le champ
+         « Taper nom fournisseur » ne pouvait rien filtrer dessus. */
+      var afficheId = /escH\\(fid\\)/.test(src);
+      var resoutNom = /getFournisseurs\\(\\)/.test(src) && /_pdfFrNom/.test(src);
+      var classeFiltre = /pdfChkLbl/.test(src);
+      (!afficheId && resoutNom && classeFiltre)
+        ? 'OK : libelle = nom du fournisseur, filtre porte sur la classe pdfChkLbl'
+        : 'ECHEC afficheId=' + afficheId + ' resoutNom=' + resoutNom + ' classe=' + classeFiltre
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Compte fournisseur : le detail deroule affiche Remettant, Executant, Moyen, N deg. transaction et Observations',
     app: 'index.html', store: storeRealiste,
     code: `
