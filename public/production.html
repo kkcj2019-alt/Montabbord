@@ -9421,6 +9421,150 @@ function scheduleProdPush() {
   try { if (_prodPushT) clearTimeout(_prodPushT); } catch(e) {}
   _prodPushT = setTimeout(prodPushNow, 2500);
 }
+/* ========================================================================
+   TRANSPORT DECOUPE (anti timeouts 57014) : la table enterprise_data
+   contient 1 ligne par rubrique au lieu du dossier entier (2,5 Mo).
+   - Lecture CIBLEE : identite + rubriques utiles uniquement (plus de
+     SELECT * qui timeoutait a chaque ecriture/lecture).
+   - Ecriture par lignes : sections mdb_production + cles entieres.
+   - Repli legacy automatique si la table n'existe pas encore (migration
+     SQL passee apres le deploiement) : les anciens appels RPC reprennent.
+   ======================================================================== */
+var _prodSplitOK; /* undefined = inconnu, true = decoupe, false = legacy */
+function prodSplitEstTableManquante(err) {
+  try {
+    if (!err) return false;
+    var code = String(err.code || '');
+    var msg = String(err.message || '');
+    var det = String(err.details || '') + ' ' + String(err.hint || '');
+    if (code === '42P01') return true;
+    if (/enterprise_data/i.test(msg + ' ' + det) &&
+        (/does not exist|not exist|not found|42P01/i.test(msg + ' ' + det))) return true;
+    if ((err.status === 404 || err.statusCode === 404) && /enterprise_data/i.test(msg)) return true;
+  } catch (e) {}
+  return false;
+}
+function prodSplitAssemble(lignes, prefixe) {
+  /* Regroupe les lignes 'mdb_production.xxx' en objet ; les autres cles
+     passent telles quelles. */
+  var doc = {};
+  for (var i = 0; i < (lignes || []).length; i++) {
+    var r = lignes[i];
+    if (!r || typeof r.cle !== 'string') continue;
+    if (r.cle === '__split_migration_ok') continue;
+    if (prefixe && (r.cle === prefixe || r.cle.indexOf(prefixe + '.') === 0)) {
+      if (!doc || typeof doc !== 'object' || Array.isArray(doc)) doc = {};
+      var sub = (r.cle === prefixe) ? null : r.cle.slice(prefixe.length + 1);
+      if (sub === null) {
+        if (r.data && typeof r.data === 'object' && !Array.isArray(r.data)) {
+          for (var k in r.data) { if (r.data.hasOwnProperty(k)) doc[k] = r.data[k]; }
+        }
+      } else {
+        doc[sub] = (r.data === undefined ? null : r.data);
+      }
+    } else if (!prefixe) {
+      doc[r.cle] = (r.data === undefined ? null : r.data);
+    }
+  }
+  return doc;
+}
+function prodSplitLireLegacy(uid) {
+  var sb = prodSb();
+  return sb.from('enterprises').select('*').eq('id', uid).limit(1);
+}
+/* Lecture ciblee : [{identifiant,email,nom, data:{cles demandees}}] au format
+   reponse PostgREST, pour ne toucher a aucun appelant. */
+function prodSplitLireCles(uid, clesExactes, avecProd) {
+  var sb = prodSb();
+  function legacy() {
+    _prodSplitOK = false;
+    return prodSplitLireLegacy(uid);
+  }
+  if (_prodSplitOK === false) return legacy();
+  return sb.from('enterprises').select('id,identifiant,email,nom').eq('id', uid).limit(1).then(function(r0) {
+    if (r0.error) throw r0.error;
+    var idrow = (r0.data && r0.data[0]) || null;
+    var demandes = [];
+    function lireExactes() {
+      if (!clesExactes || !clesExactes.length) return Promise.resolve([]);
+      return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).in('cle', clesExactes).then(function(r) {
+        if (r.error) throw r.error;
+        return r.data || [];
+      });
+    }
+    function lireProd() {
+      if (!avecProd) return Promise.resolve([]);
+      return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).like('cle', 'mdb_production.%').then(function(r) {
+        if (r.error) throw r.error;
+        var rows = r.data || [];
+        return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).eq('cle', 'mdb_production').then(function(r2) {
+          if (r2.error) throw r2.error;
+          return rows.concat(r2.data || []);
+        });
+      });
+    }
+    return Promise.all([lireExactes(), lireProd()]).then(function(tout) {
+      _prodSplitOK = true;
+      var data = {};
+      var i, r;
+      for (i = 0; i < tout[0].length; i++) { r = tout[0][i]; data[r.cle] = (r.data === undefined ? null : r.data); }
+      var prod = prodSplitAssemble(tout[1], 'mdb_production');
+      if (Object.keys(prod).length > 0) data.mdb_production = prod;
+      var row = { identifiant: (idrow && idrow.identifiant) || '', email: (idrow && idrow.email) || '', nom: (idrow && idrow.nom) || '', data: data };
+      try {
+        if (idrow) window._prodCloudCache = { uid: uid, at: Date.now(), row: row };
+      } catch (eCC) {}
+      return { data: (idrow || tout[0].length || tout[1].length) ? [row] : [] };
+    });
+  }).catch(function(e) {
+    if (prodSplitEstTableManquante(e)) return legacy();
+    throw e;
+  });
+}
+/* Ecriture decoupee : docPartiel = {cle: valeur} ; mdb_production (objet) est
+   decoupé par section. Rejette {__splitManquant:true} si repli necessaire. */
+function prodSplitEcrire(uid, docPartiel, identity) {
+  var sb = prodSb();
+  if (_prodSplitOK === false) return Promise.reject({ __splitManquant: true });
+  var lignes = [];
+  for (var k in docPartiel) {
+    if (!docPartiel.hasOwnProperty(k)) continue;
+    var v = docPartiel[k];
+    if (v === undefined || v === null) continue;
+    if (k === 'mdb_production' && v && typeof v === 'object' && !Array.isArray(v)) {
+      for (var s in v) {
+        if (!v.hasOwnProperty(s) || v[s] === undefined || v[s] === null) continue;
+        lignes.push({ enterprise_id: uid, cle: k + '.' + s, data: v[s], updated_at: new Date().toISOString() });
+      }
+    } else {
+      lignes.push({ enterprise_id: uid, cle: k, data: v, updated_at: new Date().toISOString() });
+    }
+  }
+  function bump() {
+    var up = { id: uid, updated_at: new Date().toISOString() };
+    if (identity) {
+      if (identity.identifiant) up.identifiant = identity.identifiant;
+      if (identity.email) up.email = identity.email;
+      if (identity.nom) up.nom = identity.nom;
+    }
+    return sb.from('enterprises').upsert(up, { onConflict: 'id' }).then(function(r) {
+      if (r.error) throw r.error;
+    });
+  }
+  function envoi(paquet) {
+    return sb.from('enterprise_data').upsert(paquet, { onConflict: 'enterprise_id,cle' }).then(function(r) {
+      if (r.error) throw r.error;
+    });
+  }
+  var chain = Promise.resolve();
+  for (var i = 0; i < lignes.length; i += 25) {
+    (function(pq) { chain = chain.then(function() { return envoi(pq); }); })(lignes.slice(i, i + 25));
+  }
+  return chain.then(bump).catch(function(e) {
+    if (prodSplitEstTableManquante(e)) { _prodSplitOK = false; throw { __splitManquant: true }; }
+    throw e;
+  });
+}
 function prodPushNow() {
   try { if (_prodPushT) { clearTimeout(_prodPushT); _prodPushT = null; } } catch(e) {}
   if (_prodPushing || !_prodDirty) return;
@@ -9432,24 +9576,19 @@ function prodPushNow() {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { prodSyncStatus('○ hors ligne', 'var(--dim)'); return; }
   _prodPushing = true;
   var identity = null;
-  /* Lecture cachee 30 s : relire tout le dossier (~1,5 Mo) avant chaque ecriture,
-     a 2 postes simultanes, c'est ce qui sature la base. Le serveur fusionne par
-     cles, le cache suffit entre deux sondes. */
+  /* Lecture ciblee + cache 30 s : on ne lit que l'identite et les rubriques
+     utiles (mdb_production par sections, dettes). L'ancien SELECT * du
+     dossier entier (~2,5 Mo) timeoutait a chaque ecriture. */
   var _lecP2 = null;
   try {
     var _cc2 = window._prodCloudCache;
     if (_cc2 && _cc2.uid === uid && _cc2.row && (Date.now() - _cc2.at) < 30000) {
       _lecP2 = Promise.resolve({ data: [_cc2.row] });
     } else {
-      _lecP2 = sb.from('enterprises').select('*').eq('id', uid).limit(1).then(function (res0) {
-        if (!res0.error && res0.data && res0.data[0]) {
-          try { window._prodCloudCache = { uid: uid, at: Date.now(), row: res0.data[0] }; } catch (eCC2) {}
-        }
-        return res0;
-      });
+      _lecP2 = prodSplitLireCles(uid, ['mdb_dettesFournisseurs'], true);
     }
   } catch (eCP2) { _lecP2 = null; }
-  if (!_lecP2) _lecP2 = sb.from('enterprises').select('*').eq('id', uid).limit(1);
+  if (!_lecP2) _lecP2 = prodSplitLireCles(uid, ['mdb_dettesFournisseurs'], true);
   _lecP2.then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
@@ -9500,21 +9639,32 @@ function prodPushNow() {
        par sections n'enverrait que mdb_production et perdrait la suppression). */
     var _nomEnAttente = !!window._prodNomEnAttente;
     if (_nomEnAttente) { window._prodNomEnAttente = false; window._prodNomModifie = false; }
-    if (_prodMergedRpc === false || !sectionPayload || _nomEnAttente) {
-      return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+    /* Ecriture decoupee d'abord (petites lignes, pas de timeout) ; repli RPC
+       (comportement d'avant) si la table n'existe pas encore. */
+    var docPartiel;
+    if (_nomEnAttente || _prodMergedRpc === false || !sectionPayload) {
+      docPartiel = payload; /* complet : mdb_production + extras */
+    } else {
+      docPartiel = { mdb_production: sectionPayload }; /* sections sales seules */
+      try { window._prodSectionsEnvoyees = null; window._prodSectionsPartielles = sectionPayload; } catch (eSP) {}
     }
-    var prodArgs = { p_id: uid, p_prod: sectionPayload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom };
-    try { window._prodSectionsEnvoyees = null; window._prodSectionsPartielles = sectionPayload; } catch (eSP) {}
-    return sb.rpc('mdb_upsert_enterprise_prod', prodArgs).then(function(r) {
-      if (r && r.error) {
-        _prodMergedRpc = false;
+    return prodSplitEcrire(uid, docPartiel, identity).catch(function(eSplit) {
+      if (!(eSplit && eSplit.__splitManquant)) throw eSplit;
+      if (_prodMergedRpc === false || !sectionPayload || _nomEnAttente) {
         return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
       }
-      _prodMergedRpc = true;
-      return r;
-    }).catch(function() {
-      _prodMergedRpc = false;
-      return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+      var prodArgs = { p_id: uid, p_prod: sectionPayload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom };
+      return sb.rpc('mdb_upsert_enterprise_prod', prodArgs).then(function(r) {
+        if (r && r.error) {
+          _prodMergedRpc = false;
+          return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+        }
+        _prodMergedRpc = true;
+        return r;
+      }).catch(function() {
+        _prodMergedRpc = false;
+        return sb.rpc('mdb_upsert_enterprise', { p_id: uid, p_data: payload, p_identifiant: identity.identifiant, p_email: identity.email, p_nom: identity.nom });
+      });
     });
   }).then(function(r2) {
     if (r2 && r2.error) throw r2.error;
@@ -9739,7 +9889,9 @@ function prodPullNow(silent) {
   var sb = prodSb();
   if (!sb) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-  sb.from('enterprises').select('*').eq('id', uid).limit(1).then(function(res) {
+  /* Tirage cible : mdb_production (sections) + cles caisse/dettes, sans le
+     SELECT * du dossier entier qui timeoutait. */
+  prodSplitLireCles(uid, ['mdb_dettesFournisseurs', 'mdb_operationsCaisse', 'mdb_codesCaisse', 'mdb_caisses'], true).then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
     if (!row.data) return;
@@ -9759,6 +9911,9 @@ function prodStartRealtime() {
   if (!sb || !sb.channel) return;
   try { if (_prodSub) { try { sb.removeChannel(_prodSub); } catch(e) {} _prodSub = null; } } catch(e) {}
   try {
+    /* Decoupe : on ecoute les petites lignes (evenements legers) puis on
+       retire les rubriques utiles. Repli enterprises si table absente. */
+    if (_prodSplitOK === false) {
     _prodSub = sb.channel('prod-' + uid).on('postgres_changes', { event: '*', schema: 'public', table: 'enterprises', filter: 'id=eq.' + uid }, function(payload) {
       try {
         var row = (payload && payload.new) || {};
@@ -9771,6 +9926,19 @@ function prodStartRealtime() {
         if ((a1 || a2 || a3 || a4 || a5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
       } catch(e) {}
     });
+    } else {
+    _prodSub = sb.channel('prod-split-' + uid).on('postgres_changes', { event: '*', schema: 'public', table: 'enterprise_data', filter: 'enterprise_id=eq.' + uid }, function(payload) {
+      try {
+        /* Un evenement par ligne : on coalesce 1,5 s puis on retire (meme
+           chemin que le pull, fusions incluses). */
+        try { if (window._prodRtT) clearTimeout(window._prodRtT); } catch(eT) {}
+        window._prodRtT = setTimeout(function() {
+          window._prodRtT = null;
+          try { prodPullNow(true); } catch(eP) {}
+        }, 1500);
+      } catch(e) {}
+    });
+    }
     _prodSub.subscribe(function(status) {});
   } catch(e) {}
 }

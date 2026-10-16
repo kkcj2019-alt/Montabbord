@@ -21,27 +21,35 @@ const ETAPES = [
   { cle: '02', nom: 'fonctions', charger: () => require('./02-fonctions.js') },
   { cle: '03', nom: 'pages', charger: () => require('./03-pages.js') },
   { cle: '04', nom: 'fonctionnalite', charger: () => require('./04-fonctionnalite.js') },
-  { cle: '05', nom: 'ergonomie', charger: () => require('./05-ergonomie.js') }
+  { cle: '05', nom: 'ergonomie', charger: () => require('./05-ergonomie.js') },
+  { cle: '06', nom: 'split', charger: () => require('./06-split.js') }
 ];
 
 const rapport = new Rapport('MONTABBORD — CONTROLE QUALITE DES APPLICATIONS');
 
-let executees = 0;
-ETAPES.forEach(function (e) {
-  if (only && e.cle !== only) return;
-  executees++;
-  const etape = e.charger();
-  if (e.cle === '03') {
-    etape.run(rapport, { verbose: verbose });
-  } else {
-    etape.run(rapport);
+/* Certaines etapes sont asynchrones (06 : faux Supabase en promesses) :
+   on les attend avant d'afficher le resultat, sinon leurs controles
+   arriveraient apres la fin du programme. */
+async function principal() {
+  let executees = 0;
+  for (const e of ETAPES) {
+    if (only && e.cle !== only) continue;
+    executees++;
+    const etape = e.charger();
+    const r = (e.cle === '03') ? etape.run(rapport, { verbose: verbose }) : etape.run(rapport);
+    if (r && typeof r.then === 'function') await r;
   }
-});
 
-if (!executees) {
-  console.error('Aucune etape ne correspond a --only=' + only);
-  process.exit(2);
+  if (!executees) {
+    console.error('Aucune etape ne correspond a --only=' + only);
+    process.exit(2);
+  }
+
+  const echecs = rapport.afficher();
+  process.exit(echecs === 0 ? 0 : 1);
 }
 
-const echecs = rapport.afficher();
-process.exit(echecs === 0 ? 0 : 1);
+principal().catch(function (e) {
+  console.error('Echec du lanceur : ' + (e && e.message));
+  process.exit(1);
+});

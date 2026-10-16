@@ -2,6 +2,9 @@
    MDB-SUPABASE.JS — Adaptateur Firestore -> Supabase pour MONTABBORD
    Expose une API compatible avec le sous-ensemble Firestore utilisé par l'app,
    adossé à PostgreSQL/Supabase. La logique métier reste inchangée.
+   DECOUPAGE (anti timeouts 57014) : le document enterprises n'est plus UN
+   gros jsonb — chaque rubrique est une petite ligne de enterprise_data
+   (mdb_paye / mdb_production decoupes par section). Interface inchangee.
    ============================================================================ */
 (function() {
   'use strict';
@@ -47,6 +50,221 @@
   }
 
   function isoNow() { return new Date().toISOString(); }
+
+  /* ========================================================================
+     DECOUPAGE ANTI-TIMEOUT (1 ligne par rubrique dans enterprise_data)
+     Le dossier entier (2,5 Mo) dans enterprises.data faisait timeouter
+     Postgres (57014/500) a 4 postes. Desormais chaque rubrique est une
+     petite ligne : ecritures/lectures en millisecondes, temps reel leger.
+     - mdb_paye / mdb_production (les geants) sont decoupes par SECTION
+       ('mdb_paye.pointage'...), transparent pour l'app (re-assembles).
+     - Compatibilite totale : si la table n'existe pas encore (migration SQL
+       passee APRES le deploiement), repli automatique sur l'ancien chemin.
+     - Migration sans perte : a la premiere lecture, l'ancien document est
+       recopie ligne par ligne (uniquement les cles manquantes), l'ancienne
+       colonne reste intacte en secours. Rien n'est jamais efface.
+     ======================================================================== */
+  var SPLIT_TABLE = 'enterprise_data';
+  var SPLIT_MIGRATION_CLE = '__split_migration_ok';
+  var SPLIT_SECTION_KEYS = { mdb_paye: true, mdb_production: true };
+  var _splitOK = null; /* null = inconnu, true = table prete, false = repli legacy */
+
+  function splitEstTableManquante(err) {
+    try {
+      if (!err) return false;
+      var code = String(err.code || '');
+      var msg = String(err.message || '');
+      var det = String(err.details || '') + ' ' + String(err.hint || '');
+      if (code === '42P01') return true;
+      if (/enterprise_data/i.test(msg + ' ' + det) &&
+          (/does not exist|not exist|not found|42P01/i.test(msg + ' ' + det))) return true;
+      if ((err.status === 404 || err.statusCode === 404) && /enterprise_data/i.test(msg)) return true;
+    } catch (e) {}
+    return false;
+  }
+
+  function splitEstObjetSimple(v) {
+    return v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date);
+  }
+
+  /* Document {cle: valeur} -> lignes. Les cles null/undefined sont ignorees
+     (pousse-a-vide : on ne propage jamais du vide). */
+  function splitDocEnLignes(uid, data) {
+    var lignes = [];
+    for (var k in data) {
+      if (!data.hasOwnProperty(k)) continue;
+      var v = data[k];
+      if (v === undefined || v === null) continue;
+      if (SPLIT_SECTION_KEYS[k] && splitEstObjetSimple(v)) {
+        for (var s in v) {
+          if (!v.hasOwnProperty(s)) continue;
+          if (v[s] === undefined || v[s] === null) continue;
+          lignes.push({ enterprise_id: uid, cle: k + '.' + s, data: v[s], updated_at: isoNow() });
+        }
+      } else {
+        lignes.push({ enterprise_id: uid, cle: k, data: v, updated_at: isoNow() });
+      }
+    }
+    return lignes;
+  }
+
+  /* Lignes -> document identique a l'ancien. Les sections priment sur une
+     eventuelle ligne entiere (elles sont toujours les plus recentes). */
+  function splitAssemble(lignes) {
+    var doc = {};
+    var i, r, pos, base;
+    for (i = 0; i < (lignes || []).length; i++) {
+      r = lignes[i];
+      if (!r || typeof r.cle !== 'string' || r.cle === SPLIT_MIGRATION_CLE) continue;
+      pos = r.cle.indexOf('.');
+      if (pos > 0 && SPLIT_SECTION_KEYS[r.cle.slice(0, pos)]) continue; /* passe 2 */
+      doc[r.cle] = (r.data === undefined ? null : r.data);
+    }
+    for (i = 0; i < (lignes || []).length; i++) {
+      r = lignes[i];
+      if (!r || typeof r.cle !== 'string') continue;
+      pos = r.cle.indexOf('.');
+      if (!(pos > 0)) continue;
+      base = r.cle.slice(0, pos);
+      if (!SPLIT_SECTION_KEYS[base]) continue;
+      if (!splitEstObjetSimple(doc[base])) doc[base] = {};
+      doc[base][r.cle.slice(pos + 1)] = (r.data === undefined ? null : r.data);
+    }
+    return doc;
+  }
+
+  function splitIdentite(data) {
+    var id = {};
+    if (data) {
+      if (typeof data.identifiant === 'string' && data.identifiant) id.identifiant = data.identifiant;
+      if (typeof data.email === 'string' && data.email) id.email = data.email;
+      if (typeof data.nom === 'string' && data.nom) id.nom = data.nom;
+    }
+    return id;
+  }
+
+  function splitParPaquets(arr, n) {
+    var out = [];
+    for (var i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+    return out;
+  }
+
+  /* Ecriture decoupee : 1 upsert de petites lignes + bump updated_at leger
+     (c'est lui que lisent les sondes des autres postes). La sentinelle est
+     posee EN DERNIER : elle seule dit que le decoupe fait foi. Sans elle
+     (echec intermediaire), la lecture reprend le legacy + migration. */
+  function writeEnterpriseSplit(uid, data) {
+    var lignes = splitDocEnLignes(uid, data);
+    var ident = splitIdentite(data);
+    var upsertIdent = { id: uid, updated_at: isoNow() };
+    for (var k in ident) { if (ident.hasOwnProperty(k)) upsertIdent[k] = ident[k]; }
+    var p1 = (lignes.length > 0)
+      ? sb.from(SPLIT_TABLE).upsert(lignes, { onConflict: 'enterprise_id,cle' })
+          .then(function(r) { if (r.error) throw r.error; })
+      : Promise.resolve();
+    return p1.then(function() {
+      return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' })
+        .then(function(r2) { if (r2.error) throw r2.error; });
+    }).then(function() {
+      return sb.from(SPLIT_TABLE).upsert(
+        [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
+        { onConflict: 'enterprise_id,cle' })
+        .then(function(r3) { if (r3.error) throw r3.error; });
+    });
+  }
+
+  /* Ancien chemin (table enterprise_data absente) : conserve tel quel. */
+  function writeEnterpriseLegacy(uid, data) {
+    var conv = docToRow('enterprises', uid, data);
+    var row = conv.row;
+    return sb.rpc('mdb_upsert_enterprise', {
+      p_id: row.id, p_data: row.data,
+      p_identifiant: row.identifiant || '', p_email: row.email || '', p_nom: row.nom || ''
+    }).then(function(res) { if (res.error) throw res.error; });
+  }
+
+  /* Migration legacy -> decoupe : ne remplit que les cles ABSENTES (jamais
+     d'ecrasement d'une ecriture fraiche), puis pose la sentinelle. Idempotent,
+     rejouable, erreurs avalees (reessai a la prochaine lecture). */
+  function migrerLegacyVersSplit(uid, legacyData, lignesExistantes) {
+    try {
+      if (!legacyData || typeof legacyData !== 'object') return Promise.resolve();
+      var presents = {};
+      for (var i = 0; i < (lignesExistantes || []).length; i++) {
+        var r = lignesExistantes[i];
+        if (r && r.cle) presents[r.cle] = true;
+      }
+      var toutes = [];
+      var cand = splitDocEnLignes(uid, legacyData);
+      for (var j = 0; j < cand.length; j++) {
+        if (!presents[cand[j].cle]) toutes.push(cand[j]);
+      }
+      var chain = Promise.resolve();
+      var paquets = splitParPaquets(toutes, 15);
+      paquets.forEach(function(pq) {
+        chain = chain.then(function() {
+          return sb.from(SPLIT_TABLE).upsert(pq, { onConflict: 'enterprise_id,cle' })
+            .then(function(r) { if (r.error) throw r.error; });
+        });
+      });
+      return chain.then(function() {
+        return sb.from(SPLIT_TABLE).upsert(
+          [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
+          { onConflict: 'enterprise_id,cle' })
+          .then(function(r) { if (r.error) throw r.error; });
+      }).catch(function() {});
+    } catch (e) { return Promise.resolve(); }
+  }
+
+  function fetchEnterpriseLegacy(uid) {
+    return sb.from('enterprises').select('*').eq('id', uid).limit(1).then(function(res) {
+      if (res.error) throw res.error;
+      var snap = (res.data && res.data.length > 0)
+        ? docFromRow('enterprises', res.data[0])
+        : new DocSnapshot(uid, false, null);
+      snap._split = false;
+      return snap;
+    });
+  }
+
+  function fetchEnterpriseSplit(uid) {
+    return sb.from(SPLIT_TABLE).select('cle,data').eq('enterprise_id', uid).then(function(res) {
+      if (res.error) {
+        if (splitEstTableManquante(res.error)) {
+          _splitOK = false;
+          return fetchEnterpriseLegacy(uid);
+        }
+        throw res.error;
+      }
+      _splitOK = true;
+      var lignes = res.data || [];
+      var aSentinelle = false;
+      for (var i = 0; i < lignes.length; i++) {
+        if (lignes[i] && lignes[i].cle === SPLIT_MIGRATION_CLE) { aSentinelle = true; break; }
+      }
+      if (aSentinelle) {
+        var snap = new DocSnapshot(uid, true, splitAssemble(lignes));
+        snap._split = true;
+        return snap;
+      }
+      /* Pas de sentinelle : le legacy fait foi + migration en arriere-plan */
+      return sb.from('enterprises').select('id').eq('id', uid).limit(1).then(function(rId) {
+        if (rId.error) throw rId.error;
+        var identExiste = !!(rId.data && rId.data.length > 0);
+        if (!lignes.length && !identExiste) {
+          var vide = new DocSnapshot(uid, false, null);
+          vide._split = true;
+          return vide;
+        }
+        return fetchEnterpriseLegacy(uid).then(function(snapLegacy) {
+          try {
+            migrerLegacyVersSplit(uid, snapLegacy.exists ? snapLegacy.data() : null, lignes);
+          } catch (eM) {}
+          return snapLegacy;
+        });
+      });
+    });
+  }
 
   /* ---------- Conversion ligne <-> document ---------- */
 
@@ -153,15 +371,18 @@
 
   function writeDoc(parentTable, parentId, table, docId, data, opts) {
     data = deepClean(data || {});
+
+    /* Document entreprise : ecriture decoupee (petites lignes), repli legacy
+       si la table enterprise_data n'existe pas encore. */
+    if (table === 'enterprises' && !parentTable) {
+      if (_splitOK === false) return writeEnterpriseLegacy(docId, data);
+      return writeEnterpriseSplit(docId, data).catch(function(e) {
+        _splitOK = false;
+        return writeEnterpriseLegacy(docId, data);
+      });
+    }
     var conv = docToRow(table, docId, data);
     var row = conv.row;
-
-    if (conv.mergeRpc) {
-      return sb.rpc('mdb_upsert_enterprise', {
-        p_id: row.id, p_data: row.data,
-        p_identifiant: row.identifiant || '', p_email: row.email || '', p_nom: row.nom || ''
-      }).then(function(res) { if (res.error) throw res.error; });
-    }
     if (conv.saMerge) {
       return sb.rpc('mdb_upsert_sa_config', { p_data: row.data })
         .then(function(res) { if (res.error) throw res.error; });
@@ -248,6 +469,15 @@
 
   function fetchDoc(parentTable, parentId, table, docId) {
     var q;
+    /* Document entreprise : lecture decoupee (petites lignes + migration
+       auto), repli legacy si la table n'existe pas encore. */
+    if (table === 'enterprises' && !parentTable) {
+      if (_splitOK === false) return _tmo(fetchEnterpriseLegacy(docId));
+      return _tmo(fetchEnterpriseSplit(docId).catch(function(e) {
+        if (splitEstTableManquante(e)) { _splitOK = false; return fetchEnterpriseLegacy(docId); }
+        throw e;
+      }));
+    }
     switch (table) {
       case 'enterprises':
         q = sb.from('enterprises').select('*').eq('id', docId).limit(1); break;
@@ -299,16 +529,36 @@
     fetchDoc(parentTable, parentId, table, docId).then(function(snap) {
       if (stopped) return;
       try { onData(snap); } catch (e) { console.warn('[SB] snapshot cb error:', e); }
-      var cfg = { event: '*', schema: 'public', table: table };
-      if (table === 'enterprises') cfg.filter = 'id=eq.' + docId;
+      /* Document decoupe : on s'abonne aux petites lignes (evenements legers),
+         puis on re-assemble (requetes rapides). Debounce anti-rafale. */
+      var useSplit = (table === 'enterprises' && snap && snap._split === true);
+      var cfg = useSplit
+        ? { event: '*', schema: 'public', table: SPLIT_TABLE, filter: 'enterprise_id=eq.' + docId }
+        : { event: '*', schema: 'public', table: table };
+      if (table === 'enterprises' && !useSplit) cfg.filter = 'id=eq.' + docId;
       else if (table === 'sessions') cfg.filter = 'enterprise_id=eq.' + parentId;
       else if (table === 'backups') cfg.filter = 'enterprise_id=eq.' + parentId;
       else if (table === 'license_keys') cfg.filter = 'code=eq.' + docId;
-      channel = sb.channel('mdb-' + table + '-' + parentId + '-' + docId).on(
+      var chName = 'mdb-' + (useSplit ? SPLIT_TABLE : table) + '-' + parentId + '-' + docId;
+      var debT = null;
+      channel = sb.channel(chName).on(
         'postgres_changes', cfg,
         function(payload) {
           if (stopped) return;
           try {
+            if (useSplit) {
+              /* Un evenement par ligne modifiee : on coalesce puis relit */
+              if (debT) clearTimeout(debT);
+              debT = setTimeout(function() {
+                debT = null;
+                if (stopped) return;
+                fetchDoc(parentTable, parentId, table, docId).then(function(s2) {
+                  if (stopped) return;
+                  try { onData(s2); } catch (e2) { console.warn('[SB] snapshot cb error:', e2); }
+                }).catch(function() {});
+              }, 400);
+              return;
+            }
             if (payload.eventType === 'DELETE' || payload.event === 'DELETE') {
               onData(new DocSnapshot(docId, false, null));
             } else {
@@ -358,7 +608,24 @@
   DocRef.prototype.delete = function() {
     var self = this;
     if (this.table === 'enterprises') {
-      return sb.from('enterprises').delete().eq('id', this.id).then(function(r) { if (r.error) throw r.error; });
+      var supprSplit = function() {
+        return sb.from(SPLIT_TABLE).delete().eq('enterprise_id', self.id).then(function(r) {
+          if (r.error) throw r.error;
+          return sb.from('enterprises').delete().eq('id', self.id).then(function(r2) {
+            if (r2.error) throw r2.error;
+          });
+        });
+      };
+      if (_splitOK === false) {
+        return sb.from('enterprises').delete().eq('id', self.id).then(function(r) { if (r.error) throw r.error; });
+      }
+      return supprSplit().catch(function(e) {
+        if (splitEstTableManquante(e)) {
+          _splitOK = false;
+          return sb.from('enterprises').delete().eq('id', self.id).then(function(r) { if (r.error) throw r.error; });
+        }
+        throw e;
+      });
     }
     if (this.table === 'sessions') {
       return sb.from('sessions').delete()
@@ -421,7 +688,11 @@
       if (!t) throw new Error('Collection inconnue: ' + name);
       return new CollectionRef(null, null, t);
     },
-    getAllEnterprises: function() { return sb.from('enterprises').select('*'); }
+    getAllEnterprises: function() {
+      /* Sans la colonne data (le dossier entier) : la liste ne telecharge
+         que l'identite, sinon chaque ligne fait timeouter. */
+      return sb.from('enterprises').select('id,identifiant,email,nom,updated_at');
+    }
   };
 
   /* Référence canonique : un nom dédié que le code applicatif ne peut pas écraser */
@@ -431,6 +702,14 @@
   window.firebase_firestore_FieldValue_delete = FV_DELETE;
   window.SB_genUid = genUid;
   window.SB_ready = true;
+
+  /* Exposes pour les tests automatises (round-trip decoupe/assemblage). */
+  adapter.__splitInternals = {
+    splitDocEnLignes: splitDocEnLignes,
+    splitAssemble: splitAssemble,
+    splitEstTableManquante: splitEstTableManquante,
+    SPLIT_MIGRATION_CLE: SPLIT_MIGRATION_CLE
+  };
 
   console.log('[MDB] Adaptateur Supabase prêt (' + SUPABASE_URL + ')');
 })();
