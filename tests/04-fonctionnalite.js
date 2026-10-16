@@ -11027,6 +11027,59 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Pointage montage : suppression possible (cellule + journée entière)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      setPointageMontage([
+        { employee_id: 'e1', date: '2026-10-15', article_code: 'MDI', quantite: 150 },
+        { employee_id: 'e1', date: '2026-10-15', article_code: 'SIV', quantite: 90 },
+        { employee_id: 'e2', date: '2026-10-15', article_code: 'MDI', quantite: 10 },
+        { employee_id: 'e1', date: '2026-10-16', article_code: 'MDI', quantite: 5 }
+      ]);
+      window.confirm = function () { return true; };
+      /* 1) suppression ciblee : un travailleur, un jour */
+      ptMontSupprimer('e1', '2026-10-15', false);
+      var r1 = getPointageMontage();
+      /* e2 du 15 et e1 du 16 doivent subsister */
+      var resteE2 = r1.filter(function (p) { return p.employee_id === 'e2' && p.date === '2026-10-15'; }).length;
+      var resteE1J16 = r1.filter(function (p) { return p.employee_id === 'e1' && p.date === '2026-10-16'; }).length;
+      /* 2) suppression de la journee entiere */
+      ptMontSupprimer('', '2026-10-15', true);
+      var r2 = getPointageMontage();
+      var resteJ15 = r2.filter(function (p) { return p.date === '2026-10-15'; }).length;
+      var total = r2.length;
+      /* 3) confirmation obligatoire : sans confirmation, rien n'est supprime */
+      setPointageMontage([{ employee_id: 'e1', date: '2026-10-15', article_code: 'MDI', quantite: 150 }]);
+      window.confirm = function () { return false; };
+      ptMontSupprimer('e1', '2026-10-15', false);
+      var annule = getPointageMontage().length;
+      (r1.length === 2 && resteE2 === 1 && resteE1J16 === 1
+        && r2.length === 1 && resteJ15 === 0 && total === 1
+        && annule === 1)
+        ? 'OK : suppression ciblee OK, journee entiere OK, annulation par confirmation respectee'
+        : 'ECHEC r1=' + r1.length + ' e2=' + resteE2 + ' e1J16=' + resteE1J16 + ' r2=' + r2.length + ' j15=' + resteJ15 + ' annule=' + annule
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Pointage montage : le bouton poubelle existe sur les cellules remplies',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var src = ptMontShowEtat.toString();
+      var bouton = src.indexOf('ptMontSupprimer(') !== -1;
+      /* il ne doit pas déclencher l'ouverture de la saisie */
+      var stop = src.indexOf('event.stopPropagation();ptMontSupprimer(') !== -1;
+      var srcGrille = buildMontageGrid.toString();
+      var boutonJour = srcGrille.indexOf('Supprimer la journée') !== -1 && srcGrille.indexOf('ptMontSupprimer(') !== -1;
+      (bouton && stop && boutonJour)
+        ? 'OK : poubelle sur la cellule (sans ouvrir la saisie) + bouton journee dans le panneau'
+        : 'ECHEC bouton=' + bouton + ' stop=' + stop + ' boutonJour=' + boutonJour
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Synchro cloud : le local garde la main sur les objets partages (mdb_paye)',
     app: 'index.html', store: storeRealiste,
     code: `
