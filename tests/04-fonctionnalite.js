@@ -9109,6 +9109,142 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Anti-perte synchro : cle metier, union, tombstones, garde vide ---------- */
+  r.push({
+    nom: 'Synchro anti-perte : deux lignes du meme fait (ids differents) ont la meme cle',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var k1 = _payeItemKey({ id: 'a', employee_id: 'e1', date: '2026-10-01' });
+      var k2 = _payeItemKey({ id: 'b', employee_id: 'e1', date: '2026-10-01' });
+      var k3 = _payeItemKey({ id: 'a', employee_id: 'e1', date: '2026-10-02' });
+      var k4 = _payeItemKey({ id: 'c', code: 'X' });
+      (k1 === k2 && k1 !== k3 && k4 === 'code:x')
+        ? 'OK : cle metier (' + k1 + '), article/jour distincts, code: prioritaire sinon'
+        : 'ECHEC k1=' + k1 + ' k2=' + k2 + ' k3=' + k3 + ' k4=' + k4
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte : une journee reconstruite (nouvel id) ne se duplique pas',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var u = _payeUnion(
+        [{ id: 'a1', employee_id: 'e1', date: '2026-10-01', h_j_manual: '8' }],
+        [{ id: 'b2', employee_id: 'e1', date: '2026-10-01', h_j_manual: '8' }]
+      );
+      (u.length === 1)
+        ? 'OK : 1 seule ligne apres union (pas de doublon)'
+        : 'ECHEC n=' + u.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte : une journee effacee ne revient pas meme reconstruite',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var res = _payeMergeObj(
+        { pointage: [{ id: 'n1', employee_id: 'e9', date: '2026-10-02', present: true }], pointage_tombstones: [] },
+        { pointage: [], pointage_tombstones: ['cle:pt:e9|2026-10-02|'] },
+        true
+      );
+      (res.pointage.length === 0)
+        ? 'OK : le jumeau reconstruit est filtre par la cle tombstonee'
+        : 'ECHEC n=' + res.pointage.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte : jamais de poussee du vide sur du plein (sauf suppression deliberee)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var lv = { pointage: [{ id: 'x', employee_id: 'e', date: '2026-10-01' }] };
+      var bloque = _payePousseeVideInterdite({}, { pointage: lv.pointage });
+      var videPartout = _payePousseeVideInterdite({ pointage: [] }, {});
+      var delibere = _payePousseeVideInterdite({}, { pointage: lv.pointage, pointage_tombstones: ['x'] });
+      (bloque === true && videPartout === false && delibere === false)
+        ? 'OK : vide->plein bloque, vide->vide et suppression deliberee autorises'
+        : 'ECHEC bloque=' + bloque + ' videPartout=' + videPartout + ' delibere=' + delibere
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte : une suppression pose corbeille + tombstones (id et cle)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      _pointageSuppressionSecurisee(
+        [{ id: 'd1', employee_id: 'e1', date: '2026-10-03' }, { id: 'd2', employee_id: 'e1', date: '2026-10-04' }],
+        'test corbeille'
+      );
+      var tb = getPayeSection('pointage_tombstones', []);
+      var aId = tb.indexOf('d1') !== -1;
+      var aCle = tb.indexOf('cle:pt:e1|2026-10-03|') !== -1;
+      var corb = false;
+      for (var i = 0; i < localStorage.length; i++) {
+        if ((localStorage.key(i) || '').indexOf('mdb_corbeille_pointage_') === 0) corb = true;
+      }
+      (aId && aCle && corb)
+        ? 'OK : tombstones id+cle poses, copie corbeille gardee'
+        : 'ECHEC id=' + aId + ' cle=' + aCle + ' corbeille=' + corb
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte (index) : union additive, sans-id gardes une fois',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var u1 = syncUnionTableaux([{ id: 'a' }], [{ id: 'b' }]);
+      var u2 = syncUnionTableaux(
+        [{ id: 'a1', employee_id: 'e', date: '2026-10-01' }],
+        [{ id: 'b2', employee_id: 'e', date: '2026-10-01' }]
+      );
+      var u3 = syncUnionTableaux([{ x: 1 }], [{ x: 1 }]);
+      var u4 = syncUnionTableaux([{ x: 1 }], [{ x: 2 }]);
+      (u1.length === 2 && u2.length === 1 && u3.length === 1 && u4.length === 2)
+        ? 'OK : union 2+1+1+2 (metier dedup, sans-id gardes sans doublon)'
+        : 'ECHEC ' + u1.length + '/' + u2.length + '/' + u3.length + '/' + u4.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte (index) : la reception unit le pointage au lieu de le remplacer',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var m = mergePayeRecu(
+        { pointage: [{ id: 'l1', employee_id: 'e1', date: '2026-10-01' }], pointage_tombstones: [] },
+        { pointage: [{ id: 'c2', employee_id: 'e1', date: '2026-10-05' }], pointage_tombstones: [] }
+      );
+      var m2 = mergePayeRecu(
+        { pointage: [{ id: 'l1', employee_id: 'e1', date: '2026-10-01' }], pointage_tombstones: [] },
+        { pointage: [], pointage_tombstones: ['l1'] }
+      );
+      (m.pointage.length === 2 && m2.pointage.length === 0)
+        ? 'OK : local+cloud conserves (2), supprime tombe (0)'
+        : 'ECHEC m=' + m.pointage.length + ' m2=' + m2.pointage.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro anti-perte (index) : vide local et suppression deliberee detectes',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var v1 = _syncEstVide([]) && _syncEstVide({}) && _syncEstVide(null) && !_syncEstVide([1]) && !_syncEstVide({ a: 1 });
+      var d1 = _syncSuppressionDeliberee('k', [{ id: 'a' }, { id: 'b' }], { a: 1, b: 1 });
+      var d2 = _syncSuppressionDeliberee('k', [{ id: 'a' }, { id: 'b' }], { a: 1 });
+      var d3 = _syncSuppressionDeliberee('k', [{ noid: 1 }], {});
+      (v1 && d1 === true && d2 === false && d3 === false)
+        ? 'OK : vide detecte, delibere seulement si tout est tombstone'
+        : 'ECHEC v1=' + v1 + ' d1=' + d1 + ' d2=' + d2 + ' d3=' + d3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'Prix d\'articles variables : m\u00eame article, prix diff\u00e9rent par employ\u00e9 / p\u00e9riode / date',
     app: 'paye.html', store: storeRealiste,

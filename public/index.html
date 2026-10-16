@@ -1770,6 +1770,131 @@ function mergeObjetPartage(cloud, local) {
   return out;
 }
 
+/* Union ADDITIVE de deux tableaux (jamais de perte, jamais d'ecrasement) :
+   - lignes de pointage (horaire/montage) : cle metier employe+jour(+article),
+     insensible aux reconstructions qui regenerent des id aleatoires ;
+   - autres objets : id stable ;
+   - sans id : signature de contenu (le meme des deux cotes ne compte qu'une fois).
+   En conflit (meme cle, contenu different) : le local gagne a la poussee, le
+   cloud gagne a la reception — deterministe, ca converge sans perdre de ligne. */
+function _syncSig(x) { try { return JSON.stringify(x); } catch (e) { try { return String(x); } catch (e2) { return ""; } } }
+function _syncCleMetier(r) {
+  try {
+    if (!r || typeof r !== "object" || Array.isArray(r)) return "";
+    if (r.employee_id && r.date) {
+      var art = (r.article_code === undefined || r.article_code === null) ? "" : String(r.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      return "pt:" + String(r.employee_id) + "|" + String(r.date) + "|" + art;
+    }
+  } catch (e) {}
+  return "";
+}
+function _syncCle(x) {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return "V|" + _syncSig(x);
+  var m = _syncCleMetier(x);
+  if (m) return "M|" + m;
+  if (x.id !== undefined && x.id !== null && String(x.id) !== "") return "ID|" + String(x.id);
+  return "S|" + _syncSig(x);
+}
+function syncUnionTableaux(localArr, cloudArr, cloudDabord) {
+  var out = [], vus = {}, i, x, k;
+  var premier = cloudDabord ? cloudArr : localArr;
+  var second = cloudDabord ? localArr : cloudArr;
+  premier = Array.isArray(premier) ? premier : [];
+  second = Array.isArray(second) ? second : [];
+  for (i = 0; i < premier.length; i++) { x = premier[i]; if (x === undefined) continue; k = _syncCle(x); if (!vus[k]) { vus[k] = true; out.push(x); } }
+  for (i = 0; i < second.length; i++) { x = second[i]; if (x === undefined) continue; k = _syncCle(x); if (!vus[k]) { vus[k] = true; out.push(x); } }
+  return out;
+}
+/* Vide utile ? null, [], {} ou objet sans contenu (que des tableaux vides et
+   des scalaires vides). Sert au garde-fou pousse-a-vide. */
+function _syncEstVide(v) {
+  try {
+    if (v === null || v === undefined) return true;
+    if (Array.isArray(v)) return v.length === 0;
+    if (typeof v !== "object") return (v === "" || v === 0 || v === false);
+    var ks = Object.keys(v);
+    if (!ks.length) return true;
+    for (var i = 0; i < ks.length; i++) {
+      var s = v[ks[i]];
+      if (Array.isArray(s)) { if (s.length > 0) return false; }
+      else if (s !== undefined && s !== null && s !== "" && s !== 0 && s !== false) return false;
+    }
+    return true;
+  } catch (e) { return false; }
+}
+/* Suppression deliberee couvrant tout ? Chaque id present dans le cloud est
+   tombstone : l'envoi du vide est alors legitime (il propage l'effacement
+   volontaire au lieu d'etre un accident). */
+function _syncSuppressionDeliberee(entityKey, cloudArr, tombParId) {
+  try {
+    if (!Array.isArray(cloudArr) || !cloudArr.length) return true;
+    var couverts = 0, total = 0;
+    for (var i = 0; i < cloudArr.length; i++) {
+      var r = cloudArr[i];
+      if (r && r.id !== undefined && r.id !== null && String(r.id) !== "") {
+        total++;
+        if (tombParId && tombParId[String(r.id)]) couverts++;
+      }
+    }
+    /* Sans-id non couvrables : s'il en reste cote cloud, ce n'est pas un
+       effacement volontaire complet. */
+    if (total < cloudArr.length) return false;
+    return total > 0 && couverts === total;
+  } catch (e) { return false; }
+}
+
+/* Fusion additive d'un objet mdb_paye recu du cloud : les tableaux s'unissent
+   (jamais de remplacement en bloc — c'etait la cause des pointages disparus a
+   la reception), les suppressions tombstonees (id + cle metier) ne ressuscitent
+   pas, les sections a fusion evenementielle cote Paie restent sous autorite Paie. */
+function mergePayeRecu(_lpP, _npP) {
+  _lpP = (_lpP && typeof _lpP === 'object' && !Array.isArray(_lpP)) ? _lpP : {};
+  _npP = (_npP && typeof _npP === 'object' && !Array.isArray(_npP)) ? _npP : {};
+  var _grdK = ['categories', 'services', 'fonctions', 'primesSpec', 'pointage', 'pointageMontage'];
+  for (var _gk2 = 0; _gk2 < _grdK.length; _gk2++) {
+    var _sk3 = _grdK[_gk2];
+    var _lvArr = Array.isArray(_lpP[_sk3]) ? _lpP[_sk3] : [];
+    var _cvArr = Array.isArray(_npP[_sk3]) ? _npP[_sk3] : [];
+    _lpP[_sk3] = syncUnionTableaux(_lvArr, _cvArr, true);
+    delete _npP[_sk3];
+  }
+  var _evtK = { articlesMontage: true };
+  for (var _pk5 in _npP) {
+    if (!Object.prototype.hasOwnProperty.call(_npP, _pk5)) continue;
+    var _nv5 = _npP[_pk5];
+    if (Array.isArray(_nv5) && !_evtK[_pk5]) {
+      var _ov5 = _lpP[_pk5];
+      _lpP[_pk5] = syncUnionTableaux(Array.isArray(_ov5) ? _ov5 : [], _nv5, true);
+    } else if (_nv5 === undefined || _nv5 === null || _nv5 === '') {
+      continue; /* cloud vide : on garde le local */
+    } else {
+      _lpP[_pk5] = _nv5;
+    }
+  }
+  (function () {
+    function _setDe(arr) { var s = {}; try { (arr || []).forEach(function (t) { s[String(t)] = true; }); } catch (e) {} return s; }
+    if (Array.isArray(_lpP.pointage)) {
+      var _tsP = _setDe(_lpP.pointage_tombstones);
+      _lpP.pointage = _lpP.pointage.filter(function (p) {
+        if (!p || typeof p !== 'object') return true;
+        if (p.id && _tsP[String(p.id)]) return false;
+        try {
+          if (p.employee_id && p.date) {
+            var _art = (p.article_code === undefined || p.article_code === null) ? '' : String(p.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (_tsP['cle:pt:' + String(p.employee_id) + '|' + String(p.date) + '|' + _art]) return false;
+          }
+        } catch (eC) {}
+        return true;
+      });
+    }
+    if (Array.isArray(_lpP.primesSpec) && Array.isArray(_lpP.primesSpec_tombstones) && _lpP.primesSpec_tombstones.length) {
+      var _tsS = _setDe(_lpP.primesSpec_tombstones);
+      _lpP.primesSpec = _lpP.primesSpec.filter(function (pr) { return !(pr && pr.id && _tsS[String(pr.id)]); });
+    }
+  })();
+  return _lpP;
+}
+
 /* File d'attente persistante : toute modification non encore envoyée est mémorisée
    sur le disque. Même si la page est fermée/refresh avant l'envoi, elle partira
    dès la prochaine connexion. Rien ne se perd jamais dans un seul navigateur. */
@@ -1871,26 +1996,62 @@ function pushToCloud() {
       var k = batch[i];
       var lv = DB.get(k);
       if (lv === null || lv === undefined) continue;
+      /* Garde-fou pousse-a-vide : un local VIDE (tableau/objet) ne rase jamais
+         un cloud PLEIN. Seule une suppression deliberee couvrant tout
+         (tombstones) peut envoyer du vide. Sans ca, un appareil au stockage
+         vide/reinitialise effacait les donnees de tous les autres postes. */
+      if ((Array.isArray(lv) || (lv && typeof lv === 'object')) && _syncEstVide(lv) && !_syncEstVide(cloud[k])) {
+        var _delib = false;
+        try {
+          if (Array.isArray(cloud[k])) {
+            _delib = _syncSuppressionDeliberee(k, cloud[k], getTombstones()[k]);
+          } else if (k === 'mdb_paye' && cloud[k] && typeof cloud[k] === 'object') {
+            _delib = true;
+            var _secs = Object.keys(cloud[k]);
+            for (var _si = 0; _si < _secs.length && _delib; _si++) {
+              var _sa = cloud[k][_secs[_si]];
+              if (Array.isArray(_sa) && _sa.length) {
+                if (_secs[_si] === 'pointage') {
+                  var _ptb = {};
+                  try { ((lv && lv.pointage_tombstones) || []).concat(cloud[k].pointage_tombstones || []).forEach(function (t) { _ptb[String(t)] = true; }); } catch (ePT) {}
+                  for (var _li = 0; _li < _sa.length; _li++) {
+                    var _lr = _sa[_li];
+                    var _lid = (_lr && _lr.id !== undefined && _lr.id !== null) ? String(_lr.id) : '';
+                    var _lcle = '';
+                    try {
+                      if (_lr && _lr.employee_id && _lr.date) {
+                        var _la = (_lr.article_code === undefined || _lr.article_code === null) ? '' : String(_lr.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+                        _lcle = 'cle:pt:' + String(_lr.employee_id) + '|' + String(_lr.date) + '|' + _la;
+                      }
+                    } catch (eLC) {}
+                    if ((!_lid || !_ptb[_lid]) && (!_lcle || !_ptb[_lcle])) { _delib = false; break; }
+                  }
+                } else {
+                  var _tbS = getTombstones()[k + '.' + _secs[_si]] || getTombstones()[k] || {};
+                  _delib = _syncSuppressionDeliberee(k + '.' + _secs[_si], _sa, _tbS);
+                }
+              }
+            }
+          }
+        } catch (eDG) { _delib = false; }
+        if (!_delib) {
+          try {
+            window._syncVideRefus = window._syncVideRefus || {};
+            if (Date.now() - (window._syncVideRefus[k] || 0) > 15 * 60 * 1000) {
+              window._syncVideRefus[k] = Date.now();
+              toast('Synchro en pause pour « ' + k + ' » : vos données locales sont vides alors que le cloud contient des données. Rechargez la page (la réception remplit le local).', 'error');
+            }
+          } catch (eT) {}
+          continue;
+        }
+      }
       if (Array.isArray(lv)) {
         var cv = cloud[k];
         var base = Array.isArray(cv) ? cv : [];
-        var byId = {};
-        var j;
-        for (j = 0; j < base.length; j++) { if (base[j] && base[j].id) byId[base[j].id] = base[j]; }
-        for (j = 0; j < lv.length; j++) { if (lv[j] && lv[j].id) byId[lv[j].id] = lv[j]; }
         /* Employés : latest-wins (un onglet périmé ne réimpose plus ses vieilles fiches au cloud). */
-        var mergedArr = (k === 'mdb_employes') ? mergeEmployesPreferRecent(lv, base) : [];
-        var seenIds = {};
-        if (k !== 'mdb_employes') {
-        for (j = 0; j < lv.length; j++) {
-          mergedArr.push(lv[j]);
-          if (lv[j] && lv[j].id) seenIds[lv[j].id] = true;
-        }
-        for (j = 0; j < base.length; j++) {
-          var cr = base[j];
-          if (cr && cr.id && !seenIds[cr.id]) { mergedArr.push(cr); seenIds[cr.id] = true; }
-        }
-        }
+        /* Autres tableaux : union additive (cle metier, id, signature) — les
+           lignes cloud sans id ne sont plus abandonnees a la poussee. */
+        var mergedArr = (k === 'mdb_employes') ? mergeEmployesPreferRecent(lv, base) : syncUnionTableaux(lv, base);
         data[k] = stripTombstoned(k, mergedArr);
       } else if (lv && typeof lv === 'object' && !Array.isArray(lv) && cloud[k] && typeof cloud[k] === 'object' && !Array.isArray(cloud[k])) {
         /* Objet partage (mdb_paye, mdb_production) : NE JAMAIS renvoyer la copie
@@ -1898,6 +2059,12 @@ function pushToCloud() {
            Exploitation ouverts a cote) : remplacer alors l'objet entier effacait
            le pointage deja synchronise. On fusionne section par section. */
         data[k] = mergeObjetPartage(cloud[k], lv);
+        if (k === 'mdb_paye' && data[k] && typeof data[k] === 'object' && !Array.isArray(data[k])) {
+          /* Jamais de doublons metier sur le pointage (reconstructions multi-postes). */
+          ['pointage', 'pointageMontage'].forEach(function (sec) {
+            if (Array.isArray(data[k][sec])) data[k][sec] = syncUnionTableaux(data[k][sec], []);
+          });
+        }
       } else {
         data[k] = lv;
       }
@@ -5164,21 +5331,8 @@ function doFirebaseLoginInner() {
             var _lpP = DB.get(key);
             if (!_lpP || typeof _lpP !== 'object' || Array.isArray(_lpP)) _lpP = {};
             var _npP = (val && typeof val === 'object' && !Array.isArray(val)) ? val : {};
-            var _grdK = ['categories', 'services', 'fonctions', 'primesSpec', 'pointage'];
-            for (var _gk2 = 0; _gk2 < _grdK.length; _gk2++) {
-              var _sk3 = _grdK[_gk2];
-              var _lv5 = _lpP[_sk3], _cv4 = _npP[_sk3];
-              var _lvArr = Array.isArray(_lv5) ? _lv5 : [], _cvArr = Array.isArray(_cv4) ? _cv4 : [];
-              if (_cvArr.length > 0) { _lpP[_sk3] = _cvArr; delete _npP[_sk3]; continue; }
-              if (_lvArr.length > 0) { delete _npP[_sk3]; continue; }
-            }
-            for (var _pk5 in _npP) _lpP[_pk5] = _npP[_pk5];
-            /* Pointage : ne pas ressusciter une journée effacée sur un autre poste */
-            if (Array.isArray(_lpP.pointage) && Array.isArray(_lpP.pointage_tombstones) && _lpP.pointage_tombstones.length) {
-              var _ptSet = {};
-              for (var _pti = 0; _pti < _lpP.pointage_tombstones.length; _pti++) _ptSet[String(_lpP.pointage_tombstones[_pti])] = true;
-              _lpP.pointage = _lpP.pointage.filter(function (p) { return !(p && p.id && _ptSet[String(p.id)]); });
-            }
+            /* Fusion additive (jamais de remplacement en bloc). */
+            _lpP = mergePayeRecu(_lpP, _npP);
             if (_lpP.grilleWood !== true) { try { _lpP.categories = woodSectorGridDataI(); _lpP.grilleWood = true; } catch (_eg2) {} }
             else if (!_lpP.categories || !_lpP.categories.length) { try { _lpP.categories = woodSectorGridDataI(); } catch (_eg3) {} }
             var _prevP = JSON.stringify(DB.get(key));
@@ -5537,21 +5691,8 @@ function doFirebaseRegister() {
             var _lpP = DB.get(key);
             if (!_lpP || typeof _lpP !== 'object' || Array.isArray(_lpP)) _lpP = {};
             var _npP = (val && typeof val === 'object' && !Array.isArray(val)) ? val : {};
-            var _grdK = ['categories', 'services', 'fonctions', 'primesSpec', 'pointage'];
-            for (var _gk2 = 0; _gk2 < _grdK.length; _gk2++) {
-              var _sk3 = _grdK[_gk2];
-              var _lv5 = _lpP[_sk3], _cv4 = _npP[_sk3];
-              var _lvArr = Array.isArray(_lv5) ? _lv5 : [], _cvArr = Array.isArray(_cv4) ? _cv4 : [];
-              if (_cvArr.length > 0) { _lpP[_sk3] = _cvArr; delete _npP[_sk3]; continue; }
-              if (_lvArr.length > 0) { delete _npP[_sk3]; continue; }
-            }
-            for (var _pk5 in _npP) _lpP[_pk5] = _npP[_pk5];
-            /* Pointage : ne pas ressusciter une journée effacée sur un autre poste */
-            if (Array.isArray(_lpP.pointage) && Array.isArray(_lpP.pointage_tombstones) && _lpP.pointage_tombstones.length) {
-              var _ptSet = {};
-              for (var _pti = 0; _pti < _lpP.pointage_tombstones.length; _pti++) _ptSet[String(_lpP.pointage_tombstones[_pti])] = true;
-              _lpP.pointage = _lpP.pointage.filter(function (p) { return !(p && p.id && _ptSet[String(p.id)]); });
-            }
+            /* Fusion additive (jamais de remplacement en bloc). */
+            _lpP = mergePayeRecu(_lpP, _npP);
             if (_lpP.grilleWood !== true) { try { _lpP.categories = woodSectorGridDataI(); _lpP.grilleWood = true; } catch (_eg2) {} }
             else if (!_lpP.categories || !_lpP.categories.length) { try { _lpP.categories = woodSectorGridDataI(); } catch (_eg3) {} }
             var _prevP = JSON.stringify(DB.get(key));
@@ -5987,21 +6128,8 @@ entRef.get().then(function(doc) {
             var _lpP = DB.get(key);
             if (!_lpP || typeof _lpP !== 'object' || Array.isArray(_lpP)) _lpP = {};
             var _npP = (val && typeof val === 'object' && !Array.isArray(val)) ? val : {};
-            var _grdK = ['categories', 'services', 'fonctions', 'primesSpec', 'pointage'];
-            for (var _gk2 = 0; _gk2 < _grdK.length; _gk2++) {
-              var _sk3 = _grdK[_gk2];
-              var _lv5 = _lpP[_sk3], _cv4 = _npP[_sk3];
-              var _lvArr = Array.isArray(_lv5) ? _lv5 : [], _cvArr = Array.isArray(_cv4) ? _cv4 : [];
-              if (_cvArr.length > 0) { _lpP[_sk3] = _cvArr; delete _npP[_sk3]; continue; }
-              if (_lvArr.length > 0) { delete _npP[_sk3]; continue; }
-            }
-            for (var _pk5 in _npP) _lpP[_pk5] = _npP[_pk5];
-            /* Pointage : ne pas ressusciter une journée effacée sur un autre poste */
-            if (Array.isArray(_lpP.pointage) && Array.isArray(_lpP.pointage_tombstones) && _lpP.pointage_tombstones.length) {
-              var _ptSet = {};
-              for (var _pti = 0; _pti < _lpP.pointage_tombstones.length; _pti++) _ptSet[String(_lpP.pointage_tombstones[_pti])] = true;
-              _lpP.pointage = _lpP.pointage.filter(function (p) { return !(p && p.id && _ptSet[String(p.id)]); });
-            }
+            /* Fusion additive (jamais de remplacement en bloc). */
+            _lpP = mergePayeRecu(_lpP, _npP);
             if (_lpP.grilleWood !== true) { try { _lpP.categories = woodSectorGridDataI(); _lpP.grilleWood = true; } catch (_eg2) {} }
             else if (!_lpP.categories || !_lpP.categories.length) { try { _lpP.categories = woodSectorGridDataI(); } catch (_eg3) {} }
             var _prevP = JSON.stringify(DB.get(key));

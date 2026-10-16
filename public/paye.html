@@ -6385,8 +6385,34 @@ function payeObj(key) {
       }
 
       /* ===== Fusion anti-perte : union par id, le tableau prioritaire gagne ===== */
+      /* Cle metier stable d'une ligne de pointage (horaire ou montage) : employe +
+         jour (+ article normalise pour le montage). Insensible aux reconstructions
+         qui regenerent des id aleatoires (ex. re-saisie d'une journee) : deux
+         lignes du meme fait se reconnaissent et fusionnent au lieu de se
+         dupliquer — et une suppression reste supprimee meme apres reconstruction. */
+      function _payeCleMetierPointage(r) {
+        try {
+          if (!r || typeof r !== "object" || Array.isArray(r)) return "";
+          if (!r.employee_id || !r.date) return "";
+          var art = (r.article_code === undefined || r.article_code === null) ? "" : String(r.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+          return "pt:" + String(r.employee_id) + "|" + String(r.date) + "|" + art;
+        } catch (e) { return ""; }
+      }
+      /* Une ligne est supprimee si son id OU sa cle metier est tombstonee.
+         setTomb : objet {valeur: true} construit depuis le tableau tombstones. */
+      function _payeEstSupprimePointage(setTomb, ligne) {
+        try {
+          if (!setTomb || !ligne || typeof ligne !== "object") return false;
+          if (ligne.id && setTomb[String(ligne.id)]) return true;
+          var c = _payeCleMetierPointage(ligne);
+          if (c && setTomb["cle:" + c]) return true;
+        } catch (e) {}
+        return false;
+      }
       function _payeItemKey(r) {
         if (r && typeof r === "object") {
+          var _cmk = _payeCleMetierPointage(r);
+          if (_cmk) return _cmk;
           if (r.code) return "code:" + String(r.code).trim().toLowerCase();
           if (r.id) return "id:" + String(r.id);
           if (r.numero) return "numero:" + String(r.numero).trim().toLowerCase();
@@ -6696,8 +6722,10 @@ function payeObj(key) {
             if (!_pT[_pk]) { _pT[_pk] = true; _pTAll.push(_pk); }
           }
           if (Array.isArray(merged.pointage)) {
+            /* Id OU cle metier : une journee effacee ne revient pas, meme si un
+               poste l'a reconstruite avec un nouvel id entre-temps. */
             merged.pointage = merged.pointage.filter(function (p) {
-              return !(p && p.id && _pT[String(p.id)]);
+              return !_payeEstSupprimePointage(_pT, p);
             });
           }
           merged.pointage_tombstones = _pTAll;
@@ -6896,6 +6924,40 @@ function payeObj(key) {
         } catch (eD) {}
         return 20000;
       }
+      /* Garde-fou pousse-a-vide : un local VIDE ne doit jamais ecraser un cloud
+         PLEIN. Sans ca, un appareil au stockage vide/reinitialise peut envoyer du
+         vide qui rase les donnees de tous les autres postes. Seule exception :
+         une suppression deliberee couvrant chaque ligne (tombstones), qui elle
+         doit bien se propager. */
+      function _payeContenuUtile(p) {
+        var n = 0;
+        try {
+          if (!p || typeof p !== "object" || Array.isArray(p)) return 0;
+          Object.keys(p).forEach(function (k) {
+            var v = p[k];
+            if (Array.isArray(v)) { if (v.length > 0) n += v.length; }
+            else if (v !== undefined && v !== null && v !== "" && v !== 0 && v !== false) n += 1;
+          });
+        } catch (e) {}
+        return n;
+      }
+      function _payePousseeVideInterdite(p, cp) {
+        try {
+          if (_payeContenuUtile(p) > 0) return false;
+          if (_payeContenuUtile(cp) === 0) return false;
+          var idsCloud = {};
+          ["pointage", "pointageMontage"].forEach(function (sec) {
+            var arr = cp && cp[sec];
+            if (Array.isArray(arr)) arr.forEach(function (l) { if (l && l.id) idsCloud[String(l.id)] = true; });
+          });
+          var tb = {};
+          try {
+            ((p && p.pointage_tombstones) || []).concat((cp && cp.pointage_tombstones) || []).forEach(function (t) { tb[String(t)] = true; });
+          } catch (eT) {}
+          for (var id in idsCloud) { if (idsCloud.hasOwnProperty(id) && !tb[id]) return true; }
+          return false;
+        } catch (e) { return false; }
+      }
       function payeFiltrerChargeUtile(charge, base, incertain) {
         var out = {}, hashes = {}, k, raw, h;
         base = base || {};
@@ -7028,7 +7090,18 @@ function payeObj(key) {
                 ? cloud[PAYE_KEY]
                 : {};
             var mp = _payeMergeObj(p, cp, true);
-            if (mp && Object.keys(mp).length > 0) payload[PAYE_KEY] = mp;
+            if (mp && Object.keys(mp).length > 0 && !_payePousseeVideInterdite(p, cp)) {
+              payload[PAYE_KEY] = mp;
+            } else if (mp && Object.keys(mp).length > 0) {
+              /* Local vide + cloud plein : on bloque l'envoi (pas d'ecrasement),
+                 on garde tout en local, on alerte au plus une fois par 15 min. */
+              try {
+                if (Date.now() - (window._payeVideToastAt || 0) > 15 * 60 * 1000) {
+                  window._payeVideToastAt = Date.now();
+                  toast("Synchro en pause : vos données locales semblent vides alors que le cloud contient des données. Rechargez la page (la réception remplit le local) puis touchez à nouveau vos saisies.", "error");
+                }
+              } catch (eVT) {}
+            }
             var simpleKeys = [
               "mdb_employes",
               /* Congés planifiés : envoyés pour que l’index et les autres
@@ -20232,6 +20305,41 @@ function peTogglePst() {
       }
 
       /* --- MODAL EFFACER POINTAGES --- */
+      /* Suppression securisee de lignes de pointage (horaire) :
+         1) copie de securite locale horodatee (10 dernieres gardees),
+         2) tombstones id + cle metier pour que la suppression converge sur TOUS
+            les postes au lieu de ressusciter depuis un appareil perime,
+         3) sauvegarde complete versionnee quand l'app principale est joignable.
+         Sans ca, un effacement revenait par la synchro (union sans tombstones). */
+      function _pointageSuppressionSecurisee(supprimees, motif) {
+        try {
+          supprimees = supprimees || [];
+          if (!supprimees.length) return supprimees;
+          try {
+            localStorage.setItem("mdb_corbeille_pointage_" + Date.now(), JSON.stringify({ nom: motif || "pointage", ts: Date.now(), lignes: supprimees }));
+            var cles = [];
+            for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (k && k.indexOf("mdb_corbeille_pointage_") === 0) cles.push(k); }
+            cles.sort();
+            while (cles.length > 10) { try { localStorage.removeItem(cles.shift()); } catch (eR) {} }
+          } catch (eC) {}
+          try {
+            var tb = getPayeSection("pointage_tombstones", []);
+            if (!Array.isArray(tb)) tb = [];
+            var set = {};
+            tb.forEach(function (t) { set[String(t)] = true; });
+            supprimees.forEach(function (l) {
+              if (l && l.id && !set[String(l.id)]) { tb.push(String(l.id)); set[String(l.id)] = true; }
+              var c = _payeCleMetierPointage(l);
+              if (c && !set["cle:" + c]) { tb.push("cle:" + c); set["cle:" + c] = true; }
+            });
+            while (tb.length > 2000) tb.shift();
+            setPayeSection("pointage_tombstones", tb);
+          } catch (eT) {}
+          try { if (window.parent && window.parent !== window && typeof window.parent.createFullBackup === "function") window.parent.createFullBackup(); } catch (eP) {}
+          try { toast("Copie de sécurité gardée (" + supprimees.length + " ligne(s) avant suppression)", "success"); } catch (eTT) {}
+        } catch (e) {}
+        return supprimees;
+      }
       function showModalEffacer() {
         var mois = document.getElementById("pt-mois").value || new Date().toISOString().slice(0,7);
         var y=mois.split("-")[0], m=mois.split("-")[1];
@@ -20303,10 +20411,11 @@ function peTogglePst() {
         if (!confirm("Supprimer les pointages du "+debut+" au "+fin+" pour "+cbs.length+" employé(s) ?")) return;
         var pts = getPointageData();
         var ids = {}; cbs.forEach(function(cb){ ids[cb.value]=true; });
-        var count=0;
+        var count=0, supprimees=[];
         for (var i=pts.length-1;i>=0;i--) {
-          if (ids[pts[i].employee_id] && pts[i].date>=debut && pts[i].date<=fin) { pts.splice(i,1); count++; }
+          if (ids[pts[i].employee_id] && pts[i].date>=debut && pts[i].date<=fin) { supprimees.push(pts[i]); pts.splice(i,1); count++; }
         }
+        _pointageSuppressionSecurisee(supprimees, "effacer pointages " + debut + " au " + fin);
         setPointageData(pts);
         toast(count+" pointage(s) supprimé(s)","success");
         closePtModal();
@@ -23860,8 +23969,13 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           )
         )
           return;
+        var _avant = getPointageData();
+        var _retirees = _avant.filter(function (p) {
+          return (p.employee_id === empId && p && p.date && p.date.indexOf(mois) === 0);
+        });
+        _pointageSuppressionSecurisee(_retirees, "effacer mois " + mois);
         setPointageData(
-          getPointageData().filter(function (p) {
+          _avant.filter(function (p) {
             return !(p.employee_id === empId && p && p.date && p.date.indexOf(mois) === 0);
           }),
         );
