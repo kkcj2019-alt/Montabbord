@@ -11027,6 +11027,75 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
+    nom: 'Caisse : dedoublonnage des lignes collectives identiques (piece en double)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* Deux lignes strictement identiques (meme groupe, meme beneficiaire,
+         meme n° de piece, meme montant) : la 2e n'etait jamais reprise par la
+         boucle d'edition, qui ne met a jour que la 1re trouvee => doublon
+         definitif et solde faux. */
+      DB.set('mdb_operationsCaisse', [
+        { id:'o1', groupeId:'g1', numeroPiece:'KKCJ2608089', date:'2026-08-09', montant:960000, sens:'sortie', beneficiaireId:'e1', beneficiaireNom:'DOGBO', libelle:'ACOMPTE/SALAIRE/Mois de Juillet 2026', caisseId:'S71101', apType:'acompte', apMoisDeduction:'2026-10', collective:true },
+        { id:'o2', groupeId:'g1', numeroPiece:'KKCJ2608089', date:'2026-08-09', montant:960000, sens:'sortie', beneficiaireId:'e1', beneficiaireNom:'DOGBO', libelle:'ACOMPTE/SALAIRE/Mois de Juillet 2026', caisseId:'S71101', apType:'acompte', apMoisDeduction:'2026-10', collective:true },
+        { id:'o3', groupeId:'g1', numeroPiece:'KKCJ2608089', date:'2026-08-09', montant:110000, sens:'sortie', beneficiaireId:'e2', beneficiaireNom:'ZOH', libelle:'ACOMPTE/SALAIRE/Mois de Juillet 2026', caisseId:'S71101', apType:'acompte', collective:true },
+        { id:'o4', groupeId:'g1', numeroPiece:'KKCJ2608089', date:'2026-08-09', montant:50000, sens:'sortie', beneficiaireId:'', libelle:'Remise a repartir', caisseId:'S71101', collective:true }
+      ]);
+      var n = _csDedupliquerCollectif();
+      var reste = getOperationsCaisse();
+      var n1 = 0, n3 = 0, n4 = 0;
+      for (var i = 0; i < reste.length; i++) { if (reste[i].id === 'o1') n1++; if (reste[i].id === 'o3') n3++; if (reste[i].id === 'o4') n4++; }
+      /* le second appel ne doit rien faire de plus (idempotent) */
+      var n2 = _csDedupliquerCollectif();
+      (n === 1 && n1 === 1 && n3 === 1 && n4 === 1 && n2 === 0)
+        ? 'OK : 1 doublon retire, autres employes et piece mere conserves, 2e passage sans effet'
+        : 'ECHEC retire=' + n + ' o1=' + n1 + ' o3=' + n3 + ' o4=' + n4 + ' n2=' + n2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Caisse : le mois choisi remplace celui du libelle (plus de deux mois contradictoires)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      /* csEnsurePeriodeLibelle gardait '/Mois de Juillet 2026' alors que
+         l'observation passait a Octobre. */
+      var src = csEnsurePeriodeLibelle.toString();
+      var remplace = /replace\\(\\/\\\\\\/Mois/.test(src);
+      (remplace && /sSansMois/.test(src))
+        ? 'OK : le mois choisi remplace le mois deja ecrit dans le libelle'
+        : 'ECHEC : le libelle conserve encore son ancien mois'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Impression compte tiers : les 11 colonnes tiennent dans la page (pas de rognage)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var css = _cdPrintStyles('paysage');
+      /* Les cellules ont un min-width en ligne (170/110/190px) herite de
+         l'ecran : sans neutralisation, la somme depasse la largeur utile et le
+         tableau se fait rogner a droite, selon le compte imprime. */
+      var neutralise = /td\\[style\\*="min-width"\\]\\{min-width:0 !important/.test(css);
+      /* et l'unitaire sort en paysage (11 colonnes) */
+      var paysage = /A4 landscape/.test(css);
+      var portrait = /A4 portrait/.test(_cdPrintStyles('portrait'));
+      var paysageReel = (css.indexOf('portrait') === -1);
+      var srcRapide = printSingleFournisseurCompte.toString();
+      var passePaysage = /_cdImprimer\\([\\s\\S]*'paysage'\\)/.test(srcRapide);
+      var srcClient = printSingleClientCompte.toString();
+      var passePaysageC = /_cdImprimer\\([\\s\\S]*'paysage'\\)/.test(srcClient);
+      /* le regroupement PDF fournisseurs est aussi passe en paysage */
+      var groupe = doExportPDFFournisseurs.toString();
+      var groupePaysage = /A4 landscape/.test(groupe) && !/A4 portrait/.test(groupe);
+      (neutralise && paysage && portrait && paysageReel && passePaysage && passePaysageC && groupePaysage)
+        ? 'OK : min-width neutralise, orientation parametrable, unitaire + groupe en paysage'
+        : 'ECHEC neutralise=' + neutralise + ' paysage=' + paysage + ' portrait=' + portrait + ' fournisseur=' + passePaysage + ' client=' + passePaysageC + ' groupe=' + groupePaysage
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Recherche globale (page) : meme index montants que la liste deroulante',
     app: 'index.html', store: storeRealiste,
     code: `
