@@ -5566,7 +5566,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Suppression refus\u00e9e clairement si l\u2019article est li\u00e9 \u00e0 une facture ou une livraison',
+    nom: 'Suppression refusée clairement si l’article est lié à une facture ou une livraison',
     app: 'production.html', store: storeRealiste,
     code: `
       /* Le jeu de test contient une facture ET un BL sur l'article « a1 » */
@@ -5577,21 +5577,22 @@ r.push({
       window.confirm2 = function () { return true; };
       var r = supprimerArticle('a1', true);
       var encore = getArticlesActifs().filter(function (a) { return a.id === 'a1'; }).length;
-      /* Un article libre passe */
+      /* Produit fini libre : suppression redirigée vers l'Index (source unique) */
       var libre = { id: 'zz', code: 'LIBRE', designation: 'Libre', categorie: 'finished' };
       var setArticles2 = getArticles().concat([libre]);
       setArticles(setArticles2);
       var bloqLibre = articleBloquePar(libre);
       var r2 = supprimerArticle('zz', true);
-      (bloq === 'une facture' && r === false && encore === 1 && bloqLibre === '' && r2 === true)
-        ? 'OK : refus motivé (« utilisé dans une facture ») et l\u2019article reste ; un article libre passe'
-        : 'ECHEC bloq=' + bloq + ' r=' + r + ' encore=' + encore + ' bloqLibre=' + bloqLibre + ' r2=' + r2
+      var encore2 = getArticlesActifs().filter(function (a) { return a.id === 'zz'; }).length;
+      (bloq === 'une facture' && r === false && encore === 1 && bloqLibre === '' && r2 === false && encore2 === 1)
+        ? 'OK : lié (facture) bloqué + fini libre redirigé vers l’Index, rien ne bouge'
+        : 'ECHEC bloq=' + bloq + ' r=' + r + ' encore=' + encore + ' bloqLibre=' + bloqLibre + ' r2=' + r2 + ' encore2=' + encore2
     `,
     attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Suppression group\u00e9e : deux produits finis coch\u00e9s partent vraiment (et de la Nomenclature)',
+    nom: 'Source unique PF : suppression en Exploitation redirigée vers l’Index (rien ne bouge)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
@@ -5617,14 +5618,14 @@ r.push({
       var r2 = supprimerArticle('z2', true);
       var codes = getArticles().map(function (a) { return a.code; });
       var idx = JSON.parse(localStorage.getItem('mdb_nomenclature')).map(function (a) { return a.code; });
-      /* Le seul test : ils ne doivent PAS revenir */
+      /* Nouveau comportement : refus, tout reste en place (c'est l'Index qui supprime) */
       syncProduitsFinisFromIndex();
       var apres = getArticles().map(function (a) { return a.code; });
-      (r1 === true && r2 === true
-        && codes.indexOf('TST1') === -1 && codes.indexOf('TST2') === -1 && codes.indexOf('GARDE') !== -1
-        && idx.join(',') === 'GARDE'
-        && apres.indexOf('TST1') === -1 && apres.indexOf('TST2') === -1 && apres.indexOf('GARDE') !== -1)
-        ? 'OK : TST1 et TST2 supprimés des deux côtés, la synchro ne les recrée pas'
+      (r1 === false && r2 === false
+        && codes.indexOf('TST1') !== -1 && codes.indexOf('TST2') !== -1 && codes.indexOf('GARDE') !== -1
+        && idx.join(',') === 'TST1,TST2,GARDE'
+        && apres.indexOf('TST1') !== -1 && apres.indexOf('TST2') !== -1 && apres.indexOf('GARDE') !== -1)
+        ? 'OK : suppressions refusees, TST1/TST2/GARDE intacts des deux cotes'
         : 'ECHEC r1=' + r1 + ' r2=' + r2 + ' loc=' + codes.join(',') + ' idx=' + idx.join(',') + ' apres=' + apres.join(',')
     `,
     attenduPrefixe: 'OK'
@@ -5649,7 +5650,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Exploitation : un article supprim\u00e9 ne ressuscite plus (marquage d\u00e9di\u00e9)',
+    nom: 'Source unique PF : suppression en Exploitation refusée, l’Index garde la main',
     app: 'production.html', store: storeRealiste,
     code: `
       localStorage.setItem('mdb_nomenclature', JSON.stringify([
@@ -5662,17 +5663,16 @@ r.push({
       /* 1) l'index alimente l'exploitation */
       syncProduitsFinisFromIndex();
       var cree = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; }).length;
-      /* 2) l'utilisateur le supprime */
+      /* 2) suppression tentee en exploitation : refusee, l'article reste */
       var cible = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; })[0];
-      deleteArticle(cible.id);
+      var rDel = deleteArticle(cible.id);
       var apresDel = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; }).length;
-      /* 3) l'index renvoie encore son article + un onglet renvoie une base
-            plus ancienne : rien ne doit ressusciter */
+      /* 3) re-synchro : toujours la, coherent avec l'index */
       syncProduitsFinisFromIndex();
       setSection('articles', [{ id: 'z1', code: 'BBOXB', designation: 'Big box banane', categorie: 'finished', _fromIndex: true }]);
       var apresRendu = getArticlesActifs().filter(function (a) { return a.code === 'BBOXB'; }).length;
-      (cree === 1 && apresDel === 0 && apresRendu === 0)
-        ? 'OK : cr\u00e9\u00e9 puis supprim\u00e9, et il ne revient ni par l\u2019index ni par une base plus ancienne'
+      (cree === 1 && apresDel === 1 && apresRendu === 1)
+        ? 'OK : suppression refusee en exploitation, BBOXB reste (Index seul decide)'
         : 'ECHEC cree=' + cree + ' apresDel=' + apresDel + ' apresRendu=' + apresRendu
     `,
     attenduPrefixe: 'OK'
@@ -5706,7 +5706,7 @@ r.push({
   });
 
   r.push({
-    nom: 'Suppression d’un produit fini : elle part aussi dans la Nomenclature (plus de retour)',
+    nom: 'Source unique PF : suppression Index propagée en Exploitation, refusée en Exploitation',
     app: 'production.html', store: storeRealiste,
     code: `
       localStorage.setItem('mdb_nomenclature', JSON.stringify([
@@ -5719,17 +5719,20 @@ r.push({
       window.confirm2 = function () { return true; };
       syncProduitsFinisFromIndex();
       var cible = getArticles().filter(function (a) { return a.code === '114'; })[0];
+      /* 1) tentative en exploitation : refusee, rien ne bouge */
       deleteArticle(cible.id);
-      var idxRestants = JSON.parse(localStorage.getItem('mdb_nomenclature'));
-      var codesIdx = idxRestants.filter(function (x) { return x.typeArticle === 'produit_fini'; }).map(function (x) { return x.code; });
-      var codesLoc = getArticles().map(function (a) { return a.code; });
-      /* Et surtout : une synchro ne doit PAS le recreer */
+      var idxRefus = JSON.parse(localStorage.getItem('mdb_nomenclature')).map(function (x) { return x.code; });
+      var locRefus = getArticles().map(function (a) { return a.code; });
+      /* 2) l'Index supprime 114 : l'Exploitation l'abandonne a la synchro */
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id:'n2', code:'NEST', designation:'NESTLE', typeArticle:'produit_fini' }
+      ]));
       syncProduitsFinisFromIndex();
       var codesApres = getArticles().map(function (a) { return a.code; });
-      (codesIdx.length === 1 && codesIdx[0] === 'NEST' && codesLoc.indexOf('114') === -1
-        && codesApres.indexOf('114') === -1 && window._prodNomModifie === true)
-        ? 'OK : 114 supprime des DEUX cotes, la synchro ne le recree pas, envoi cloud arme'
-        : 'ECHEC idx=' + JSON.stringify(codesIdx) + ' loc=' + JSON.stringify(codesLoc) + ' apres=' + JSON.stringify(codesApres)
+      (idxRefus.length === 2 && locRefus.indexOf('114') !== -1
+        && codesApres.length === 1 && codesApres[0] === 'NEST')
+        ? 'OK : refus en exploitation (114 garde), suppression Index propagee (114 parti)'
+        : 'ECHEC refus-idx=' + JSON.stringify(idxRefus) + ' refus-loc=' + JSON.stringify(locRefus) + ' apres=' + JSON.stringify(codesApres)
     `,
     attenduPrefixe: 'OK'
   });

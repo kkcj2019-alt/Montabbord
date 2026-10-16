@@ -38,7 +38,8 @@ const EXCLUS = [
   { motif: /^removeByTombstone/, raison: 'helper interne' },
   { motif: /^removeDeletedOperations/, raison: 'filtre de fusion cloud : ne modifie aucune donnée' },
   { motif: /^removeFilter|^removePin|^removeLogo/, raison: 'filtre ouLogo, pas un enregistrement' },
-  { motif: /^supprimerNomenclature$|^supprimerArticlesSelectionnes$|^supprimerArticle$/, raison: 'helper de suppression (l\u2019appelant confirme, ou suppression group\u00e9e)' }
+  { motif: /^supprimerNomenclature$|^supprimerArticlesSelectionnes$|^supprimerArticle$/, raison: 'helper de suppression (l\u2019appelant confirme, ou suppression group\u00e9e)' },
+  { motif: /^delArticleMontage$/, raison: 'source unique : ne supprime plus, redirige vers l\u2019Index' }
 ];
 const CONFIRMER = /(window\.)?confirm2?\s*\(/;
 

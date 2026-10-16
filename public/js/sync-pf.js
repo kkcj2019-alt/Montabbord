@@ -2,10 +2,17 @@
  * ACSER — Synchronisation Tripartite des Produits Finis
  * Assure une parfaite identité (nombre, codes, libellés, dimensions, prix)
  * entre Index (Nomenclature), Exploitation (Catalogue PF) et Paye (Articles Montage).
- * 
- * Règle d'or :
- * - Si un article est ajouté, modifié ou supprimé dans UNE application,
- *   il est automatiquement ajouté, modifié ou supprimé dans les DEUX autres.
+ *
+ * Regle d'or (source unique) :
+ * - L'INDEX (Nomenclature) est le SEUL endroit ou l'on CREE, RENOMME et
+ *   SUPPRIME un produit fini. C'est ce qui faisait diverger les postes
+ *   (23 produits ici, 16 la-bas, suppressions qui revenaient) : plusieurs
+ *   ecrivains se marchaient dessus.
+ * - Exploitation et Paye RECOIVENT (lecture seule sur l'existence) ; leurs
+ *   modifications de PRIX/dimensions d'un produit existant restent propagees.
+ * - Toute creation/suppression/renommage hors index est REFUSEE avec un
+ *   message qui redirige vers l'Index. La Nomenclature synchronisee
+ *   (cloud) est la seule verite : les listes se realignent dessus.
  */
 
 var TRI_PF_ALIASES = {
@@ -41,38 +48,32 @@ function triPfCanonique(code, desig) {
   return String(code).trim().toUpperCase();
 }
 
-/* Tombstones PF : une suppression dans UNE application ne doit jamais
-   ressusciter via l'harmonisation qui reconstruit Production/Paye depuis la
-   Nomenclature. Sans ca, supprimer dans Production puis re-synchroniser
-   re-ajoutait l'article (la Nomenclature l'avait encore). */
-var TRI_PF_TOMBSTONE_KEY = 'mdb_pf_tombstones';
-function triPfTombstonesLire() {
+/* Source unique : quelle application appelle ? (defaut index : tests, scripts) */
+function triPfPage() {
   try {
-    var raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(TRI_PF_TOMBSTONE_KEY) : null;
-    var t = raw ? JSON.parse(raw) : {};
-    return (t && typeof t === 'object' && !Array.isArray(t)) ? t : {};
-  } catch (e) { return {}; }
-}
-function triPfEstSupprime(code) {
-  if (!code) return false;
-  try { return !!triPfTombstonesLire()[String(code).trim().toUpperCase()]; } catch (e) { return false; }
-}
-function triPfMarquerSupprime(code) {
-  if (!code) return;
-  try {
-    var t = triPfTombstonesLire();
-    t[String(code).trim().toUpperCase()] = Date.now();
-    if (typeof localStorage !== 'undefined') localStorage.setItem(TRI_PF_TOMBSTONE_KEY, JSON.stringify(t));
+    var p = String((typeof location !== 'undefined' && location.pathname) || '');
+    if (p.indexOf('paye') !== -1) return 'paye';
+    if (p.indexOf('production') !== -1) return 'production';
   } catch (e) {}
+  return 'index';
 }
-function triPfAnnulerSuppression(code) {
-  /* Re-ajouter (sauvegarder) un code annule sa suppression : sinon un article
-     supprime par erreur serait impossible a recreer. */
-  if (!code) return;
+var TRI_PF_MESSAGE_SOURCE = 'Produits finis : création, renommage et suppression dans l’Index (Nomenclature) uniquement. Exploitation et Paie reçoivent automatiquement.';
+function triPfRefuser() {
+  try { if (typeof toast === 'function') toast(TRI_PF_MESSAGE_SOURCE, 'error'); } catch (e) {}
+  try { console.warn('[triSync] ' + TRI_PF_MESSAGE_SOURCE); } catch (e2) {}
+  return false;
+}
+/* Nettoyage unique : les tombstones PF locales (jamais partagees entre
+   postes) faisaient diverger les comptes. La Nomenclature synchronisee
+   redevient la seule verite. */
+var TRI_PF_NETTOYAGE_CLE = 'mdb_pf_tombstones_nettoyes_v1';
+var TRI_PF_TOMBSTONE_KEY = 'mdb_pf_tombstones'; /* cle historique, nettoyee une fois */
+function triPfNettoyerTombstones() {
   try {
-    var t = triPfTombstonesLire();
-    var c = String(code).trim().toUpperCase();
-    if (t[c]) { delete t[c]; if (typeof localStorage !== 'undefined') localStorage.setItem(TRI_PF_TOMBSTONE_KEY, JSON.stringify(t)); }
+    if (typeof localStorage === 'undefined') return;
+    if (localStorage.getItem(TRI_PF_NETTOYAGE_CLE) === '1') return;
+    localStorage.removeItem(TRI_PF_TOMBSTONE_KEY);
+    localStorage.setItem(TRI_PF_NETTOYAGE_CLE, '1');
   } catch (e) {}
 }
 
@@ -186,12 +187,9 @@ function triSyncGetProduitsFinis() {
 function triSyncHarmoniserTout(forceList) {
   var _force = Array.isArray(forceList);
   var list = _force ? forceList : triSyncGetProduitsFinis();
-  /* Respecter les suppressions : un code tombstone ne doit jamais etre
-     re-ajoute par l'harmonisation (sauf re-sauvegarde explicite qui a leve
-     le tombstone via triPfAnnulerSuppression). */
-  try {
-    list = (list || []).filter(function (x) { return x && x.code && !triPfEstSupprime(x.code); });
-  } catch (eT) {}
+  /* Source unique : la liste vient de la Nomenclature synchronisee. Un code
+     supprime dans l'Index est simplement absent : il n'est jamais re-ajoute
+     (les autres applications ne creent plus, donc rien ne ressuscite). */
   /* Liste vide = rien a propager, sauf ordre explicite de suppression
      (forceList, meme vide) qui doit vider Production/Paye. Avant, le
      `return` premature empechait de propager la suppression du dernier PF. */
@@ -311,15 +309,14 @@ function triSyncHarmoniserTout(forceList) {
 
 /**
  * Supprime un Produit Fini de TOUTES les applications simultanément.
+ * SOURCE UNIQUE : Index uniquement. Hors index : refuse, rien ne bouge.
  */
 function triSyncSupprimerProduitFini(codeOrId) {
-  if (!codeOrId) return;
+  if (!codeOrId) return false;
+  triPfNettoyerTombstones();
+  if (triPfPage() !== 'index') return triPfRefuser();
   var cStr = String(codeOrId).trim().toUpperCase();
   var canon = triPfCanonique(cStr, '');
-
-  /* Memoriser la suppression : sans tombstone, la prochaine harmonisation
-     reconstruisait l'article depuis la Nomenclature restante. */
-  try { if (canon) triPfMarquerSupprime(canon); } catch (eTS) {}
 
   var list = triSyncGetProduitsFinis();
   var filtered = list.filter(function (x) {
@@ -355,23 +352,34 @@ function triSyncSupprimerProduitFini(codeOrId) {
     payData.articlesMontage = ams.filter(function (a) { return a && a.code !== canon && triPfNorm(a.code) !== triPfNorm(cStr); });
     localStorage.setItem('mdb_paye', JSON.stringify(payData));
   } catch (eM) {}
+  return true;
 }
 
 /**
  * Ajoute ou met à jour un Produit Fini dans les 3 applications simultanément.
+ * SOURCE UNIQUE : creation et renommage dans l'Index uniquement (refuses
+ * ailleurs). La mise a jour des champs d'un produit EXISTANT (prix,
+ * dimensions, designation) reste propagee depuis tous les postes.
  */
 function triSyncSauvegarderProduitFini(art, oldCode) {
-  if (!art || !art.code) return;
+  if (!art || !art.code) return false;
+  triPfNettoyerTombstones();
   var canon = triPfCanonique(art.code, art.designation);
-  /* Re-creation explicite : lever le tombstone, sinon l'harmonisation
-     filtrerait le code qu'on est en train de re-ajouter. */
-  try { triPfAnnulerSuppression(canon); } catch (eTA) {}
   var list = triSyncGetProduitsFinis();
+  var existe = false;
+  for (var ei = 0; ei < list.length; ei++) {
+    if (list[ei] && list[ei].code === canon) { existe = true; break; }
+  }
+  var renomme = false;
+  if (oldCode) {
+    var oldCanon = triPfCanonique(oldCode, '');
+    if (oldCanon && oldCanon !== canon) renomme = true;
+  }
+  if ((!existe || renomme) && triPfPage() !== 'index') return triPfRefuser();
 
   if (oldCode) {
     var oldCanon = triPfCanonique(oldCode, '');
     if (oldCanon && oldCanon !== canon) {
-      try { triPfMarquerSupprime(oldCanon); } catch (eTO) {}
       list = list.filter(function (x) {
         return x.code !== oldCanon && triPfNorm(x.code) !== triPfNorm(oldCode);
       });
@@ -407,6 +415,7 @@ function triSyncSauvegarderProduitFini(art, oldCode) {
   }
 
   triSyncHarmoniserTout(list);
+  return true;
 }
 
 // Initialisation automatique au chargement
@@ -418,8 +427,7 @@ if (typeof window !== 'undefined') {
     window.triSyncHarmoniserTout = triSyncHarmoniserTout;
     window.triSyncSupprimerProduitFini = triSyncSupprimerProduitFini;
     window.triSyncSauvegarderProduitFini = triSyncSauvegarderProduitFini;
-    window.triPfTombstonesLire = triPfTombstonesLire;
-    window.triPfEstSupprime = triPfEstSupprime;
+    window.triPfPage = triPfPage;
   } catch (eW) {}
 
   /* Auto-harmonisation au demarrage : nettoie les orphelins et aligne
