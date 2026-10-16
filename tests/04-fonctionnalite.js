@@ -5285,14 +5285,14 @@ r.push({
   });
 
   r.push({
-    nom: 'Suppression group\u00e9e : les cases existent dans les deux applications et suppriment en lot',
+    nom: 'Catalogue : cases (impression) + Synchro depuis l’Index, sans bouton de suppression',
     app: 'production.html', store: () => {
       const s = storeRealiste();
       const p = JSON.parse(s.mdb_production);
       p.articles = [
         { id: 'a1', code: 'TST1', designation: 'Test 1', categorie: 'finished' },
         { id: 'a2', code: 'TST2', designation: 'Test 2', categorie: 'finished' },
-        { id: 'a3', code: 'GARDE', designation: 'A garder', categorie: 'finished' }
+        { id: 'm1', code: 'MAT1', designation: 'Matiere 1', categorie: 'merch' }
       ];
       p.composants = [];
       s.mdb_production = JSON.stringify(p);
@@ -5301,16 +5301,15 @@ r.push({
     code: `
       CURRENT_PAGE = 'cat-produits-finis'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
-      /* Cases + bouton de suppression group\u00e9e */
+      /* Cases (impression) + bouton miroir ; fini sans poubelle, autres avec */
       var okCases = (h.match(/cat-cb/g) || []).length >= 3;
-      var okBouton = h.indexOf('supprimerArticlesSelectionnes') !== -1;
-      /* On coche deux articles et on supprime */
-      window.confirm2 = function () { return true; };
-      renderPage = function () {};
-      var n = supprimerArticlesSelectionnes.call(null) ;
-      (okCases && okBouton)
-        ? 'OK : 3 cases, bouton « Supprimer la s\u00e9lection » pr\u00e9sent (' + (h.match(/cat-cb/g) || []).length + ' cases)'
-        : 'ECHEC cases=' + okCases + ' bouton=' + okBouton
+      var okMiroir = h.indexOf('Synchro depuis l’Index') !== -1;
+      var pasDeSupprGroupee = h.indexOf('Supprimer la sélection') === -1;
+      var finiSansPoubelle = h.indexOf("deleteArticle('a1')") === -1 && h.indexOf("deleteArticle('a2')") === -1;
+      var autreAvecPoubelle = h.indexOf("deleteArticle('m1')") !== -1;
+      (okCases && okMiroir && pasDeSupprGroupee && finiSansPoubelle && autreAvecPoubelle)
+        ? 'OK : cases + miroir, finis sans poubelle, autres avec'
+        : 'ECHEC cases=' + okCases + ' miroir=' + okMiroir + ' groupe=' + (!pasDeSupprGroupee) + ' fini=' + (!finiSansPoubelle) + ' autre=' + autreAvecPoubelle
     `,
     attenduPrefixe: 'OK'
   });
@@ -5733,6 +5732,56 @@ r.push({
         && codesApres.length === 1 && codesApres[0] === 'NEST')
         ? 'OK : refus en exploitation (114 garde), suppression Index propagee (114 parti)'
         : 'ECHEC refus-idx=' + JSON.stringify(idxRefus) + ' refus-loc=' + JSON.stringify(locRefus) + ' apres=' + JSON.stringify(codesApres)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Paie : Synchro depuis l’Index cale la liste (ajoute + retire, tarifs gardés)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: 'A1', designation: 'Article 1', typeArticle: 'produit_fini' },
+        { id: 'n2', code: 'A2', designation: 'Article 2', typeArticle: 'produit_fini' }
+      ]));
+      var pd0 = JSON.parse(localStorage.getItem('mdb_paye'));
+      pd0.articlesMontage = [
+        { code: 'A1', designation: 'Article 1', prix: 200, compte_prime: false },
+        { code: 'Z9', designation: 'Fantome', prix: 999, compte_prime: true }
+      ];
+      pd0.articlesMontage_tombstones = [{ code: 'a2', deletedAt: 1 }];
+      localStorage.setItem('mdb_paye', JSON.stringify(pd0));
+      var n = syncArticlesMontageDepuisIndex();
+      var pd = JSON.parse(localStorage.getItem('mdb_paye'));
+      var codes = pd.articlesMontage.map(function (a) { return a.code; }).sort();
+      var a1 = pd.articlesMontage.filter(function (a) { return a.code === 'A1'; })[0] || {};
+      var tb = Array.isArray(pd.articlesMontage_tombstones) ? pd.articlesMontage_tombstones : [];
+      var bloqueA2 = tb.some(function (t) { return String((t && t.code) || '').toLowerCase() === 'a2'; });
+      (n === 2 && codes.join(',') === 'A1,A2' && a1.prix === 200 && a1.compte_prime === false && !bloqueA2)
+        ? 'OK : A2 ajouté, Z9 retiré, tarif/case A1 gardés, marquage A2 levé'
+        : 'ECHEC n=' + n + ' codes=' + codes.join(',') + ' prix=' + a1.prix + ' cp=' + a1.compte_prime + ' bloque=' + bloqueA2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Exploitation : la Nomenclature du cloud remplace le local puis recale le catalogue',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: '114', designation: 'PALETTE 114', typeArticle: 'produit_fini' },
+        { id: 'n2', code: 'VIEUX', designation: 'Vieux', typeArticle: 'produit_fini' }
+      ]));
+      var r1 = prodApplyNomenclature([
+        { id: 'n1', code: '114', designation: 'PALETTE 114', typeArticle: 'produit_fini' }
+      ]);
+      var apres = JSON.parse(localStorage.getItem('mdb_nomenclature')).map(function (a) { return a.code; });
+      var r2 = prodApplyNomenclature([
+        { id: 'n1', code: '114', designation: 'PALETTE 114', typeArticle: 'produit_fini' }
+      ]);
+      (r1 === true && apres.join(',') === '114' && r2 === false)
+        ? 'OK : VIEUX parti du local, 2e passage sans effet'
+        : 'ECHEC r1=' + r1 + ' apres=' + apres.join(',') + ' r2=' + r2
     `,
     attenduPrefixe: 'OK'
   });

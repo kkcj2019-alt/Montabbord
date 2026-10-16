@@ -9883,6 +9883,37 @@ function prodApplyCloud(cloudProd, silent) {
   try { if (!silent) prodAutoRefresh(); } catch(e) {}
   return true;
 }
+/* Nomenclature (Index, SOURCE UNIQUE) : le cloud fait foi. En cas de
+   changement structurel (produit ajoute/retire dans l'Index), le catalogue
+   se recale aussitot. Jamais d'union qui ressusciterait un supprime. */
+function prodApplyNomenclature(cloudNom) {
+  if (!Array.isArray(cloudNom)) return false;
+  var local = null;
+  try { local = JSON.parse(localStorage.getItem('mdb_nomenclature') || 'null'); } catch (e) { local = null; }
+  if (!Array.isArray(local)) local = [];
+  if (!cloudNom.length && local.length) return false; /* cloud vide : on garde */
+  function codesPF(nom) {
+    var s = [];
+    for (var i = 0; i < (nom || []).length; i++) {
+      var a = nom[i];
+      if (a && String(a.typeArticle || '') === 'produit_fini' && a.code) s.push(String(a.code).trim().toUpperCase());
+    }
+    s.sort();
+    return s.join('|');
+  }
+  var memeStructure = false;
+  try { memeStructure = (codesPF(local) === codesPF(cloudNom)) && (local.length === cloudNom.length); } catch (eC) {}
+  if (memeStructure) {
+    try {
+      if (JSON.stringify(local) === JSON.stringify(cloudNom)) return false;
+      localStorage.setItem('mdb_nomenclature', JSON.stringify(cloudNom));
+    } catch (eM) { return false; }
+    return false;
+  }
+  try { localStorage.setItem('mdb_nomenclature', JSON.stringify(cloudNom)); } catch (eS) { return false; }
+  try { syncProduitsFinisFromIndex(); } catch (eR) {}
+  return true;
+}
 function prodPullNow(silent) {
   var uid = _prodUid || prodEnterpriseUid();
   if (!uid) { if (!silent) prodSyncStatus('○ non connecté', 'var(--dim)'); return; }
@@ -9890,18 +9921,19 @@ function prodPullNow(silent) {
   var sb = prodSb();
   if (!sb) return;
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-  /* Tirage cible : mdb_production (sections) + cles caisse/dettes, sans le
-     SELECT * du dossier entier qui timeoutait. */
-  prodSplitLireCles(uid, ['mdb_dettesFournisseurs', 'mdb_operationsCaisse', 'mdb_codesCaisse', 'mdb_caisses'], true).then(function(res) {
+  /* Tirage cible : mdb_production (sections) + cles caisse/dettes/nomenclature,
+     sans le SELECT * du dossier entier qui timeoutait. */
+  prodSplitLireCles(uid, ['mdb_nomenclature', 'mdb_dettesFournisseurs', 'mdb_operationsCaisse', 'mdb_codesCaisse', 'mdb_caisses'], true).then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
     if (!row.data) return;
+    var rN = Array.isArray(row.data.mdb_nomenclature) ? prodApplyNomenclature(row.data.mdb_nomenclature) : false;
     var r1 = row.data.mdb_production ? prodApplyCloud(row.data.mdb_production, true) : false;
     var r2 = row.data.mdb_dettesFournisseurs ? prodApplyDettes(row.data.mdb_dettesFournisseurs) : false;
     var r3 = Array.isArray(row.data.mdb_operationsCaisse) ? acApplyCaisseCloud(row.data.mdb_operationsCaisse, 'mdb_operationsCaisse') : false;
     var r4 = Array.isArray(row.data.mdb_codesCaisse) ? acApplyCaisseCloud(row.data.mdb_codesCaisse, 'mdb_codesCaisse') : false;
     var r5 = Array.isArray(row.data.mdb_caisses) ? acApplyCaisseCloud(row.data.mdb_caisses, 'mdb_caisses') : false;
-    if ((r1 || r2 || r3 || r4 || r5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
+    if ((rN || r1 || r2 || r3 || r4 || r5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
   }).catch(function(err) {});
 }
 function prodStartRealtime() {
@@ -18099,11 +18131,10 @@ function render_articles() {
   h += '</select></div>';
   h += '<div style="display:flex;gap:.5rem">';
   h += '<button class="btn" onclick="catImprimerSelection()" title="Imprimer les fiches techniques cochées">🖨 Fiches cochées</button>';
-  h += '<button class="btn" onclick="resynchroniserCatalogue()" title="Comparer avec la Nomenclature (app principale) et reintegrer les produits manquants" style="font-size:.72rem">🔄 Resynchroniser</button>';
+  h += '<button class="btn" onclick="resynchroniserCatalogue()" title="Recopier EXACTEMENT la Nomenclature (Index, source unique) : ajoute les produits manquants, retire ceux qui n’y sont plus" style="font-size:.72rem">🔄 Synchro depuis l’Index</button>';
   if (nbHors) {
     h += '<button class="btn btn-accent" onclick="reintegrerTousHorsIndex()" title="Créer dans la Nomenclature (app principale) tous les produits hors Index, d\'un coup" style="font-size:.72rem">📥 Tout réintégrer dans Index (' + nbHors + ')</button>';
   }
-  h += '<button class="btn btn-red" onclick="supprimerArticlesSelectionnes()" title="Supprimer tous les produits cochés" style="font-size:.72rem">🗑 Supprimer la sélection</button>';
   h += '<button class="btn btn-accent" onclick="showNewArticle()">+ Nouvel Article</button>';
   h += '</div></div>';
   if (articles.length === 0) return h + '<div class="empty">Aucun article. Créez votre premier article.</div>';
@@ -18133,7 +18164,11 @@ function render_articles() {
     h += '<td style="white-space:nowrap">';
     h += '<button class="btn" onclick="showArticleDetail(\'' + a.id + '\')" style="font-size:.7rem" title="Voir" aria-label="Voir">👁️</button> ';
     h += '<button class="btn" onclick="editArticle(\'' + a.id + '\')" style="font-size:.7rem" title="Modifier" aria-label="Modifier">✏️</button> ';
-    h += '<button class="btn btn-red" onclick="deleteArticle(\'' + a.id + '\')" style="font-size:.7rem" title="Supprimer" aria-label="Supprimer">🗑️</button>';
+    /* Source unique : pas de suppression des produits finis ici (Index uniquement).
+       Les autres articles gardent leur suppression locale. */
+    if (String(a.categorie || '') !== 'finished') {
+      h += '<button class="btn btn-red" onclick="deleteArticle(\'' + a.id + '\')" style="font-size:.7rem" title="Supprimer" aria-label="Supprimer">🗑️</button>';
+    }
     h += '</td></tr>';
   });
   h += '</table></div>';

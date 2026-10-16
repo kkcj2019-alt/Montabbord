@@ -3464,7 +3464,7 @@
               <h3 style="margin-bottom: 0.5rem; font-size: 0.9rem">
                 Articles de Montage (Production) — Produits Finis
                 <span id="am-count-badge" style="font-size:0.75rem;font-weight:700;background:#dbeafe;color:#1e40af;border-radius:6px;padding:2px 10px;margin-left:8px;display:inline-block">0 articles</span>
-              </h3><div style="margin-bottom:0.8rem"><button type="button" class="btn btn-sm" onclick="harmoniserArticlesMontageAvecProduitsFinis(true);loadArticlesMontage()" style="background:#047857;color:#fff;font-size:0.75rem;font-weight:800;padding:5px 12px;border-radius:6px;border:none;box-shadow:0 1px 3px rgba(4,120,87,.25);cursor:pointer" title="Détecter intelligemment et synchroniser avec les Produits Finis de la Nomenclature et de l'Exploitation">✨ Synchroniser avec les Produits Finis</button></div>
+              </h3><div style="margin-bottom:0.8rem"><button type="button" class="btn btn-sm" onclick="harmoniserArticlesMontageAvecProduitsFinis(true);loadArticlesMontage()" style="background:#047857;color:#fff;font-size:0.75rem;font-weight:800;padding:5px 12px;border-radius:6px;border:none;box-shadow:0 1px 3px rgba(4,120,87,.25);cursor:pointer" title="Détecter intelligemment et synchroniser avec les Produits Finis de la Nomenclature et de l'Exploitation">✨ Synchroniser avec les Produits Finis</button> <button type="button" class="btn btn-sm" onclick="syncArticlesMontageDepuisIndex()" style="background:#1d4ed8;color:#fff;font-size:0.75rem;font-weight:800;padding:5px 12px;border-radius:6px;border:none;box-shadow:0 1px 3px rgba(29,78,216,.25);cursor:pointer" title="Recopier EXACTEMENT la Nomenclature (Index, source unique) : ajoute les produits manquants, retire ceux qui n'y sont plus. Tarifs et cases prime conservés.">🔄 Synchro depuis l’Index</button></div>
               </h3>
               <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-6px 0 12px;padding:9px 12px;background:#fdf2f8;border:1px solid #fbcfe8;border-radius:10px">
                 <span style="font-size:.76rem;color:#9d174d;font-weight:700">🏷 Prix unitaires</span>
@@ -6774,6 +6774,20 @@ function payeObj(key) {
         try {
         if (data.mdb_tombstones)
           _payeMergeTombstonesFromCloud(data.mdb_tombstones);
+        /* Nomenclature (Index, SOURCE UNIQUE des produits finis) : le cloud
+           fait foi, jamais d'union qui ressusciterait un produit supprime.
+           Vide entrant ne vide jamais un local plein (garde anti-effacement). */
+        if (Array.isArray(data.mdb_nomenclature)) {
+          var _cuN = DB.getMain("mdb_nomenclature");
+          if (!Array.isArray(_cuN)) _cuN = [];
+          if (data.mdb_nomenclature.length > 0 || _cuN.length === 0) {
+            try {
+              if (JSON.stringify(_cuN) !== JSON.stringify(data.mdb_nomenclature)) {
+                DB.setMain("mdb_nomenclature", data.mdb_nomenclature);
+              }
+            } catch (eN) {}
+          }
+        }
         [
           "mdb_employes",
           /* Congés planifiés (index) : la paie doit voir les AJOUTS *et* les
@@ -12702,6 +12716,83 @@ function showSection(id) {
         return pfs;
       }
 
+      /* Miroir strict depuis l'Index (SOURCE UNIQUE) : la liste de montage
+         recopie EXACTEMENT la Nomenclature — ajoute les manquants, retire
+         ceux qui n'y sont plus (10 dans l'Index = 10 ici). Les tarifs et
+         cases prime existants sont conserves. N'ecrit QUE mdb_paye. */
+      function syncArticlesMontageDepuisIndex() {
+        var list = null;
+        try {
+          if (typeof triSyncGetProduitsFinis === 'function') list = triSyncGetProduitsFinis();
+        } catch (eL) { list = null; }
+        if (!Array.isArray(list)) {
+          list = [];
+          try {
+            var rawN = localStorage.getItem('mdb_nomenclature');
+            var nomN = rawN ? JSON.parse(rawN) : [];
+            (nomN || []).forEach(function (a) {
+              if (!a || !a.code) return;
+              var typN = String(a.typeArticle || '').toLowerCase();
+              var catN = String(a.categorie || '').toLowerCase();
+              if (typN !== 'produit_fini' && catN !== 'finished' && catN !== 'produit_fini') return;
+              list.push({ code: String(a.code).trim().toUpperCase(), designation: a.designation || a.code });
+            });
+          } catch (eN) {}
+        }
+        var anciens = {};
+        try {
+          (getArticlesMontage() || []).forEach(function (a) {
+            if (a && a.code) anciens[String(a.code).trim().toUpperCase()] = a;
+          });
+        } catch (eA) {}
+        var ams = [];
+        (list || []).forEach(function (pf) {
+          if (!pf || !pf.code) return;
+          var code = String(pf.code).trim().toUpperCase();
+          var anc = anciens[code] || {};
+          var px = parseFloat(pf.prix_montage);
+          if (!(px > 0)) px = parseFloat(anc.prix) || 150;
+          ams.push({
+            code: code,
+            designation: pf.designation || anc.designation || code,
+            prix: px,
+            compte_prime: (anc.compte_prime !== undefined) ? anc.compte_prime : true,
+            estProduitFini: true,
+            updatedAt: Date.now()
+          });
+        });
+        ams.sort(function (x, y) { return String(x.code || '').localeCompare(String(y.code || '')); });
+        try {
+          setArticlesMontage(ams);
+          /* Les codes revenus de l'Index ne doivent plus etre bloques par
+             d'anciens marquages paye : on leve ceux qui sont dans la liste. */
+          try {
+            var pd2 = getPayeData();
+            if (pd2 && Array.isArray(pd2.articlesMontage_tombstones)) {
+              var presents = {};
+              ams.forEach(function (a) { presents[String(a.code || '').trim().toLowerCase()] = true; });
+              var gardes = pd2.articlesMontage_tombstones.filter(function (t) {
+                var tc = String((t && typeof t === 'object' ? t.code : t) || '').trim().toLowerCase();
+                return tc && !presents[tc];
+              });
+              if (gardes.length !== pd2.articlesMontage_tombstones.length) {
+                pd2.articlesMontage_tombstones = gardes;
+                setPayeData(pd2);
+              }
+            }
+          } catch (eT) {}
+        } catch (eS) { return 0; }
+        /* Le miroir est plus strict que le remplissage auto du premier
+           affichage (qui re-ajouterait les extras depuis la copie
+           Exploitation) : on le marque comme deja fait. */
+        try { window._amHarmoniseInit = true; } catch (eH) {}
+        try { loadArticlesMontage(); } catch (eR) {}
+        try {
+          var n = ams.length;
+          toast('Liste calée sur l’Index : ' + n + ' produit(s) fini(s).', 'success');
+        } catch (eT2) {}
+        return ams.length;
+      }
       function harmoniserArticlesMontageAvecProduitsFinis(verbose) {
         var ams = getArticlesMontage();
         if (!Array.isArray(ams)) ams = [];
@@ -12833,9 +12924,7 @@ function showSection(id) {
             (a.compte_prime ? "\u2713" : "-") +
             '</td><td style="white-space:nowrap"><button class="btn-sec" style="padding:2px 6px;font-size:.7rem" onclick="editArticleMontage(' +
             realIdx +
-            ')">Modifier</button> <button class="btn btn-red" style="padding:2px 6px;font-size:.7rem" onclick="delArticleMontage(' +
-            realIdx +
-            ')" title="Fermer" aria-label="Fermer">X</button></td></tr>';
+            ')">Modifier</button></td></tr>';
         });
         var cfg = getMontageConfig();
         var sEl = document.getElementById("am-seuil");
