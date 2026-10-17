@@ -554,6 +554,29 @@ CURRENT_PAGE = 'cout-revient';
     attenduPrefixe: 'OK'
   });
 
+  /* Regression : garde « > 0 » a supprimer — une periode SANS fiche doit tout
+     reinisialiser, sinon un ancien total (949) restait affiche pendant que le
+     bilan annoncait 0 fiche / 0 palette. */
+  r.push({
+    nom: 'Cout de production : une periode sans fiche remet la composition et Q a 0',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: { prodCoutRevient: 'write', prodCoutJour: 'write' } }));
+      renderPage = function () {};
+      /* Ancien total restant apres un ancien chargement */
+      setSection('costComposition', [{ article_id: 'a1', qte: 949 }]);
+      var _c0 = acLaborCfg(); _c0.quantite = 949; _c0.datePointage = '2000-01-01'; setSection('costLabor', _c0);
+      setSection('productions', []);
+      acInterrogerProduction('plage', '2026-10-01', '2026-10-31');
+      var _comp = getSection('costComposition', []);
+      var _q = parseFloat((acLaborCfg() || {}).quantite) || 0;
+      (Array.isArray(_comp) && _comp.length === 0 && _q === 0)
+        ? 'OK : 0 fiche -> composition videe, Q = 0'
+        : 'ECHEC comp=' + JSON.stringify(_comp) + ' Q=' + _q
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   /* ---------- Unite des pointes : carton <-> paquet <-> pointe ---------- */
   r.push({
     nom: 'Pointes : la conversion carton / paquet / pointe fonctionne dans les deux sens',
