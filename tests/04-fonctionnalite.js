@@ -6442,7 +6442,9 @@ r.push({
     code: `
       var corps = ficheTechCorpsHtml('a1');
       var vide = ficheTechCorpsHtml('a2');
-      var okCorps = corps.indexOf('Latte') !== -1 && corps.indexOf('0.01') !== -1;
+      /* La colonne Volume affiche le volume de la LIGNE (qté x volume unitaire) :
+         5 lattes de 0.0146 m3 = 0.0730. */
+      var okCorps = corps.indexOf('Latte') !== -1 && corps.indexOf('0.073') !== -1;
       var okPrint = true; /* impression PDF verifiee ailleurs */
       (okCorps && okPrint && vide.indexOf('Aucune nomenclature') !== -1)
         ? 'OK : corps avec L1/volume, vide signalé'
