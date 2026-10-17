@@ -1427,7 +1427,7 @@ attenduPrefixe: 'OK'
     code: `
       currentUser = { id:'u1', login:'admin', nom:'Admin', isAdmin:true, caisseCentralisee:true };
       var emps = getEmployes();
-      DB.set('mdb_employes', emps);
+      DB.setMain('mdb_employes', emps);
       var ops = getOperationsCaisse();
       /* id numerique : c'est le cas des pieces creees avant DB.genId() */
       ops.push({ id: 1762200000000, numeroPiece:'KICJ261000037', date:'2026-10-02', heure:'09:00',
@@ -2190,7 +2190,7 @@ attenduPrefixe: 'OK'
     code: `
       var emps = getEmployes();
       emps.push({ id: 'e2', nom: 'Abogou', prenoms: 'Wawa', abreviation: 'ABO' });
-      DB.set('mdb_employes', emps);
+      DB.setMain('mdb_employes', emps);
       var ops = getOperationsCaisse();
       ops.push({ id: 'opKM', numeroPiece: 'KM-1', date: '2026-09-15', code: 'SOLDE', libelle: 'Solde Septembre 2026', periode: '2026-09', montant: 30000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e1', beneficiaireNom: 'Diallo A', remettant: 'Kanga', caisseId: 'c1', apType: 'solde', apMoisDeduction: '2026-09' });
       ops.push({ id: 'opAB', numeroPiece: 'AB-1', date: '2026-09-16', code: 'SOLDE', libelle: 'Solde Septembre 2026', periode: '2026-09', montant: 30000, sens: 'sortie', moyenPaiement: 'Espèce', beneficiaireType: 'employe', beneficiaireId: 'e2', beneficiaireNom: 'Abogou Wawa', remettant: 'ABOGOU WAWA RIC', caisseId: 'cABO', apType: 'solde', apMoisDeduction: '2026-09' });
@@ -7390,7 +7390,7 @@ r.push({
       var okCdi = hNew.indexOf('id="empDureeGroup" style="display:none"') !== -1;
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'extz1', matricule: 'EXT-001', nom: 'PRESTA', prenoms: 'Test', sexe: 'M', date_naissance: '', telephone: '', date_entree: '2026-01-05', type_contrat: 'Externe', duree_contrat: 0, service: '', fonction: '', categorie_id: '', salaire_base: 0, situation_matrimoniale: 'celibataire', enfants: 0, enfants_infirmes: 0, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       openEmployeModal('extz1');
       var hExt = document.getElementById('formModalBody').innerHTML || '';
       var okExt = hExt.indexOf('id="empDureeGroup" style="display:"') !== -1;
@@ -7399,7 +7399,7 @@ r.push({
       var okTogExt = document.getElementById('empDureeGroup').style.display !== 'none';
       sel.value = 'CDI'; updateEmpTypeFields();
       var okTogCdi = document.getElementById('empDureeGroup').style.display === 'none';
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'extz1'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'extz1'; }));
       (okCdi && okExt && okTogExt && okTogCdi)
         ? 'OK : dur\u00e9e masqu\u00e9e en CDI, visible en Externe (rendu + bascule)'
         : 'ECHEC cdi=' + okCdi + ' ext=' + okExt + ' togExt=' + okTogExt + ' togCdi=' + okTogCdi
@@ -7419,7 +7419,7 @@ r.push({
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'cddz1', matricule: 'CDD-001', nom: 'RENOUV', prenoms: 'Test', sexe: 'M', date_entree: _e0, type_contrat: 'CDD', duree_contrat: 6, statut: 'actif' });
       arr.push({ id: 'cdiz1', matricule: 'CDI-001', nom: 'FIXE', prenoms: 'Test', sexe: 'M', date_entree: '2020-05-01', type_contrat: 'CDI', duree_contrat: 0, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       var r1 = renouvelerContratEmp('cddz1', _d1, 6, 'CDD');
       var e1 = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz1'; })[0];
       var ok1 = r1.ok && e1.historique_contrats.length === 1 && e1.historique_contrats[0].n === 1 && e1.historique_contrats[0].date_debut === _e0 && e1.historique_contrats[0].duree_mois === 6 && e1.date_entree === _d1 && e1.duree_contrat === 6 && e1.date_premiere_entree === _e0 && datePremiereEntree(e1) === _e0;
@@ -7429,7 +7429,7 @@ r.push({
       var rCdi = renouvelerContratEmp('cdiz1', '2026-01-01', 12, 'CDI');
       var rVide = renouvelerContratEmp('cddz1', '', 6, 'CDD');
       var okRefus = (!rCdi.ok) && (!rVide.ok);
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz1' && x.id !== 'cdiz1'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz1' && x.id !== 'cdiz1'; }));
       (ok1 && ok2 && okRefus)
         ? 'OK : 1er->2e->3e en historique, entree ' + _e0 + ' gardee, CDI refuse'
         : 'ECHEC r1=' + ok1 + ' r2=' + ok2 + ' refus=' + okRefus
@@ -7744,13 +7744,13 @@ r.push({
     code: `
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'cddz2', matricule: 'CDD-002', nom: 'TRACE', prenoms: 'Test', sexe: 'M', date_entree: '2025-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       var r1 = ajouterContratPasse('cddz2', 'CDD', '2024-01-10', 12);
       var r2 = ajouterContratPasse('cddz2', 'CDD', '2023-01-10', 12);
       var e = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz2'; })[0];
       var h = e.historique_contrats || [];
       var ok = r1.ok && r2.ok && h.length === 2 && h[0].n === 1 && h[0].date_debut === '2023-01-10' && h[1].n === 2 && h[1].date_debut === '2024-01-10' && e.date_entree === '2025-01-10' && e.date_premiere_entree === '2023-01-10';
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz2'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz2'; }));
       ok ? 'OK : 2 pass\u00e9s renum\u00e9rot\u00e9s chrono, en cours intact, 1re embauche 2023-01-10'
          : 'ECHEC r1=' + r1.ok + ' r2=' + r2.ok + ' n=' + h.length + ' prem=' + e.date_premiere_entree
     `,
@@ -8030,12 +8030,12 @@ r.push({
     code: `
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'cdh1', matricule: 'CDD-H', nom: 'HISTO', prenoms: 'Test', sexe: 'M', date_entree: '2025-06-01', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       renderContratsPage();
       var h = document.getElementById('content').innerHTML || '';
       var okH = h.indexOf("historiqueContratsModal('cdh1')") !== -1;
       var okR = h.indexOf("renouvelerContratModal('cdh1')") !== -1;
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdh1'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdh1'; }));
       (okH && okR) ? 'OK : boutons Historique + Renouveler pr\u00e9sents'
         : 'ECHEC hist=' + okH + ' renouv=' + okR
     `,
@@ -8061,7 +8061,7 @@ r.push({
     code: `
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'cdhm1', matricule: 'CDD-HM', nom: 'HISTOMOD', prenoms: 'Test', sexe: 'M', date_entree: '2024-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       renouvelerContratEmp('cdhm1', '2025-01-10', 6, 'CDD');
       openEmployeModal('cdhm1');
       var hb = document.getElementById('emp-hist-contrats');
@@ -8075,7 +8075,7 @@ r.push({
       var h1 = document.getElementById('emp-hist-contrats').innerHTML || '';
       var e = dbArr('mdb_employes').filter(function(x){ return x.id === 'cdhm1'; })[0];
       var okAdd = h1.indexOf('N\u00b02') !== -1 && e.historique_contrats.length === 2;
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdhm1'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cdhm1'; }));
       (okList && okAdd) ? 'OK : N\u00b01 + En cours affich\u00e9s, contrat pass\u00e9 ajout\u00e9 (N\u00b02)'
         : 'ECHEC liste=' + okList + ' ajout=' + okAdd
     `,
@@ -8088,7 +8088,7 @@ r.push({
     code: `
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'flt1', matricule: 'FLT-001', nom: 'FILTRENOM', prenoms: 'Test', sexe: 'M', date_entree: '2025-03-01', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       renderContratsPage();
       var hC = document.getElementById('content').innerHTML || '';
       var okCtr = hC.indexOf('data-search=') !== -1 && hC.indexOf('filtrenom') !== -1 && typeof filterContrats === 'function';
@@ -8098,7 +8098,7 @@ r.push({
       renderCongesPage();
       var hG = document.getElementById('content').innerHTML || '';
       var okCg = hG.indexOf('data-search=') !== -1 && hG.indexOf('cong-filtre-1') !== -1 && typeof filterConges === 'function';
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'flt1'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'flt1'; }));
       setRhConges(saved.filter(function(x){ return x.id !== 'cgf1'; }));
       renderCongesPage();
       (okCtr && okCg) ? 'OK : data-search Contrats + Cong\u00e9s, filtres locaux pr\u00e9sents'
@@ -8117,7 +8117,7 @@ r.push({
       var _fin = contratDateFin(_deb, 3);
       var arr = dbArr('mdb_employes');
       arr.push({ id: 'cddz4', matricule: 'CDD-004', nom: 'DOUBLON', prenoms: 'Test', sexe: 'M', date_entree: '2025-01-10', type_contrat: 'CDD', duree_contrat: 12, statut: 'actif' });
-      DB.set('mdb_employes', arr);
+      DB.setMain('mdb_employes', arr);
       var rSame = renouvelerContratEmp('cddz4', '2025-01-10', 12, 'CDD');
       var rP0 = ajouterContratPasse('cddz4', 'CDD', '2025-01-10', 12);
       var rP1 = ajouterContratPasse('cddz4', 'CDD', '2024-01-10', 12);
@@ -8135,11 +8135,11 @@ r.push({
       var arr2 = dbArr('mdb_employes');
       var ex2 = arr2.filter(function(x){ return x.id === 'cddz4'; })[0];
       ex2.historique_contrats.push({ n: 99, type_contrat: 'CDD', date_debut: _deb, duree_mois: 3, date_fin: _fin });
-      DB.set('mdb_employes', arr2);
+      DB.setMain('mdb_employes', arr2);
       var rN = nettoyerDoublonsContrats('cddz4');
       var eN = dbArr('mdb_employes').filter(function(x){ return x.id === 'cddz4'; })[0];
       var okNet = (rN.supprimes === 1) && (eN.historique_contrats.length === 3);
-      DB.set('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz4'; }));
+      DB.setMain('mdb_employes', dbArr('mdb_employes').filter(function(x){ return x.id !== 'cddz4'; }));
       var ok = (!rSame.ok) && (!rP0.ok) && rP1.ok && (!rP2.ok) && okProm && okPast && okSt && okNet;
       ok ? 'OK : doublons refus\u00e9s/nettoy\u00e9s, p\u00e9riode actuelle promue, pass\u00e9 en historique'
          : 'ECHEC same=' + rSame.ok + ' p0=' + rP0.ok + ' p1=' + rP1.ok + ' p2=' + rP2.ok + ' prom=' + okProm + ' past=' + okPast + ' st=' + okSt + ' net=' + okNet
@@ -8455,6 +8455,98 @@ r.push({
       var ok = h.indexOf('pt-mont-scroll') !== -1;
       ok ? 'OK : conteneur scroll identifié, position conservée au re-rendu'
          : 'ECHEC id scroll absent'
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Auto-selection du pointage montage ---------- */
+  r.push({
+    nom: 'Montage : les articles assembles de la fiche du jour sont lus dans Exploitation',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_production', JSON.stringify({
+        articles: [],
+        productions: [
+          { date:'2026-10-05', assemblage:[{code:'NES',qte:5},{code:'COUV',qte:9}] },
+          { date:'2026-10-06', assemblage:[{code:'MDI',qte:2}] }
+        ]
+      }));
+      var a = ptMontArtsAssemblesJour('2026-10-05').map(function(x){ return x.code; }).sort().join(',');
+      var b = ptMontArtsAssemblesJour('2026-10-09').length;
+      (a === 'COUV,NES' && b === 0) ? 'OK : assemblage lu par jour, vide sans fiche'
+         : 'ECHEC a=' + a + ' b=' + b
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : sans localStorage, le cache cloud Exploitation sert de source',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      try { localStorage.removeItem('mdb_production'); } catch (eR) {}
+      window._payeProdCache = { articles: [], productions: [{ date:'2026-10-05', assemblage:[{code:'NES',qte:3}] }] };
+      var a = ptMontArtsAssemblesJour('2026-10-05').map(function(x){ return x.code; }).join(',');
+      window._payeProdCache = null;
+      (a === 'NES') ? 'OK : cache cloud lu (NES)' : 'ECHEC a=' + a
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : le wizard coche les articles de la fiche et les monteurs presents',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_production', JSON.stringify({
+        articles: [],
+        productions: [{ date:'2026-10-05', assemblage:[{code:'NES',qte:5},{code:'COUV',qte:9}] }]
+      }));
+      setPayeSection('articlesMontage', [{code:'NES'},{code:'COUV'},{code:'MDI'}]);
+      DB.setMain('mdb_employes', [
+        { id:'w1', nom:'MONT1', rendement:true, en_paie:true, matricule:'1' },
+        { id:'w2', nom:'MONT2', rendement:true, en_paie:true, matricule:'2' },
+        { id:'w3', nom:'OCC1',  rendement:false, en_paie:true, matricule:'3' }
+      ]);
+      setPayeSection('pointage', [
+        { id:'p1', employee_id:'w1', date:'2026-10-05', present:true },
+        { id:'p2', employee_id:'w2', date:'2026-10-05', present:false }
+      ]);
+      setPointageMontage([]);
+      document.getElementById('pt-mois').value = '2026-10';
+      openPtWizardModal('2026-10-05');
+      var h = document.getElementById('pt-modal-content').innerHTML || '';
+      var okNes = /value="NES"[^>]*checked/.test(h);
+      var okCouv = /value="COUV"[^>]*checked/.test(h);
+      var koMdi = !/value="MDI"[^>]*checked/.test(h);
+      var okW1 = /value="w1"[^>]*checked/.test(h);
+      var koW2 = !/value="w2"[^>]*checked/.test(h);
+      var koW3 = !/value="w3"[^>]*checked/.test(h);
+      (okNes && okCouv && koMdi && okW1 && koW2 && koW3)
+        ? 'OK : fiche -> NES+COUV coches ; present -> MONT1 coche, absent + occasionnel non coches'
+        : 'ECHEC nes=' + okNes + ' couv=' + okCouv + ' mdi=' + koMdi + ' w1=' + okW1 + ' w2=' + koW2 + ' w3=' + koW3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Montage : sans pointage horaire, tous les monteurs au rendement sont pre-coches',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_production', JSON.stringify({ articles: [], productions: [] }));
+      setPayeSection('articlesMontage', [{code:'NES'},{code:'MDI'}]);
+      DB.setMain('mdb_employes', [
+        { id:'w1', nom:'MONT1', rendement:true, en_paie:true, matricule:'1' },
+        { id:'w2', nom:'MONT2', rendement:true, en_paie:true, matricule:'2' }
+      ]);
+      setPayeSection('pointage', []);
+      setPointageMontage([]);
+      document.getElementById('pt-mois').value = '2026-10';
+      openPtWizardModal('2026-10-05');
+      var h = document.getElementById('pt-modal-content').innerHTML || '';
+      var okW1 = /value="w1"[^>]*checked/.test(h);
+      var okW2 = /value="w2"[^>]*checked/.test(h);
+      var okArts = /value="NES"[^>]*checked/.test(h) && /value="MDI"[^>]*checked/.test(h);
+      (okW1 && okW2 && okArts) ? 'OK : pas de pointage horaire -> tous les monteurs + tous les articles coches'
+         : 'ECHEC w1=' + okW1 + ' w2=' + okW2 + ' arts=' + okArts
     `,
     attenduPrefixe: 'OK'
   });

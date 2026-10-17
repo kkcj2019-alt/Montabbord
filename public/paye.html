@@ -14,7 +14,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-15-273";
+      window.__APP_VERSION = "2026-10-17-274";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6868,6 +6868,18 @@ function payeObj(key) {
         });
         if (data.mdb_entreprise && data.mdb_entreprise.nom)
           DB.setMain("mdb_entreprise", data.mdb_entreprise);
+        /* Exploitation (mdb_production) : cache MEMOIRE SEULE. Le wizard du
+           pointage montage a besoin des fiches du jour pour pre-cocher les
+           articles assembles. On n'ecrit JAMAIS cette cle dans localStorage :
+           meme origine = meme stockage qu'Exploitation, une ecriture depuis
+           ici ecraserait ses saisies locales pas encore poussees. */
+        if (
+          data.mdb_production &&
+          typeof data.mdb_production === "object" &&
+          !Array.isArray(data.mdb_production)
+        ) {
+          window._payeProdCache = data.mdb_production;
+        }
         } finally { _payeApplyingCloud = false; }
       }
 
@@ -13023,17 +13035,132 @@ var _ptWizStep = 1;
       function ptMontOnDayChange(newDay) {
         if (!newDay) return;
         var pts = (getPointageMontage() || []).filter(function(p){ return p.date === newDay && (p.quantite || 0) > 0; });
-        var empIds = {}, artCodes = {};
-        pts.forEach(function(p){ empIds[p.employee_id] = true; artCodes[p.article_code] = true; });
+        var empIds = {}, artCodes = {}, artNorms = {};
+        pts.forEach(function(p){
+          empIds[p.employee_id] = true;
+          artCodes[p.article_code] = true;
+          artNorms[String(p.article_code || "").toLowerCase().replace(/[^a-z0-9]/g, "")] = true;
+        });
         var hasRecs = pts.length > 0;
 
+        /* Même auto-selection qu'à l'ouverture, sur le NOUVEAU jour : articles
+           de l'assemblage de la fiche + monteurs au rendement présents. */
+        var ficheArts = ptMontArtsAssemblesJour(newDay);
+        var ficheNorms = {};
+        ficheArts.forEach(function (fa) { ficheNorms[fa.norm] = true; });
+        var autoArts = (!hasRecs && ficheArts.length > 0);
+        var presJour = ptMontPresentsJour(newDay);
+        var autoEmps = (!hasRecs && presJour.records > 0);
+        var presentIds = {};
+        presJour.ids.forEach(function (id) { presentIds[id] = true; });
+
         document.querySelectorAll(".pt-montage-art").forEach(function(cb){
-          cb.checked = hasRecs ? (artCodes[cb.value] === true) : true;
+          var n = String(cb.value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+          cb.checked = hasRecs
+            ? (artCodes[cb.value] === true || artNorms[n] === true)
+            : (autoArts ? (ficheNorms[n] === true) : true);
         });
         document.querySelectorAll(".pt-montage-emp").forEach(function(cb){
-          cb.checked = hasRecs ? (empIds[cb.value] === true) : false;
+          var occ = cb.getAttribute("data-mont") === "0";
+          cb.checked = hasRecs
+            ? (empIds[cb.value] === true)
+            : (occ ? false : (autoEmps ? (presentIds[String(cb.value)] === true) : true));
         });
+        /* Les infos-bulles doivent suivre la nouvelle date. */
+        var hArts = document.getElementById("pt-hint-arts");
+        if (hArts) hArts.innerHTML = ptMontHintArtsHTML(newDay, hasRecs);
+        var hEmps = document.getElementById("pt-hint-emps");
+        if (hEmps) hEmps.innerHTML = ptMontHintEmpsHTML(newDay, hasRecs);
         ptMontSelCount();
+      }
+
+      /* ============ AUTO-SELECTION DU POINTAGE MONTAGE ============
+         On lit la base partagee Exploitation (mdb_production) pour savoir ce
+         qui a ETE PRODUIT ce jour, et le pointage horaire pour savoir qui
+         etait PRESENT. Objectif : arriver sur la grille avec les articles et
+         les monteurs deja coches, et ne garder qu'un ajustement au clic. */
+      /* Base Exploitation : localStorage d'abord, puis le cache cloud. */
+      function ptMontProdBase() {
+        var local = null;
+        try {
+          var raw = localStorage.getItem("mdb_production");
+          var p = raw ? JSON.parse(raw) : null;
+          if (p && typeof p === "object" && !Array.isArray(p)) local = p;
+        } catch (eL) {}
+        var cache = window._payeProdCache;
+        if (!cache || typeof cache !== "object" || Array.isArray(cache)) cache = null;
+        var locHas = !!(local && Array.isArray(local.productions) && local.productions.length > 0);
+        var cacheHas = !!(cache && Array.isArray(cache.productions) && cache.productions.length > 0);
+        /* localStorage vient d'Exploitation ouverte sur le MÊME navigateur :
+           il est plus a jour que le cloud (saisies pas encore poussees). */
+        return locHas ? local : (cacheHas ? cache : (local || cache || {}));
+      }
+      /* Fiches de production d'un jour (partagees via mdb_production). */
+      function ptMontFichesJour(jour) {
+        try {
+          var db = ptMontProdBase();
+          var fiches = Array.isArray(db.productions) ? db.productions : [];
+          return fiches.filter(function (f) {
+            return f && String(f.date || "").slice(0, 10) === jour;
+          });
+        } catch (eF) { return []; }
+      }
+      /* Codes des articles de la partie « assemblage » ce jour (produits finis
+         assembles). Meme normalisation que les codes montage (a-z, 0-9). */
+      function ptMontArtsAssemblesJour(jour) {
+        var norm = function (c) { return String(c || "").toLowerCase().replace(/[^a-z0-9]/g, ""); };
+        var vus = {}, out = [];
+        ptMontFichesJour(jour).forEach(function (f) {
+          var asm = Array.isArray(f.assemblage) ? f.assemblage : [];
+          asm.forEach(function (r) {
+            var c = String((r && r.code) || "").trim();
+            var n = norm(c);
+            if (!n || vus[n]) return;
+            vus[n] = true;
+            out.push({ code: c, norm: n });
+          });
+        });
+        return out;
+      }
+      /* Présence réelle ce jour dans le pointage horaire (tableau récap). */
+      function ptMontPresentsJour(jour) {
+        var ids = [], nbRecords = 0;
+        try {
+          getPointageData().forEach(function (r) {
+            if (!r || String(r.date || "").slice(0, 10) !== jour) return;
+            nbRecords++;
+            if (r.present === true) ids.push(String(r.employee_id));
+          });
+        } catch (eP) {}
+        return { ids: ids, records: nbRecords };
+      }
+      /* Info-bulle : d'où viennent les articles cochés (fiche du jour ?). */
+      function ptMontHintArtsHTML(jour, hasRecs) {
+        var ficheArts = ptMontArtsAssemblesJour(jour);
+        if (hasRecs || !ficheArts.length) return "";
+        return '<div style="font-size:.7rem;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:6px 9px;margin-top:6px;font-weight:700">📄 '
+          + ficheArts.length
+          + ' article(s) de l’assemblage de la fiche du ' + ptMontFmtDay(jour)
+          + ' pré-sélectionné(s). Il ne reste qu’à choisir les monteurs.</div>';
+      }
+      /* Info-bulle : d'où viennent les monteurs cochés (présents ce jour ?). */
+      function ptMontHintEmpsHTML(jour, hasRecs) {
+        if (hasRecs) return "";
+        var pres = ptMontPresentsJour(jour);
+        if (pres.records > 0) {
+          var nb = 0;
+          try {
+            ptMontWorkers().forEach(function (w) {
+              if (w && w.rendement === true && pres.ids.indexOf(String(w.id)) !== -1) nb++;
+            });
+          } catch (eW) {}
+          return '<div style="font-size:.7rem;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:6px 9px;margin-top:8px;font-weight:700">👥 '
+            + nb + ' monteur(s) au rendement présenté(s) ce jour pré-sélectionné(s) — pointé au tableau récap. Décochez ceux qui n’ont pas monté.</div>';
+        }
+        var nbR = 0;
+        try { ptMontWorkers().forEach(function (w) { if (w && w.rendement === true) nbR++; }); } catch (eW2) {}
+        return '<div style="font-size:.7rem;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:6px 9px;margin-top:8px;font-weight:700">⚠ Aucun pointage horaire ce jour : les '
+          + nbR + ' monteur(s) au rendement sont tous pré-sélectionnés — décochez les absents.</div>';
       }
 
       function openPtWizardModal(dayToEdit) {
@@ -13066,6 +13193,19 @@ var _ptWizStep = 1;
           }
         });
         var hasExisting = existingPt.length > 0;
+
+        /* --- AUTO-SELECTION (jour sans pointage deja saisi) ---
+           Articles  : coche ceux de l'assemblage de la fiche du jour.
+           Monteurs  : coche les actifs au rendement PRESENTS ce jour.
+           Sur une journee deja pointee, on garde la selection existante. */
+        var ficheArts = ptMontArtsAssemblesJour(today);
+        var ficheNorms = {};
+        ficheArts.forEach(function (fa) { ficheNorms[fa.norm] = true; });
+        var autoArts = (!hasExisting && ficheArts.length > 0);
+        var presJour = ptMontPresentsJour(today);
+        var autoEmps = (!hasExisting && presJour.records > 0);
+        var presentIds = {};
+        presJour.ids.forEach(function (id) { presentIds[id] = true; });
 
         /* Inclure automatiquement tout article pointé ce jour qui ne serait pas encore dans ams */
         var nomArts = [];
@@ -13127,11 +13267,16 @@ var _ptWizStep = 1;
         ams.forEach(function (a) {
           var lbl = (escH(a.code) + " " + escH(a.designation || "")).trim();
           var norm = String(a.code || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-          var isArtChecked = hasExisting ? (existingArtCodesRaw[a.code] === true || existingArtCodesNorm[norm] !== undefined) : true;
+          var isArtChecked = hasExisting
+            ? (existingArtCodesRaw[a.code] === true || existingArtCodesNorm[norm] !== undefined)
+            : (autoArts ? (ficheNorms[norm] === true) : true);
           modalContent += '<label data-search="' + lbl.toLowerCase() + '" class="pt-chip" style="font-size:0.8rem;padding:6px 12px' + (a._fromPointage ? ';background:#fef3c7;border-color:#f59e0b' : '') + '"><input type="checkbox" class="pt-montage-art" value="' + escH(a.code) + '"' + (isArtChecked ? ' checked' : '') + ' onchange="ptMontSelCount()"> ' + escH(a.code) + ' — <small style="color:#64748b">' + escH(a.designation || '') + '</small>' + (a._fromPointage ? ' <span style="font-size:0.65rem;color:#b45309;font-weight:800">(Pointé ce jour' + (a._horsIndex ? ' — hors Index' : '') + ')</span>' : '') + '</label>';
         });
         modalContent += '</div>';
         modalContent += '<div style="font-size:0.7rem;color:#64748b;margin-top:6px;font-weight:600"><span id="pt-montage-art-count"></span></div>';
+        /* Les articles viennent-ils de la fiche de production du jour ?
+           Contenu recalculé aussi lors du changement de date. */
+        modalContent += '<div id="pt-hint-arts">' + ptMontHintArtsHTML(today, hasExisting) + '</div>';
         /* Le compteur mélange les produits de l'Index et les articles
            historiques réellement pointés ce jour (absents de l'Index) : on
            l'explique, sinon « 24/24 » pour un Index à 16 semble buggé. */
@@ -13163,11 +13308,20 @@ var _ptWizStep = 1;
         modalContent += '<div id="pt-montage-emps" class="pt-chip-group" style="max-height:220px;gap:8px">';
         rendWorkers.forEach(function (w) {
           var isOcc = (w.rendement !== true);
-          var isChecked = hasExisting ? (existingEmpIds[w.id] === true) : false;
+          /* Auto : présents ce jour (rendement) ; absent de pointage horaire
+             -> tous les monteurs (décocables). Les « occ. » ne sont jamais
+             auto-cochés : ce sont eux qui font le montage par ailleurs. */
+          var isChecked = hasExisting
+            ? (existingEmpIds[w.id] === true)
+            : (isOcc ? false : (autoEmps ? (presentIds[String(w.id)] === true) : true));
           modalContent += '<label data-search="' + (escH(w.matricule || "") + " " + escH(w.nom) + " " + escH(w.prenoms || "")).toLowerCase() + '"' + (isOcc ? ' class="pt-mont-occ pt-chip"' : ' class="pt-chip"') + '         style="font-size:0.8rem;padding:6px 12px;display:' + (isOcc ? "none" : "inline-flex") + '"><input type="checkbox" class="pt-montage-emp" data-mont="' + (isOcc ? "0" : "1") + '" value="' + w.id + '"' + (isChecked ? " checked" : "") + ' onchange="ptMontSelCount()"> ' + escH(w.nom) + (isOcc ? ' <span style="font-size:0.6rem;color:#64748b">(occ.)</span>' : '') + '</label>';
         });
         modalContent += '</div>';
         modalContent += '<div style="font-size:0.75rem;color:#2563eb;margin-top:8px;font-weight:700"><span id="pt-montage-emp-count"></span></div>';
+        /* D'où vient la pré-sélection : il faut que l'utilisateur sache si on
+           a deviné depuis le pointage ou s'il doit cocher à la main.
+           Contenu recalculé aussi lors du changement de date. */
+        modalContent += '<div id="pt-hint-emps">' + ptMontHintEmpsHTML(today, hasExisting) + '</div>';
         modalContent += '</div>';
 
         modalContent += '<div style="display:flex;justify-content:space-between;align-items:center;padding-top:1rem;border-top:1px solid #e2e8f0">';
