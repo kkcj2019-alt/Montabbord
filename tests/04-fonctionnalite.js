@@ -4725,6 +4725,37 @@ attenduPrefixe: 'OK'
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Source unique : la fiche Produits finis suit l'Index ---------- */
+  r.push({
+    nom: "Produits finis : la fiche de stock n'affiche que ceux de l'Index",
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'f1', code: 'IDX1', designation: 'Dans Index', categorie: 'finished' },
+        { id: 'f2', code: 'HORS', designation: 'Hors Index', categorie: 'finished' }
+      ];
+      p.stockFinished = [
+        { id: 'sf1', article_id: 'f1', quantite: 4 },
+        { id: 'sf2', article_id: 'f2', quantite: 7 },
+        { id: 'sf3', code: 'AUTO', designation: 'Sans article', quantite: 2 }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      s.mdb_nomenclature = JSON.stringify([
+        { id: 'n1', code: 'IDX1', designation: 'Dans Index', typeArticle: 'produit_fini' }
+      ]);
+      return s;
+    },
+    code: `
+      var out = stockAvecCatalogue('stock-finished', getStockFinished());
+      var ids = out.map(function (s) { return s.id; }).sort().join(',');
+      (ids === 'sf1')
+        ? 'OK : seule la ligne du PF Index (sf1) subsiste, HORS et AUTO masquees'
+        : 'ECHEC : ' + ids
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'Semi-finis : le deroulage affiche le registre des mouvements du composant',
     app: 'production.html', store: () => {
@@ -8475,6 +8506,36 @@ r.push({
       var b = ptMontArtsAssemblesJour('2026-10-09').length;
       (a === 'COUV,NES' && b === 0) ? 'OK : assemblage lu par jour, vide sans fiche'
          : 'ECHEC a=' + a + ' b=' + b
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  /* ---------- Source unique : Paie ne cree pas d'article ---------- */
+  r.push({
+    nom: "Paie : creation d'un article hors Index refusee, tarif Index accepte",
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: 'PAL80', designation: 'Palette 80', typeArticle: 'produit_fini' },
+        { id: 'n2', code: 'COUV', designation: 'Couverture', typeArticle: 'produit_fini' }
+      ]));
+      setArticlesMontage([{ code: 'PAL80', designation: 'Palette 80', prix: 100 }]);
+      var idx = pfIndexCodes();
+      document.getElementById('am-code').value = 'ZZZNEW';
+      document.getElementById('am-designation').value = 'Article fantome';
+      document.getElementById('am-prix').value = '250';
+      var avant = getArticlesMontage().length;
+      addArticleMontage({ preventDefault: function () {} });
+      var refuse = getArticlesMontage().length;
+      document.getElementById('am-code').value = 'COUV';
+      document.getElementById('am-designation').value = 'Couverture';
+      document.getElementById('am-prix').value = '700';
+      addArticleMontage({ preventDefault: function () {} });
+      var codes = getArticlesMontage().map(function (a) { return a.code; }).sort().join(',');
+      var luIndex = idx && idx['PAL80'] === true && idx['COUV'] === true && !idx['ZZZNEW'];
+      (luIndex && avant === 1 && refuse === 1 && codes === 'COUV,PAL80')
+        ? 'OK : hors Index refuse (1), article Index accepte (COUV,PAL80)'
+        : 'ECHEC luIndex=' + luIndex + ' refuse=' + refuse + ' codes=' + codes
     `,
     attenduPrefixe: 'OK'
   });
