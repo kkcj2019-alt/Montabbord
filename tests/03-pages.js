@@ -26,7 +26,7 @@ const DISPATCH = {
     rendre: (p) => 'currentPage = ' + JSON.stringify(p) + '; navigateTo(' + JSON.stringify(p) + ');'
   },
   'production.html': {
-    pages: ['dashboard', 'production', 'history', 'orders', 'stock-palettes', 'stock-raw',
+    pages: ['dashboard', 'production', 'history', 'orders', 'stock-palettes', 'stock-semi', 'stock-raw',
       'stock-merch', 'stock-consum', 'inventory', 'stock-movements', 'epi', 'thermal',
       'thermal-types', 'articles', 'articles-conso', 'cat-produits-finis', 'fiche-tech', 'definitions', 'species', 'stock-merch-art',
       'achats', 'achats-history', 'livraisons', 'preventive', 'corrective', 'qualite',

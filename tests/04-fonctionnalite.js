@@ -1814,7 +1814,7 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Tableau de bord : produits finis en 2 colonnes, rien retire',
+    nom: 'Tableau de bord : produits finis en 2 colonnes, un produit = une ligne',
     app: 'production.html', store: storeRealiste,
     code: `
       var arts = getArticles();
@@ -1826,9 +1826,11 @@ attenduPrefixe: 'OK'
       ]);
       var h = render_dashboard();
       var okGrille = (h.indexOf('pf-grid2') !== -1);
-      var nb = (h.match(/pf-row/g) || []).length;
-      (okGrille && nb === 2) ? 'OK : grille 2 colonnes avec 2 lignes produit'
-        : 'ECHEC grille=' + okGrille + ' lignes=' + nb
+      var nbPal114 = h.split('title="PAL114').length - 1;
+      var total = (h.match(/>([0-9\\s\\u202f\\u00a0]+)<\\/span><br><span[^>]*>TOTAL \\(/) || [])[1] || '';
+      (okGrille && nbPal114 === 1 && total.replace(/[^0-9]/g,'') === '15')
+        ? 'OK : les 2 ecritures du meme produit forment 1 ligne a 15 (et non 2 lignes de 10 et 5)'
+        : 'ECHEC grille=' + okGrille + ' lignes PAL114=' + nbPal114 + ' total=' + total
     `,
     attenduPrefixe: 'OK'
   });
@@ -3126,8 +3128,8 @@ attenduPrefixe: 'OK'
       setSection('stockRawTab', 'initial');
       CURRENT_PAGE = 'stock-raw'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
-      (h.indexOf('invCat_0_0') !== -1 && h.indexOf('Fiche —') !== -1)
-        ? 'OK : article depliable vers sa fiche'
+      (h.indexOf('invIt_0') !== -1 && h.indexOf('Fiche —') !== -1 && h.indexOf('TOTAL') !== -1)
+        ? 'OK : article en tableau depliable vers sa fiche'
         : 'ECHEC : ' + h.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 140)
     `,
     attenduPrefixe: 'OK'
@@ -4776,9 +4778,50 @@ attenduPrefixe: 'OK'
       var m = h.match(/>([0-9\\s\\u202f\\u00a0]+)<\\/span><br><span[^>]*>TOTAL \\(/);
       var total = m ? m[1].replace(/[^0-9]/g, '') : '';
       var nbRef = (h.match(/TOTAL \\((\\d+) r/) || [])[1] || '';
-      (total === '5500' && nbRef === '10')
-        ? 'OK : TOTAL = 5500 (somme des 10 lignes), 10 references'
+      (total === '5500' && nbRef === '1')
+        ? 'OK : TOTAL = 5500 (somme des 10 ecritures, regroupees en 1 seul produit : 1 reference)'
         : 'ECHEC total=' + total + ' nbRef=' + nbRef
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Tableau de bord : la carte Produits finis donne LES MEMES CHIFFRES que la fiche',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'f1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' },
+        { id: 'f2', code: 'HORS', designation: 'Hors Index', categorie: 'finished' },
+        { id: 'f3', code: 'CAT0', designation: 'PF jamais stocke', categorie: 'finished' }
+      ];
+      p.stockFinished = [
+        { id: 'sf1', article_id: 'f1', code: 'PAL7', designation: 'Palette 7', quantite: 100, motif: 'Production 1' },
+        { id: 'sf2', article_id: 'f1', code: 'PAL7', designation: 'Palette 7', quantite: 50, motif: 'Production 2' },
+        { id: 'sf3', article_id: 'f1', code: 'PAL7', designation: 'Palette 7', quantite: 0, motif: 'Catalogue' },
+        { id: 'sf4', article_id: 'f2', code: 'HORS', designation: 'Hors Index', quantite: 30 },
+        { id: 'sf5', code: 'AUTO', designation: 'Sans article', quantite: 5 }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      s.mdb_nomenclature = JSON.stringify([
+        { id: 'n1', code: 'PAL7', designation: 'Palette 7', typeArticle: 'produit_fini' },
+        { id: 'n2', code: 'CAT0', designation: 'PF jamais stocke', typeArticle: 'produit_fini' }
+      ]);
+      return s;
+    },
+    code: `
+      var h = render_dashboard();
+      var totalCarte = ((h.match(/>([0-9\\s\\u202f\\u00a0]+)<\\/span><br><span[^>]*>TOTAL \\(/) || [])[1] || '').replace(/[^0-9]/g, '');
+      var refsCarte = (h.match(/TOTAL \\((\\d+) r/) || [])[1] || '';
+      var lignesCarte = (h.match(/class="pf-row"/g) || []).length;
+      var f = render_stock_finished();
+      var paires = [], re = /font-weight:800;color:#0f172a;line-height:1\\.1">([^<]+)<\\/div><div style="font-size:\\.62rem[^>]*>([^<]+)</g, mm;
+      while ((mm = re.exec(f)) !== null) paires.push(mm[2] + '=' + mm[1].replace(/[^0-9]/g, ''));
+      var totalFiche = ((paires.filter(function (x) { return x.indexOf('Stock total=') === 0; })[0] || '').split('=')[1]) || '';
+      var refsFiche = ((paires.filter(function (x) { return x.indexOf('References=') === 0; })[0] || '').split('=')[1]) || '';
+      (totalCarte === '150' && refsCarte === '2' && lignesCarte === 2 && totalFiche === '150' && refsFiche === '2')
+        ? 'OK : carte et fiche = 150 pour 2 produits (PAL7 ecrit 3 fois, hors Index et sans article exclus)'
+        : 'ECHEC carte=' + totalCarte + '/' + refsCarte + ' lignes=' + lignesCarte + ' fiche=' + totalFiche + '/' + refsFiche
     `,
     attenduPrefixe: 'OK'
   });
@@ -7453,6 +7496,7 @@ r.push({
     app: 'index.html', store: storeRealiste,
     code: `
       var saved = getRhConges();
+      window._cgTous = true; /* test du champ de recherche : liste complète */
       var e1 = rhActifs().filter(function(x){ return x.type_contrat !== 'Externe'; })[0];
       if (e1) { saved.push({ id: 'cgz1', numero: 'CONG-2026-999', employee_id: e1.id, type: 'annual', date_depart: '2026-11-10', date_retour: '2026-11-14', date_reprise: '', duree: 5, remplacant_id: '', notes: '' }); }
       setRhConges(saved);
@@ -8213,6 +8257,7 @@ r.push({
       var hC = document.getElementById('content').innerHTML || '';
       var okCtr = hC.indexOf('data-search=') !== -1 && hC.indexOf('filtrenom') !== -1 && typeof filterContrats === 'function';
       var saved = getRhConges();
+      window._cgTous = true; /* test data-search : liste complète */
       saved.push({ id: 'cgf1', numero: 'CONG-FILTRE-1', employee_id: 'flt1', type: 'annual', date_depart: '2026-11-10', date_retour: '2026-11-14', date_reprise: '', duree: 5, remplacant_id: '', notes: '' });
       setRhConges(saved);
       renderCongesPage();
@@ -12032,6 +12077,326 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- Traitement thermique : duree totale automatique ---------- */
+  r.push({
+    nom: 'Traitement thermique : la duree totale vaut chauffage + 30 min (format 2h30)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      function calcD(ch, tr) {
+        document.getElementById('th_chauffage').value = ch;
+        document.getElementById('th_traitement').value = tr;
+        return thDureeTotCalculee();
+      }
+      var c1 = calcD('2h', '30');
+      var c2 = calcD('1h45', '30');
+      var c3 = calcD('90', '30');
+      var c4 = calcD('', '30');
+      var c5 = calcD('2h30', '');
+      var parseOK = thParseDuree('2h30') === 150 && thParseDuree('150') === 150
+        && thParseDuree('45min') === 45 && thParseDuree('n importe quoi') === null;
+      document.getElementById('th_chauffage').value = '3h';
+      document.getElementById('th_traitement').value = '30';
+      document.getElementById('th_duree_tot').value = '';
+      thDureeTotMaj();
+      var maj = document.getElementById('th_duree_tot').value;
+      (c1 === '2h30' && c2 === '2h15' && c3 === '2h' && c4 === '30min' && c5 === '3h'
+        && parseOK && maj === '3h30')
+        ? 'OK : 2h+30=2h30, 1h45+30=2h15, 90+30=2h, sans chauffage=30min, 2h30+30=3h, champ recalcule 3h30'
+        : 'ECHEC c1=' + c1 + ' c2=' + c2 + ' c3=' + c3 + ' c4=' + c4 + ' c5=' + c5 + ' parse=' + parseOK + ' maj=' + maj
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Traitement thermique : la duree calculee est enregistree et affichee sur la fiche',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      renderPage = function () {};
+      showNewThermal();
+      document.getElementById('th_date').value = '2026-10-20';
+      document.getElementById('th_chauffage').value = '2h';
+      document.getElementById('th_traitement').value = '30';
+      thDureeTotMaj();
+      var champ = document.getElementById('th_duree_tot').value;
+      var faux = { id: 'thl_row_1' };
+      document.querySelectorAll = function (sel) { return sel === '#thLinesBody tr' ? [faux] : []; };
+      document.getElementById('thl_client_1').value = 'Client X';
+      document.getElementById('thl_dest_1').value = 'Abidjan';
+      document.getElementById('thl_produit_1').value = 'PAL7';
+      document.getElementById('thl_qte_1').value = '2';
+      document.getElementById('thl_pu_1').value = '45000';
+      document.getElementById('thl_liv_1').value = '2026-10-25';
+      saveThermal();
+      var list = getThermalTreatments();
+      var t = list[list.length - 1] || {};
+      var h = render_thermal();
+      var champOK = champ === '2h30';
+      var saveOK = t.duree_tot === '2h30' && t.lignes && t.lignes.length === 1 && t.lignes[0].montant === 90000;
+      var affOK = h.indexOf('2h30') !== -1;
+      (champOK && saveOK && affOK)
+        ? 'OK : champ auto 2h30, enregistre 2h30 (2 x 45000 = 90000), etat affiche 2h30'
+        : 'ECHEC champ=' + champ + ' duree=' + t.duree_tot + ' mnt=' + ((t.lignes && t.lignes[0]) ? t.lignes[0].montant : '-') + ' aff=' + affOK
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Traitement thermique : code trt auto, ATT/RAP incrementes, destination pal x > client',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      renderPage = function () {};
+      showNewThermal();
+      document.getElementById('th_date').value = '2026-06-01';
+      document.getElementById('thl_produit_1').value = '20';
+      thAutoCode(1);
+      var code1 = document.getElementById('thl_code_1').value;
+      var att1 = document.getElementById('thl_att_1').value;
+      var rap1 = document.getElementById('thl_rap_1').value;
+      document.getElementById('thl_client_1').value = 'CEMOI-CI';
+      document.getElementById('thl_qte_1').value = '20';
+      thAutoDest(1);
+      var dest1 = document.getElementById('thl_dest_1').value;
+      thAddLine();
+      document.getElementById('thl_produit_2').value = '20';
+      thAutoCode(2);
+      var code2 = document.getElementById('thl_code_2').value;
+      var att2 = document.getElementById('thl_att_2').value;
+      document.getElementById('thl_code_2').value = 'CODE-MAINTENU';
+      thCodeManuel(2);
+      thAutoCode(2);
+      var code2main = document.getElementById('thl_code_2').value;
+      document.getElementById('thl_dest_2').value = 'DST PERSONNELLE';
+      thDestManuel(2);
+      document.getElementById('thl_qte_2').value = '5';
+      document.getElementById('thl_client_2').value = 'AUTRE';
+      thAutoDest(2);
+      var dest2main = document.getElementById('thl_dest_2').value;
+      (code1 === '20060126' && att1 === 'A1' && rap1 === 'R1'
+        && dest1 === 'pal 20 \\u2192 CEMOI-CI'
+        && code2 === '20060226' && att2 === 'A2'
+        && code2main === 'CODE-MAINTENU' && dest2main === 'DST PERSONNELLE')
+        ? 'OK : code 20060126 puis 20060226 (NN incremente), A1/R1 puis A2/R2, destination "pal 20 -> CEMOI-CI", saisies manuelles preservees'
+        : 'ECHEC code1=' + code1 + ' att1=' + att1 + ' rap1=' + rap1 + ' dest1=' + dest1 + ' code2=' + code2 + ' att2=' + att2 + ' code2main=' + code2main + ' dest2main=' + dest2main
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Anti ecran blanc (production) : hook global d\u2019erreur, bandeau mdbErrBox, trace locale',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var okHook = typeof window.mdbErrBox === 'function' && window.__mdbFatalHook === true;
+      try { window.mdbErrBox('test-anti-blanc'); } catch (e1) {}
+      try { if (window._mdbFatal) window._mdbFatal('test-fatal'); } catch (e2) {}
+      var tr = '';
+      try { tr = localStorage.getItem('mdb_diag_trace') || ''; } catch (e3) {}
+      (okHook && typeof window.addEventListener === 'function' && tr.indexOf('test-fatal') !== -1)
+        ? 'OK : hook installe, bandeau appelable sans erreur, erreur tracee'
+        : 'ECHEC hook=' + okHook + ' trace=' + String(tr).slice(0, 80)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Anti ecran blanc (index) : bandeau mdbErrBox disponible',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var okHook = typeof window.mdbErrBox === 'function' && window.__mdbFatalHook === true;
+      try { window.mdbErrBox('test-anti-blanc'); } catch (e1) {}
+      var tr = '';
+      try { if (window._mdbFatal) window._mdbFatal('test-fatal-index'); tr = localStorage.getItem('mdb_diag_trace') || ''; } catch (e2) {}
+      (okHook && tr.indexOf('test-fatal-index') !== -1)
+        ? 'OK : bandeau installe sur index, trace ecrite'
+        : 'ECHEC hook=' + okHook + ' trace=' + String(tr).slice(0, 80)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Anti ecran blanc (paye) : bandeau mdbErrBox disponible',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var okHook = typeof window.mdbErrBox === 'function' && window.__mdbFatalHook === true;
+      try { window.mdbErrBox('test-anti-blanc'); } catch (e1) {}
+      try { if (window._mdbFatal) window._mdbFatal('test-fatal'); } catch (e2) {}
+      var tr = '';
+      try { tr = localStorage.getItem('mdb_diag_trace') || ''; } catch (e3) {}
+      (okHook && tr.indexOf('test-fatal') !== -1)
+        ? 'OK : bandeau installe sur paye, trace ecrite'
+        : 'ECHEC hook=' + okHook + ' trace=' + String(tr).slice(0, 80)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Rapports : buildReport couvre production, stock, presence et thermique ; generateReport ouvre le rapport',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('productions', [{ id: 'p1', date: '2026-10-12', statut: 'validated', lattes: [{ code: 'L1', qte: 40 }], plots: [{ code: 'PL1', qte: 10 }] }]);
+      setSection('movements', [{ id: 'm1', date: '2026-10-12', type: 'entree', designation: 'Bois', quantite: 100 }]);
+      setSection('thermalTreatments', [{ id: 't1', numero: 'TRT-001', date: '2026-10-12', agent: 'Kouadio', duree_tot: '2h30', lignes: [{ client: 'CEMOI-CI', qte: 20, pu: 5000, montant: 100000 }] }]);
+      setPointagePaye([
+        { id: 'pt1', employee_id: 'e1', date: '2026-10-12', present: true },
+        { id: 'pt2', employee_id: 'e2', date: '2026-10-12', present: false, motif: 'Maladie' }
+      ]);
+      window._globalMonth = '2026-10';
+      var rp = buildReport('production'), rs = buildReport('stock'), rc = buildReport('presence'), rt = buildReport('thermal');
+      var okP = rp.indexOf('repBox_production') !== -1 && rp.indexOf('Rapport Production') !== -1 && rp.indexOf('Lattes 1') !== -1 && rp.indexOf('validated') !== -1;
+      var okS = rs.indexOf('repBox_stock') !== -1 && rs.indexOf('Bois') !== -1 && rs.indexOf('Entrée') !== -1;
+      var okC = rc.indexOf('repBox_presence') !== -1 && rc.indexOf('Maladie') !== -1 && rc.indexOf('Présents') !== -1;
+      var okT = rt.indexOf('repBox_thermal') !== -1 && rt.indexOf('TRT-001') !== -1 && rt.indexOf('2h30') !== -1;
+      var okG = false;
+      try { okG = (generateReport('production') === true); } catch (e) { okG = false; }
+      (okP && okS && okC && okT && okG)
+        ? 'OK : 4 rapports construits + ouverture du rapport'
+        : 'ECHEC prod=' + okP + ' stock=' + okS + ' presence=' + okC + ' thermique=' + okT + ' ouverture=' + okG
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Congés (index) : Terminé et Prévu masqués par défaut, bouton « Afficher tous »',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var em = rhActifs()[0];
+      var t = (typeof getToday === 'function') ? getToday() : today();
+      function _plusJ(d, n) { var x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); }
+      var arr = getRhConges();
+      arr.push({ id: 'cgv1', numero: 'CONG-V-1', employee_id: em.id, type: 'annual', date_depart: _plusJ(t, -2), date_retour: _plusJ(t, 3), duree: 6 });
+      arr.push({ id: 'cgv2', numero: 'CONG-V-2', employee_id: em.id, type: 'annual', date_depart: _plusJ(t, 20), date_retour: _plusJ(t, 25), duree: 6 });
+      arr.push({ id: 'cgv3', numero: 'CONG-V-3', employee_id: em.id, type: 'annual', date_depart: _plusJ(t, -40), date_retour: _plusJ(t, -35), date_reprise: _plusJ(t, -35), duree: 6 });
+      setRhConges(arr);
+      window._cgTous = false;
+      renderCongesPage();
+      var h1 = document.getElementById('content').innerHTML || '';
+      var okCache = h1.indexOf('CONG-V-1') !== -1 && h1.indexOf('CONG-V-2') === -1 && h1.indexOf('CONG-V-3') === -1;
+      var okBtn = h1.indexOf('Afficher tous') !== -1;
+      cgToggleTous();
+      var h2 = document.getElementById('content').innerHTML || '';
+      var okTout = h2.indexOf('CONG-V-1') !== -1 && h2.indexOf('CONG-V-2') !== -1 && h2.indexOf('CONG-V-3') !== -1;
+      (okCache && okBtn && okTout)
+        ? 'OK : en cours visible, prevu + termine masques, Afficher tous -> tout'
+        : 'ECHEC cache=' + okCache + ' btn=' + okBtn + ' tout=' + okTout
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Congés (Exploitation) : la page Congés masque Terminé/Prévu et propose Afficher tous',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_employes = JSON.stringify([{ id: 'e1', nom: 'ABOGOU', prenoms: 'Koffi', matricule: 'M001', fonction: 'Cariste' }]);
+      s.mdb_rh_conges = JSON.stringify([
+        { id: 'cg-c', employee_id: 'e1', type: 'annual', date_depart: (function () { var x = new Date(); x.setDate(x.getDate() - 2); return x.toISOString().slice(0, 10); })(), date_retour: (function () { var x = new Date(); x.setDate(x.getDate() + 3); return x.toISOString().slice(0, 10); })() },
+        { id: 'cg-p', employee_id: 'e1', type: 'annual', date_depart: (function () { var x = new Date(); x.setDate(x.getDate() + 20); return x.toISOString().slice(0, 10); })(), date_retour: (function () { var x = new Date(); x.setDate(x.getDate() + 25); return x.toISOString().slice(0, 10); })() },
+        { id: 'cg-t', employee_id: 'e1', type: 'annual', date_depart: (function () { var x = new Date(); x.setDate(x.getDate() - 40); return x.toISOString().slice(0, 10); })(), date_retour: (function () { var x = new Date(); x.setDate(x.getDate() - 35); return x.toISOString().slice(0, 10); })(), date_reprise: (function () { var x = new Date(); x.setDate(x.getDate() - 35); return x.toISOString().slice(0, 10); })() }
+      ]);
+      return s;
+    },
+    code: `
+      window._congesTous = false;
+      var h1 = render_leaves();
+      var r1 = (h1.match(/<tr/g) || []).length;
+      var h2 = '';
+      var ok1 = h1.indexOf('Afficher tous') !== -1 && h1.indexOf('masqué(s)') !== -1;
+      window._congesTous = true;
+      h2 = render_leaves();
+      var r2 = (h2.match(/<tr/g) || []).length;
+      var ok3 = r1 === 2 && r2 === 4 && h2.indexOf('Masquer termin') !== -1;
+      (ok1 && ok3)
+        ? 'OK : bouton Afficher tous + 1 ligne sur 3, 3 lignes apres bascule (entete comprise)'
+        : 'ECHEC btn=' + ok1 + ' lignes=' + r1 + '/' + r2 + ' complet=' + ok3
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Contrats RH : date de fin modifiable (plus readonly) et valeur manuelle conservée',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var e = rhActifs()[0];
+      var list = rhContratsStore().filter(function (x) { return x.id !== 'ctr-test-fin'; });
+      list.push({ id: 'ctr-test-fin', employee_id: e.id, type: 'CDD', debut: '2026-01-01', unite: 'mois', duree: 6, fin: '', remis_le: '' });
+      rhContratsSet(list);
+      var okSrc = rhModalContrat.toString().indexOf('readonly') === -1;
+      rhModalContrat(e.id, false);
+      var el1 = document.getElementById('ct-fin');
+      el1.value = '2031-12-31';
+      rhSaveContrat(e.id, 'ctr-test-fin');
+      var s1 = rhContratsStore().filter(function (x) { return x.id === 'ctr-test-fin'; })[0] || {};
+      var okMan = s1.fin === '2031-12-31';
+      rhModalContrat(e.id, false);
+      var el2 = document.getElementById('ct-fin');
+      el2.value = '';
+      document.getElementById('ct-debut').value = '2026-01-01';
+      document.getElementById('ct-duree').value = '12';
+      rhCalcFinContrat();
+      var attendu = el2.value;
+      rhSaveContrat(e.id, 'ctr-test-fin');
+      var s2 = rhContratsStore().filter(function (x) { return x.id === 'ctr-test-fin'; })[0] || {};
+      var okAuto = !!attendu && s2.fin === attendu;
+      (okSrc && okMan && okAuto)
+        ? 'OK : plus readonly, manuel conserve, sinon recalcul automatique'
+        : 'ECHEC src=' + okSrc + ' manuel=' + s1.fin + ' auto=' + s2.fin + '/' + attendu
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Navigation Exploitation : bouton Avancer, piles persistees, un seul bouton Retour',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      window._navHist = []; window._navFwd = [];
+      try { localStorage.removeItem('mdb_prod_navHist'); localStorage.removeItem('mdb_prod_navFwd'); } catch (e) {}
+      var bF = document.getElementById('navFwdBtn');
+      navigate('stock-raw');
+      navigate('history');
+      var okPage = localStorage.getItem('mdb_prod_currentPage') === 'history';
+      var okVide = (window._navFwd || []).length === 0;
+      goBack();
+      var okBack = CURRENT_PAGE === 'stock-raw' && (window._navFwd || []).length === 1;
+      var okBtnOn = bF.disabled === false;
+      var okPersist = String(localStorage.getItem('mdb_prod_navFwd') || '').indexOf('history') !== -1;
+      goForward();
+      var okFwd = CURRENT_PAGE === 'history' && (window._navFwd || []).length === 0;
+      var okBtnOff = bF.disabled === true;
+      _navRestore();
+      var okRestore = Array.isArray(window._navHist) && Array.isArray(window._navFwd);
+      (okPage && okVide && okBack && okBtnOn && okPersist && okFwd && okBtnOff && okRestore)
+        ? 'OK : page courante + piles Retour/Avancer persistees, bouton → actif puis desactive'
+        : 'ECHEC page=' + okPage + ' vide=' + okVide + ' retour=' + okBack + ' btnOn=' + okBtnOn
+          + ' persist=' + okPersist + ' avant=' + okFwd + ' btnOff=' + okBtnOff + ' restore=' + okRestore
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire caisse : décompte du fonds, écart affiché et conservé',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var ca = getCaisses()[0];
+      var soldeTheo = calcSoldeCaisse(ca, getOperationsCaisse());
+      var avant = getCaisseInventaires().length;
+      DB.set('mdb_caisseInventaires', []);
+      currentUser = { nom: 'K Test', caisseId: ca.id };
+      document.getElementById('ciSolde').value = String(soldeTheo + 2500);
+      document.getElementById('ciDate').value = '2026-10-17';
+      document.getElementById('ciNote').value = 'comptage cl\u00f4ture';
+      saveCaisseInventaire(ca.id);
+      var liste = getCaisseInventaires();
+      var rec = liste[liste.length - 1] || {};
+      var okPush = liste.length === avant + 1;
+      var okEcart = rec.ecart === 2500 && rec.soldeTheo === soldeTheo && rec.soldeReel === soldeTheo + 2500;
+      var okFiche = liste[0].caisseId === ca.id;
+      var hInv = renderCaisseInventairesHtml(ca.id);
+      var okHtml = hInv.indexOf('Inventaires de caisse') !== -1 && hInv.indexOf('comptage cl\u00f4ture') !== -1;
+      (okPush && okEcart && okFiche && okHtml)
+        ? 'OK : inventaire enregistr\u00e9 (th\u00e9orique + compt\u00e9), \u00e9cart et fiche affich\u00e9s'
+        : 'ECHEC push=' + okPush + ' ecart=' + okEcart + ' fiche=' + okFiche + ' html=' + okHtml
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 
@@ -12210,6 +12575,107 @@ function run(rapport) {
     }
   } catch (eR) {
     rapport.ko('Exploitation tableau de bord : controle statique illisible (' + eR.message + ')');
+  }
+
+  /* Controle statique : le bouton « Paramètres » a été retiré de la barre
+     d outils figée de l Index (ancien #paramsBtn -> navigateTo('parametres'))
+     et du pied de menu latéral d Exploitation (openMainParametres). Les
+     réglages restent accessibles par le menu Administration (page parametres). */
+  try {
+    const fsParams = require('fs');
+    const pathParams = require('path');
+    const srcIdx = fsParams.readFileSync(pathParams.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const srcProd = fsParams.readFileSync(pathParams.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const okIdx = srcIdx.indexOf('id="paramsBtn"') === -1
+      && srcIdx.indexOf("navigateTo('parametres')") === -1;
+    const okProd = srcProd.indexOf('onclick="openMainParametres()"') === -1
+      && srcProd.indexOf('<span class="label">Param\u00e8tres</span>') === -1;
+    const okPage = srcIdx.indexOf('parametres: renderParametres') !== -1;
+    if (okIdx && okProd && okPage) {
+      rapport.ok('Bouton Param\u00e8tres supprim\u00e9 (barre d outils Index + menu lat\u00e9ral Exploitation) ; page Administration > Param\u00e8tres toujours disponible');
+    } else {
+      rapport.ko('Bouton Param\u00e8tres — index=' + okIdx + ' exploitation=' + okProd + ' page=' + okPage);
+    }
+  } catch (ePrm) {
+    rapport.ko('Bouton Param\u00e8tres : lecture impossible (' + ePrm.message + ')');
+  }
+
+  /* Controle statique : le menu Stock d Exploitation reprend les memes
+     rubriques que le Stock de l Index (Produits finis, Semi-finis,
+     Marchandises, Consommables) — la rubrique Semi-finis manquait, alors
+     que la page render_stock_semi existe et que l Index l affiche deja. */
+  try {
+    const fsMenu = require('fs');
+    const pathMenu = require('path');
+    const srcMenu = fsMenu.readFileSync(pathMenu.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const iNav = srcMenu.indexOf("label: 'Stock', icon:");
+    const segNav = iNav >= 0 ? srcMenu.slice(iNav, iNav + 700) : '';
+    const ordre = ['stock-palettes', 'stock-semi', 'stock-merch', 'stock-consum'];
+    const pos = ordre.map((k) => segNav.indexOf(k));
+    const okNav = pos.every((p) => p !== -1) && pos.every((p, i2) => i2 === 0 || p > pos[i2 - 1]);
+    const okTitre = srcMenu.indexOf("'stock-semi': 'Stock Semi-Finis'") !== -1;
+    const okPerm = /'stock-semi':\s*'prodStock'/.test(srcMenu);
+    const okFiche = srcMenu.indexOf('function render_stock_semi()') !== -1;
+    if (okNav && okTitre && okPerm && okFiche) {
+      rapport.ok('Menu Stock Exploitation = Stock Index : Produits finis, Semi-finis, Marchandises, Consommables (page + titre + droits prodStock)');
+    } else {
+      rapport.ko('Menu Stock Exploitation — nav=' + okNav + ' titre=' + okTitre + ' droits=' + okPerm + ' fiche=' + okFiche);
+    }
+  } catch (eMn) {
+    rapport.ko('Menu Stock Exploitation : lecture impossible (' + eMn.message + ')');
+  }
+
+  /* Controle statique : la barre figée d Exploitation n affiche PLUS un second
+     « ← Retour » (doublon avec le ← de la barre supérieure) : Retour et
+     Avancer (→) vivent une seule fois en haut, et l historique de navigation
+     est relu au lancement (persistance apres rechargement). */
+  try {
+    const fsNav = require('fs');
+    const pathNav = require('path');
+    const srcNav = fsNav.readFileSync(pathNav.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const okFwd = srcNav.indexOf('id="navFwdBtn"') !== -1
+      && srcNav.indexOf('function goForward()') !== -1
+      && srcNav.indexOf('onclick="goForward()"') !== -1;
+    const iAct = srcNav.indexOf("var actions = document.getElementById('pageActions')");
+    const segAct = iAct >= 0 ? srcNav.slice(iAct, iAct + 900) : '';
+    const okPasDoublon = iAct !== -1 && segAct.indexOf('goBack()') === -1;
+    const okPersistance = srcNav.indexOf('function _navRestore()') !== -1
+      && srcNav.indexOf('_navRestore(); } catch (eNavR)') !== -1
+      && srcNav.indexOf("localStorage.setItem('mdb_prod_navHist'") !== -1;
+    const okPiles = srcNav.indexOf('function _navFwdSync()') !== -1
+      && srcNav.indexOf('window._navFwd.push(CURRENT_PAGE)') !== -1;
+    if (okFwd && okPasDoublon && okPersistance && okPiles) {
+      rapport.ok('Exploitation : bouton Avancer (→) + piles Retour/Avancer persistées + plus de doublon « ← Retour » dans la barre figée');
+    } else {
+      rapport.ko('Exploitation navigation — avancer=' + okFwd + ' sansDoublon=' + okPasDoublon + ' persistance=' + okPersistance + ' piles=' + okPiles);
+    }
+  } catch (eNav) {
+    rapport.ko('Exploitation navigation : lecture impossible (' + eNav.message + ')');
+  }
+
+  /* Controle statique : un inventaire de caisse existe, comme l inventaire
+     bancaire (bouton Inventaire par caisse, saisie du montant compt\u00e9 avec
+     le solde th\u00e9orique en vis-\u00e0-vis, \u00e9cart conserv\u00e9 dans
+     mdb_caisseInventaires, historique dans la vue D\u00e9tails). */
+  try {
+    const fsCi = require('fs');
+    const pathCi = require('path');
+    const srcCi = fsCi.readFileSync(pathCi.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okDefs = srcCi.indexOf('function openCaisseInventaire(') !== -1
+      && srcCi.indexOf('function saveCaisseInventaire(') !== -1
+      && srcCi.indexOf('function renderCaisseInventairesHtml(') !== -1;
+    const okBouton = srcCi.indexOf("openCaisseInventaire(\\'' + ca.id + '\\')") !== -1;
+    const okPersist = srcCi.indexOf("DB.set('mdb_caisseInventaires'") !== -1
+      && srcCi.indexOf("dbArr('mdb_caisseInventaires')") !== -1;
+    const okDetails = srcCi.indexOf('html += renderCaisseInventairesHtml(caisseId);') !== -1;
+    const okEcart = srcCi.indexOf('ecart: soldeReel - soldeTheo') !== -1;
+    if (okDefs && okBouton && okPersist && okDetails) {
+      rapport.ok('Inventaire de caisse : bouton par caisse, solde th\u00e9orique vs montant compt\u00e9, \u00e9cart conserv\u00e9 et historique dans D\u00e9tails');
+    } else {
+      rapport.ko('Inventaire de caisse — defs=' + okDefs + ' bouton=' + okBouton + ' persist=' + okPersist + ' details=' + okDetails);
+    }
+  } catch (eCi) {
+    rapport.ko('Inventaire de caisse : lecture impossible (' + eCi.message + ')');
   }
 
   const liste = controles();
