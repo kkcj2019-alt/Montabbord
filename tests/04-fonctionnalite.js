@@ -4757,6 +4757,95 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Tableau de bord : le TOTAL produits finis est le vrai total (pas le top 8)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [{ id: 'f1', code: 'PAL7', designation: 'Palette 7', categorie: 'finished' }];
+      p.stockFinished = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000].map(function (q, i) {
+        return { id: 'sf' + (i + 1), article_id: 'f1', quantite: q };
+      });
+      s.mdb_production = JSON.stringify(p);
+      s.mdb_nomenclature = JSON.stringify([
+        { id: 'n1', code: 'PAL7', designation: 'Palette 7', typeArticle: 'produit_fini' }
+      ]);
+      return s;
+    },
+    code: `
+      var h = render_dashboard();
+      var m = h.match(/>([0-9\\s\\u202f\\u00a0]+)<\\/span><br><span[^>]*>TOTAL \\(/);
+      var total = m ? m[1].replace(/[^0-9]/g, '') : '';
+      var nbRef = (h.match(/TOTAL \\((\\d+) r/) || [])[1] || '';
+      (total === '5500' && nbRef === '10')
+        ? 'OK : TOTAL = 5500 (somme des 10 lignes), 10 references'
+        : 'ECHEC total=' + total + ' nbRef=' + nbRef
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche Produits finis : le stock total s affiche meme avec le filtre Inactif',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [
+        { id: 'f1', code: 'IDX1', designation: 'Dans Index', categorie: 'finished' },
+        { id: 'f2', code: 'IDX2', designation: 'Autre Index', categorie: 'finished' }
+      ];
+      p.stockFinished = [
+        { id: 'sf1', article_id: 'f1', quantite: 0 },
+        { id: 'sf2', article_id: 'f2', quantite: 50 }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      s.mdb_nomenclature = JSON.stringify([
+        { id: 'n1', code: 'IDX1', designation: 'Dans Index', typeArticle: 'produit_fini' },
+        { id: 'n2', code: 'IDX2', designation: 'Autre Index', typeArticle: 'produit_fini' }
+      ]);
+      return s;
+    },
+    code: `
+      setSection('stockEtat_stock-finished', 'inactif');
+      var h = renderStockFiche('stock-finished', getStockFinished, 'Fiche', 'showAddStock');
+      var bandeau = /Stock total/.test(h) && />50</.test(h);
+      var totalLigne = /stock total 50/.test(h) && /lignes affichees : 1 \\/ 2/.test(h);
+      var desDabord = h.indexOf('<th style="width:32%">Designation</th><th>Code</th>') !== -1;
+      (bandeau && totalLigne && desDabord)
+        ? 'OK : bandeau 50 (total reel), ligne TOTAL complete (1/2, stock total 50), designation avant code'
+        : 'ECHEC bandeau=' + bandeau + ' totalLigne=' + totalLigne + ' desDabord=' + desDabord
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Composants : creer un semi-fini en Exploitation reste autorise',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.setItem('mdb_nomenclature', JSON.stringify([
+        { id: 'n1', code: 'IDX1', designation: 'Dans Index', typeArticle: 'produit_fini' }
+      ]));
+      openArticleModal(null);
+      document.getElementById('art_code').value = 'LATTE120';
+      document.getElementById('art_des').value = 'Latte 120';
+      document.getElementById('art_catstock').value = 'semi';
+      saveArticleModal(null);
+      var codes = getArticles().map(function (a) { return a.code; });
+      var semiOk = codes.indexOf('LATTE120') !== -1;
+      /* et un produit fini inconnu de l'Index est toujours refuse */
+      openArticleModal(null);
+      document.getElementById('art_code').value = 'PFZZZ';
+      document.getElementById('art_des').value = 'PF fantome';
+      document.getElementById('art_catstock').value = 'finished';
+      saveArticleModal(null);
+      var codes2 = getArticles().map(function (a) { return a.code; });
+      var bloque = codes2.indexOf('PFZZZ') === -1;
+      (semiOk && bloque)
+        ? 'OK : semi-fini cree ici, PF hors Index refuse'
+        : 'ECHEC semiOk=' + semiOk + ' bloque=' + bloque
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Semi-finis : le deroulage affiche le registre des mouvements du composant',
     app: 'production.html', store: () => {
       const s = storeRealiste();
