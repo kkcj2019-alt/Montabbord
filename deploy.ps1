@@ -22,4 +22,9 @@ if ($curBranch -and $curBranch -ne 'HEAD') { git push origin $curBranch } else {
 Write-Host "[deploy] Firebase hosting..."
 cmd /c "npx.cmd --yes firebase-tools@latest deploy --only hosting --project montabbord"
 
-Write-Host "[deploy] Termine : https://montabbord.web.app"
+Write-Host "[deploy] Cloudflare Pages..."
+cmd /c "npx.cmd --yes wrangler pages deploy public --project-name montabbord --branch main"
+
+Write-Host "[deploy] Termine :"
+Write-Host "  Firebase   : https://montabbord.web.app"
+Write-Host "  Cloudflare : https://montabbord.pages.dev"
