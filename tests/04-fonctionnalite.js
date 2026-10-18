@@ -3146,13 +3146,13 @@ attenduPrefixe: 'OK'
       var seg = i >= 0 ? h.slice(Math.max(0, i - 200), i + 220) : '';
       var okCarte = seg.indexOf('prodGoStockInitial()') !== -1;
       prodGoStockInitial();
-      var okPage = CURRENT_PAGE === 'stock-raw';
-      var okTab = getSection('stockRawTab') === 'initial';
+      var okPage = CURRENT_PAGE === 'stock';
+      var okTab = getSection('stockRawTab') === 'initial' && getSection('stockTab') === 'raw';
       var body = document.getElementById('content').innerHTML || '';
       var okAff = body.indexOf('Fiche de Stock') !== -1 && body.indexOf('Stock Initial') !== -1;
       (okCarte && okPage && okTab && okAff)
-        ? 'OK : carte -> prodGoStockInitial, page stock-raw, onglet initial affiche'
-        : 'ECHEC carte=' + okCarte + ' page=' + CURRENT_PAGE + ' tab=' + getSection('stockRawTab') + ' aff=' + okAff
+        ? 'OK : carte -> prodGoStockInitial, page stock, onglet initial affiche'
+        : 'ECHEC carte=' + okCarte + ' page=' + CURRENT_PAGE + ' tab=' + getSection('stockTab') + '/' + getSection('stockRawTab') + ' aff=' + okAff
     `,
     attenduPrefixe: 'OK'
   });
@@ -6377,7 +6377,7 @@ r.push({
       };
       CURRENT_PAGE = 'dashboard';
       var ok = false;
-      try { navigate('stock-consum'); ok = (CURRENT_PAGE === 'stock-consum'); } catch (e) { ok = false; }
+      try { navigate('stock-consum'); ok = (CURRENT_PAGE === 'stock'); } catch (e) { ok = false; }
       window.localStorage.setItem = vraiSet;
       var h = ok ? (document.getElementById('content').innerHTML || '') : '';
       (ok && aExplode && h.length > 100)
@@ -12354,7 +12354,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       var okPage = localStorage.getItem('mdb_prod_currentPage') === 'history';
       var okVide = (window._navFwd || []).length === 0;
       goBack();
-      var okBack = CURRENT_PAGE === 'stock-raw' && (window._navFwd || []).length === 1;
+      var okBack = CURRENT_PAGE === 'stock' && (window._navFwd || []).length === 1;
       var okBtnOn = bF.disabled === false;
       var okPersist = String(localStorage.getItem('mdb_prod_navFwd') || '').indexOf('history') !== -1;
       goForward();
@@ -12600,26 +12600,26 @@ function run(rapport) {
     rapport.ko('Bouton Param\u00e8tres : lecture impossible (' + ePrm.message + ')');
   }
 
-  /* Controle statique : le menu Stock d Exploitation reprend les memes
-     rubriques que le Stock de l Index (Produits finis, Semi-finis,
-     Marchandises, Consommables) — la rubrique Semi-finis manquait, alors
-     que la page render_stock_semi existe et que l Index l affiche deja. */
+  /* Controle statique : le menu Stock d Exploitation est desormais un seul
+     entree 'Stock' qui ouvre la page 'stock' a onglets (Produits finis,
+     Semi-finis, Matiere premiere, Marchandises, Consommables, Inventaire,
+     Mouvements, Stock EPI). Les anciennes pages stock-* redirigent vers
+     l'onglet correspondant. */
   try {
     const fsMenu = require('fs');
     const pathMenu = require('path');
     const srcMenu = fsMenu.readFileSync(pathMenu.join(__dirname, '..', 'public', 'production.html'), 'utf8');
-    const iNav = srcMenu.indexOf("label: 'Stock', icon:");
-    const segNav = iNav >= 0 ? srcMenu.slice(iNav, iNav + 700) : '';
-    const ordre = ['stock-palettes', 'stock-semi', 'stock-merch', 'stock-consum'];
-    const pos = ordre.map((k) => segNav.indexOf(k));
-    const okNav = pos.every((p) => p !== -1) && pos.every((p, i2) => i2 === 0 || p > pos[i2 - 1]);
-    const okTitre = srcMenu.indexOf("'stock-semi': 'Stock Semi-Finis'") !== -1;
-    const okPerm = /'stock-semi':\s*'prodStock'/.test(srcMenu);
-    const okFiche = srcMenu.indexOf('function render_stock_semi()') !== -1;
-    if (okNav && okTitre && okPerm && okFiche) {
-      rapport.ok('Menu Stock Exploitation = Stock Index : Produits finis, Semi-finis, Marchandises, Consommables (page + titre + droits prodStock)');
+    const iNav = srcMenu.indexOf("{ id: 'stock', label: 'Stock', icon:");
+    const segNav = iNav >= 0 ? srcMenu.slice(iNav, iNav + 60) : '';
+    const okNav = segNav.indexOf("children") === -1;
+    const okPage = srcMenu.indexOf("function render_stock()") !== -1;
+    const okTabs = srcMenu.indexOf("setSection('stockTab'") !== -1;
+    const okAlias = srcMenu.indexOf("_stockTabMap") !== -1;
+    const okTitle = srcMenu.indexOf("'stock': 'Stock'") !== -1;
+    if (okNav && okPage && okTabs && okAlias && okTitle) {
+      rapport.ok('Menu Stock Exploitation : entree unique Stock a onglets (8 onglets) + redirection des anciennes pages');
     } else {
-      rapport.ko('Menu Stock Exploitation — nav=' + okNav + ' titre=' + okTitre + ' droits=' + okPerm + ' fiche=' + okFiche);
+      rapport.ko('Menu Stock Exploitation — nav=' + okNav + ' page=' + okPage + ' tabs=' + okTabs + ' alias=' + okAlias + ' titre=' + okTitle);
     }
   } catch (eMn) {
     rapport.ko('Menu Stock Exploitation : lecture impossible (' + eMn.message + ')');
