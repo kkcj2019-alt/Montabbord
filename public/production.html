@@ -1209,13 +1209,13 @@ th{font-size:.64rem;letter-spacing:.4px}
   <nav id="nav"></nav>
   <div class="nav-section-sep"></div>
   <div style="padding:.5rem 0">
-    <div class="nav-parent" onclick="window.location.href='index.html?logout=1'" style="color:#ef4444">
+    <div class="nav-parent" onclick="if(window.parent&&window.parent!==window){try{window.parent.location.href='index.html?logout=1';}catch(e){_prodExitToMainApp();}}else{window.location.href='index.html?logout=1';}" style="color:#ef4444">
       <span class="icon">🚪</span>
       <span class="label">Déconnexion</span>
     </div>
   </div>
   <div style="margin-top:auto;padding:.6rem;border-top:1px solid #334155">
-    <a href="index.html" style="color:#64748b;font-size:.72rem;text-decoration:none;display:flex;align-items:center;gap:.3rem">← Retour à Montabbord</a>
+    <a href="javascript:void(0)" onclick="_prodExitToMainApp()" style="color:#64748b;font-size:.72rem;text-decoration:none;display:flex;align-items:center;gap:.3rem">← Retour à Montabbord</a>
   </div>
 </aside>
 <div id="sidebarOverlay" onclick="closeSidebar()"></div>
@@ -1403,7 +1403,7 @@ function seulementObjets(arr) {
 var PROD_UI_PREFS_KEY = 'mdb_ui_prefs';
 var PROD_UI_PREFS = null;
 var PROD_UI_KEYS = {
-  catPfTab: 1, costModeSource: 1, coutArticleId: 1, defSearch: 1, defTypeFilter: 1,
+  stockTab: 1, catPfTab: 1, costModeSource: 1, coutArticleId: 1, defSearch: 1, defTypeFilter: 1,
   definitionsTab: 1, epiSubTab: 1, ficheTechArticle: 1, historyTab: 1, presenceSubTab: 1,
   ptFilterDept: 1, ptFilterFonction: 1, ptFilterType: 1, reparPalettesTab: 1, reparSearch: 1,
   stockBLFour: 1, stockBLVue: 1, stockConsoTab: 1, stockConsoEtat: 1, stockRawEtat: 1,
@@ -1666,13 +1666,13 @@ function startIdleTrackingProd() {
       if (stored > _lastActivityProd) _lastActivityProd = stored;
     } catch(e) {}
     if (document.visibilityState === 'visible' && isLoggedInProd() && (Date.now() - _lastActivityProd) > _idleTimeoutMs) {
-      window.location.href = 'index.html';
+      _prodExitToMainApp();
     }
   });
   _idleTimerProd = setInterval(function() {
     persistIdleActivityProd();
     if (isLoggedInProd() && (Date.now() - _lastActivityProd) > _idleTimeoutMs) {
-      window.location.href = 'index.html';
+      _prodExitToMainApp();
     }
   }, 30000);
 }
@@ -1686,9 +1686,6 @@ var NAV = [
       { id: 'orders', label: 'Ordres de Production' }
     ]},
     { id: 'stock', label: 'Stock', icon: '📦' },
-    { id: 'inventory', label: 'Inventaire', icon: '📋' },
-    { id: 'stock-movements', label: 'Mouvements', icon: '🔄' },
-    { id: 'epi', label: 'Stock EPI', icon: '🛡️' },
     { id: 'thermal', label: 'Traitement thermique', icon: '🌡️', children: [
       { id: 'thermal', label: 'Opérations' },
       { id: 'thermal-types', label: 'Types de produits' }
@@ -2126,8 +2123,19 @@ function _prodExitToMainApp() {
      cet onglet et la session unique revocait l'utilisateur = ecran de
      connexion). Dernier recours seulement : navigation directe. */
   try {
-    if (window.parent && window.parent !== window && typeof window.parent.closeProductionOverlay === 'function') {
-      window.parent.closeProductionOverlay();
+    if (window.parent && window.parent !== window) {
+      if (typeof window.parent.closeProductionOverlay === 'function') {
+        window.parent.closeProductionOverlay();
+        return;
+      }
+      try { window.parent.postMessage({ type: 'close_production_overlay' }, '*'); } catch (eMsg) {}
+      try {
+        if (window.top && window.top !== window && typeof window.top.closeProductionOverlay === 'function') {
+          window.top.closeProductionOverlay();
+          return;
+        }
+      } catch (eTop) {}
+      try { if (window.top) { window.top.location.href = 'index.html'; return; } } catch (eTop2) {}
       return;
     }
   } catch (e) {}
@@ -2143,6 +2151,12 @@ function _prodExitToMainApp() {
       return;
     }
   } catch (e2) {}
+  try {
+    if (window.top && window.top !== window) {
+      window.top.location.href = 'index.html';
+      return;
+    }
+  } catch (eTop3) {}
   try { window.location.replace('index.html'); } catch (e3) { try { window.location.href = 'index.html'; } catch (e4) {} }
 }
 /* Icone « 4 carres » du bandeau fige : elle ramene au TABLEAU DE BORD de
@@ -9668,6 +9682,11 @@ function _prodAutoRRun() {
 function prodShouldRender() {
   try {
     if (document.getElementById('modalOverlay')) return false;
+    /* Si la souris survole la barre latérale ou un menu, différer le re-rendu pour éviter tout clignotement / freeze */
+    try {
+      var sb = document.getElementById('sidebar');
+      if (sb && (sb.matches(':hover') || sb.matches(':focus-within'))) return false;
+    } catch(eHov) {}
     /* Pointage Paie en iframe : jamais de re-rendu parent (perdrait l'iframe) */
     if (document.getElementById('ptPayeIframe')) return false;
     var ae = document.activeElement;
@@ -13590,21 +13609,36 @@ function render_stock_finished() { syncCatalogueToStock(); try { syncMirrorFinis
 function render_stock_semi() {
   syncCatalogueToStock();
   var etat = getSection('stockSemiEtat', 'tout');
-  var list = semiAggregate(getGlobalMonth()).filter(function (e) {
-    return etat === 'tout' ? true : (parseFloat(e.quantite) || 0) > 0;
+  var listTous = semiAggregate(getGlobalMonth());
+  var totGen = 0, zeroGen = 0, totVolGen = 0;
+  listTous.forEach(function (e) {
+    var q = parseFloat(e.quantite) || 0;
+    totGen += q;
+    totVolGen += parseFloat(e.volumeTotal) || 0;
+    if (q <= 0) zeroGen++;
   });
-  var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
-  h += '<h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Semi-Finis</h2>';
-  h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Un composant par ligne — cliquez pour derouler ses mouvements</p></div>';
-  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
-  h += '<input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)">';
-  h += '<div style="display:flex;gap:.5rem;align-items:center">';
-  h += '<button class="btn' + (etat === 'actif' ? ' btn-accent' : '') + '" onclick="setSection(\'stockSemiEtat\',\'actif\');renderPage()" style="font-size:.75rem">Actif (qté&gt;0)</button>';
-  h += '<button class="btn' + (etat === 'tout' ? ' btn-accent' : '') + '" onclick="setSection(\'stockSemiEtat\',\'tout\');renderPage()" style="font-size:.75rem">Tout (y compris 0)</button>';
-  h += '<button class="btn" onclick="stockFicheSortie(\'stock-semi\',\'print\')" title="Imprimer cette fiche de stock">🖨️ Imprimer</button>';
-  h += '<button class="btn" onclick="stockFicheSortie(\'stock-semi\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
-  h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
-  h += '<button class="btn btn-accent" onclick="showAddStock(\'stock-semi\')">+ Nouveau</button>';
+  var list = listTous.filter(function (e) {
+    if (etat === 'actif') return (parseFloat(e.quantite) || 0) > 0;
+    if (etat === 'inactif') return (parseFloat(e.quantite) || 0) <= 0;
+    return true; /* tout */
+  });
+  var h = '<div style="margin-bottom:.8rem"><h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Semi-Finis</h2>';
+  h += '<p style="color:var(--dim);font-size:.78rem;margin:2px 0 0 0">Un composant par ligne — cliquez pour dérouler ses mouvements</p></div>';
+
+  /* 1. Bandeau Chiffres Clés (KPI) */
+  h += stockKpiCardsHtml(totGen, listTous.length, zeroGen, listTous.length - zeroGen, totVolGen, "setSection('stockSemiEtat','inactif');renderPage()", "setSection('stockSemiEtat','actif');renderPage()", etat === 'inactif', etat === 'actif', 'pièces');
+
+  /* 2. Barre d'actions complète et rangée */
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem">';
+  h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+  h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'stockTable\',this.value)" style="min-width:160px;padding:.36rem .6rem;font-size:.76rem">';
+  h += stockEtatBoutons('stockSemiEtat');
+  h += '</div>';
+  h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-semi\',\'print\')" title="Imprimer cette fiche de stock" style="font-size:.74rem">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-semi\',\'pdf\')" title="Télécharger en PDF" style="font-size:.74rem">📄 PDF</button>';
+  h += '<button class="btn" onclick="exportStockExcel()" title="Exporter vers Excel" style="font-size:.74rem">📊 Export</button>';
+  h += '<button class="btn btn-accent" onclick="showAddStock(\'stock-semi\')" style="font-size:.76rem;font-weight:700">+ Nouveau</button>';
   h += '</div></div>';
   try {
     var _gmSemi = getGlobalMonth() || '';
@@ -14341,10 +14375,8 @@ function render_stock_raw() {
     return etat === 'inactif' ? v <= 0 : v > 0;
   }
 
-  var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
-  h += '<h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Matière Première</h2>';
-  h += '<p style="color:var(--dim);font-size:.82rem;margin:0">État du stock et historique des mouvements</p></div>';
-  h += '<div style="display:flex;justify-content:flex-end;margin-bottom:.5rem;gap:.4rem"><button class="btn" onclick="inspecterMouvementsSemi()" title="Voir chaque écriture du stock semi-fini et choisir celles à supprimer" style="font-size:.72rem">🔎 Inspecter les mouvements</button><button class="btn" onclick="cleanOrphanStockRaw()" title="Supprimer les lignes de stock sans bordereau d\'achat (ex : BL supprimé)" style="font-size:.72rem">🧹 Nettoyer les orphelins</button></div>';
+  var h = '<div style="margin-bottom:.8rem"><h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Matière Première</h2>';
+  h += '<p style="color:var(--dim);font-size:.78rem;margin:2px 0 0 0">État du stock et historique des mouvements</p></div>';
   h += '<div class="tabs">';
   h += '<div class="tab' + (tab === 'actif' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'actif\');renderPage()">Stock actif global</div>';
   h += '<div class="tab' + (tab === 'bl' ? ' active' : '') + '" onclick="setSection(\'stockRawTab\',\'bl\');renderPage()">Stock BL</div>';
@@ -14484,12 +14516,35 @@ function render_stock_raw() {
 
 
   if (tab === 'semi') {
-    var semiL = semiAggregate(getGlobalMonth()).filter(function (e) { return etatOk(e.quantite); });
+    var semiTous = semiAggregate(getGlobalMonth());
+    var totSQGen = 0, totSZGen = 0, totSVGen = 0;
+    semiTous.forEach(function (e) {
+      var q = parseFloat(e.quantite) || 0;
+      totSQGen += q;
+      totSVGen += parseFloat(e.volumeTotal) || 0;
+      if (q <= 0) totSZGen++;
+    });
+    var semiL = semiTous.filter(function (e) { return etatOk(e.quantite); });
     var totSQ = 0, totSV = 0;
     semiL.forEach(function (e) { totSQ += parseFloat(e.quantite) || 0; totSV += parseFloat(e.volumeTotal) || 0; });
-    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
-    h += '<input type="text" class="search-box" placeholder="Rechercher..." oninput="filterTable(\'stockTable\',this.value)">';
-    h += '<div style="display:flex;gap:.5rem;align-items:center">' + showEtat + '</div></div>';
+
+    /* 1. Bandeau Chiffres Clés (KPI) */
+    h += stockKpiCardsHtml(totSQGen, semiTous.length, totSZGen, semiTous.length - totSZGen, totSVGen, "setSection('stockRawEtat','inactif');renderPage()", "setSection('stockRawEtat','actif');renderPage()", etat === 'inactif', etat === 'actif', 'pièces');
+
+    /* 2. Barre d'actions complète et rangée */
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem">';
+    h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+    h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'stockTable\',this.value)" style="min-width:160px;padding:.36rem .6rem;font-size:.76rem">';
+    h += showEtat;
+    h += '</div>';
+    h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+    h += '<button class="btn" onclick="inspecterMouvementsSemi()" title="Voir chaque écriture du stock semi-fini et choisir celles à supprimer" style="font-size:.72rem">🔎 Inspecter</button>';
+    h += '<button class="btn" onclick="stockFicheSortie(\'stock-semi\',\'print\')" title="Imprimer cette fiche de stock" style="font-size:.74rem">🖨️ Imprimer</button>';
+    h += '<button class="btn" onclick="stockFicheSortie(\'stock-semi\',\'pdf\')" title="Télécharger en PDF" style="font-size:.74rem">📄 PDF</button>';
+    h += '<button class="btn" onclick="exportStockExcel()" title="Exporter vers Excel" style="font-size:.74rem">📊 Export</button>';
+    h += '<button class="btn btn-accent" onclick="showAddStock(\'stock-semi\')" style="font-size:.76rem;font-weight:700">+ Nouveau</button>';
+    h += '</div></div>';
+
     h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Type</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
     semiL.forEach(function (e) {
       var _sid = 'semiDet_' + String(e.code || '').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -14508,25 +14563,45 @@ function render_stock_raw() {
     return h;
   }
 
-  var items = getStockRaw().filter(function(s) {
+  var rawTous = getStockRaw().filter(function(s) {
     var o = mpOrigin(s);
     if (tab === 'bl' && o !== 'BL') return false;
     if (tab === 'spe' && o !== 'SPECIFIC') return false;
-    /* Mois sélectionné : les colis entrés après (ex : octobre pour un
-       inventaire de septembre) ne s'affichent pas. */
+    /* Mois sélectionné : les colis entrés après ne s'affichent pas */
     try { if (!stockVisibleMois(getGlobalMonth(), s)) return false; } catch (eGM2) {}
+    return true;
+  });
+  var totRawQ = 0, totRawZero = 0, totRawVol = 0;
+  rawTous.forEach(function(s) {
+    var q = parseFloat(s.quantite) || 0;
+    totRawQ += q;
+    totRawVol += stkVol(s);
+    if (q <= 0) totRawZero++;
+  });
+  var items = rawTous.filter(function(s) {
     return etatOk(s.quantite);
   });
-  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
-  h += '<input type="text" class="search-box" placeholder="Rechercher code, désignation..." oninput="filterTable(\'stockTable\',this.value)">';
-  h += '<div style="display:flex;gap:.5rem;align-items:center">' + showEtat;
-  h += '<button class="btn" onclick="stockFicheSortie(\'stock-raw\',\'print\')" title="Imprimer la fiche">🖨️ Imprimer</button>';
-  h += '<button class="btn" onclick="stockFicheSortie(\'stock-raw\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
-  h += '<button class="btn" onclick="exportStockExcel()">📊 Export</button>';
+
+  /* 1. Bandeau Chiffres Clés (KPI) */
+  h += stockKpiCardsHtml(totRawQ, rawTous.length, totRawZero, rawTous.length - totRawZero, totRawVol, "setSection('stockRawEtat','inactif');renderPage()", "setSection('stockRawEtat','actif');renderPage()", etat === 'inactif', etat === 'actif', 'colis / pièces');
+
+  /* 2. Barre d'actions complète et rangée */
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem">';
+  h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+  h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'stockTable\',this.value)" style="min-width:160px;padding:.36rem .6rem;font-size:.76rem">';
+  h += showEtat;
+  h += '</div>';
+  h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+  h += '<button class="btn" onclick="inspecterMouvementsSemi()" title="Voir chaque écriture du stock semi-fini et choisir celles à supprimer" style="font-size:.72rem">🔎 Inspecter</button>';
+  h += '<button class="btn" onclick="cleanOrphanStockRaw()" title="Supprimer les lignes de stock sans bordereau d\'achat (ex : BL supprimé)" style="font-size:.72rem">🧹 Orphelins</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-raw\',\'print\')" title="Imprimer la fiche" style="font-size:.74rem">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'stock-raw\',\'pdf\')" title="Télécharger en PDF" style="font-size:.74rem">📄 PDF</button>';
+  h += '<button class="btn" onclick="exportStockExcel()" title="Exporter vers Excel" style="font-size:.74rem">📊 Export</button>';
   h += (tab === 'spe'
-    ? '<button class="btn btn-accent" onclick="showNewBoisBrut()">+ Créer bois brut</button>'
-    : '<button class="btn btn-accent" onclick="showNewRawItem()">+ Nouveau</button>');
+    ? '<button class="btn btn-accent" onclick="showNewBoisBrut()" style="font-size:.76rem;font-weight:700">+ Créer bois brut</button>'
+    : '<button class="btn btn-accent" onclick="showNewRawItem()" style="font-size:.76rem;font-weight:700">+ Nouveau</button>');
   h += '</div></div>';
+
   h += '<div class="card"><table id="stockTable"><tr><th>Code</th><th>Désignation</th><th>Origine</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th><th style="text-align:right">Volume (m³)</th><th>Actions</th></tr>';
   var totQ = 0, totV = 0;
   var blMap = buildColisBLMap();
@@ -14851,20 +14926,49 @@ function pfStockLignes(rows) {
    Par défaut, seuls les articles dont la quantité est > 0 s'affichent
    (« Actif »). Le bouton « Inactif » montre le contraire (quantité <= 0).
    L'état est mémorisé par page via setSection, sous la clé fournie. */
-function stockEtatKey(key) {
-  var e = 'actif';
-  try { e = getSection(key, 'actif'); } catch (err) {}
-  return e === 'inactif' ? 'inactif' : 'actif';
+function stockEtatKey(key, defaultVal) {
+  var def = defaultVal || 'actif';
+  var e = def;
+  try { e = getSection(key, def); } catch (err) {}
+  if (e === 'inactif') return 'inactif';
+  if (e === 'tout') return 'tout';
+  if (e === 'actif') return 'actif';
+  return def;
 }
 function stockEtatVisible(key, q) {
+  var e = stockEtatKey(key);
+  if (e === 'tout') return true;
   var v = parseFloat(q) || 0;
-  return stockEtatKey(key) === 'inactif' ? v <= 0 : v > 0;
+  return e === 'inactif' ? v <= 0 : v > 0;
 }
 function stockEtatBoutons(key) {
   var e = stockEtatKey(key);
-  return '<div style="display:flex;gap:.4rem;align-items:center">'
-    + '<button class="btn' + (e === 'actif' ? ' btn-accent' : '') + '" onclick="setSection(\'' + key + '\',\'actif\');renderPage()" style="font-size:.75rem" title="Articles dont la quantité est supérieure à 0">Actif (qté&gt;0)</button>'
-    + '<button class="btn' + (e === 'inactif' ? ' btn-accent' : '') + '" onclick="setSection(\'' + key + '\',\'inactif\');renderPage()" style="font-size:.75rem" title="Articles dont la quantité est nulle (ou négative)">Inactif (qté&le;0)</button></div>';
+  return '<div style="display:flex;gap:.35rem;align-items:center">'
+    + '<button type="button" class="btn' + (e === 'actif' ? ' btn-accent' : '') + '" onclick="setSection(\'' + key + '\',\'actif\');renderPage()" style="font-size:.74rem;padding:.36rem .6rem" title="Articles dont la quantité est supérieure à 0">Actif</button>'
+    + '<button type="button" class="btn' + (e === 'inactif' ? ' btn-accent' : '') + '" onclick="setSection(\'' + key + '\',\'inactif\');renderPage()" style="font-size:.74rem;padding:.36rem .6rem" title="Articles dont la quantité est nulle ou négative">Inactif</button>'
+    + '<button type="button" class="btn' + (e === 'tout' ? ' btn-accent' : '') + '" onclick="setSection(\'' + key + '\',\'tout\');renderPage()" style="font-size:.74rem;padding:.36rem .6rem" title="Toutes les références">Tout</button>'
+    + '</div>';
+}
+
+function stockKpiCardsHtml(totQty, totRefs, totZero, totActif, totVol, zClick, aClick, isZ, isA, unit) {
+  var u = unit || '';
+  function card(l, v, clic, actif, sub) {
+    return '<div' + (clic ? ' onclick="' + clic + '"' : '') + ' style="cursor:' + (clic ? 'pointer' : 'default') + ';min-width:115px;flex:1 1 110px;padding:.55rem .85rem;border-radius:12px;background:' + (actif ? '#fff7ed' : '#f8fafc') + ';border:1px solid ' + (actif ? '#fdba74' : '#e2e8f0') + ';box-shadow:0 1px 3px rgba(0,0,0,.03);transition:all .15s">'
+      + '<div style="font-size:1.18rem;font-weight:800;color:' + (actif ? '#ea580c' : '#0f172a') + ';line-height:1.1">' + v + '</div>'
+      + '<div style="font-size:.62rem;font-weight:700;color:#64748b;letter-spacing:.6px;text-transform:uppercase;margin-top:2px">' + l + '</div>'
+      + (sub ? '<div style="font-size:.62rem;color:#94a3b8;margin-top:1px">' + sub + '</div>' : '')
+      + '</div>';
+  }
+  var h = '<div class="stock-kpi-bar" style="display:flex;gap:.55rem;flex-wrap:wrap;align-items:stretch;margin-bottom:1rem">';
+  h += card('Stock total', fmt(totQty || 0), '', false, u);
+  h += card('References', fmt(totRefs || 0), '', false);
+  h += card('À zéro', fmt(totZero || 0), zClick, isZ, 'qté ≤ 0');
+  h += card('En stock', fmt(totActif || 0), aClick, isA, 'qté > 0');
+  if (totVol != null && totVol > 0) {
+    h += card('Volume total', (typeof totVol === 'number' ? totVol.toFixed(3) : totVol) + ' m³', '', false);
+  }
+  h += '</div>';
+  return h;
 }
 
 /* ==================== FICHE DE STOCK GENERIQUE (façon ACSER) ==================== */
@@ -14876,43 +14980,40 @@ function renderStockFiche(key, getFn, title, addFn) {
   var etatKey = 'stockEtat_' + key;
   var etat = stockEtatKey(etatKey);
   var items = itemsTous.filter(function(s) { return stockEtatVisible(etatKey, s.quantite); });
-  var totGen = 0, zeroGen = 0;
-  itemsTous.forEach(function(s) { var q = parseFloat(s.quantite) || 0; totGen += q; if (q <= 0) zeroGen++; });
+  var totGen = 0, zeroGen = 0, totVolGen = 0;
+  itemsTous.forEach(function(s) {
+    var q = parseFloat(s.quantite) || 0;
+    totGen += q;
+    totVolGen += stkVol(s);
+    if (q <= 0) zeroGen++;
+  });
   var totAff = 0;
   items.forEach(function(s) { totAff += parseFloat(s.quantite) || 0; });
   var noVol = (key === 'stock-finished');
-  var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
-  h += '<h2 style="font-size:1.15rem;margin:0">' + escH(title) + '</h2>';
-  h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Etat du stock et historique des mouvements</p></div>';
-  /* BANDEAU CHIFFRES CLES : le meme total que le tableau de bord, pour que
-     les deux ecrans ne se contredisent plus (la fiche etait filtree, le
-     total n'etait alors que celui des lignes affichees). */
-  function kpiStk(l, v, clic, actif) {
-    return '<div' + (clic ? ' onclick="' + clic + '"' : '') + ' style="cursor:' + (clic ? 'pointer' : 'default') + ';min-width:112px;flex:0 0 auto;padding:.5rem .8rem;border-radius:12px;background:' + (actif ? '#fff7ed' : '#f8fafc') + ';border:1px solid ' + (actif ? '#fdba74' : '#e2e8f0') + '">'
-      + '<div style="font-size:1.05rem;font-weight:800;color:#0f172a;line-height:1.1">' + v + '</div>'
-      + '<div style="font-size:.62rem;font-weight:700;color:#64748b;letter-spacing:.6px;text-transform:uppercase;margin-top:2px">' + l + '</div></div>';
-  }
-  /* UNE SEULE LIGNE DE COMMANDE : chiffres cles a gauche, recherche et
-     actions a droite (plus de bande d'actions separate, qui mangeait
-     une ligne de hauteur). */
-  h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;margin-bottom:1rem">';
-  h += '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">'
-    + kpiStk('Stock total', fmt(totGen), '', false)
-    + kpiStk('References', fmt(itemsTous.length), '', false)
-    + kpiStk('A zero', fmt(zeroGen), "setSection('" + etatKey + "','inactif');renderPage()", etat === 'inactif')
-    + kpiStk('En stock', fmt(itemsTous.length - zeroGen), "setSection('" + etatKey + "','actif');renderPage()", etat === 'actif')
-    + '</div>';
-  h += '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">';
-  h += '<input type="text" class="search-box" placeholder="Rechercher designation, code..." oninput="filterTable(\'stockTable\',this.value)" style="min-width:180px">';
+  var h = '<div style="margin-bottom:.8rem"><h2 style="font-size:1.15rem;margin:0">' + escH(title) + '</h2>';
+  h += '<p style="color:var(--dim);font-size:.78rem;margin:2px 0 0 0">État du stock et historique des mouvements</p></div>';
+
+  /* 1. Bandeau Chiffres Clés (KPI) */
+  h += stockKpiCardsHtml(totGen, itemsTous.length, zeroGen, itemsTous.length - zeroGen, (noVol ? 0 : totVolGen), "setSection('" + etatKey + "','inactif');renderPage()", "setSection('" + etatKey + "','actif');renderPage()", etat === 'inactif', etat === 'actif');
+
+  /* 2. Barre d'actions complète et rangée */
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem">';
+  h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+  h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'stockTable\',this.value)" style="min-width:160px;padding:.36rem .6rem;font-size:.76rem">';
   h += stockEtatBoutons(etatKey);
-  h += '<button class="btn" onclick="stockFicheSortie(\'' + key + '\',\'print\')" title="Imprimer cette fiche de stock">Imprimer</button>';
-  h += '<button class="btn" onclick="stockFicheSortie(\'' + key + '\',\'pdf\')" title="Telecharger en PDF">PDF</button>';
-  h += '<button class="btn" onclick="exportStockExcel()">Export</button>';
-  h += '<button class="btn btn-accent" onclick="' + addFn + '(\'' + key + '\')">+ Nouveau</button>';
-  if (key === 'stock-finished') h += '<button class="btn" onclick="remettreZeroStockFinished()" title="Ramener chaque produit a zero (ecart trace, comme un inventaire)">Remettre a zero</button>';
-  if (key === 'stock-finished') h += '<button class="btn" onclick="syncMirrorFinishedAll(false)" title="Recopier tous les produits finis vers Index (meme ceux jamais touches)">Synchroniser vers Index</button>';
-  if (key === 'stock-finished') h += '<button class="btn" onclick="importerFinisIndex()" title="Creer dans le catalogue les produits finis saisis dans Index mais inconnus ici">Importer depuis Index</button>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+  h += '<button class="btn" onclick="stockFicheSortie(\'' + key + '\',\'print\')" title="Imprimer cette fiche de stock" style="font-size:.74rem">🖨️ Imprimer</button>';
+  h += '<button class="btn" onclick="stockFicheSortie(\'' + key + '\',\'pdf\')" title="Télécharger en PDF" style="font-size:.74rem">📄 PDF</button>';
+  h += '<button class="btn" onclick="exportStockExcel()" title="Exporter vers Excel" style="font-size:.74rem">📊 Export</button>';
+  if (key === 'stock-finished') {
+    h += '<button class="btn" onclick="syncMirrorFinishedAll(false)" title="Recopier tous les produits finis vers Index" style="font-size:.72rem">🔄 Synchro</button>';
+    h += '<button class="btn" onclick="importerFinisIndex()" title="Créer dans le catalogue les produits finis saisis dans Index mais inconnus ici" style="font-size:.72rem">📥 Importer</button>';
+    h += '<button class="btn" onclick="remettreZeroStockFinished()" title="Ramener chaque produit à zéro" style="font-size:.72rem;color:#dc2626">↺ À zéro</button>';
+  }
+  h += '<button class="btn btn-accent" onclick="' + addFn + '(\'' + key + '\')" style="font-size:.76rem;font-weight:700">+ Nouveau</button>';
   h += '</div></div>';
+
   h += '<div class="card"><table id="stockTable"><tr><th style="width:32%">Designation</th><th>Code</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock actuel</th>' + (noVol ? '' : '<th style="text-align:right">Volume (m3)</th>') + '<th>Observation</th><th>Actions</th></tr>';
   items.forEach(function(s) {
     var v = stkVol(s);
@@ -16323,34 +16424,47 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
   try { var _dup = dedoublonnerBasesInventaire(); if (_dup > 0) console.info('[Stock] ' + _dup + ' ligne(s) « Stock initial » en double retiree(s).'); } catch (eDup) {}
     var tab = getSection('stockConsoTab', 'tous');
     if (tab !== 'tous' && tab !== 'pointes' && tab !== 'divers') tab = 'tous';
-    /* Une seule ligne par PRODUIT (les fiches en double sont regroupees a
-       l'affichage ; le bouton ci-dessous les fusionne reellement). */
-    var list = consoAggregate().filter(function(x) {
+    var listTous = consoAggregate().filter(function(x) {
       if (tab === 'pointes') return x.type === 'POINTE';
       if (tab === 'divers') return x.type === 'DIVERS';
       return true;
-    }).filter(function(x) { return stockEtatVisible('stockConsoEtat', x.unites); });
-    var h = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-bottom:1rem">';
-    h += '<h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Consommables</h2>';
-    h += '<p style="color:var(--dim);font-size:.82rem;margin:0">Pointes et divers, sans dimensions ni volume</p></div>';
+    });
+    var totConsoQ = 0, totConsoZero = 0;
+    listTous.forEach(function(x) {
+      var q = parseFloat(x.unites) || 0;
+      totConsoQ += q;
+      if (q <= 0) totConsoZero++;
+    });
+    var list = listTous.filter(function(x) { return stockEtatVisible('stockConsoEtat', x.unites); });
+    var h = '<div style="margin-bottom:.8rem"><h2 style="font-size:1.15rem;margin:0">Fiche de Stock - Consommables</h2>';
+    h += '<p style="color:var(--dim);font-size:.78rem;margin:2px 0 0 0">Pointes et divers, sans dimensions ni volume</p></div>';
+
     h += '<div class="tabs">';
     h += '<div class="tab' + (tab === 'tous' ? ' active' : '') + '" onclick="setSection(\'stockConsoTab\',\'tous\');renderPage()">Tous</div>';
     h += '<div class="tab' + (tab === 'pointes' ? ' active' : '') + '" onclick="setSection(\'stockConsoTab\',\'pointes\');renderPage()">Pointes</div>';
     h += '<div class="tab' + (tab === 'divers' ? ' active' : '') + '" onclick="setSection(\'stockConsoTab\',\'divers\');renderPage()">Divers</div>';
     h += '</div>';
-    h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:.5rem">';
-    h += '<input type="text" class="search-box" placeholder="Rechercher code, nom..." oninput="filterTable(\'consoTable\',this.value)">';
+
+    /* 1. Bandeau Chiffres Clés (KPI) */
+    h += stockKpiCardsHtml(totConsoQ, listTous.length, totConsoZero, listTous.length - totConsoZero, null, "setSection('stockConsoEtat','inactif');renderPage()", "setSection('stockConsoEtat','actif');renderPage()", stockEtatKey('stockConsoEtat') === 'inactif', stockEtatKey('stockConsoEtat') === 'actif', 'unités');
+
+    /* 2. Barre d'actions complète et rangée */
+    h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem">';
+    h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+    h += '<input type="text" class="search-box" placeholder="🔍 Rechercher..." oninput="filterTable(\'consoTable\',this.value)" style="min-width:150px;padding:.36rem .6rem;font-size:.76rem">';
     h += stockEtatBoutons('stockConsoEtat');
-    h += '<div style="display:flex;gap:.5rem">';
-    h += '<button class="btn" onclick="printStockConsum()" title="Imprimer la fiche de stock">🖨 Imprimer</button>';
-    h += '<button class="btn" onclick="stockFicheSortie(\'stock-consum\',\'pdf\')" title="Télécharger en PDF">📄 PDF</button>';
-    h += '<button class="btn" onclick="showSortieConso()" title="Enregistrer une consommation ou une perte">📤 Sortie / consommation</button>';
-    h += '<button class="btn" onclick="showAddStock(\'stock-consum\')">+ Ajouter au stock</button>';
-    h += '<button class="btn" onclick="reconstruireStockConsum()" title="Recreer le stock a partir des achats (BL)">🔄 Reconstruire le stock</button>';
-    h += '<button class="btn btn-accent" onclick="creerConsoDepuisStock()" title="Créer dans le référentiel Articles > Consommables & Divers">+ Nouveau Consommable</button>';
-    h += '<button class="btn" onclick="fusionnerFichesConso()" title="Regrouper les fiches en double : une seule fiche par produit">🧹 Fusionner les fiches en double</button>';
-    h += '<button class="btn" onclick="remettreZeroStockConso()" title="Inventaire : ramener chaque produit a zero (ajustement trace, conserve a la reconstruction)">↺ Remettre à zéro</button>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:.35rem;align-items:center;flex-wrap:wrap">';
+    h += '<button class="btn" onclick="showSortieConso()" title="Enregistrer une consommation ou une perte" style="font-size:.72rem">📤 Sortie</button>';
+    h += '<button class="btn" onclick="showAddStock(\'stock-consum\')" title="Ajouter une entrée de stock" style="font-size:.72rem">📥 + Stock</button>';
+    h += '<button class="btn" onclick="reconstruireStockConsum()" title="Recréer le stock à partir des achats (BL)" style="font-size:.72rem">🔄 Reconstruire</button>';
+    h += '<button class="btn" onclick="fusionnerFichesConso()" title="Regrouper les fiches en double : une seule fiche par produit" style="font-size:.72rem">🧹 Doublons</button>';
+    h += '<button class="btn" onclick="remettreZeroStockConso()" title="Inventaire : ramener chaque produit à zéro" style="font-size:.72rem;color:#dc2626">↺ À zéro</button>';
+    h += '<button class="btn" onclick="printStockConsum()" title="Imprimer la fiche de stock" style="font-size:.74rem">🖨️ Imprimer</button>';
+    h += '<button class="btn" onclick="stockFicheSortie(\'stock-consum\',\'pdf\')" title="Télécharger en PDF" style="font-size:.74rem">📄 PDF</button>';
+    h += '<button class="btn btn-accent" onclick="creerConsoDepuisStock()" title="Créer dans le référentiel Articles > Consommables & Divers" style="font-size:.76rem;font-weight:700">+ Nouveau Conso</button>';
     h += '</div></div>';
+
     h += '<div class="card"><table id="consoTable">';
     if (tab === 'divers') {
       h += '<tr><th>Code</th><th>Nom</th><th>Type</th><th>Emplacement</th><th style="text-align:right">Stock</th><th>Actions</th></tr>';
@@ -16505,7 +16619,7 @@ function _exportStockPDFLegacy() {
   var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Stock Matière Première</title>';
   h += '<style>body{font-family:Arial,sans-serif;margin:20px;font-size:11px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:4px 6px;font-size:10px}th{background:#f0f0f0;text-align:left}tr.total td{font-weight:bold;background:#f5f5f5}</style>';
   h += '</head><body>';
-  h += '<h2>Stock Matière Première — ' + (tab === 'actif' ? 'Actif' : tab) + ' / ' + (etat === 'actif' ? 'Actif (qté>0)' : 'Tout') + '</h2>';
+  h += '<h2>Stock Matière Première — ' + (tab === 'actif' ? 'Actif' : tab) + ' / ' + (etat === 'actif' ? 'Actif' : (etat === 'inactif' ? 'Inactif' : 'Tout')) + '</h2>';
   h += '<table><tr><th>Code</th><th>Désignation</th><th>Origine</th><th>Dimensions (cm)</th><th>Emplacement</th><th style="text-align:right">Stock</th><th style="text-align:right">Volume (m³)</th></tr>';
   var totQ = 0, totV = 0;
   items.forEach(function(s) {
@@ -17273,8 +17387,8 @@ function stockMoisBanner(n, gm) {
 function stockZeroBanner(n, quoi) {
   if (!(n > 0)) return '';
   return '<div style="background:#fefce8;border:1px solid #fde68a;color:#854d0e;border-radius:10px;padding:.5rem .9rem;margin-bottom:.8rem;font-size:.8rem">'
-    + 'ℹ️ ' + n + ' ' + (quoi || 'ligne') + '(s) à quantité 0 masquée(s) par le filtre <strong>Actif (qté&gt;0)</strong>. '
-    + 'Cliquez <strong>Inactif (qté&le;0)</strong> pour les voir.</div>';
+    + 'ℹ️ ' + n + ' ' + (quoi || 'ligne') + '(s) à quantité 0 masquée(s) par le filtre <strong>Actif</strong>. '
+    + 'Cliquez <strong>Inactif</strong> ou <strong>Tout</strong> pour les voir.</div>';
 }
 
 /* Une ligne de stock est-elle visible pour un mois donné ? Oui si elle a été
@@ -18531,9 +18645,15 @@ function render_articles() {
     var _sy = syncProduitsFinisFromIndex();
     if (_sy.crees > 0) toast('📑 ' + _sy.crees + ' produit(s) récupéré(s) de la Nomenclature');
   } catch (eSy) {}
-  /* Le catalogue produits ne liste ni les consommables ni les divers :
-     ils se gèrent dans Articles > Consommables & Divers (page articles-conso). */
-  var articles = (getArticlesActifs() || []).filter(function(a) { return ['consum', 'consommable', 'consommables', 'divers', 'diver'].indexOf(String(a.categorie || '').toLowerCase()) === -1; });
+  var idxPf = pfIndexCodes();
+  var articles = (getArticlesActifs() || []).filter(function(a) {
+    if (['consum', 'consommable', 'consommables', 'divers', 'diver'].indexOf(String(a.categorie || '').toLowerCase()) !== -1) return false;
+    /* Source unique : seuls les produits finis présents dans l'Index (Nomenclature) sont affichés */
+    if (String(a.categorie || '').toLowerCase() === 'finished') {
+      if (idxPf) return !!idxPf[pfNormCode(a.code)];
+    }
+    return true;
+  });
   var composants = getSection('composants', []) || [];
   /* Filtre par destination (ex : MONDI ABIDJAN, SIVEM...) */
   var dests = {};
@@ -19275,6 +19395,9 @@ function diagnosticEcartsPF() {
 /* Resynchronise le catalogue sur la Nomenclature, en levant le blocage des
    codes supprimes localement : c'est la seule facon de les reintegrer. */
 function resynchroniserCatalogue() {
+  try {
+    if (typeof triSyncHarmoniserTout === 'function') triSyncHarmoniserTout();
+  } catch(eTri) {}
   var avant = diagnosticEcartsPF();
   var cibles = (avant.indexSeulement || []).map(function (c) { return pfNormCode(c); });
   var n = 0;
@@ -19446,6 +19569,9 @@ function pfExplDe(idxCode) {
 function syncProduitsFinisFromIndex() {
   var res = { crees: 0, prixMaj: 0, supprimes: 0, liens: 0, doublons: [], horsIndex: [] };
   try {
+    if (typeof triSyncHarmoniserTout === 'function') {
+      try { triSyncHarmoniserTout(); } catch (eTri) {}
+    }
     var arts = getArticles();
     var idxArts = idxNomenclature();
     var change = false;
@@ -23694,14 +23820,30 @@ function deleteEpiAttribution(id) {
 /* === STOCK EPI === */
 function renderEpiStockTab() {
   var cat = getEpiCatalogue();
+  var totEpiQ = 0, totEpiZero = 0;
+  cat.forEach(function(e) {
+    var s = e.stock || 0;
+    totEpiQ += s;
+    if (s <= 0) totEpiZero++;
+  });
   var q = ((document.getElementById('epiStockSearch') || {}).value || '').toLowerCase();
   var filtered = q ? cat.filter(function(e) { return ((e.code||'') + ' ' + (e.designation||'')).toLowerCase().indexOf(q) !== -1; }) : cat;
   /* Filtre Actif/Inactif : par défaut, un EPI à quantité nulle ne s'affiche pas. */
   filtered = filtered.filter(function(e) { return stockEtatVisible('epiStockEtat', e.stock); });
-  var h = '<div style="display:flex;gap:.5rem;margin-bottom:1rem;align-items:center;flex-wrap:wrap">';
-  h += '<input type="text" id="epiStockSearch" placeholder="Rechercher..." oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px">';
+
+  /* 1. Bandeau Chiffres Clés (KPI) */
+  var h = stockKpiCardsHtml(totEpiQ, cat.length, totEpiZero, cat.length - totEpiZero, null, "setSection('epiStockEtat','inactif');renderPage()", "setSection('epiStockEtat','actif');renderPage()", stockEtatKey('epiStockEtat') === 'inactif', stockEtatKey('epiStockEtat') === 'actif', 'unités');
+
+  /* 2. Barre d'actions */
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;margin-bottom:.8rem">';
+  h += '<div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">';
+  h += '<input type="text" id="epiStockSearch" placeholder="🔍 Rechercher..." oninput="renderPage()" class="search-box" value="' + escH(q) + '" style="min-width:200px">';
   h += stockEtatBoutons('epiStockEtat');
-  h += '<button class="btn btn-accent" onclick="showAjusterStockEpiModal()" style="margin-left:auto">✏️ Ajuster Stock</button></div>';
+  h += '</div>';
+  h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
+  h += '<button class="btn btn-accent" onclick="showAjusterStockEpiModal()" style="font-size:.76rem;font-weight:700">✏️ Ajuster Stock</button>';
+  h += '</div></div>';
+
   if (!filtered.length) return h + '<div class="empty">Aucun EPI en stock</div>';
   h += '<div class="card"><table><tr><th>Équipement</th><th style="text-align:right">Quantité</th><th style="text-align:right">Min. Requis</th><th>État du Stock</th><th>Dernière MAJ</th><th>Actions</th></tr>';
   filtered.forEach(function(e) {
@@ -24894,9 +25036,12 @@ var _sidebarPinned = false;
 var _sbExpandTime = 0;
 
 function initSidebarState() {
-  try { _sidebarCollapsed = localStorage.getItem('mdb_sidebarCollapsed') === '1'; } catch(e) {}
   try { _sidebarPinned = localStorage.getItem('mdb_sidebarPinned') === '1'; } catch(e) {}
-  _sidebarCollapsed = true;
+  try {
+    var storedCol = localStorage.getItem('mdb_sidebarCollapsed');
+    _sidebarCollapsed = storedCol !== null ? (storedCol === '1') : false;
+  } catch(e) {}
+  if (_sidebarPinned) _sidebarCollapsed = false;
 
   var sb = document.getElementById('sidebar');
   if (sb) {
