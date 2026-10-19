@@ -8,7 +8,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script>
-window.__APP_VERSION='2026-10-19-249';
+window.__APP_VERSION='2026-10-19-250';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -10073,6 +10073,73 @@ function prodSplitEcrire(uid, docPartiel, identity) {
     throw e;
   });
 }
+/* AVANT ENVOI : anti-ecrasement des saisies concurrentes.
+   prodSplitEcrire fait un upsert par ligne qui REMPLACE la donnee : si ma
+   section est sale (ecrite il y a 2 min) alors qu'un autre poste vient d'y
+   ajouter un brouillon de fiche, mon envoi ecrase son ajout — et l'autre
+   poste ne voit jamais ma fiche.
+   Juste avant l'envoi, on relit donc (frais, hors cache 30 s) les lignes
+   cloud des sections sale et on fait une union local-gagnant par id :
+   mes items restent tels quels, les items ajoutes par l'autre poste sont
+   CONSERVES et partent avec mon envoi.
+   Erreur silencieuse : le push continue avec l'ancien contenu (comportement
+   d'avant) plutot que d'etre bloque. */
+function prodFusionnerSectionsAvantEnvoi(uid) {
+  try {
+    var sb = prodSb();
+    if (!sb || !uid) return Promise.resolve();
+    var dirty = Object.keys(_prodDirtySections || {});
+    var cles = [];
+    for (var i = 0; i < dirty.length; i++) {
+      var sk = dirty[i];
+      if (!sk || sk === '__prodUpdatedAt' || prodIsUiKey(sk)) continue;
+      var lv = getDB()[sk];
+      if (Array.isArray(lv) && lv.length) cles.push('mdb_production.' + sk);
+    }
+    if (!cles.length) return Promise.resolve();
+    return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).in('cle', cles).then(function(r) {
+      if (r.error) throw r.error;
+      var rows = r.data || [];
+      if (!rows.length) return;
+      var local2 = getDB();
+      var changed = false;
+      for (var j = 0; j < rows.length; j++) {
+        var rw = rows[j];
+        if (!rw || typeof rw.cle !== 'string' || rw.cle.indexOf('mdb_production.') !== 0) continue;
+        var sec = rw.cle.slice('mdb_production.'.length);
+        if (!sec || !Array.isArray(local2[sec]) || !Array.isArray(rw.data)) continue;
+        /* Union local-gagnant : mes items restent tels quels (meme en cas de
+           conflit — c'est MON envoi qui repart, echouer sur mon edition serait
+           un recul) ; les items distants inconnus localement sont ajoutes.
+           (prodFusionTrois sansBase ferait l'inverse : cloud gagnant — bon
+           pour le pull, faux ici.) */
+        var seenL = {}, merged = [], jj;
+        for (jj = 0; jj < local2[sec].length; jj++) {
+          var li = local2[sec][jj];
+          merged.push(li);
+          try { if (li && li.id !== undefined && li.id !== null && li.id !== '') seenL['id:' + String(li.id)] = true; } catch(eL) {}
+        }
+        var addD = false;
+        for (jj = 0; jj < rw.data.length; jj++) {
+          var ci = rw.data[jj];
+          if (!ci || typeof ci !== 'object') continue;
+          var cid = null;
+          try { if (ci.id !== undefined && ci.id !== null && ci.id !== '') cid = 'id:' + String(ci.id); } catch(eC) {}
+          if (cid && seenL[cid]) continue;
+          merged.push(ci);
+          if (cid) seenL[cid] = true;
+          addD = true;
+        }
+        if (addD) { local2[sec] = merged; changed = true; }
+      }
+      if (!changed) return;
+      try { setDB(local2); } catch(eF) {}
+      /* Le cache cloud reflete l'ancienne version : on le jette pour que le
+         prochain pull relise l'etat fraiche (avec les items fusionnes). */
+      try { window._prodCloudCache = null; } catch(eFC) {}
+    }).catch(function() {});
+  } catch (eFV) { return Promise.resolve(); }
+}
 function prodPushNow() {
   try { if (_prodPushT) { clearTimeout(_prodPushT); _prodPushT = null; } } catch(e) {}
   if (_prodPushing || !_prodDirty) return;
@@ -10097,7 +10164,10 @@ function prodPushNow() {
     }
   } catch (eCP2) { _lecP2 = null; }
   if (!_lecP2) _lecP2 = prodSplitLireCles(uid, ['mdb_dettesFournisseurs'], true);
-  _lecP2.then(function(res) {
+  /* Fusion fraiche des sections sales AVANT le premier getDB() du payload :
+     sans elle, une section sale ecrase les ajouts concurrents des autres postes. */
+  Promise.all([_lecP2, prodFusionnerSectionsAvantEnvoi(uid)]).then(function(toutP) {
+    var res = toutP[0];
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
     var cloudData = row.data || {};

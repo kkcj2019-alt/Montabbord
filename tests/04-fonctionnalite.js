@@ -12908,6 +12908,31 @@ function run(rapport) {
     rapport.ko('Demandes de semi-finis : lecture impossible (' + eDs.message + ')');
   }
 
+  /* Controle statique : synchro Exploitation — le push ne doit pas ecraser
+     les saisies concurrentes des autres postes. prodSplitEcrire remplace la
+     ligne de section (upsert) : sans fusion fraiche avant envoi, une section
+     sale locale ecrase le brouillon qu'un autre poste vient d'ajouter dans
+     le cloud (fiche visible chez X, invisible chez Y). prodPushNow appelle
+     prodFusionnerSectionsAvantEnvoi (relit les lignes cloud des sections
+     sales, union local-gagnant par id) avant de construire le payload. */
+  try {
+    const fsAf = require('fs');
+    const pathAf = require('path');
+    const srcAf = fsAf.readFileSync(pathAf.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const okDefs = srcAf.indexOf('function prodFusionnerSectionsAvantEnvoi(') !== -1;
+    const okAppel = srcAf.indexOf('Promise.all([_lecP2, prodFusionnerSectionsAvantEnvoi(uid)])') !== -1;
+    const okUnion = srcAf.indexOf('Union local-gagnant') !== -1;
+    const okEcriture = srcAf.indexOf("sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).in('cle', cles)") !== -1;
+    const okCache = srcAf.indexOf('window._prodCloudCache = null') !== -1;
+    if (okDefs && okAppel && okUnion && okEcriture && okCache) {
+      rapport.ok('Synchro Exploitation : push anti-écrasement — fusion fraîche des sections sales avant envoi (brouillon concurrent conservé)');
+    } else {
+      rapport.ko('Synchro Exploitation anti-écrasement — defs=' + okDefs + ' appel=' + okAppel + ' union=' + okUnion + ' ecriture=' + okEcriture + ' cache=' + okCache);
+    }
+  } catch (eAf) {
+    rapport.ko('Synchro Exploitation anti-écrasement : lecture impossible (' + eAf.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
