@@ -12954,6 +12954,42 @@ function run(rapport) {
     rapport.ko('Transferts caisse code connexion : lecture impossible (' + eTc.message + ')');
   }
 
+  /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
+     pages internes (derriere mot de passe) en noindex et retirees du sitemap,
+     sitemap/robots referencant uniquement les pages publiques. */
+  try {
+    const fsSeo = require('fs');
+    const pathSeo = require('path');
+    const pub = pathSeo.join(__dirname, '..', 'public');
+    const rd = (f) => fsSeo.readFileSync(pathSeo.join(pub, f), 'utf8');
+    const idxSeo = rd('index.html');
+    const vitSeo = rd('vitrine.html');
+    const okImages = fsSeo.existsSync(pathSeo.join(pub, 'logo-512.png'))
+      && fsSeo.statSync(pathSeo.join(pub, 'logo-512.png')).size > 1000
+      && fsSeo.existsSync(pathSeo.join(pub, 'favicon.png'))
+      && fsSeo.statSync(pathSeo.join(pub, 'favicon.png')).size > 100;
+    const okOg = idxSeo.indexOf('property="og:image" content="https://montabbord.web.app/logo-512.png"') !== -1
+      && vitSeo.indexOf('property="og:image" content="https://montabbord.web.app/logo-512.png"') !== -1;
+    const okFavicon = idxSeo.indexOf('rel="icon" type="image/png" href="/favicon.png"') !== -1
+      && vitSeo.indexOf('rel="icon" type="image/png" href="/favicon.png"') !== -1;
+    const okNoindex = ['production.html', 'paye.html', 'fusion.html', 'restaurer.html'].every((f) => rd(f).indexOf('name="robots" content="noindex, nofollow"') !== -1);
+    const okSitemap = (function () {
+      const sm = rd('sitemap.xml');
+      return sm.indexOf('vitrine.html') !== -1
+        && sm.indexOf('paye.html') === -1
+        && sm.indexOf('production.html') === -1
+        && sm.indexOf('restaurer.html') === -1;
+    })();
+    const okRobots = rd('robots.txt').indexOf('Sitemap: https://montabbord.web.app/sitemap.xml') !== -1;
+    if (okImages && okOg && okFavicon && okNoindex && okSitemap && okRobots) {
+      rapport.ok('SEO : og:image + favicon, pages internes en noindex, sitemap/robots limités aux pages publiques');
+    } else {
+      rapport.ko('SEO — images=' + okImages + ' og=' + okOg + ' favicon=' + okFavicon + ' noindex=' + okNoindex + ' sitemap=' + okSitemap + ' robots=' + okRobots);
+    }
+  } catch (eSeo) {
+    rapport.ko('SEO : lecture impossible (' + eSeo.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
