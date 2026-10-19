@@ -8,7 +8,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script>
-window.__APP_VERSION='2026-10-18-247';
+window.__APP_VERSION='2026-10-19-249';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -17538,9 +17538,9 @@ function demarrerInventaire() { window._invShowForm = true; window._invFromDraft
 function fermerInventaireForm() { window._invShowForm = false; renderPage(); }
 function render_inventory() {
   var _gmInv = getGlobalMonth();
-  /* Les brouillons restent visibles quel que soit le mois affiché (sinon on
-     ne les retrouve plus pour continuer), les validés suivent le filtre. */
-  var invs = getInventories().filter(function(x) { return (x && x.statut === 'brouillon') || !_gmInv || (x.month || '') === _gmInv; }).slice().reverse();
+  /* L'historique d'inventaire affiche tous les inventaires enregistrés (brouillons et validés)
+     sans être masqués par le sélecteur Mois du header, car l'inventaire est piloté par la date choisie. */
+  var invs = getInventories().slice().reverse();
   var _mn = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
   var now = new Date();
   var months = [];
@@ -17839,6 +17839,57 @@ function stockZeroBanner(n, quoi) {
 /* Une ligne de stock est-elle visible pour un mois donné ? Oui si elle a été
    créée au plus tard ce mois-là (ou si elle est indatable : on la garde).
    Sans cela, l'inventaire de septembre listait aussi les achats d'octobre. */
+/* Helper : Calcul du volume bois unitaire d'un produit fini / palette à partir de ses composants
+   (logique métier : somme de chaque composant bois latte, plot, etc. : qté × L × l × e / 1000000,
+   et NON la boîte extérieure L × l × e de la palette). */
+function pfVolumeBoisComposants(it) {
+  if (!it) return 0;
+  var artId = it.article_id;
+  var code = String(it.code || it.ref || '').trim();
+  if (!artId && code && typeof getArticles === 'function') {
+    try {
+      var a = getArticles().find(function(x) {
+        return x && ((x.code && String(x.code).trim().toUpperCase() === code.toUpperCase()) || String(x.id) === code);
+      });
+      if (a) artId = a.id;
+    } catch (eA) {}
+  }
+  if (artId && typeof acNomenclatureArticle === 'function') {
+    try {
+      var nom = acNomenclatureArticle(artId);
+      if (nom && nom.volNet > 0) return nom.volNet;
+    } catch (eNom) {}
+  }
+  try {
+    var comps = (typeof getSection === 'function' ? getSection('composants', []) : []) || [];
+    var artComps = comps.filter(function(c) {
+      if (!c) return false;
+      if (artId && String(c.article_id) === String(artId)) return true;
+      if (code && c.article_code && String(c.article_code).trim().toUpperCase() === code.toUpperCase()) return true;
+      if (code && c.code_article && String(c.code_article).trim().toUpperCase() === code.toUpperCase()) return true;
+      return false;
+    });
+    var vol = 0;
+    artComps.forEach(function(c) {
+      var typ = String(c.type || '').toUpperCase();
+      if (typ === 'LATTE' || typ === 'PLOT' || typ === 'CP') {
+        if (typeof acCompBoisVolume === 'function') {
+          var bv = acCompBoisVolume(c);
+          if (bv && bv.volTot > 0) vol += bv.volTot;
+        } else {
+          var q = parseFloat(c.quantity != null ? c.quantity : c.qte) || 1;
+          var L = parseFloat(c.length || c.long) || 0;
+          var W = parseFloat(c.width || c.larg) || 0;
+          var T = parseFloat(c.thickness || c.epais) || 0;
+          if (L > 0 && W > 0 && T > 0) vol += q * (L * W * T / 1000000);
+        }
+      }
+    });
+    if (vol > 0) return vol;
+  } catch (eC) {}
+  return 0;
+}
+
 function stockVisibleMois(mois, s) {
   if (!mois) return true;
   var c = String((s && (s.created_at || s.date)) || '');
@@ -17890,23 +17941,91 @@ function calcInventoryItems(month, dateMax) {
     var q = parseFloat(e.quantite) || 0;
     items.push({ code: e.code, nom: e.designation || e.code, categorie: 'Semi-fini', source: 'Semi-fini', emplacement: '', dimensions: dims, volume: parseFloat(e.volumeTotal) || 0, theo_qte: q, real_qte: q, ref: e.code, store: 'stockSemi', storeIdx: items.length });
   });
+  /* Palettes : répertorie toutes les références de palettes, stock théorique calculé ≤ dateMax */
+  var _palVus = {}, _palOrdre = [];
   (getStockPalettes() || []).forEach(function(s) {
-    if (!visible(s)) return;
+    if (!s) return;
     var _a = invArt(s);
-    items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Palette', source: 'Palette', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockPalettes', storeIdx: items.length, ctype: _a.category_type || '' });
+    var _c = String(s.code || _a.code || '').trim().toUpperCase();
+    if (!_c || _c === '-') return;
+    if (!_palVus[_c]) {
+      _palVus[_c] = { code: s.code || _a.code, nom: s.nom || s.designation || _a.designation || _c, emplacement: s.emplacement || '', theo: 0, ctype: _a.category_type || '' };
+      _palOrdre.push(_c);
+    }
+    if (visible(s)) _palVus[_c].theo += parseFloat(s.quantite) || 0;
   });
-  /* Produits finis : THEORIQUE = stock du produit (une ligne par produit),
-     memes chiffres que la fiche — comme les semi-finis ci-dessus. Le filtre de
-     date s'applique AVANT le regroupement pour ne compter que les ecritures
-     d'avant l'inventaire. */
-  pfStockLignes(stockAvecCatalogue('stock-finished', getStockFinished() || []).filter(visible)).forEach(function(s) {
+  _palOrdre.forEach(function(k) {
+    var p = _palVus[k];
+    var uVol = pfVolumeBoisComposants({ code: p.code });
+    items.push({ code: p.code, nom: p.nom, categorie: 'Palette', source: 'Palette', emplacement: p.emplacement, dimensions: '', volume: uVol, theo_qte: Math.round(p.theo * 1000) / 1000, real_qte: Math.round(p.theo * 1000) / 1000, ref: p.code, store: 'stockPalettes', storeIdx: items.length, ctype: p.ctype });
+  });
+
+  /* Produits finis : on part de TOUS les produits finis existants (catalogue/nomenclature + stock).
+     Pour chaque produit :
+       - quantité théorique = cumul des entrées/sorties ≤ dateMax (ou 0 si aucune écriture antérieure) ;
+       - volume unitaire = somme des volumes des composants bois (lattes, plots, CP) ;
+       - l'article figure TOUJOURS dans l'inventaire afin de permettre la saisie du stock réel à la date indiquée ! */
+  var _pfVus = {}, _pfOrdre = [];
+  function _pfAjoute(code, nom, artId, dims, ctype) {
+    var k = String(code || '').trim().toUpperCase();
+    if (!k || k === '-') return null;
+    if (!_pfVus[k]) {
+      _pfVus[k] = { code: code, nom: nom || code, article_id: artId || '', dimensions: dims || '', ctype: ctype || '', theo: 0, store: 'stockFinished' };
+      _pfOrdre.push(k);
+    } else {
+      if (artId && !_pfVus[k].article_id) _pfVus[k].article_id = artId;
+      if (nom && (!_pfVus[k].nom || _pfVus[k].nom === _pfVus[k].code)) _pfVus[k].nom = nom;
+      if (dims && !_pfVus[k].dimensions) _pfVus[k].dimensions = dims;
+      if (ctype && !_pfVus[k].ctype) _pfVus[k].ctype = ctype;
+    }
+    return _pfVus[k];
+  }
+
+  (getStockFinished() || []).forEach(function(s) {
+    if (!s) return;
     var _a = invArt(s);
+    var _c = stkCode(s) || (s && s.code) || _a.code || '';
+    var _n = stkDes(s) || (s && s.designation) || _a.designation || _c;
     var _dims = s.dimensions || _a.dimensions || '';
-    var _l = parseFloat(s.length) || parseFloat(_a.length) || 0;
-    var _w = parseFloat(s.width) || parseFloat(_a.width) || 0;
-    var _t = parseFloat(s.thickness) || parseFloat(_a.thickness) || 0;
-    if (!_dims && _l > 0 && _w > 0 && _t > 0) _dims = _l + 'x' + _w + 'x' + _t;
-    items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Produit fini', source: 'Produit fini', emplacement: s.emplacement || '', dimensions: _dims, volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockFinished', storeIdx: items.length, ctype: _a.category_type || '' });
+    var g = _pfAjoute(_c, _n, s.article_id || _a.id, _dims, _a.category_type || '');
+    if (g && visible(s)) {
+      g.theo += parseFloat(s.quantite) || 0;
+    }
+  });
+
+  try {
+    var idxPf = pfIndexCodes();
+    (getArticles() || []).forEach(function(a) {
+      if (!a || !a.code) return;
+      var cat = String(a.categorie || '').toLowerCase();
+      var typ = String(a.typeArticle || '').toLowerCase();
+      var isPf = (cat === 'finished' || cat === 'produit_fini' || typ === 'produit_fini');
+      if (idxPf && idxPf[String(a.code).trim().toUpperCase()]) isPf = true;
+      if (!isPf) return;
+      _pfAjoute(a.code, a.designation || a.code, a.id, a.dimensions || '', a.category_type || '');
+    });
+  } catch (eArtPf) {}
+
+  _pfOrdre.forEach(function(k) {
+    var g = _pfVus[k];
+    if (!g) return;
+    var uVol = pfVolumeBoisComposants({ article_id: g.article_id, code: g.code });
+    items.push({
+      code: g.code,
+      nom: g.nom,
+      categorie: 'Produit fini',
+      source: 'Produit fini',
+      emplacement: '',
+      dimensions: g.dimensions || '',
+      volume: uVol,
+      theo_qte: Math.round(g.theo * 1000) / 1000,
+      real_qte: Math.round(g.theo * 1000) / 1000,
+      ref: g.code,
+      article_id: g.article_id,
+      store: 'stockFinished',
+      storeIdx: items.length,
+      ctype: g.ctype || ''
+    });
   });
   stockAvecCatalogue('stock-merch', getStockMerch() || []).forEach(function(s) {
     var _a = invArt(s);
@@ -18003,11 +18122,17 @@ function calcInventoryItems(month, dateMax) {
     if (_g.empl) it.emplacement = _g.empl;
     return true;
   });
-  /* Volume unitaire derive des dimensions (LxLxT en cm -> m3) quand la ligne
-     n'en porte pas (produits finis, palettes, marchandises...). Sans ca, la
-     colonne VOLUME restait « - » et le total 0.000 meme apres saisie du reel. */
+  /* Volume unitaire dérivé :
+     - Pour les produits finis et palettes : UNIQUEMENT le volume bois issu des composants (lattes + plots).
+       JAMAIS le volume géométrique extérieur de la palette (longueur × largeur × épaisseur de l'article).
+     - Pour les matières premières et débits : L × l × e en cm → m³. */
   items.forEach(function(it) {
     if (!it) return;
+    if (it.store === 'stockFinished' || it.categorie === 'Produit fini' || it.store === 'stockPalettes' || it.categorie === 'Palette') {
+      var vc = pfVolumeBoisComposants(it);
+      it.volume = vc;
+      return;
+    }
     if (parseFloat(it.volume) > 0) return;
     var _m = String(it.dimensions || '').match(/([\d.,]+)\s*x\s*([\d.,]+)\s*x\s*([\d.,]+)/i);
     if (!_m) return;
@@ -24882,6 +25007,9 @@ function invPaquetsCartons(unites, it) {
 function invItemDimsAndVol(it) {
   var l = 0, w = 0, t = 0;
   if (!it) return { l: 0, w: 0, t: 0, hasDims: false, dimStr: '-', unitVol: 0 };
+
+  var isPf = (it.store === 'stockFinished' || it.categorie === 'Produit fini' || it.source === 'Produit fini' || it.store === 'stockPalettes' || it.categorie === 'Palette');
+
   if (parseFloat(it.length || it.longueur) > 0) l = parseFloat(it.length || it.longueur);
   if (parseFloat(it.width || it.largeur) > 0) w = parseFloat(it.width || it.largeur);
   if (parseFloat(it.thickness || it.epaisseur) > 0) t = parseFloat(it.thickness || it.epaisseur);
@@ -24922,9 +25050,22 @@ function invItemDimsAndVol(it) {
 
   var hasDims = (l > 0 && w > 0 && t > 0);
   var dimStr = hasDims ? (l + ' × ' + w + ' × ' + t + ' cm') : '-';
-  var unitVol = hasDims ? (l * w * t / 1000000) : 0;
-  if (!unitVol && parseFloat(it.volume) > 0 && parseFloat(it.real_qte || it.theo_qte) > 0) {
-    unitVol = parseFloat(it.volume) / (parseFloat(it.real_qte || it.theo_qte) || 1);
+  var unitVol = 0;
+
+  if (isPf) {
+    /* Produits finis / palettes : le volume DOIT suivre la nomenclature des composants
+       (lattes × vol + plots × vol...), et NON les dimensions extérieures de la palette. */
+    unitVol = pfVolumeBoisComposants(it);
+    if (!unitVol && parseFloat(it.volume) > 0) {
+      /* Si it.volume a déjà été calculé via les composants */
+      unitVol = parseFloat(it.volume);
+    }
+  } else {
+    /* Matières premières, débits, plots, etc. : volume volumique direct */
+    unitVol = hasDims ? (l * w * t / 1000000) : 0;
+    if (!unitVol && parseFloat(it.volume) > 0 && parseFloat(it.real_qte || it.theo_qte) > 0) {
+      unitVol = parseFloat(it.volume) / (parseFloat(it.real_qte || it.theo_qte) || 1);
+    }
   }
   return { l: l, w: w, t: t, hasDims: hasDims, dimStr: dimStr, unitVol: unitVol };
 }
