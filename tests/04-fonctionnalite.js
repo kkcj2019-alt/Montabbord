@@ -12577,22 +12577,23 @@ function run(rapport) {
     rapport.ko('Exploitation tableau de bord : controle statique illisible (' + eR.message + ')');
   }
 
-  /* Controle statique : le bouton « Paramètres » a été retiré de la barre
-     d outils figée de l Index (ancien #paramsBtn -> navigateTo('parametres'))
-     et du pied de menu latéral d Exploitation (openMainParametres). Les
-     réglages restent accessibles par le menu Administration (page parametres). */
+  /* Controle statique : le bouton « Paramètres » (#paramsBtn) est présent
+     dans la barre d outils figée de l Index (navigateTo('parametres')). Il
+     avait été retiré dans 843ab6c, puis l utilisateur l a réclamé à nouveau.
+     Côté Exploitation (production.html), le pied de menu latéral reste sans
+     bouton Paramètres (openMainParametres retiré) : réglages via Index. */
   try {
     const fsParams = require('fs');
     const pathParams = require('path');
     const srcIdx = fsParams.readFileSync(pathParams.join(__dirname, '..', 'public', 'index.html'), 'utf8');
     const srcProd = fsParams.readFileSync(pathParams.join(__dirname, '..', 'public', 'production.html'), 'utf8');
-    const okIdx = srcIdx.indexOf('id="paramsBtn"') === -1
-      && srcIdx.indexOf("navigateTo('parametres')") === -1;
+    const okIdx = srcIdx.indexOf('id="paramsBtn"') !== -1
+      && srcIdx.indexOf("navigateTo('parametres')") !== -1;
     const okProd = srcProd.indexOf('onclick="openMainParametres()"') === -1
       && srcProd.indexOf('<span class="label">Param\u00e8tres</span>') === -1;
     const okPage = srcIdx.indexOf('parametres: renderParametres') !== -1;
     if (okIdx && okProd && okPage) {
-      rapport.ok('Bouton Param\u00e8tres supprim\u00e9 (barre d outils Index + menu lat\u00e9ral Exploitation) ; page Administration > Param\u00e8tres toujours disponible');
+      rapport.ok('Bouton Param\u00e8tres present dans la barre Index ; absent du menu lat\u00e9ral Exploitation ; page Administration > Param\u00e8tres disponible');
     } else {
       rapport.ko('Bouton Param\u00e8tres — index=' + okIdx + ' exploitation=' + okProd + ' page=' + okPage);
     }
