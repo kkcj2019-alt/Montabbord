@@ -13954,6 +13954,10 @@ function render_stock_semi() {
   h += '<button class="btn" onclick="exportStockExcel()" title="Exporter vers Excel" style="font-size:.74rem">📊 Export</button>';
   h += '<button class="btn btn-accent" onclick="showAddStock(\'stock-semi\')" style="font-size:.76rem;font-weight:700">+ Nouveau</button>';
   h += '</div></div>';
+  /* Registre des demandes : « demande produite » — le besoin est demande puis
+     suivi jusqu'a sa production (sans impacter le stock, qui se saisit
+     separement via + Nouveau). */
+  try { h += demandesSemiHtml(); } catch (eDS) {}
   try {
     var _gmSemi = getGlobalMonth() || '';
     if (_gmSemi) {
@@ -13990,6 +13994,139 @@ function render_stock_semi() {
   if (!list.length) h += '<div class="empty">Aucun semi-fini</div>';
   h += '</div>';
   return h;
+}
+
+/* ==================== DEMANDES DE SEMI-FINIS (« demande produite ») ============
+   Un besoin de semi-fini est DEPOSE (en attente) puis SUivi jusqu'a sa
+   production (date + quantite produite). Le stock n'est pas touche : la
+   saisie de l'entree reste dans « + Nouveau » de la fiche. */
+function demandesSemiList() { var v = getSection('demandesSemi', []); return Array.isArray(v) ? v : []; }
+function demandesSemiSet(v) { setSection('demandesSemi', v); }
+function demandesSemiStatutLabel(st) {
+  if (st === 'produite') return '🟢 Produite';
+  if (st === 'annulee') return '⚪ Annulée';
+  return '🟠 En attente';
+}
+function demandesSemiEcritureOk() {
+  try { return (typeof prodCanWrite !== 'function') || prodCanWrite(prodPageKey('stock')); } catch (e) { return true; }
+}
+function demandesSemiHtml() {
+  var list = demandesSemiList();
+  var enAttente = 0;
+  list.forEach(function (d) { if (d && d.statut === 'attente') enAttente++; });
+  var h = '<div class="card" style="margin-bottom:.8rem">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.5rem">';
+  h += '<h3 style="margin:0;font-size:.95rem">📋 Demandes de semi-finis <span style="font-size:.72rem;color:var(--dim);font-weight:400">(demande → produite)</span></h3>';
+  h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
+  h += '<span style="font-size:.74rem;color:var(--dim)">' + enAttente + ' en attente · ' + list.length + ' au total</span>';
+  if (demandesSemiEcritureOk()) h += '<button class="btn btn-accent" onclick="demandesSemiOuvrirModal()" style="font-size:.76rem;font-weight:700">➕ Demande</button>';
+  h += '</div></div>';
+  if (!list.length) {
+    h += '<div class="empty" style="padding:.7rem;font-size:.8rem">Aucune demande — déposez ici les besoins en semi-finis (débit) avant de pointer la production.</div></div>';
+    return h;
+  }
+  h += '<div style="overflow-x:auto"><table style="width:100%;font-size:.78rem"><tr><th>Date</th><th>Article</th><th style="text-align:right">Qté demandée</th><th>Besoin pour</th><th>Statut</th><th>Actions</th></tr>';
+  list.slice().reverse().forEach(function (d) {
+    if (!d) return;
+    h += '<tr>';
+    h += '<td style="white-space:nowrap">' + escH(fmtD(d.date || '')) + '</td>';
+    h += '<td><strong>' + escH(d.code || '-') + '</strong>' + (d.designation ? ' — ' + escH(d.designation) : '') + '</td>';
+    h += '<td style="text-align:right;font-weight:700">' + fmt(parseFloat(d.qte_demandee) || 0) + '</td>';
+    h += '<td>' + escH(d.pour || '-') + '</td>';
+    h += '<td>' + demandesSemiStatutLabel(d.statut);
+    if (d.statut === 'produite' && d.date_production) {
+      h += '<br><span style="font-size:.68rem;color:var(--dim)">' + escH(fmtD(d.date_production)) + ' · ' + fmt(parseFloat(d.qte_produite) || 0) + ' produit(s)</span>';
+    }
+    h += '</td>';
+    h += '<td style="white-space:nowrap">';
+    var _id = String(d.id || '').replace(/'/g, "\\'");
+    if (demandesSemiEcritureOk() && d.statut === 'attente') {
+      h += '<button class="btn btn-green" onclick="demandesSemiMarquerProduite(\'' + _id + '\')" style="font-size:.7rem;padding:2px 8px" title="Marquer comme produite">✔ Produite</button> ';
+      h += '<button class="btn" onclick="demandesSemiAnnuler(\'' + _id + '\')" style="font-size:.7rem;padding:2px 8px" title="Annuler la demande">✖</button>';
+    }
+    if (demandesSemiEcritureOk() && d.statut !== 'attente') {
+      h += '<button class="btn" onclick="demandesSemiSupprimer(\'' + _id + '\')" style="font-size:.7rem;padding:2px 8px;color:#dc2626" title="Supprimer">🗑️</button>';
+    }
+    h += '</td></tr>';
+  });
+  h += '</table></div></div>';
+  return h;
+}
+function demandesSemiOuvrirModal() {
+  var semis = [];
+  try { semis = semiAggregate(getGlobalMonth()); } catch (e) {}
+  var opts = semis.map(function (e) {
+    return '<option value="' + escH(String(e.code || '')) + '">' + escH((e.code || '-') + (e.designation ? ' — ' + e.designation : '')) + '</option>';
+  }).join('');
+  var m = '<h3 style="margin:0 0 .8rem;font-size:1.05rem;font-weight:800">Nouvelle demande de semi-fini</h3>';
+  m += '<div class="form-group"><label>Date *</label><input type="date" id="dsDate" value="' + today() + '"></div>';
+  m += '<div class="form-group"><label>Article semi-fini *</label><select id="dsCode">' + (opts || '<option value="">Aucun semi-fini au stock</option>') + '</select></div>';
+  m += '<div class="form-group"><label>Quantité demandée *</label><input type="number" id="dsQte" min="0" step="any" placeholder="Ex : 120"></div>';
+  m += '<div class="form-group"><label>Besoin pour</label><input type="text" id="dsPour" placeholder="N° fiche de production, client, zone..."></div>';
+  m += '<div class="form-group"><label>Observations</label><textarea id="dsObs" rows="2" placeholder="Facultatif"></textarea></div>';
+  m += '<div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem"><button class="btn" onclick="closeModal()">Annuler</button><button class="btn btn-accent" onclick="demandesSemiEnregistrer()">✅ Enregistrer</button></div>';
+  openModal(m);
+}
+function demandesSemiEnregistrer() {
+  var code = (document.getElementById('dsCode') || {}).value || '';
+  var qte = parseFloat((document.getElementById('dsQte') || {}).value) || 0;
+  var date = (document.getElementById('dsDate') || {}).value || today();
+  var pour = ((document.getElementById('dsPour') || {}).value || '').trim();
+  var obs = ((document.getElementById('dsObs') || {}).value || '').trim();
+  if (!code) { toast('Choisissez un article semi-fini', 'error'); return; }
+  if (!(qte > 0)) { toast('Quantité demandée invalide', 'error'); return; }
+  var designation = '';
+  try {
+    var found = semiAggregate('').find(function (e) { return String(e.code || '') === String(code); });
+    if (found) designation = found.designation || '';
+  } catch (eD) {}
+  var list = demandesSemiList();
+  list.push({ id: 'ds_' + Date.now() + '_' + Math.floor(Math.random() * 1000), date: date, code: code, designation: designation, qte_demandee: qte, pour: pour, obs: obs, statut: 'attente', created_at: new Date().toISOString() });
+  demandesSemiSet(list);
+  closeModal();
+  toast('Demande de semi-fini enregistrée (en attente de production)');
+  renderPage();
+}
+function demandesSemiById(id) { return demandesSemiList().find(function (d) { return d && String(d.id) === String(id); }) || null; }
+function demandesSemiMarquerProduite(id) {
+  var d = demandesSemiById(id);
+  if (!d) { toast('Demande introuvable', 'error'); return; }
+  var m = '<h3 style="margin:0 0 .8rem;font-size:1.05rem;font-weight:800">Marquer la demande comme produite</h3>';
+  m += '<p style="font-size:.8rem;color:var(--dim);margin:0 0 .8rem">' + escH(d.code || '') + (d.designation ? ' — ' + escH(d.designation) : '') + ' · demandé le ' + escH(fmtD(d.date || '')) + '</p>';
+  m += '<div class="form-group"><label>Quantité produite</label><input type="number" id="dsQteProd" min="0" step="any" value="' + (parseFloat(d.qte_demandee) || 0) + '"></div>';
+  m += '<div class="form-group"><label>Date de production</label><input type="date" id="dsDateProd" value="' + today() + '"></div>';
+  m += '<div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem"><button class="btn" onclick="closeModal()">Annuler</button><button class="btn btn-accent" onclick="demandesSemiValiderProduite(\'' + String(d.id).replace(/'/g, "\\'") + '\')">✅ Valider</button></div>';
+  openModal(m);
+}
+function demandesSemiValiderProduite(id) {
+  var list = demandesSemiList();
+  var d = list.find(function (x) { return x && String(x.id) === String(id); });
+  if (!d) { toast('Demande introuvable', 'error'); return; }
+  d.qte_produite = parseFloat((document.getElementById('dsQteProd') || {}).value) || 0;
+  d.date_production = (document.getElementById('dsDateProd') || {}).value || today();
+  d.statut = 'produite';
+  demandesSemiSet(list);
+  closeModal();
+  toast('Demande marquée comme produite');
+  renderPage();
+}
+function demandesSemiAnnuler(id) {
+  confirmerInApp('Annuler cette demande de semi-fini ?', { titre: 'Annuler la demande', valider: 'Annuler la demande' }, function () {
+    var list = demandesSemiList();
+    var d = list.find(function (x) { return x && String(x.id) === String(id); });
+    if (!d) return;
+    d.statut = 'annulee';
+    demandesSemiSet(list);
+    toast('Demande annulée');
+    renderPage();
+  });
+}
+function demandesSemiSupprimer(id) {
+  confirmerInApp('Supprimer définitivement cette demande ?', { titre: 'Supprimer', valider: 'Supprimer' }, function () {
+    demandesSemiSet(demandesSemiList().filter(function (x) { return !(x && String(x.id) === String(id)); }));
+    toast('Demande supprimée');
+    renderPage();
+  });
 }
 
 /* ==================== STOCK MATIERE PREMIERE (façon ACSER) ==================== */

@@ -12881,6 +12881,33 @@ function run(rapport) {
     rapport.ko('Inventaire de caisse : lecture impossible (' + eCi.message + ')');
   }
 
+  /* Controle statique : le registre « Demandes de semi-finis » (demande
+     produite) dans l onglet Semi-finis du Stock — creation, suivi
+     attente -> produite, annulation et suppression. */
+  try {
+    const fsDs = require('fs');
+    const pathDs = require('path');
+    const srcDs = fsDs.readFileSync(pathDs.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const okDefs = srcDs.indexOf('function demandesSemiHtml(') !== -1
+      && srcDs.indexOf('function demandesSemiOuvrirModal(') !== -1
+      && srcDs.indexOf('function demandesSemiEnregistrer(') !== -1
+      && srcDs.indexOf('function demandesSemiMarquerProduite(') !== -1
+      && srcDs.indexOf('function demandesSemiValiderProduite(') !== -1;
+    const okAppel = srcDs.indexOf('try { h += demandesSemiHtml(); } catch (eDS) {}') !== -1;
+    const okStock = srcDs.indexOf("getSection('demandesSemi', [])") !== -1
+      && srcDs.indexOf("setSection('demandesSemi', v)") !== -1;
+    const okStatuts = srcDs.indexOf("statut: 'attente'") !== -1
+      && srcDs.indexOf("d.statut = 'produite'") !== -1;
+    const okNonDestructif = srcDs.indexOf('/* Registre des demandes') !== -1;
+    if (okDefs && okAppel && okStock && okStatuts && okNonDestructif) {
+      rapport.ok('Demandes de semi-finis : registre demande -> produite dans l onglet Semi-finis (sans impact stock)');
+    } else {
+      rapport.ko('Demandes de semi-finis — defs=' + okDefs + ' appel=' + okAppel + ' stock=' + okStock + ' statuts=' + okStatuts + ' nonDestructif=' + okNonDestructif);
+    }
+  } catch (eDs) {
+    rapport.ko('Demandes de semi-finis : lecture impossible (' + eDs.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
