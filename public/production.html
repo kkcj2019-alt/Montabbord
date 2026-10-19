@@ -2733,19 +2733,22 @@ function acEmpRemuneration(emp) {
 
 function acGuessPosteFromFonction(fn) {
   var s = String(fn || '').toLowerCase();
-  /* Règle utilisateur essentielle : les travailleurs dont la fonction est monteur, c'est eux qui font le clouage */
-  if (s.indexOf('mont') !== -1 || s.indexOf('clou') !== -1 || s.indexOf('assembl') !== -1) {
-    return 'monteur';
-  }
-  if (s.indexOf('machin') !== -1 || s.indexOf('scieur') !== -1 || s.indexOf('sciage') !== -1 || s.indexOf('debit') !== -1 || s.indexOf('affut') !== -1) {
-    return 'machiniste';
-  }
-  if (s.indexOf('manut') !== -1 || s.indexOf('approv') !== -1 || s.indexOf('charg') !== -1 || s.indexOf('aide') !== -1 || s.indexOf('ouvrier') !== -1 || s.indexOf('flux') !== -1) {
-    return 'manutentionnaire';
-  }
-  if (s.indexOf('chef') !== -1 || s.indexOf('direct') !== -1 || s.indexOf('magas') !== -1 || s.indexOf('admin') !== -1 || s.indexOf('compt') !== -1 || s.indexOf('superv') !== -1 || s.indexOf('secre') !== -1) {
-    return 'indirect';
-  }
+  if (s.normalize) { try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (eN) {} }
+  var t = s.replace(/[^a-z]/g, '');
+  /* SOURCE UNIQUE = la fonction declaree dans le module Paye : c'est elle
+     qui alimente le filtre « Monteur / Machiniste / Manutentionnaire » du
+     pointage. On ne devine PLUS sur un simple mot contenu dans l'intitule :
+     « Chef de montage », « Magasin montage », « Assistant clouage » n'ont
+     rien a voir avec les monteurs : les melanger dans la ligne Clouage
+     (FALLE, GOLI, SAMAILA, ETCHIEN, DOGBO, NDORI, KOFFI) etait faux. */
+  if (t === 'monteur' || t === 'monteurs') return 'monteur';
+  if (t === 'machiniste' || t === 'machinistes') return 'machiniste';
+  if (t === 'manutentionnaire' || t === 'manutentionnaires') return 'manutentionnaire';
+  if (t === 'indirect' || t === 'indirecte' || t === 'indirects') return 'indirect';
+  /* Variante explicite uniquement : « Monteur », « monteur clouage »,
+     « monteur(s) montage » — un qualificatif court, pas un autre metier. */
+  var m = t.match(/^(monteur|machiniste|manutentionnaire)([a-z]{0,10})$/);
+  if (m && !/(magasin|chef|assistant|aide|apprenti|stagiaire|responsable|supervis|principal)/.test(m[2])) return m[1];
   return 'indirect';
 }
 
@@ -2789,6 +2792,7 @@ function acGetPersonnelPointageList(targetDate) {
     var prev = selSaved[emp.id];
     var active = prev ? !!prev.actif : isPresent;
     var poste = prev ? prev.poste : acGuessPosteFromFonction(emp.fonction);
+    if (!prev && poste !== 'indirect' && emp.rendement !== true) poste = 'indirect';
     var hTravail = prev && prev.heures ? parseFloat(prev.heures) : (hPt || 8);
 
     list.push({
@@ -3846,6 +3850,11 @@ function acComputeLaborFromPointage(targetDate, J) {
 
 var nbPresentsTotal = 0;
   var nomsPresents = [];
+  var ptMont = acGetPointageMontagePeriode(targetDate, targetDate);
+  var ptMontLignes = (ptMont && Array.isArray(ptMont.lignes)) ? ptMont.lignes : (Array.isArray(ptMont) ? ptMont : []);
+  var idsMonteursActifs = {};
+  ptMontLignes.forEach(function(x) { if (x && x.employee_id) idsMonteursActifs[String(x.employee_id)] = true; });
+
   for (var i = 0; i < emps.length; i++) {
     var emp = emps[i];
     if (!emp || !emp.id) continue;
@@ -3863,7 +3872,15 @@ nbPresentsTotal++;
       if (hDep > hArr) hPt = Math.max(1, Math.min(12, hDep - hArr - (hDep - hArr >= 6 ? 1 : 0)));
     }
 
-    var poste = acGuessPosteFromFonction(emp.fonction);
+    var posteGuess = acGuessPosteFromFonction(emp.fonction);
+    if (posteGuess === 'monteur' && !idsMonteursActifs[String(emp.id)]) posteGuess = 'indirect';
+    /* Regle unique des trois postes de production (Clouage/Montage,
+       Manutentionnaire, Machiniste) : ils ne sont reels que pour les
+       employes AU RENDEMENT. Tout autre travailleur (monteur, manutentionnaire
+       ou machiniste paye au mois / au forfait) n'a pas de tarif a la piece :
+       il est compte en Main-d'oeuvre Indirecte. */
+    if (posteGuess !== 'indirect' && emp.rendement !== true) posteGuess = 'indirect';
+    var poste = posteGuess;
     var rem = acEmpRemuneration(emp);
 
     if (poste === 'monteur') {
