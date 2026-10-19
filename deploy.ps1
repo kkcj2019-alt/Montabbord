@@ -23,7 +23,9 @@ Write-Host "[deploy] Firebase hosting..."
 cmd /c "npx.cmd --yes firebase-tools@latest deploy --only hosting --project montabbord"
 
 Write-Host "[deploy] Cloudflare Pages..."
-cmd /c "npx.cmd --yes wrangler pages deploy public --project-name montabbord --branch main"
+if (-not $env:CLOUDFLARE_ACCOUNT_ID) { $env:CLOUDFLARE_ACCOUNT_ID = "4e8f173aa6a4b630bb6d651369ae2b23" }
+if (-not $env:CLOUDFLARE_API_TOKEN) { Write-Host "[deploy] ATTENTION : CLOUDFLARE_API_TOKEN non defini, Cloudflare sera ignore." }
+else { cmd /c "npx.cmd --yes wrangler pages deploy public --project-name montabbord --branch main" }
 
 Write-Host "[deploy] Termine :"
 Write-Host "  Firebase   : https://montabbord.web.app"
