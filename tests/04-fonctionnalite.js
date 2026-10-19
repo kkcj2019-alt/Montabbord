@@ -4142,6 +4142,67 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Fiche de stock : la base d\u2019inventaire reste au registre meme si son type differe des achats (plus de « Stock initial 0 »)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* Cas rencontre : la base d\u2019inventaire (type DIVERS, impose par le
+         catalogue) et l\u2019achat (type POINTE) ne portent pas le meme type
+         pour le meme code : la base sortait du registre, qui s\u2019ouvrait
+         alors sur un « Stock initial » a 0 et l\u2019inventaire en entree. */
+      p.stockConsum = [
+        { id: 'a1', code: 'LATTE X', designation: 'Latte 120x10x2.5', ctype: 'POINTE', cond: 0, quantite: 46, fournisseur: 'FOU', obs: 'Achat BL-1', created_at: '2026-10-20' },
+        { id: 'b1', code: 'LATTE X', designation: 'Latte 120x10x2.5', ctype: 'DIVERS', cond: 0, quantite: 46, date: '2026-10-15', _invBase: true, _invId: 'v1', obs: 'Stock initial \u2014 inventaire du 15/10/26' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var lignes = _consoLignes('LATTE X');
+      var r = buildConsoMovements(lignes, 'LATTE X');
+      var init = r.filter(function (x) { return x.estInitial; })[0] || {};
+      var ent = r.filter(function (x) { return x.entree > 0; })[0] || {};
+      var html = _consoRegistreHtml(lignes, 'LATTE X');
+      (lignes.length === 2 && init.initial === 46 && init.date === '2026-10-15'
+        && ent.entree === 46 && r[r.length - 1].final === 92
+        && /Stock initial/.test(html) && html.indexOf('46') !== -1)
+        ? 'OK : base d\u2019inventaire au registre (46 au 15/10), achat en entree (46 au 20/10), final 92'
+        : 'ECHEC : lignes=' + lignes.length + ' registre=' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche de stock : un produit divers a aussi sa fiche deroulable, en quantites',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* Produit « divers » (aucun conditionnement) : avant, sa fiche n'existait
+         pas (les produits DIVERS etaient exclus du registre) et le tableau
+         n'affichait que des tirets. */
+      p.stockConsum = [
+        { id: 'a2', code: 'ENCRE X', designation: 'Encre speciale', ctype: 'DIVERS', cond: 0, quantite: 20, fournisseur: 'FOU', obs: 'Achat BL-1', created_at: '2026-10-02' },
+        { id: 'b2', code: 'ENCRE X', designation: 'Encre speciale', ctype: 'DIVERS', cond: 0, quantite: 20, date: '2026-10-15', _invBase: true, _invId: 'v1', _invClos: '', obs: 'Stock initial \u2014 inventaire du 15/10/26' }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      setSection('stockConsoTab', 'divers');
+      var h = '';
+      try { h = render_stock_consum(); } catch (e) { h = 'ERREUR:' + e.message; }
+      var deroule = /toggleConsoDetailRow\\(this\\)/.test(h) && /Mouvements/.test(h);
+      var html = '';
+      try { html = _consoRegistreHtml(_consoLignes('ENCRE X'), 'ENCRE X'); } catch (e2) { html = 'ERREUR:' + e2.message; }
+      var quantites = /20/.test(html) && !/ERREUR/.test(html);
+      (deroule && quantites)
+        ? 'OK : le produit divers deroule son registre, quantites en unites (20)'
+        : 'ECHEC : deroule=' + deroule + ' h=' + h.substr(0, 300) + ' html=' + html.substr(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Fiche de stock : la date d\'un achat est lue dans created_at (elle s\'affichait « - »)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
