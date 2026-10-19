@@ -4192,6 +4192,94 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Synchro cloud : la version recente par section prime sur la ligne globale obsolete (le poste Y voit les saisies du poste X)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Le cloud conserve encore une ligne globale 'mdb_production' (ancien envoi
+         complet) en plus des lignes par section (temps reel). Si la globale
+         ecrasait les lignes par section, le poste Y relisait une version
+         obsolete et ne voyait JAMAIS les saisies des autres postes. */
+      var lignes = [
+        { cle: 'mdb_production.productions', data: [{ id: 'f1', numero: '261001', statut: 'brouillon' }] },
+        { cle: 'mdb_production.stockSemi', data: [{ code: 'L120*10*2.5', quantite: 400 }] },
+        { cle: 'mdb_production', data: { productions: [], stockSemi: [{ code: 'L120*10*2.5', quantite: 0 }] } }
+      ];
+      var d = prodSplitAssemble(lignes, 'mdb_production');
+      (d.productions && d.productions.length === 1 && d.productions[0].id === 'f1'
+        && d.stockSemi && d.stockSemi.length === 1 && d.stockSemi[0].quantite === 400)
+        ? 'OK : la version recente (par section) est conservee, pas la version globale obsolete'
+        : 'ECHEC : ' + JSON.stringify(d)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Menu Exploitation : Production ouvre une page a onglets (Saisie / Historique / Ordres), comme Stock',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var itemProd = null;
+      NAV.forEach(function (g) { (g.items || []).forEach(function (i) { if (i.id === 'production') itemProd = i; }); });
+      var sansSousMenu = !!itemProd && (!itemProd.children || !itemProd.children.length);
+      setSection('prodTab', 'historique');
+      var h = render_production();
+      var onglets = /Nouvelle Saisie/.test(h) && /Historique/.test(h) && /Ordres de Production/.test(h);
+      var contenuHisto = /Fiches de Production|pertes|Pertes/.test(h);
+      setSection('prodTab', 'saisie');
+      var h2 = render_production();
+      var ongletSaisie = /SORTIE DU BOIS/.test(h2);
+      (sansSousMenu && onglets && contenuHisto && ongletSaisie)
+        ? 'OK : Production = page unique a onglets (Saisie / Historique / Ordres), comme Stock'
+        : 'ECHEC : sousMenu=' + sansSousMenu + ' onglets=' + onglets + ' histo=' + contenuHisto + ' saisie=' + ongletSaisie
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche de production : enregistrer une fiche passe vraiment par l\u2019enregistrement (etape imbriquee, pas de variable globale perdue)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      document.getElementById = function (id) {
+        if (id === 'prod_date') return { value: '2026-10-19' };
+        if (id === 'prod_chef') return { value: 'Chef Test' };
+        if (id === 'prod_article_id') return { value: 'A1' };
+        return null;
+      };
+      document.querySelectorAll = function () { return []; };
+      var _nav = '';
+      renderPage = function () {};
+      window.navigate = function (p) { _nav = p; };
+      var _err = '';
+      try { saveProduction('save'); } catch (e) { _err = String(e && e.message || e); }
+      var prods = getProductions();
+      var nouvelle = prods.filter(function (p) { return p.chef === 'Chef Test' && p.date === '2026-10-19'; })[0];
+      (!_err && nouvelle && nouvelle.statut === 'draft' && _nav === 'history')
+        ? 'OK : fiche enregistree (etapes imbriquees, aucun ReferenceError)'
+        : 'ECHEC : err=' + _err + ' nb=' + prods.length + ' nouvelle=' + (nouvelle ? nouvelle.statut : 'absente') + ' nav=' + _nav
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Alertes : inventaire, suppression et validation de fiche passent par la modale in-app (plus de confirm natif)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var srcVal = String(validerInventaireCourant);
+      var srcSup = String(deleteInventory);
+      var srcProd = String(saveProduction);
+      var srcBrou = String(validerInventaireBrouillon);
+      var ok = typeof confirmerInApp === 'function'
+        && srcVal.indexOf('confirm2(') === -1 && srcVal.indexOf('confirmerInApp') !== -1
+        && srcBrou.indexOf('confirm2(') === -1 && srcBrou.indexOf('confirmerInApp') !== -1
+        && srcSup.indexOf('confirm2(') === -1 && srcSup.indexOf('confirmerInApp') !== -1
+        && srcProd.indexOf('confirm2(') === -1 && srcProd.indexOf('confirmerInApp') !== -1;
+      (ok)
+        ? 'OK : les confirmations passent par la modale stylée de l\\u2019application'
+        : 'ECHEC : confirmerInApp=' + (typeof confirmerInApp) + ' val=' + srcVal.indexOf('confirm2(') + ' brou=' + srcBrou.indexOf('confirm2(') + ' sup=' + srcSup.indexOf('confirm2(') + ' prod=' + srcProd.indexOf('confirm2(')
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Fiche de stock : la base d\u2019inventaire reste au registre meme si son type differe des achats (plus de « Stock initial 0 »)',
     app: 'production.html', store: () => {
       const s = storeRealiste();
@@ -11050,6 +11138,8 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       setInventories([{ id: 'vieux', month: '2026-09', type: 'consum', date: '2026-09-30', supervisor: 'S',
         items: [{ store: 'stockConsum', ref: 'P8', code: 'P8', real_qte: 5000 }] }]);
       window.confirm2 = function() { return true; };
+      /* La confirmation passe par la modale in-app : on la declenche. */
+      window.confirmerInApp = function (msg, opts, onOk) { if (onOk) onOk(); };
       renderPage = function () {};
       deleteInventory('vieux');
       var lignes = getStockConsum().filter(function (l) { return String(l.code || '').toUpperCase() === 'P8'; });
@@ -12462,14 +12552,15 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       var bF = document.getElementById('navFwdBtn');
       navigate('stock-raw');
       navigate('history');
-      var okPage = localStorage.getItem('mdb_prod_currentPage') === 'history';
+      /* 'history' n'est plus une page : c'est un onglet de Production. */
+      var okPage = localStorage.getItem('mdb_prod_currentPage') === 'production' && getSection('prodTab', 'saisie') === 'historique';
       var okVide = (window._navFwd || []).length === 0;
       goBack();
       var okBack = CURRENT_PAGE === 'stock' && (window._navFwd || []).length === 1;
       var okBtnOn = bF.disabled === false;
-      var okPersist = String(localStorage.getItem('mdb_prod_navFwd') || '').indexOf('history') !== -1;
+      var okPersist = String(localStorage.getItem('mdb_prod_navFwd') || '').indexOf('production') !== -1;
       goForward();
-      var okFwd = CURRENT_PAGE === 'history' && (window._navFwd || []).length === 0;
+      var okFwd = CURRENT_PAGE === 'production' && (window._navFwd || []).length === 0;
       var okBtnOff = bF.disabled === true;
       _navRestore();
       var okRestore = Array.isArray(window._navHist) && Array.isArray(window._navFwd);
