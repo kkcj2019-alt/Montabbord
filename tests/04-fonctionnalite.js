@@ -12990,6 +12990,31 @@ function run(rapport) {
     rapport.ko('SEO : lecture impossible (' + eSeo.message + ')');
   }
 
+  /* Controle statique : l'entête ne doit plus pouvoir disparaître.
+     index.html : navigateTo() et showLogin() remettent #header visible (les
+     overlays Paye/Exploitation le masquent à l'ouverture sur mobile).
+     paye.html : en mobile l'en-tête reste collé (sticky) et se replie en une
+     ligne compacte (.pt-mini) au scroll au lieu de disparaître. */
+  try {
+    const fsHdr = require('fs');
+    const pathHdr = require('path');
+    const idxHdr = fsHdr.readFileSync(pathHdr.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const payHdr = fsHdr.readFileSync(pathHdr.join(__dirname, '..', 'public', 'paye.html'), 'utf8');
+    const okNavHdr = idxHdr.indexOf('remet visible (sinon elle disparaît') !== -1;
+    const okLoginHdr = idxHdr.indexOf('on la réactive') !== -1;
+    const okNbRestaure = (idxHdr.split("getElementById('header').style.display = ''").length - 1) >= 2;
+    const okPayeSticky = payHdr.indexOf('#payeHeader.pt-mini') !== -1
+      && payHdr.indexOf("l'en-tête n'est PAS figé") === -1
+      && payHdr.indexOf("classList.toggle('pt-mini'") !== -1;
+    if (okNavHdr && okLoginHdr && okNbRestaure && okPayeSticky) {
+      rapport.ok('Entête : navigateTo()/showLogin() réaffichent #header sur index, en-tête paye mobile sticky réduit au scroll (.pt-mini)');
+    } else {
+      rapport.ko('Entête — nav=' + okNavHdr + ' login=' + okLoginHdr + ' restaure=' + okNbRestaure + ' paye=' + okPayeSticky);
+    }
+  } catch (eHdrCtrl) {
+    rapport.ko('Entête : lecture impossible (' + eHdrCtrl.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
