@@ -26,7 +26,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-19-261';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-19-262';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -3771,6 +3771,7 @@ function _doOpenProductionModule(targetKey) {
   try { isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true; } catch (e) {}
   var uaMobile = /Android|iPhone|iPad|iPod|Mobile|Silk/i.test(navigator.userAgent || '');
   if (uaMobile || isStandalone) {
+    window._prodOverlayOpen = true;
     try{ document.getElementById('header').style.display='none'; }catch(e){}
     document.getElementById('content').innerHTML = ''
       + '<div style="position:fixed;left:0;right:0;top:0;bottom:0;background:#0f172a;z-index:99999;display:flex;flex-direction:column">'
@@ -3800,6 +3801,7 @@ function _doOpenProductionModule(targetKey) {
     + '</div>';
 }
 function closeProductionOverlay() {
+  window._prodOverlayOpen = false;
   try{ document.getElementById('header').style.display=''; }catch(e){}
   if(typeof navigateTo==='function') navigateTo('dashboard'); else renderDashboard();
 }
@@ -4997,6 +4999,7 @@ function initAuth() {
 
 function showLogin() {
   window._payeOverlayOpen = false;
+  window._prodOverlayOpen = false;
   /* Déconnexion ou session expirée pendant qu'un module masquait l'entête : on la réactive. */
   try { document.getElementById('header').style.display = ''; } catch (eHdrL) {}
   document.getElementById('loginOverlay').style.display = 'flex';
@@ -7822,6 +7825,9 @@ var PROD_PAGE_MAP = { prodDashboard: 'dashboard', prodSaisie: 'production', prod
 function navigateTo(page) {
   /* Overlay Module Paye ouvert : ne jamais re-rendre le contenu (sinon l'overlay se referme tout seul) */
   if (window._payeOverlayOpen) return;
+  /* Overlay Exploitation ouvert : idem — les re-rendus temps reel (applySnapshot,
+     sonde 4 s) appellent navigateTo(currentPage) et fermaient l'overlay tout seul. */
+  if (window._prodOverlayOpen) return;
   /* Un module plein écran (Paye / Exploitation) masque l'entête à l'ouverture sur
      mobile : toute navigation la remet visible (sinon elle disparaît après « Retour
      au tableau de bord » ou après déconnexion/reconnexion depuis l'overlay). */
@@ -9203,6 +9209,33 @@ function migrateTransfertStatuts() {
     var o = ops[i];
     if (!isTransfertOp(o)) continue;
     if (!o.status) { o.status = 'approuve'; o.statutLegacy = true; changed = true; }
+  }
+  /* Paire desynchronisee : la copie ENTREE etait creee sans statut puis migree
+     en 'approuve' pendant que la copie SORTIE restait 'en_attente' (le transfert
+     recu apparaissait approuve sans que personne n'ait agi). Le cote sans statut
+     legacy fait foi ; sinon les deux moities repassent en attente. */
+  var pairesTr = {};
+  for (var piT = 0; piT < ops.length; piT++) {
+    var oP = ops[piT];
+    if (!isTransfertOp(oP) || !oP.transferId) continue;
+    if (!pairesTr[oP.transferId]) pairesTr[oP.transferId] = [];
+    pairesTr[oP.transferId].push(oP);
+  }
+  for (var tidT in pairesTr) {
+    var grpT = pairesTr[tidT];
+    if (grpT.length < 2) continue;
+    var stRefT = null;
+    for (var riT = 0; riT < grpT.length; riT++) {
+      if (!grpT[riT].statutLegacy && grpT[riT].status) { stRefT = grpT[riT].status; break; }
+    }
+    if (stRefT === null) continue;
+    for (var miT = 0; miT < grpT.length; miT++) {
+      if (grpT[miT].status !== stRefT) {
+        grpT[miT].status = stRefT;
+        delete grpT[miT].statutLegacy;
+        changed = true;
+      }
+    }
   }
   if (changed) {
     try { DB.set('mdb_operationsCaisse', ops); } catch (e) {}
@@ -12335,6 +12368,9 @@ function forceRecalcEcheances() {
   try { if (typeof renderFactures === 'function') renderFactures(); } catch (eR) {}
 }
 function renderDashboard() {
+  /* Overlay plein écran ouvert (Paye / Exploitation) : un rendu direct ne doit
+     ni écraser l'overlay ni laisser l'entête masquée derrière. */
+  if (window._payeOverlayOpen || window._prodOverlayOpen) return;
   try { migrateFacturesEcheances(); } catch (eMig2) {}
   if (currentUser && !currentUser.isSuperAdmin && !canAccess('dashboard', false)) { renderUserDashboard(); return; }
   if (currentUser && currentUser.dashSpecial) { renderUserDashboard(); return; }
@@ -38110,7 +38146,7 @@ function saveCaisse(id, asDraft) {
     var txId = DB.genId();
     ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais, status:'en_attente', transferId:txId});
     var npDest = generatePieceNumber(destCaisseId, txDate);
-    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0, transferId:txId});
+    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0, status:'en_attente', transferId:txId});
     DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
     if (feedback) { feedback.innerHTML = '<span style="color:var(--success)">Transfert OK \u2192 ' + escH(destNom) + '</span>'; setTimeout(function(){ feedback.innerHTML=''; }, 3000); }
     toast('Transfert effectu\u00e9 : ' + sourceNom + ' \u2192 ' + destNom);

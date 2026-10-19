@@ -13015,6 +13015,31 @@ function run(rapport) {
     rapport.ko('Entête : lecture impossible (' + eHdrCtrl.message + ')');
   }
 
+  /* Controle statique : overlays plein écran + statut des transferts caisse.
+     - un re-rendu temps reel (applySnapshot / sonde 4 s) ne doit plus fermer
+       l'overlay Exploitation ni laisser l'entête masquée : flags _prodOverlayOpen
+       + gardes dans navigateTo() et renderDashboard() ;
+     - la copie ENTREE d'un transfert est creee 'en_attente' comme la SORTIE, et
+       les paires desynchronisees (migreee 'approuve' d'un cote) sont reparees. */
+  try {
+    const fsOv = require('fs');
+    const pathOv = require('path');
+    const srcOv = fsOv.readFileSync(pathOv.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okGardeNav = srcOv.indexOf('if (window._prodOverlayOpen) return;') !== -1;
+    const okGardeDash = srcOv.indexOf('if (window._payeOverlayOpen || window._prodOverlayOpen) return;') !== -1;
+    const okFlagOuvert = srcOv.indexOf('window._prodOverlayOpen = true;') !== -1;
+    const okFlagFerme = (srcOv.split('window._prodOverlayOpen = false;').length - 1) >= 2;
+    const okEntreeStatut = (srcOv.split("status:'en_attente'").length - 1) >= 2;
+    const okReparaison = srcOv.indexOf('Paire desynchronisee') !== -1;
+    if (okGardeNav && okGardeDash && okFlagOuvert && okFlagFerme && okEntreeStatut && okReparaison) {
+      rapport.ok('Overlays + transferts : navigateTo/renderDashboard en no-op pendant un overlay, copie reçue créée en_attente + réparation des paires désynchronisées');
+    } else {
+      rapport.ko('Overlays/transferts — nav=' + okGardeNav + ' dash=' + okGardeDash + ' ouvert=' + okFlagOuvert + ' ferme=' + okFlagFerme + ' entree=' + okEntreeStatut + ' reparation=' + okReparaison);
+    }
+  } catch (eOv) {
+    rapport.ko('Overlays/transferts : lecture impossible (' + eOv.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
