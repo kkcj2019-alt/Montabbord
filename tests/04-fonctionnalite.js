@@ -12933,6 +12933,27 @@ function run(rapport) {
     rapport.ko('Synchro Exploitation anti-écrasement : lecture impossible (' + eAf.message + ')');
   }
 
+  /* Controle statique : transferts internes de caisse — l'approbation exige le
+     CODE DE CONNEXION de l'agent (mot de passe de son compte mdb_users), pas
+     le code global de l'entreprise. La caisse destination prouve ainsi qui     elle est avant d'etre creditee. */
+  try {
+    const fsTc = require('fs');
+    const pathTc = require('path');
+    const srcTc = fsTc.readFileSync(pathTc.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okDef = srcTc.indexOf('function codeConnexionOK(') !== -1;
+    const okPrompt = srcTc.indexOf("window.prompt('Saisissez votre code de connexion pour approuver ce transfert :'") !== -1;
+    const okAppel = srcTc.indexOf('if (!codeConnexionOK(codeCs)) { toast(\'Code de connexion incorrect\', \'error\'); return; }') !== -1;
+    const okCompte = srcTc.indexOf('list[i].password && String(list[i].password) === c') !== -1;
+    const okExclusion = srcTc.indexOf('if (sansCompte) {') !== -1; /* code entreprise seulement sans compte local */
+    if (okDef && okPrompt && okAppel && okCompte && okExclusion) {
+      rapport.ok('Transferts caisse : approbation protégée par le code de connexion de l\u2019agent (compte mdb_users, code entreprise seulement sans compte)');
+    } else {
+      rapport.ko('Transferts caisse code connexion — def=' + okDef + ' prompt=' + okPrompt + ' appel=' + okAppel + ' compte=' + okCompte + ' exclusion=' + okExclusion);
+    }
+  } catch (eTc) {
+    rapport.ko('Transferts caisse code connexion : lecture impossible (' + eTc.message + ')');
+  }
+
   const liste = controles();
   const parApp = {};
 
