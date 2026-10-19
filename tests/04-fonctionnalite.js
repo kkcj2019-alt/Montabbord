@@ -4142,6 +4142,56 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Semi-fini : l’inventaire ouvre la fiche (Stock initial = reel, plus d’entree fantome)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      /* Le reel d'inventaire (400) etait affiche comme une entree, la ligne
+         « Stock initial » restant a 0. */
+      p.stockSemi = [
+        { id: 'sm1', code: 'L120*10*2.5', designation: 'Latte 120x10x2.5', type: 'LATTE', quantite: 400, date: '2026-09-30', created_at: '2026-09-30T12:00:00.000Z' },
+        { id: 'sm2', code: 'L120*10*2.5', designation: 'Latte 120x10x2.5', type: 'LATTE', quantite: 50, motif: 'Production 260930 — usinage : +50 L120*10*2.5', obs: 'Production 260930 — usinage : +50 L120*10*2.5', created_at: '2026-10-02' }
+      ];
+      p.inventories = [
+        { id: 'iv1', month: '2026-09', type: 'global', date: '2026-09-30', statut: 'valide', supervisor: 'S',
+          items: [{ store: 'stockSemi', ref: 'L120*10*2.5', code: 'L120*10*2.5', real_qte: 400 }] }
+      ];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      var r = _semiMouvements('L120*10*2.5');
+      var init = r.filter(function (x) { return x.estInitial; })[0] || {};
+      var mvts = r.filter(function (x) { return !x.estInitial; });
+      (init.initial === 400 && init.final === 400 && init.date === '2026-09-30'
+        && mvts.length === 1 && mvts[0].entree === 50 && r[r.length - 1].final === 450)
+        ? 'OK : stock initial 400 a l’inventaire du 30/09, mouvement +50 du 02/10, final 450'
+        : 'ECHEC : ' + JSON.stringify(r)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Fiche de production : le brouillon automatique memorise aussi les lignes des tableaux',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      sessionStorage.removeItem('mdb_prod_autoDraft');
+      CURRENT_PAGE = 'production';
+      autoSaveDraft();
+      var raw = sessionStorage.getItem('mdb_prod_autoDraft') || '';
+      var d = null;
+      try { d = JSON.parse(raw); } catch (eP) {}
+      var ok = !!(d && d.l && d.l.lattes && d.l.plots && d.l.cp && d.l.ass && d.l.enc && d.l.sb);
+      var err = '';
+      try { applyAutoDraft(); } catch (e) { err = e.message; }
+      (ok && !err)
+        ? 'OK : les 6 tableaux sont memorises dans le brouillon, restauration sans erreur'
+        : 'ECHEC : ok=' + ok + ' err=' + err + ' raw=' + raw.substr(0, 200)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Fiche de stock : la base d\u2019inventaire reste au registre meme si son type differe des achats (plus de « Stock initial 0 »)',
     app: 'production.html', store: () => {
       const s = storeRealiste();

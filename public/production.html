@@ -1905,17 +1905,41 @@ function filterMenus(q) {
 
 /* ===== Auto-draft: mémorise la saisie en cours entre les menus (même app) ===== */
 var _autoDTimer = null;
+/* Perimetre de la fiche de production (la ou la saisie vit).
+   `#prod-form` a disparu lors de la refonte de la page : le brouillon
+   automatique ne s'activait donc PLUS du tout (le conteneur de la page
+   `#content` le remplace). */
+function _prodSaisieScope() {
+  try {
+    return document.getElementById('prod-form') || document.getElementById('content') || document.body || null;
+  } catch (e) { return null; }
+}
+function _prodDansSaisie(el) {
+  try {
+    if (!el || !el.closest) return false;
+    if (el.closest('#prod-form')) return true;
+    if (el.closest('#content')) return true;
+    return false;
+  } catch (e) { return false; }
+}
 function autoSaveDraft() {
   try {
-    var form = document.getElementById('prod-form');
-    if (!form) return;
+    if (typeof CURRENT_PAGE !== 'undefined' && CURRENT_PAGE && CURRENT_PAGE !== 'production') return;
+    var scope = _prodSaisieScope();
+    if (!scope) return;
     var draft = { t: Date.now(), v: {} };
-    var el = form.querySelectorAll('input,textarea,select');
+    var el = scope.querySelectorAll('input,textarea,select');
     for (var i = 0; i < el.length; i++) {
       var f = el[i];
       if (!f.id) continue;
       draft.v[f.id] = (f.type === 'checkbox' ? (f.checked ? '1' : '0') : f.value);
     }
+    /* Les LIGNES des tableaux (lattes, plots, CP, assemblage, en-cours,
+       sortie du bois) n'ont pas d'id : elles n'etaient donc pas
+       memorisees. Un re-rendu de la page (synchro cloud, rechargement de
+       l'iframe, navigation) reconstruisait les tableaux a zero et la saisie
+       en cours disparaissait (« + Ajouter » effacait la ligne precedente). */
+    try { draft.l = _prodLignesDraft(); } catch (eL) {}
     sessionStorage.setItem('mdb_prod_autoDraft', JSON.stringify(draft));
   } catch (e) {}
 }
@@ -1927,9 +1951,9 @@ function applyAutoDraft() {
     var raw = sessionStorage.getItem('mdb_prod_autoDraft');
     if (!raw) return;
     var draft = JSON.parse(raw);
-    var form = document.getElementById('prod-form');
-    if (!form) return;
-    var el = form.querySelectorAll('input,textarea,select');
+    var scope = _prodSaisieScope();
+    if (!scope) return;
+    var el = scope.querySelectorAll('input,textarea,select');
     for (var i = 0; i < el.length; i++) {
       var f = el[i];
       if (!f.id || !(f.id in draft.v)) continue;
@@ -1937,20 +1961,132 @@ function applyAutoDraft() {
       if (f.type === 'checkbox') f.checked = (sv === '1');
       else if (f.value === '' || f.value === null || f.value === undefined) f.value = sv;
     }
+    /* Lignes des tableaux : restaurees en DERNIER (le brouillon est plus
+       recent que la fiche enregistree, qui a pu reconstruire les tableaux
+       a vide juste avant). */
+    try { _prodRestaureLignes(draft.l); } catch (eR) {}
   } catch (e) {}
 }
+/* === LIGNES DES TABLEAUX DE LA FICHE : MEMORISEES ET RESTAUREES === */
+/* Les lignes saisies (lattes, plots, CP, assemblage, en-cours, sortie du
+   bois) vivent dans le DOM, pas dans un champ nomme : sans ce mecanisme,
+   le moindre re-rendu de la page (synchro, rechargement de l'iframe,
+   navigation) les effacait. */
+function _prodLignesDraft() {
+  function cap(sel) {
+    var out = [];
+    var rows = document.querySelectorAll(sel);
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (!r || !r.id) continue;
+      var vals = [];
+      var f = r.querySelectorAll('input,select');
+      for (var j = 0; j < f.length; j++) vals.push({ v: f[j].value, s: (f[j].tagName === 'SELECT') ? 1 : 0 });
+      if (vals.length) out.push({ id: r.id, vals: vals });
+    }
+    return out;
+  }
+  return {
+    lattes: cap('#lattesBody tr[id^="latteRow"]'),
+    plots: cap('#plotsBody tr[id^="plotRow"]'),
+    cp: cap('#cpBody tr[id^="cpRow"]'),
+    ass: cap('#assBody tr[id^="assRow"]'),
+    enc: cap('#encBody tr[id^="encRow"]'),
+    sb: cap('#sortieBoisLignes tr[id^="sortieBoisRow"]')
+  };
+}
+function _prodRestaureLignes(t) {
+  if (!t) return;
+  function _setVals(r, vals) {
+    if (!r || !vals) return;
+    var f = r.querySelectorAll('input,select');
+    for (var i = 0; i < f.length && i < vals.length; i++) {
+      try { f[i].value = vals[i].v; } catch (e) {}
+    }
+  }
+  function _restore(sel, addFn, rows) {
+    if (!rows || !rows.length) return;
+    var body = document.querySelector(sel);
+    if (!body) return;
+    try { body.innerHTML = ''; } catch (e) {}
+    rows.forEach(function(row) {
+      try { addFn(); } catch (e1) {}
+      var r = null;
+      try { r = body.lastElementChild; } catch (e2) {}
+      if (!r && body.children && body.children.length) r = body.children[body.children.length - 1];
+      _setVals(r, row.vals);
+    });
+  }
+  function _recalc(sel, prefix, fn) {
+    var rows = document.querySelectorAll(sel);
+    for (var i = 0; i < rows.length; i++) {
+      var id = rows[i].id || '';
+      if (id.indexOf(prefix) !== 0) continue;
+      var n = parseInt(id.replace(prefix, ''), 10);
+      if (!isNaN(n)) { try { fn(n); } catch (e) {} }
+    }
+  }
+  _restore('#lattesBody', addLigneLattes, t.lattes);
+  _restore('#plotsBody', addLignePlots, t.plots);
+  _restore('#cpBody', addLigneCP, t.cp);
+  _restore('#assBody', addLigneAssemblage, t.ass);
+  _restore('#encBody', addLigneEncours, t.enc);
+  /* Sortie du bois : les lignes sont numerotees (sb_code_0, sb_code_1...) :
+     on recree celles qui manquent avec le bon numero. */
+  if (t.sb && t.sb.length) {
+    var maxN = 0;
+    t.sb.forEach(function(row) {
+      var n = parseInt(String(row.id || '').replace('sortieBoisRow', ''), 10);
+      if (!isNaN(n) && n > maxN) maxN = n;
+    });
+    var exist = document.querySelectorAll('#sortieBoisLignes tr[id^="sortieBoisRow"]');
+    for (var i2 = exist.length - 1; i2 >= 0; i2--) {
+      var idn = parseInt(String(exist[i2].id || '').replace('sortieBoisRow', ''), 10);
+      if (isNaN(idn) || idn > maxN) { try { exist[i2].remove(); } catch (e3) {} }
+    }
+    t.sb.forEach(function(row) {
+      var n2 = parseInt(String(row.id || '').replace('sortieBoisRow', ''), 10);
+      if (isNaN(n2)) return;
+      var cible = document.getElementById('sortieBoisRow' + n2);
+      if (!cible) {
+        try { _sbRowIdx = n2; addSortieBoisLigne(); } catch (e4) {}
+        cible = document.getElementById('sortieBoisRow' + n2);
+      }
+      _setVals(cible, row.vals);
+    });
+  }
+  _recalc('#lattesBody', 'latteRow', calcLatteVol);
+  _recalc('#plotsBody', 'plotRow', calcPlotVol);
+  _recalc('#cpBody', 'cpRow', calcCPVol);
+  _recalc('#encBody', 'encRow', calcEncoursVol);
+  _recalc('#sortieBoisLignes', 'sortieBoisRow', calcSBVolume);
+  try { calcLatteTotals(); } catch (e5) {}
+  try { calcPlotTotals(); } catch (e6) {}
+  try { calcCPTotals(); } catch (e7) {}
+  try { calcAssemblageTotals(); } catch (e8) {}
+  try { calcEncoursTotals(); } catch (e9) {}
+  try { calcSBTotals(); } catch (e10) {}
+}
 document.addEventListener('input', function(e) {
-  if (e.target && e.target.closest && e.target.closest('#prod-form')) {
+  if (_prodDansSaisie(e.target)) {
     if (_autoDTimer) clearTimeout(_autoDTimer);
-    _autoDTimer = setTimeout(autoSaveDraft, 600);
+    _autoDTimer = setTimeout(autoSaveDraft, 400);
   }
 });
 document.addEventListener('change', function(e) {
-  if (e.target && e.target.closest && e.target.closest('#prod-form')) {
-    if (_autoDTimer) clearTimeout(_autoDTimer);
-    _autoDTimer = setTimeout(autoSaveDraft, 300);
+  /* Sauvegarde immediate : la saisie est validee quand on quitte le champ
+     (clic sur un bouton, « + Ajouter »...), pas 300 ms plus tard. */
+  if (_prodDansSaisie(e.target)) {
+    if (_autoDTimer) { clearTimeout(_autoDTimer); _autoDTimer = null; }
+    try { autoSaveDraft(); } catch (e) {}
   }
 });
+/* Filet de securite : l'onglet se cache ou se ferme (rechargement de
+   l'iframe) -> on memorise la saisie avant. */
+try {
+  window.addEventListener('pagehide', function() { try { autoSaveDraft(); } catch (e) {} });
+  document.addEventListener('visibilitychange', function() { if (document.hidden) { try { autoSaveDraft(); } catch (e) {} } });
+} catch (eVis) {}
 /* Droits par menu (écrits par l'app principale dans mdb_prod_granted).
    Absent = pas de restriction (admin / accès historique complet). */
 var PROD_PAGE_PERM = {
@@ -14343,6 +14479,29 @@ function semiAggregate(moisMax) {
    sorties (tracees depuis la validation des fiches), ajustements et stock
    final. Meme modele que les pointes : Date, Libelle, Stock init, Entree,
    Sortie, Ajust, Stock fin, Observation. */
+/* Ouverture d'un semi-fini : le dernier inventaire VALIDE qui le concerne
+   fixe le stock initial (le reel compte). Sans cela, le reel de l'inventaire
+   s'affichait comme une simple entree (« Stock initial 0 » + « Entree 400 »)
+   alors qu'il ouvre la periode. */
+function _semiOuvertureInventaire(code) {
+  try {
+    var key = String(code || '').trim().toUpperCase();
+    if (!key) return null;
+    var invs = (getInventories() || []).filter(function(inv) { return inv && inv.statut === 'valide'; });
+    var best = null;
+    invs.forEach(function(inv) {
+      (inv.items || []).forEach(function(it) {
+        if (!it || it.store !== 'stockSemi') return;
+        var k = String(it.ref || it.code || '').trim().toUpperCase();
+        if (k !== key) return;
+        var d = String(inv.date || '').slice(0, 10);
+        if (!d) return;
+        if (!best || d > best.date) best = { date: d, qte: parseFloat(it.real_qte) || 0, invId: inv.id };
+      });
+    });
+    return best;
+  } catch (e) { return null; }
+}
 function _semiMouvements(code) {
   var key = String(code || '').trim().toUpperCase();
   var rows = [];
@@ -14363,11 +14522,27 @@ function _semiMouvements(code) {
   var vU = parseFloat(cat.volume) || 0;
   if (!vU && cat.length > 0 && cat.width > 0 && cat.thickness > 0) vU = cat.length * cat.width * cat.thickness / 1000000;
   var out = [];
-  out.push({ date: rows.length ? (rows[0].created_at || rows[0].date || '') : '', code: key,
-             libelle: 'Stock initial', initial: 0, entree: 0, sortie: 0, ajust: 0, final: 0,
-             obs: 'Stock initial', estInitial: true, vU: vU });
-  var cumul = 0;
+  var ouv = _semiOuvertureInventaire(key);
+  if (ouv) {
+    out.push({ date: ouv.date, code: key, libelle: 'Stock initial', initial: ouv.qte, entree: 0, sortie: 0, ajust: 0, final: ouv.qte,
+               obs: 'Stock initial — inventaire du ' + fmtD(ouv.date), estInitial: true, vU: vU });
+  } else {
+    out.push({ date: rows.length ? (rows[0].created_at || rows[0].date || '') : '', code: key,
+               libelle: 'Stock initial', initial: 0, entree: 0, sortie: 0, ajust: 0, final: 0,
+               obs: 'Stock initial', estInitial: true, vU: vU });
+  }
+  var cumul = ouv ? ouv.qte : 0;
   rows.forEach(function (s) {
+    /* Les lignes anterieures a l'inventaire sont absorbees par l'ouverture :
+       elles sont deja comptees dans le reel. La ligne que l'inventaire a
+       touche porte sa date d'inventaire (`date`), les mouvements de
+       production portent seulement leur date de creation. */
+    if (ouv) {
+      var _dInv = String(s.date || '').slice(0, 10);
+      var _dCrea = String(s.created_at || '').slice(0, 10);
+      if (_dInv) { if (_dInv <= ouv.date) return; }
+      else if (_dCrea && _dCrea < ouv.date) return;
+    }
     var q = parseFloat(s.quantite) || 0;
     /* Une ligne a zero_issue de l'initialisation n'est pas un mouvement. */
     var a0 = parseFloat(s.ajust) || parseFloat(s.ajustement) || 0;
