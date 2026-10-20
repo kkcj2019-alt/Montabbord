@@ -234,31 +234,86 @@ function triSyncHarmoniserTout(forceList) {
     }
   } catch (e1) {}
 
-  // 2. Mettre à jour mdb_production.articles
+  // 2. Mettre à jour mdb_production.articles — MISE A JOUR EN PLACE.
+  //    Avant : filtre + reconstruction avec un id « art_pf_CODE » : l'id de
+  //    l'article changeait a chaque synchro, les composants (section separee,
+  //    lies par article_id) devenaient orphelins, et les champs saisis par
+  //    l'utilisateur (essence, portance, poids, traitement...) etaient jetes.
+  //    C'etait la cause des fiches techniques qui « se perdaient ».
   try {
     var rawProd = localStorage.getItem('mdb_production');
     var pData = rawProd ? JSON.parse(rawProd) : {};
     var pArts = Array.isArray(pData.articles) ? pData.articles : [];
 
-    // Conserver les composants / matières / consommables locaux
-    var newPArts = pArts.filter(function (a) {
-      if (!a) return false;
-      var tNorm = String(a.typeArticle || '').toLowerCase().replace(/[^a-z]/g, '');
-      var cNorm = String(a.categorie || '').toLowerCase().replace(/[^a-z]/g, '');
-      var isPF = (cNorm === 'finished' || tNorm === 'produitfini' || cNorm === 'produitfini');
-      var canon = triPfCanonique(a.code, a.designation);
-      if (canon && canonSet[canon]) isPF = true;
-      return !isPF;
-    });
+    /* References : un doublon de code ne doit jamais etre celui qui ne porte
+       ni composant ni stock — l'autre perdrait sa fiche technique. */
+    var refs = {};
+    try {
+      (Array.isArray(pData.composants) ? pData.composants : []).forEach(function (c) {
+        if (c && c.article_id) refs[String(c.article_id)] = (refs[String(c.article_id)] || 0) + 1;
+      });
+      ['stockFinished', 'stockSemi'].forEach(function (sec) {
+        (Array.isArray(pData[sec]) ? pData[sec] : []).forEach(function (s) {
+          if (s && s.article_id) refs[String(s.article_id)] = (refs[String(s.article_id)] || 0) + 1;
+        });
+      });
+    } catch (eRef) {}
 
-    // Conserver les composants (nomenclature technique) des anciens PF si existants
-    var compoMap = {};
+    var dejaVus = {}; /* canon -> article retenu */
+    var nonPF = [];
+
+    /* 2a. Parcourir les articles existants : non-PF conserves tels quels,
+       PF du canonSet mis a jour sur place (id et champs conserves), doublons
+       et PF hors liste retires (supprimes de l'Index). */
     pArts.forEach(function (a) {
-      if (a && a.code && Array.isArray(a.composants)) compoMap[triPfCanonique(a.code, a.designation)] = a.composants;
+      if (!a) return;
+      var canon = triPfCanonique(a.code, a.designation);
+      var dansListe = !!(canon && canonSet[canon]);
+      if (!dansListe) {
+        /* Non-PF (lattes, matieres, consommables…) : conserve tel quel.
+           PF hors Index : retire (source unique = Nomenclature). */
+        var tNorm = String(a.typeArticle || '').toLowerCase().replace(/[^a-z]/g, '');
+        var cNorm = String(a.categorie || '').toLowerCase().replace(/[^a-z]/g, '');
+        var estPF = (cNorm === 'finished' || tNorm === 'produitfini' || cNorm === 'produitfini');
+        if (!estPF) nonPF.push(a);
+        return;
+      }
+      var retenu = dejaVus[canon];
+      if (retenu) {
+         /* Doublon : garde celui qui a des references (composants/stock),
+            sinon la 1re occurrence. L'autre est retire silencieusement. */
+         if ((refs[String(a.id)] || 0) > (refs[String(retenu.id)] || 0)) dejaVus[canon] = a;
+        return;
+      }
+      dejaVus[canon] = a;
     });
 
+    var nouvelles = nonPF.slice();
+    Object.keys(dejaVus).forEach(function (canon) {
+      var a = dejaVus[canon];
+      var pf = canonSet[canon];
+      /* Mise à jour en place : l'id et tous les champs hors périmètre Index
+         (essence, portance, poids, traitement, composants inline…) sont
+         conservés. Seuls les champs sources-Index sont recalés. */
+      a.code = pf.code;
+      if (pf.designation) a.designation = pf.designation;
+      if (pf.longueur) a.length = pf.longueur;
+      if (pf.largeur) a.width = pf.largeur;
+      if (pf.epaisseur) a.thickness = pf.epaisseur;
+      if (pf.prix_vente > 0) a.prix_vente = pf.prix_vente;
+      if (pf.prix_montage > 0) a.prix_montage = pf.prix_montage;
+      if (pf.destination) a.destination = pf.destination;
+      a.categorie = 'finished';
+      a.typeArticle = 'produit_fini';
+      nouvelles.push(a);
+    });
+
+    /* 2b. Creations : les PF de la liste absents localement. Id deterministe
+       art_pf_CODE (identique sur tous les postes) : la fusion cloud reconnait
+       alors le meme article au lieu d'en creer deux. */
     list.forEach(function (pf) {
-      newPArts.push({
+      if (dejaVus[pf.code]) return;
+      nouvelles.push({
         id: 'art_pf_' + pf.code,
         code: pf.code,
         designation: pf.designation,
@@ -270,13 +325,11 @@ function triSyncHarmoniserTout(forceList) {
         destination: pf.destination || '',
         prix_vente: pf.prix_vente || 0,
         prix_montage: pf.prix_montage || 150,
-        composants: compoMap[pf.code] || []
+        composants: []
       });
     });
 
-    pData.articles = newPArts;
-    // Vider les fiches orphelines hors index
-    pData.pfIgnores = [];
+    pData.articles = nouvelles;
     localStorage.setItem('mdb_production', JSON.stringify(pData));
   } catch (e2) {}
 

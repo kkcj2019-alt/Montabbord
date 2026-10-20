@@ -12676,6 +12676,166 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     attenduPrefixe: 'OK'
   });
 
+  /* ---------- PF : la fiche technique ne doit plus « se perdre » ---------- */
+  /* sync-pf.js est un script EXTERNE : extractScripts ne le charge pas dans
+     le bac a sable. On lit sa source ici et on l'injecte en tete du code de
+     test pour tester le VRAI comportement d'harmonisation. */
+  try {
+    const fsSync = require('fs');
+    const pathSync = require('path');
+    const srcSyncPf = fsSync.readFileSync(pathSync.join(__dirname, '..', 'public', 'js', 'sync-pf.js'), 'utf8');
+
+    r.push({
+      nom: 'PF : l\u2019harmonisation conserve l\u2019article (id + champs saisis) et ses composants lies',
+      app: 'production.html', store: () => {
+        const s = storeRealiste();
+        s.mdb_nomenclature = JSON.stringify([
+          { id: 'n1', code: 'COUV114', designation: 'Couvercle 114', typeArticle: 'produit_fini',
+            longueur: 114, largeur: 114, epaisseur: 4, prixPeriodes: [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: 1200 }] }
+        ]);
+        const p = JSON.parse(s.mdb_production);
+        p.articles = [
+          { id: 'gen123', code: 'COUV114', designation: 'Mon couvercle', categorie: 'finished',
+            essence: 'blanc', portance: 500, weight: 22, treatment_code: '20', prix_vente: 900 },
+          { id: 'latte1', code: 'L1', designation: 'Latte', categorie: 'lattes', prix_vente: 200 }
+        ];
+        p.composants = [
+          { article_id: 'gen123', type: 'LATTE', code: 'L1', designation: 'Latte', quantity: 5, length: 100, width: 8, thickness: 2 }
+        ];
+        p.pfIgnores = []; p.pfLinks = [];
+        s.mdb_production = JSON.stringify(p);
+        return s;
+      },
+      code: srcSyncPf + '\n;\n' + `
+        triSyncHarmoniserTout();
+        var db = getDB();
+        var a = db.articles.filter(function(x){ return x.id === 'gen123'; })[0];
+        var latte = db.articles.filter(function(x){ return x.id === 'latte1'; })[0];
+        var comp = getSection('composants', []).filter(function(c){ return c.article_id === 'gen123'; });
+        var okId = !!a;
+        var okChamps = a && a.essence === 'blanc' && a.portance === 500 && a.weight === 22 && a.treatment_code === '20';
+        var okDesig = a && a.designation === 'Couvercle 114';
+        var okPrix = a && parseFloat(a.prix_vente) === 1200;
+        var okComp = comp.length === 1 && comp[0].code === 'L1';
+        var okLatte = !!latte;
+        var okCat = a && a.categorie === 'finished';
+        (okId && okChamps && okDesig && okPrix && okComp && okLatte && okCat)
+          ? 'OK : id gen123 conserve, champs saisis preserves, designation+prix recalcles, composants lies, non-PF conserve'
+          : 'ECHEC id=' + okId + ' champs=' + okChamps + ' desig=' + okDesig + ' prix=' + okPrix + ' comp=' + okComp + ' latte=' + okLatte + ' cat=' + okCat + ' a=' + JSON.stringify(a)
+      `,
+      attenduPrefixe: 'OK'
+    });
+
+    r.push({
+      nom: 'PF : enregistrer la modale article garde l\u2019id et lie les composants (pas d\u2019orphelins)',
+      app: 'production.html', store: () => {
+        const s = storeRealiste();
+        s.mdb_nomenclature = JSON.stringify([
+          { id: 'n1', code: 'COUV114', designation: 'Couvercle 114', typeArticle: 'produit_fini',
+            longueur: 114, largeur: 114, epaisseur: 4, prixPeriodes: [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: 1200 }] }
+        ]);
+        const p = JSON.parse(s.mdb_production);
+        p.articles = [
+          { id: 'gen123', code: 'COUV114', designation: 'Couvercle 114', categorie: 'finished', essence: 'blanc', prix_vente: 1200 }
+        ];
+        p.composants = [];
+        p.stockFinished = [];
+        p.pfIgnores = []; p.pfLinks = [];
+        s.mdb_production = JSON.stringify(p);
+        return s;
+      },
+      code: srcSyncPf + '\n;\n' + `
+        renderPage = function(){};
+        afCollectRows = function(cat){
+          return cat === 'lattes' ? [{ code:'L1', designation:'Latte', length:100, width:8, thickness:2, quantity:5, placement:'SUPERIEUR', volume:0.008 }] : [];
+        };
+        document.getElementById('art_code').value = 'COUV114';
+        document.getElementById('art_des').value = 'Couvercle 114';
+        document.getElementById('art_catstock').value = 'finished';
+        document.getElementById('art_essence').value = 'blanc';
+        document.getElementById('art_portance').value = '500';
+        document.getElementById('art_weight').value = '22';
+        document.getElementById('art_treat').value = '20';
+        document.getElementById('art_pu').value = '1200';
+        saveArticleModal('gen123');
+        var arts = getArticles().filter(function(x){ return x.code === 'COUV114'; });
+        var a = arts[0];
+        var comp = getSection('composants', []).filter(function(c){ return c.article_id === (a && a.id); });
+        var orph = getSection('composants', []).filter(function(c){ return c.article_id && !getArticles().some(function(x){ return x.id === c.article_id; }); });
+        var okUnSeul = arts.length === 1;
+        var okId = a && a.id === 'gen123';
+        var okComp = comp.length === 1 && comp[0].code === 'L1';
+        var okDet = comp[0] && String(comp[0].id).indexOf('comp:COUV114:LATTE:') === 0;
+        var okOrph = orph.length === 0;
+        (okUnSeul && okId && okComp && okDet && okOrph)
+          ? 'OK : article unique id gen123, composant lie id deterministe, aucun orphelin'
+          : 'ECHEC seul=' + okUnSeul + ' id=' + (a && a.id) + ' comp=' + okComp + ' det=' + okDet + ' orph=' + okOrph + ' comps=' + JSON.stringify(getSection('composants', []))
+      `,
+      attenduPrefixe: 'OK'
+    });
+  } catch (eSyncPf) {
+    r.push({
+      nom: 'PF : injection sync-pf.js impossible', app: 'production.html', store: storeRealiste,
+      code: `'ECHEC lecture sync-pf.js : ' + ${JSON.stringify(String(eSyncPf && eSyncPf.message || eSyncPf))}`,
+      attenduPrefixe: 'ECHEC'
+    });
+  }
+
+  r.push({
+    nom: 'PF : la migration des ids composants est deterministe et one-shot',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.removeItem('mdb_pf_comp_ids_v2');
+      setSection('composants', [
+        { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', length: 100, width: 8, thickness: 2, quantity: 5, placement: 'SUPERIEUR' },
+        { id: 'gen_b', article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', length: 100, width: 8, thickness: 2, quantity: 5, placement: 'SUPERIEUR' },
+        { id: 'gen_c', article_id: 'a1', type: 'POINTE', code: 'P1', designation: 'Pointes', quantity: 90 },
+        { id: 'gen_d', article_id: 'inconnu', type: 'LATTE', code: 'L9', quantity: 1 }
+      ]);
+      pfComposantsMigrerIds();
+      var comps = getSection('composants', []);
+      var okTaille = comps.length === 3;
+      var okIds = comps.filter(function(c){ return c.article_id === 'a1'; })
+        .every(function(c){ return String(c.id).indexOf('comp:PAL:') === 0; });
+      var okOrph = comps.some(function(c){ return c.id === 'gen_d' && c.article_id === 'inconnu'; });
+      var okFlag = localStorage.getItem('mdb_pf_comp_ids_v2') === '1';
+      var avant2e = JSON.stringify(comps);
+      pfComposantsMigrerIds();
+      var okNoop = JSON.stringify(getSection('composants', [])) === avant2e;
+      (okTaille && okIds && okOrph && okFlag && okNoop)
+        ? 'OK : ids comp:PAL:* deterministes, doublon exact dropp\u00e9, orphelin conserve, flag pos\u00e9, 2e appel no-op'
+        : 'ECHEC taille=' + okTaille + ' ids=' + okIds + ' orph=' + okOrph + ' flag=' + okFlag + ' noop=' + okNoop + ' comps=' + JSON.stringify(comps.map(function(c){ return c.id; }))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'PF : syncProduitsFinisFromIndex cr\u00e9e avec l\u2019id d\u00e9terministe art_pf_CODE',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_nomenclature = JSON.stringify([
+        { id: 'n1', code: 'NEW123', designation: 'Nouveau produit', typeArticle: 'produit_fini',
+          prixPeriodes: [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: 5000 }] }
+      ]);
+      const p = JSON.parse(s.mdb_production);
+      p.articles = [];
+      p.pfIgnores = []; p.pfLinks = [];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      renderPage = function(){};
+      var r1 = syncProduitsFinisFromIndex();
+      var a = getArticles().filter(function(x){ return x.code === 'NEW123'; })[0];
+      var r2 = syncProduitsFinisFromIndex();
+      var ok = a && a.id === 'art_pf_NEW123' && a.categorie === 'finished' && r1.crees === 1 && r2.crees === 0;
+      ok
+        ? 'OK : id art_pf_NEW123, categorie finished, 2e passe sans doublon'
+        : 'ECHEC id=' + (a && a.id) + ' cat=' + (a && a.categorie) + ' crees1=' + r1.crees + ' crees2=' + r2.crees
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   return r;
 }
 

@@ -20476,6 +20476,7 @@ function saveArticleModal(id) {
   a.dimensions = (a.length || '') + 'x' + (a.width || '') + 'x' + (a.thickness || '');
   a.statut = 'active';
   setArticles(articles);
+  var sidAvantSynchro = a.id;
   if (typeof triSyncSauvegarderProduitFini === 'function' && (a.categorie === 'finished' || a.typeArticle === 'produit_fini')) {
     try {
       triSyncSauvegarderProduitFini({
@@ -20490,11 +20491,35 @@ function saveArticleModal(id) {
       }, oldCode);
     } catch(eSy) {}
   }
-  /* Nomenclature : remplace les composants de l'article */
-  var allComp = getSection('composants', []).filter(function(c) { return c.article_id !== a.id; });
+  /* Re-résoudre l'article PAR CODE après la synchro : l'harmonisation a pu
+     remplacer l'objet en mémoire (id « art_pf_CODE »). Sans cela, les
+   composants sont écrits avec l'ancien id et deviennent orphelins —
+     c'était la fiche technique qui « disparaissait » à la réouverture. */
+  try {
+    var _artsMaj = getArticles();
+    var _codeA = String(a.code || '').trim().toUpperCase();
+    for (var iR = 0; iR < _artsMaj.length; iR++) {
+      var _cA = _artsMaj[iR] && String(_artsMaj[iR].code || '').trim().toUpperCase();
+      if (_cA && _cA === _codeA) { a = _artsMaj[iR]; break; }
+    }
+  } catch (eRe) {}
+  /* Nomenclature : remplace les composants de l'article. Les lignes de
+     l'ancien id (avant synchro) sont aussi nettoyées, sinon elles restent
+     orphelines dans la section. */
+  var allComp = getSection('composants', []).filter(function(c) {
+    return c && c.article_id !== a.id && c.article_id !== sidAvantSynchro;
+  });
+  /* Ids DETERMINISTES comp:CODEARTICLE:TYPE:CODE:N : deux postes qui
+     configurent la même fiche génèrent les mêmes ids, la fusion cloud
+     reconnaît les lignes identiques au lieu d'additionner les deux versions. */
+  var _compN = {};
   ['lattes', 'plots', 'pointe', 'contreplaque'].forEach(function(cat) {
     afCollectRows(cat).forEach(function(r) {
-      allComp.push({ id: genId(), article_id: a.id, type: _afCatToType[cat], code: r.code, designation: r.designation, length: r.length, width: r.width, thickness: r.thickness, quantity: r.quantity, placement: r.placement, volume: r.volume });
+      var _typ = _afCatToType[cat];
+      var _cle = _typ + '|' + (r.code || '');
+      _compN[_cle] = (_compN[_cle] || 0) + 1;
+      allComp.push({ id: 'comp:' + pfNormCode(a.code) + ':' + _typ + ':' + (r.code || '') + ':' + _compN[_cle],
+        article_id: a.id, type: _typ, code: r.code, designation: r.designation, length: r.length, width: r.width, thickness: r.thickness, quantity: r.quantity, placement: r.placement, volume: r.volume });
     });
   });
   setSection('composants', allComp);
@@ -20642,7 +20667,22 @@ function resynchroniserCatalogue() {
     if (typeof triSyncHarmoniserTout === 'function') triSyncHarmoniserTout();
   } catch(eTri) {}
   var avant = diagnosticEcartsPF();
-  var cibles = (avant.indexSeulement || []).map(function (c) { return pfNormCode(c); });
+  /* Lever les ignores pour TOUS les codes presents dans l'Index (pas
+     seulement indexSeulement) : l'harmonisation a pu creer l'article avant
+     le diagnostic, indexSeulement etait alors vide et le blocage restait. */
+  var cibles = [];
+  try {
+    idxNomenclature().forEach(function (a) {
+      if (a && String(a.typeArticle || '') === 'produit_fini') {
+        var n = pfNormCode(a.code);
+        if (n && cibles.indexOf(n) === -1) cibles.push(n);
+      }
+    });
+  } catch (eIdx) {}
+  (avant.indexSeulement || []).forEach(function (c) {
+    var n = pfNormCode(c);
+    if (n && cibles.indexOf(n) === -1) cibles.push(n);
+  });
   var n = 0;
   cibles.forEach(function (code) {
     if (pfEstSupprime(code)) { pfOublierSupprime(code); n++; }
@@ -20761,6 +20801,43 @@ function pfReintegrer(code) {
   if (!n) return;
   setPfIgnores(getPfIgnores().filter(function(x) { return pfNormCode(x) !== n; }));
   toast(code + ' réintégré : il reviendra à la prochaine synchro');
+}
+/* Migration one-shot des ids de composants vers le schema deterministe
+   comp:CODEARTICLE:TYPE:CODE:N. Les anciens ids aleatoires (genId) faisaient
+   que la fusion cloud ADDITIONNAIT les fiches des deux postes (chacun avait
+   ses propres ids) : l'utilisateur voyait une nomenclature qu'il n'avait pas
+   saisie. Desormais, meme ligne = meme id = fusion au lieu d'addition. */
+var PF_COMP_MIG_CLE = 'mdb_pf_comp_ids_v2';
+function pfComposantsMigrerIds() {
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(PF_COMP_MIG_CLE) === '1') return;
+    var comps = getSection('composants', []);
+    if (!Array.isArray(comps) || !comps.length) {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(PF_COMP_MIG_CLE, '1');
+      return;
+    }
+    var arts = getArticles() || [];
+    var artParId = {};
+    arts.forEach(function(a) { if (a && a.id) artParId[String(a.id)] = a; });
+    var vus = {}, compteurs = {}, sortie = [], sautes = 0, idMaj = 0;
+    comps.forEach(function(c) {
+      if (!c) return;
+      var art = artParId[String(c.article_id || '')] || null;
+      if (!art) { sortie.push(c); return; } /* orphelin : conserve tel quel */
+      var typ = String(c.type || '').toUpperCase();
+      var cleBase = pfNormCode(art.code) + '|' + typ + '|' + String(c.code || '');
+      var n = (compteurs[cleBase] = (compteurs[cleBase] || 0) + 1);
+      var nid = 'comp:' + pfNormCode(art.code) + ':' + typ + ':' + String(c.code || '') + ':' + n;
+      var sig = JSON.stringify([c.article_id, typ, c.code, c.length, c.width, c.thickness, c.quantity, c.placement]);
+      if (vus[sig]) { sautes++; return; } /* doublon exact : droppe */
+      if (vus[nid]) { sautes++; return; } /* meme ligne logique deja prise */
+      vus[nid] = true; vus[sig] = true;
+      if (c.id !== nid) { c.id = nid; idMaj++; }
+      sortie.push(c);
+    });
+    if (sautes > 0 || idMaj > 0 || sortie.length !== comps.length) setSection('composants', sortie);
+    if (typeof localStorage !== 'undefined') localStorage.setItem(PF_COMP_MIG_CLE, '1');
+  } catch (e) {}
 }
 function idxNomenclature() {
   try { var v = JSON.parse(localStorage.getItem('mdb_nomenclature')); return Array.isArray(v) ? v : []; }
@@ -20899,7 +20976,9 @@ function syncProduitsFinisFromIndex() {
         if (arts[k].categorie === 'finished' && pfNormCode(arts[k].code) === pfNormCode(codeExp)) { ex2 = arts[k]; break; }
       }
       if (!ex2) {
-        arts.push({ id: genId(), code: ia2.code, designation: ia2.designation || ia2.code,
+        /* Id deterministe art_pf_CODE : identique sur tous les postes, la
+           fusion cloud reconnaît le même article au lieu d'en créer deux. */
+        arts.push({ id: 'art_pf_' + pfNormCode(ia2.code), code: ia2.code, designation: ia2.designation || ia2.code,
           categorie: 'finished', prix_vente: idxPrixActuel(ia2), prix_revient: 0,
           unite: 'pcs', statut: 'active', created_at: new Date().toISOString(), _fromIndex: true });
         res.crees++; change = true;
@@ -26710,6 +26789,7 @@ initSidebarState();
    navigation d'avant le rechargement (et activer le bouton → si besoin). */
 try { _navRestore(); } catch (eNavR) { try { _navFwdSync(); } catch (eNavR2) {} }
 window.addEventListener('resize', function() { initSidebarState(); });
+try { pfComposantsMigrerIds(); } catch (eMig) {}
 maybeInitACSERData();
 
   /* Lancement repousse tout a la fin du fichier : plusieurs fonctions de rendu
