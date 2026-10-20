@@ -12773,6 +12773,75 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       `,
       attenduPrefixe: 'OK'
     });
+
+    r.push({
+      nom: 'PF : la d\u00e9dup efface m\u00eame quand position/dimensions divergent entre deux posts (PAL114 x2)',
+      app: 'production.html', store: storeRealiste,
+      code: `
+        var comps = [
+          { id: 'comp:PAL:LATTE:L114*8*2:1', article_id: 'a1', type: 'LATTE', code: 'L114*8*2', length: 114, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+          { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: ' l114*8*2 ', length: 114, width: 8, thickness: 2.5, quantity: 7, placement: '' },
+          { id: 'comp:PAL:PLOT:P114*10:1', article_id: 'a1', type: 'PLOT', code: 'P114*10', length: 114, width: 10, thickness: 4, quantity: 3, placement: '' },
+          { id: 'gen_b', article_id: 'a1', type: 'PLOT', code: 'P114*10', length: 114, width: 10, thickness: 4, quantity: 3, placement: 'SUPERIEUR' }
+        ];
+        var propre = pfComposantsNettoyerDoublons(comps);
+        var lattes = propre.filter(function(c){ return String(c.type) === 'LATTE'; });
+        var okTaille = propre.length === 2;
+        var okLatte = lattes.length === 1 && String(lattes[0].id).indexOf('comp:') === 0;
+        (okTaille && okLatte)
+          ? 'OK : position+dimensions+case differentes ecrasees, 2 lignes, version comp: gard\u00e9e'
+          : 'ECHEC taille=' + propre.length + ' ids=' + JSON.stringify(propre.map(function(c){ return c.id; }))
+      `,
+      attenduPrefixe: 'OK'
+    });
+
+    r.push({
+      nom: 'PF : harmonisation rattache les composants du doublon perdu au gagnant (pas de fiche x2)',
+      app: 'production.html', store: () => {
+        const s = storeRealiste();
+        s.mdb_nomenclature = JSON.stringify([
+          { id: 'n1', code: 'PAL114', designation: 'PALETTES 114*114*12', typeArticle: 'produit_fini',
+            longueur: 114, largeur: 114, epaisseur: 12, prixPeriodes: [{ dateDebut: '2026-01-01', dateFin: '2026-12-31', prixUnitaire: 1500 }] }
+        ]);
+        const p = JSON.parse(s.mdb_production);
+        p.articles = [
+          { id: 'art_30', code: 'PAL114', designation: 'Palettes 114', categorie: 'finished', prix_vente: 1500 },
+          { id: 'gen_X', code: 'PAL114', designation: 'PALETTES 114*114*12', categorie: 'finished', prix_vente: 1500 }
+        ];
+        p.composants = [
+          { id: 'comp:PAL:LATTE:L114*8*2:1', article_id: 'art_30', type: 'LATTE', code: 'L114*8*2', length: 114, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+          { id: 'comp:PAL:PLOT:P114*10:1', article_id: 'art_30', type: 'PLOT', code: 'P114*10', length: 114, width: 10, thickness: 4, quantity: 3, placement: '' },
+          { id: 'comp:PAL:POINTE:P5:1', article_id: 'art_30', type: 'POINTE', code: 'P5', length: 5, width: 5, thickness: 5, quantity: 4, placement: '' },
+          { id: 'gen_c1', article_id: 'gen_X', type: 'LATTE', code: 'L114*8*2', length: 114, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+          { id: 'gen_c2', article_id: 'gen_X', type: 'PLOT', code: 'P114*10', length: 114, width: 10, thickness: 4, quantity: 3, placement: '' },
+          { id: 'gen_c3', article_id: 'gen_X', type: 'POINTE', code: 'P5', length: 5, width: 5, thickness: 5, quantity: 4, placement: '' }
+        ];
+        p.pfIgnores = []; p.pfLinks = [];
+        s.mdb_production = JSON.stringify(p);
+        return s;
+      },
+      code: srcSyncPf + '\n;\n' + `
+        triSyncHarmoniserTout();
+        var db = getDB();
+        var pals = db.articles.filter(function(x){
+          var c = String(x.code || '').toUpperCase();
+          return c === 'PAL114' || c.indexOf('PALETTES') === 0;
+        });
+        var comps = getSection('composants', []);
+        var orph = comps.filter(function(c){ return c.article_id && !db.articles.some(function(x){ return x.id === c.article_id; }); });
+        var surGagnant = comps.filter(function(c){ return c.article_id === 'art_30'; });
+        var okUnSeul = pals.length === 1 && pals[0].id === 'art_30';
+        var okTrois = comps.length === 3 && surGagnant.length === 3;
+        var okOrph = orph.length === 0;
+        var okTypes = ['LATTE', 'PLOT', 'POINTE'].every(function(t){
+          return surGagnant.filter(function(c){ return c.type === t; }).length === 1;
+        });
+        (okUnSeul && okTrois && okOrph && okTypes)
+          ? 'OK : 1 seul article PAL114 (art_30), ses 3 composants + les 3 rattaches du doublon dedupliques en 3, 0 orphelin'
+          : 'ECHEC pals=' + pals.length + ' id=' + (pals[0] && pals[0].id) + ' comps=' + comps.length + ' gagnant=' + surGagnant.length + ' orph=' + orph.length + ' ' + JSON.stringify(comps.map(function(c){ return c.article_id + ':' + c.type; }))
+      `,
+      attenduPrefixe: 'OK'
+    });
   } catch (eSyncPf) {
     r.push({
       nom: 'PF : injection sync-pf.js impossible', app: 'production.html', store: storeRealiste,
@@ -12785,7 +12854,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
     nom: 'PF : la migration des ids composants est deterministe et one-shot',
     app: 'production.html', store: storeRealiste,
     code: `
-      localStorage.removeItem('mdb_pf_comp_ids_v2');
+      localStorage.removeItem('mdb_pf_comp_ids_v3');
       setSection('composants', [
         { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', length: 100, width: 8, thickness: 2, quantity: 5, placement: 'SUPERIEUR' },
         { id: 'gen_b', article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', length: 100, width: 8, thickness: 2, quantity: 5, placement: 'SUPERIEUR' },
@@ -12798,7 +12867,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       var okIds = comps.filter(function(c){ return c.article_id === 'a1'; })
         .every(function(c){ return String(c.id).indexOf('comp:PAL:') === 0; });
       var okOrph = comps.some(function(c){ return c.id === 'gen_d' && c.article_id === 'inconnu'; });
-      var okFlag = localStorage.getItem('mdb_pf_comp_ids_v2') === '1';
+      var okFlag = localStorage.getItem('mdb_pf_comp_ids_v3') === '1';
       var avant2e = JSON.stringify(comps);
       pfComposantsMigrerIds();
       var okNoop = JSON.stringify(getSection('composants', [])) === avant2e;
@@ -12832,6 +12901,106 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       ok
         ? 'OK : id art_pf_NEW123, categorie finished, 2e passe sans doublon'
         : 'ECHEC id=' + (a && a.id) + ' cat=' + (a && a.categorie) + ' crees1=' + r1.crees + ' crees2=' + r2.crees
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'PF : pfComposantsNettoyerDoublons efface les doublons genId vs comp: (meme code/dims/position, qt\u00e9 diff\u00e9rente)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      var comps = [
+        { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 7, placement: 'SUPERIEUR' },
+        { id: 'comp:a1:LATTE:L1:1', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+        { id: 'gen_b', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 7, placement: 'SUPERIEUR' },
+        { id: 'comp:a1:PLOT:P1:1', article_id: 'a1', type: 'PLOT', code: 'P1', length: 50, width: 5, thickness: 5, quantity: 3, placement: 'SUPERIEUR' },
+        { id: 'gen_c', article_id: 'a1', type: 'LATTE', code: 'L2', length: 90, width: 8, thickness: 2, quantity: 4, placement: 'INFERIEUR' }
+      ];
+      var propre = pfComposantsNettoyerDoublons(comps);
+      var latte = propre.filter(function(c){ return c.code === 'L1'; });
+      var okTaille = propre.length === 3;
+      var okLatte = latte.length === 1 && latte[0].id === 'comp:a1:LATTE:L1:1';
+      var okL2 = propre.some(function(c){ return c.code === 'L2'; });
+      var okP1 = propre.some(function(c){ return c.id === 'comp:a1:PLOT:P1:1'; });
+      (okTaille && okLatte && okL2 && okP1)
+        ? 'OK : 3 lignes restantes, L1 garde la version comp:, L2 et P1 conserv\u00e9es'
+        : 'ECHEC taille=' + propre.length + ' latte=' + latte.length + ' latteId=' + (latte[0] && latte[0].id)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'PF : la migration v3 nettoie les doublons genId vs comp: avec quantit\u00e9 diff\u00e9rente (7 vs 8)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      localStorage.removeItem('mdb_pf_comp_ids_v3');
+      setSection('composants', [
+        { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', length: 100, width: 8, thickness: 2, quantity: 7, placement: 'SUPERIEUR' },
+        { id: 'gen_b', article_id: 'a1', type: 'LATTE', code: 'L1', designation: 'Latte', length: 100, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+        { id: 'gen_c', article_id: 'a1', type: 'PLOT', code: 'P1', designation: 'Plot', length: 50, width: 5, thickness: 5, quantity: 3, placement: 'SUPERIEUR' },
+        { id: 'gen_d', article_id: 'a1', type: 'PLOT', code: 'P1', designation: 'Plot', length: 50, width: 5, thickness: 5, quantity: 3, placement: 'SUPERIEUR' }
+      ]);
+      pfComposantsMigrerIds();
+      var comps = getSection('composants', []);
+      var okLatte = comps.filter(function(c){ return c.code === 'L1'; }).length === 1;
+      var okPlot = comps.filter(function(c){ return c.code === 'P1'; }).length === 1;
+      var okIds = comps.every(function(c){ return String(c.id).indexOf('comp:PAL:') === 0; });
+      var okFlag = localStorage.getItem('mdb_pf_comp_ids_v3') === '1';
+      (okLatte && okPlot && okIds && okFlag)
+        ? 'OK : 1 latte + 1 plot restants, ids comp:PAL:*, flag v3 pos\u00e9'
+        : 'ECHEC latte=' + comps.filter(function(c){ return c.code === 'L1'; }).length + ' plot=' + comps.filter(function(c){ return c.code === 'P1'; }).length + ' ids=' + JSON.stringify(comps.map(function(c){ return c.id; }))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'PF : prodApplyCloud ne r\u00e9suscite pas les lignes genId du cloud (nettoyage apr\u00e8s merge pull)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      /* Local : 2 lignes comp: ; Cloud : les memes lignes en genId + 1 nouvelle. */
+      setSection('composants', [
+        { id: 'comp:a1:LATTE:L1:1', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+        { id: 'comp:a1:PLOT:P1:1', article_id: 'a1', type: 'PLOT', code: 'P1', length: 50, width: 5, thickness: 5, quantity: 3, placement: 'SUPERIEUR' }
+      ]);
+      var db = getDB();
+      db.__prodUpdatedAt = 1000;
+      try { setDB(db); } catch(e) {}
+      prodApplyCloud({
+        __prodUpdatedAt: 2000,
+        composants: [
+          { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 7, placement: 'SUPERIEUR' },
+          { id: 'gen_b', article_id: 'a1', type: 'PLOT', code: 'P1', length: 50, width: 5, thickness: 5, quantity: 3, placement: 'SUPERIEUR' },
+          { id: 'comp:a1:LATTE:L2:1', article_id: 'a1', type: 'LATTE', code: 'L2', length: 90, width: 8, thickness: 2, quantity: 4, placement: 'INFERIEUR' }
+        ]
+      }, true);
+      var comps = getSection('composants', []);
+      var okPasGenId = comps.every(function(c){ return String(c.id).indexOf('gen_') !== 0; });
+      var okTaille = comps.length === 3;
+      var okL2 = comps.some(function(c){ return c.id === 'comp:a1:LATTE:L2:1'; });
+      (okPasGenId && okTaille && okL2)
+        ? 'OK : genId non r\u00e9suscit\u00e9s, 3 lignes (2 locales + L2 distant), pas de doublon'
+        : 'ECHEC taille=' + comps.length + ' ids=' + JSON.stringify(comps.map(function(c){ return c.id; }))
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'PF : openArticleModal nettoie les doublons avant pr\u00e9-remplissage de la nomenclature',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', [
+        { id: 'gen_a', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 7, placement: 'SUPERIEUR' },
+        { id: 'gen_b', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' },
+        { id: 'comp:a1:LATTE:L1:1', article_id: 'a1', type: 'LATTE', code: 'L1', length: 100, width: 8, thickness: 2, quantity: 8, placement: 'SUPERIEUR' }
+      ]);
+      openArticleModal('a1');
+      var comps = getSection('composants', []);
+      var okNettoye = comps.length === 1 && String(comps[0].id).indexOf('comp:') === 0;
+      var modal = document.getElementById('modalOverlay');
+      if (modal) modal.remove();
+      okNettoye
+        ? 'OK : 1 seule ligne L1 conserv\u00e9e (id comp:) apr\u00e8s ouverture de la modale'
+        : 'ECHEC taille=' + comps.length + ' ids=' + JSON.stringify(comps.map(function(c){ return c.id; }))
     `,
     attenduPrefixe: 'OK'
   });

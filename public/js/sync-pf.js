@@ -184,6 +184,38 @@ function triSyncGetProduitsFinis() {
  * 2. mdb_production.articles
  * 3. mdb_paye.articlesMontage
  */
+
+/* Nettoyage des doublons de composants causes par la fusion cloud. Les anciennes
+   lignes genId (aleatoires) et les nouvelles lignes comp: (deterministes) ont des
+   ids differents : a chaque sync, l'union par id les additionnait → lignes qui se
+   dupliquent. Dedup par (article_id, type, code) SEULEMENT — sans dims ni
+   position : deux posts qui divergent sur un champ ou une position gardent la
+   meme ligne logique, et c'etait precisement ce qui empechait l'effacement.
+   On garde la ligne avec l'id deterministe comp: si presente, sinon la premiere
+   (les lignes locales passent en premier dans les fusions).
+   GARDE EN PARITE avec production.html (meme corps de fonction). */
+function pfComposantsNettoyerDoublons(comps) {
+  if (!Array.isArray(comps) || comps.length < 2) return comps;
+  var groupes = {}, ordre = [];
+  for (var i = 0; i < comps.length; i++) {
+    var c = comps[i];
+    if (!c || typeof c !== 'object') continue;
+    var cle = String(c.article_id || '') + '|' + String(c.type || '').toUpperCase() + '|' + String(c.code || '').trim().toUpperCase();
+    if (!groupes[cle]) { groupes[cle] = []; ordre.push(cle); }
+    groupes[cle].push(c);
+  }
+  var sortie = [];
+  for (var j = 0; j < ordre.length; j++) {
+    var g = groupes[ordre[j]];
+    var choisie = g[0];
+    for (var k = 0; k < g.length; k++) {
+      if (String((g[k] && g[k].id) || '').indexOf('comp:') === 0) { choisie = g[k]; break; }
+    }
+    sortie.push(choisie);
+  }
+  return sortie;
+}
+
 function triSyncHarmoniserTout(forceList) {
   var _force = Array.isArray(forceList);
   var list = _force ? forceList : triSyncGetProduitsFinis();
@@ -260,6 +292,7 @@ function triSyncHarmoniserTout(forceList) {
     } catch (eRef) {}
 
     var dejaVus = {}; /* canon -> article retenu */
+    var perdants = []; /* doublons PF perdu : { art, canon } a rattacher */
     var nonPF = [];
 
     /* 2a. Parcourir les articles existants : non-PF conserves tels quels,
@@ -280,13 +313,45 @@ function triSyncHarmoniserTout(forceList) {
       }
       var retenu = dejaVus[canon];
       if (retenu) {
-         /* Doublon : garde celui qui a des references (composants/stock),
-            sinon la 1re occurrence. L'autre est retire silencieusement. */
-         if ((refs[String(a.id)] || 0) > (refs[String(retenu.id)] || 0)) dejaVus[canon] = a;
+        /* Doublon : garde celui qui a des references (composants/stock),
+           sinon la 1re occurrence. Le perdu n'est pas jete : ses composants
+           et stocks sont rattaches au retenu juste apres — sinon la fiche
+           gagnante restait incompletle et la synchro suivante additionnait
+           les deux versions → lignes qui se dupliquaient. */
+        if ((refs[String(a.id)] || 0) > (refs[String(retenu.id)] || 0)) {
+          dejaVus[canon] = a;
+          perdants.push({ art: retenu, canon: canon });
+        } else {
+          perdants.push({ art: a, canon: canon });
+        }
         return;
       }
       dejaVus[canon] = a;
     });
+
+    /* Rattacher les composants/stocks des doublons perdus au gagnant, puis
+       dedupliquer les lignes de composants (meme article/type/code = meme
+       ligne logique : les ids genId vs comp: ne doivent pas s'additionner). */
+    try {
+      perdants.forEach(function (e) {
+        var gagnant = dejaVus[e.canon];
+        if (!gagnant || !e.art || String(gagnant.id) === String(e.art.id)) return;
+        var pid = String(e.art.id);
+        (Array.isArray(pData.composants) ? pData.composants : []).forEach(function (c) {
+          if (c && String(c.article_id) === pid) c.article_id = gagnant.id;
+        });
+        ['stockFinished', 'stockSemi'].forEach(function (sec) {
+          (Array.isArray(pData[sec]) ? pData[sec] : []).forEach(function (s) {
+            if (s && String(s.article_id) === pid) s.article_id = gagnant.id;
+          });
+        });
+      });
+      if (typeof pfComposantsNettoyerDoublons === 'function' &&
+          Array.isArray(pData.composants) && pData.composants.length > 1) {
+        var propres = pfComposantsNettoyerDoublons(pData.composants);
+        if (propres.length !== pData.composants.length) pData.composants = propres;
+      }
+    } catch (eRm) {}
 
     var nouvelles = nonPF.slice();
     Object.keys(dejaVus).forEach(function (canon) {

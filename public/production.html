@@ -10136,6 +10136,12 @@ function prodFusionnerSectionsAvantEnvoi(uid) {
           addD = true;
         }
         if (addD) { local2[sec] = merged; changed = true; }
+        /* Composants : apres l'union, supprime les doublons causes par les
+           anciennes lignes genId du cloud (elles reviendraient a chaque push). */
+        if (sec === 'composants' && Array.isArray(local2[sec]) && local2[sec].length > 1) {
+          var compPropre = pfComposantsNettoyerDoublons(local2[sec]);
+          if (compPropre.length !== local2[sec].length) { local2[sec] = compPropre; changed = true; }
+        }
       }
       if (!changed) return;
       try { setDB(local2); } catch(eF) {}
@@ -10287,6 +10293,15 @@ function prodMergeObjs(local, cloud) {
       else if (lv !== undefined) out[key] = lv;
       else out[key] = cv;
     }
+    /* Composants : l'union par id additionne les lignes genId/comp: d'un meme
+       article (ids differents, meme article/type/code) → lignes qui se
+       dupliquent. Nettoyage apres fusion (chemin initial sans base hash). */
+    try {
+      if (Array.isArray(out.composants) && out.composants.length > 1) {
+        var cpMo = pfComposantsNettoyerDoublons(out.composants);
+        if (cpMo.length !== out.composants.length) out.composants = cpMo;
+      }
+    } catch(eCpMo) {}
     out.__prodUpdatedAt = Date.now();
   } catch(e) { out = local; }
   return out;
@@ -10421,6 +10436,15 @@ function prodApplyCloud(cloudProd, silent) {
       sales[k] = true;
     }
   } catch (eF) {}
+  /* Composants : apres le merge pull, supprime les doublons (lignes genId du
+     cloud vs lignes comp: deterministes locales — ids differents mais meme
+     ligne logique). Sans cela, chaque pull les additionnait. */
+  try {
+    if (Array.isArray(local.composants) && local.composants.length > 1) {
+      var compProprePull = pfComposantsNettoyerDoublons(local.composants);
+      if (compProprePull.length !== local.composants.length) { local.composants = compProprePull; change = true; }
+    }
+  } catch (eCP) {}
   try {
     var ctu = cloudProd.__prodUpdatedAt || 0, ltu = local.__prodUpdatedAt || 0;
     if (ctu > ltu) { local.__prodUpdatedAt = ctu; change = true; }
@@ -20390,6 +20414,13 @@ function openArticleModal(id) {
   afMarge();
   /* Pré-remplir la nomenclature existante */
   if (a) {
+    /* Nettoyage one-shot avant affichage : supprime les doublons de lignes
+       (lignes genId vs comp: avec meme code/dims/position). */
+    try {
+      var compsPropres = pfComposantsNettoyerDoublons(getSection('composants', []));
+      var compsOrig = getSection('composants', []);
+      if (compsPropres.length !== compsOrig.length) setSection('composants', compsPropres);
+    } catch(eN) {}
     getSection('composants', []).filter(function(c) { return c.article_id === a.id; }).forEach(function(c) {
       var cat = _afTypeToCat[c.type];
       if (cat) afAddRow(cat, { code: c.code, designation: c.designation || c.code, length: c.length, width: c.width, thickness: c.thickness, quantity: c.quantity, placement: c.placement });
@@ -20807,7 +20838,7 @@ function pfReintegrer(code) {
    que la fusion cloud ADDITIONNAIT les fiches des deux postes (chacun avait
    ses propres ids) : l'utilisateur voyait une nomenclature qu'il n'avait pas
    saisie. Desormais, meme ligne = meme id = fusion au lieu d'addition. */
-var PF_COMP_MIG_CLE = 'mdb_pf_comp_ids_v2';
+var PF_COMP_MIG_CLE = 'mdb_pf_comp_ids_v3';
 function pfComposantsMigrerIds() {
   try {
     if (typeof localStorage !== 'undefined' && localStorage.getItem(PF_COMP_MIG_CLE) === '1') return;
@@ -20835,9 +20866,42 @@ function pfComposantsMigrerIds() {
       if (c.id !== nid) { c.id = nid; idMaj++; }
       sortie.push(c);
     });
+    /* Nettoyage post-migration : les lignes genId vs comp: avec meme
+       (article, type, code, dims, placement) mais quantite differente (7 vs 8)
+       passaient le filtre sig et restaient en double. */
+    sortie = pfComposantsNettoyerDoublons(sortie);
     if (sautes > 0 || idMaj > 0 || sortie.length !== comps.length) setSection('composants', sortie);
     if (typeof localStorage !== 'undefined') localStorage.setItem(PF_COMP_MIG_CLE, '1');
   } catch (e) {}
+}
+/* Nettoyage des doublons de composants causes par la fusion cloud. Les anciennes
+   lignes genId (aleatoires) et les nouvelles lignes comp: (deterministes) ont des
+   ids differents : a chaque sync, l'union par id les additionnait → lignes qui se
+   dupliquent. Dedup par (article_id, type, code) SEULEMENT — sans dims ni
+   position : deux posts qui divergent sur un champ ou une position gardent la
+   meme ligne logique, et c'etait precisement ce qui empechait l'effacement.
+   On garde la ligne avec l'id deterministe comp: si presente, sinon la premiere
+   (les lignes locales passent en premier dans les fusions). */
+function pfComposantsNettoyerDoublons(comps) {
+  if (!Array.isArray(comps) || comps.length < 2) return comps;
+  var groupes = {}, ordre = [];
+  for (var i = 0; i < comps.length; i++) {
+    var c = comps[i];
+    if (!c || typeof c !== 'object') continue;
+    var cle = String(c.article_id || '') + '|' + String(c.type || '').toUpperCase() + '|' + String(c.code || '').trim().toUpperCase();
+    if (!groupes[cle]) { groupes[cle] = []; ordre.push(cle); }
+    groupes[cle].push(c);
+  }
+  var sortie = [];
+  for (var j = 0; j < ordre.length; j++) {
+    var g = groupes[ordre[j]];
+    var choisie = g[0];
+    for (var k = 0; k < g.length; k++) {
+      if (String((g[k] && g[k].id) || '').indexOf('comp:') === 0) { choisie = g[k]; break; }
+    }
+    sortie.push(choisie);
+  }
+  return sortie;
 }
 function idxNomenclature() {
   try { var v = JSON.parse(localStorage.getItem('mdb_nomenclature')); return Array.isArray(v) ? v : []; }
@@ -21047,6 +21111,26 @@ function syncProduitsFinisFromIndex() {
         _sansCode.push(b1a); res.doublons.push(b1a.code);
       }
     }
+    /* Les doublons perdus ne doivent pas laisser leurs composants/stocks
+       orphelins : la version corrompue (plus de lignes) gagnait ensuite par
+       score de references et re-dupliquait a l'affichage. On rattache au
+       gagnant puis on deduplique par (article, type, code). */
+    try {
+      var _remap = false;
+      _sansCode.forEach(function (pa) {
+        if (!pa || pa.categorie !== 'finished') return;
+        var pn = pfNormCode(pa.code);
+        var gagnant = pn ? _bestParCode[pn] : null;
+        if (!gagnant || gagnant === pa) return;
+        var pid = String(pa.id);
+        _comps.forEach(function (c) { if (c && String(c.article_id) === pid) { c.article_id = gagnant.id; _remap = true; } });
+        _stkFin.forEach(function (s) { if (s && String(s.article_id) === pid) { s.article_id = gagnant.id; _remap = true; } });
+        _stkSemi.forEach(function (s) { if (s && String(s.article_id) === pid) { s.article_id = gagnant.id; _remap = true; } });
+      });
+      var _propre = pfComposantsNettoyerDoublons(_comps);
+      if (_remap || _propre.length !== _comps.length) setSection('composants', _propre);
+      if (_remap) { setStockFinished(_stkFin); setStockSemi(_stkSemi); }
+    } catch (eRm2) {}
     var _final = [];
     for (var b2 = 0; b2 < arts.length; b2++) {
       var a = arts[b2];
