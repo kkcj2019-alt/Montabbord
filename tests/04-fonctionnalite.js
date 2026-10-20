@@ -4235,6 +4235,83 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Taux de perte : le champ est librement ajustable (plus verrouille pour les non-admin) et le taux du jour s applique a la date',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_tauxPerteJour = JSON.stringify([{ id: 't1', date: '2026-10-10', taux: 35 }]);
+      return s;
+    },
+    code: `
+      window._stockTab = 'palettes';
+      setSection('prodTab', 'saisie');
+      localStorage.removeItem('mdb_prod_editId');
+      var h = render_production();
+      var champ = /<input[^>]*id="prod_taux_perte"/.test(h);
+      var nonVerrouille = !/id="prod_taux_perte"[^>]*disabled/.test(h);
+      var tauxJour = getTauxPerteFor('2026-10-10');
+      var tauxAutre = getTauxPerteFor('2026-10-11');
+      var fixe = getTauxPerteJourFixe('2026-10-10');
+      var absent = getTauxPerteJourFixe('2026-12-31');
+      (champ && nonVerrouille && tauxJour === '35' && fixe === '35' && absent === null && tauxAutre === getDefaultTauxPerte())
+        ? 'OK : champ libre, taux du jour 35% sur 10/10, defaut ailleurs'
+        : 'ECHEC : champ=' + champ + ' libre=' + nonVerrouille + ' jour=' + tauxJour + ' fixe=' + fixe + ' absent=' + absent + ' defaut=' + tauxAutre
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Taux de perte : reprendre un brouillon applique le taux fixe pour SON jour (pas le taux fige a 10%)',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      s.mdb_tauxPerteJour = JSON.stringify([{ id: 't1', date: '2026-10-10', taux: 35 }]);
+      const p = JSON.parse(s.mdb_production);
+      p.productions = [{ id: 'f-brouillon', numero: '261001', date: '2026-10-10', chef: 'JEAN PAUL', statut: 'draft', taux_perte: 10 }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      setSection('prodTab', 'saisie');
+      localStorage.setItem('mdb_prod_editId', 'f-brouillon');
+      render_production();
+      var ouverture = prodTauxOuverture({ date: '2026-10-10', taux_perte: 10 });
+      var autreJour = prodTauxOuverture({ date: '2026-10-11', taux_perte: 33 });
+      var personnalise = prodTauxOuverture({ date: '2026-10-11', taux_perte: 7 });
+      var fixePrime = (ouverture === '35');
+      var saisieConservee = (autreJour === '33' && personnalise === '7');
+      (fixePrime && saisieConservee)
+        ? 'OK : taux fixe du jour prime (35%), sinon le taux deja saisi est conserve (33% / 7%)'
+        : 'ECHEC : ouverture=' + ouverture + ' autre=' + autreJour + ' perso=' + personnalise
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Historique : la colonne ARTICLE / PRODUIT montre ce qui a ete produit (lattes, plots, assemblage) au lieu de « - »',
+    app: 'production.html', store: () => {
+      const s = storeRealiste();
+      const p = JSON.parse(s.mdb_production);
+      p.productions = [{
+        id: 'f1', numero: '261001', date: '2026-10-10', chef: 'JEAN PAUL', statut: 'draft', article_id: '',
+        lattes: [{ code: 'L114*8*2', qte: 10 }], plots: [{ code: 'P114*10*4', qte: 5 }],
+        assemblage: [{ code: 'PAL114', qte: 2 }], cp: [], encours: []
+      }];
+      s.mdb_production = JSON.stringify(p);
+      return s;
+    },
+    code: `
+      setSection('prodTab', 'historique');
+      setSection('historyTab', 'saisies');
+      var h = render_production();
+      var resume = prodResumeArticle(getProductions()[0]);
+      var dansTableau = h.indexOf('Lattes (1), Plots (1), Assemblage (1)') !== -1;
+      (resume === 'Lattes (1), Plots (1), Assemblage (1)' && dansTableau)
+        ? 'OK : resume du produit affiche (Lattes (1), Plots (1), Assemblage (1)) au lieu de -'
+        : 'ECHEC : resume=' + resume + ' tableau=' + dansTableau
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Fiche de production : enregistrer une fiche passe vraiment par l\u2019enregistrement (etape imbriquee, pas de variable globale perdue)',
     app: 'production.html', store: storeRealiste,
     code: `

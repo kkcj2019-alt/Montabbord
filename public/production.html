@@ -10623,27 +10623,42 @@ function getDefaultTauxPerte() {
   return String(v);
 }
 /* Taux lié au jour : taux spécifique fixé pour ce jour (Paramètres de l'app principale), sinon défaut */
-function getTauxPerteFor(dateStr) {
+function getTauxPerteJourFixe(dateStr) {
   try {
     var arr = lsArr('mdb_tauxPerteJour');
     for (var i = 0; i < arr.length; i++) {
       if (arr[i].date === dateStr) { var t = parseFloat(arr[i].taux); if (!isNaN(t)) return String(Math.min(100, Math.max(0, t))); }
     }
   } catch (e) {}
+  return null;
+}
+function getTauxPerteFor(dateStr) {
+  var f = getTauxPerteJourFixe(dateStr);
+  return (f !== null) ? f : getDefaultTauxPerte();
+}
+/* Taux à afficher à l'ouverture d'une fiche : le taux fixé pour SON jour
+   prime (fiche non validée), sinon le taux déjà saisi sur la fiche, sinon
+   le défaut. */
+function prodTauxOuverture(p) {
+  try {
+    var date = (p && p.date) || today();
+    var fixe = getTauxPerteJourFixe(date);
+    if (fixe !== null) return fixe;
+    var t = p ? parseFloat(p.taux_perte) : NaN;
+    if (!isNaN(t) && t > 0) return String(Math.min(100, Math.max(0, t)));
+  } catch (e) {}
   return getDefaultTauxPerte();
 }
-/* Si la date de la fiche change et que le taux n'a pas été touché manuellement, on ré-applique le taux du jour */
+/* La date change : le taux du jour s'applique automatiquement (fiche non
+   validée). L'utilisateur peut ensuite l'ajuster librement. */
 try {
   document.addEventListener('change', function(e) {
     try {
       if (e.target && e.target.id === 'prod_date') {
         var t = document.getElementById('prod_taux_perte');
-        if (t && t.getAttribute('data-auto') !== '0') { t.value = getTauxPerteFor(e.target.value || today()); t.setAttribute('data-auto', '1'); }
+        if (t && !t.disabled) t.value = getTauxPerteFor(e.target.value || today());
       }
     } catch (err) {}
-  });
-  document.addEventListener('input', function(e) {
-    try { if (e.target && e.target.id === 'prod_taux_perte') e.target.setAttribute('data-auto', '0'); } catch (err2) {}
   });
 } catch (eDoc) {}
 /* Heartbeat : garde la session principale (index.html) vivante pendant l'utilisation de cette app.
@@ -11430,14 +11445,14 @@ function render_production_saisie() {
   var h = '';
 
   /* === EN-TÊTE FICHE === */
-  var isAdmin = isCurrentUserAdmin();
   h += '<div class="card">';
   h += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:1rem">';
   h += formField('prod_date', 'Date', today(), 'date', true);
   h += '<div class="form-group"><label>N° Fiche de Production</label><input type="text" id="prod_numero" value="' + numero + '" readonly style="background:#f8f9fa;font-weight:700"></div>';
   h += formField('prod_chef', 'Chef de Production *', '', 'text', true);
-  var tauxPerteDisabled = isAdmin ? '' : ' disabled style="background:#f5f5f5;cursor:not-allowed"';
-  h += '<div class="form-group"><label>% Taux de Perte Accepté</label><input type="number" id="prod_taux_perte" data-auto="1" value="' + getTauxPerteFor(today()) + '"' + tauxPerteDisabled + '></div>';
+  /* Taux librement ajustable tant que la fiche n'est pas validée (le taux
+     fixé pour le jour sélectionné pré-remplit le champ). */
+  h += '<div class="form-group"><label>% Taux de Perte Accepté</label><input type="number" id="prod_taux_perte" min="0" max="100" step="0.5" value="' + getTauxPerteFor(today()) + '"></div>';
   h += '</div>';
 
   /* === REPRISE DU BROUILLON === */
@@ -12868,7 +12883,7 @@ function buildProductionHistoryHTML() {
   prods.forEach(function(p) {
     var art = getArticles().find(function(a) { return a.id === p.article_id; });
     var rend = p.rendement != null ? p.rendement.toFixed(1) + '%' : '-';
-    h += '<tr><td>' + escH(p.numero || '-') + '</td><td>' + fmtD(p.date) + '</td><td>' + escH(art ? (art.code + ' — ' + art.designation) : '-') + '</td><td>' + escH(p.chef || '-') + '</td><td style="text-align:right">' + ((p.vol_sortie_bois || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_lattes || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_plots || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + rend + '</td><td>' + (p.statut === 'validated' ? '✅ Validé' : p.statut === 'draft' ? '📝 Brouillon' : p.statut) + '</td></tr>';
+    h += '<tr><td>' + escH(p.numero || '-') + '</td><td>' + fmtD(p.date) + '</td><td>' + escH(prodResumeArticle(p)) + '</td><td>' + escH(p.chef || '-') + '</td><td style="text-align:right">' + ((p.vol_sortie_bois || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_lattes || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + ((p.vol_plots || 0).toFixed(4)) + ' m³</td><td style="text-align:right">' + rend + '</td><td>' + (p.statut === 'validated' ? '✅ Validé' : p.statut === 'draft' ? '📝 Brouillon' : p.statut) + '</td></tr>';
   });
   h += '</table></body></html>';
   return h;
@@ -12898,7 +12913,7 @@ function populateProdForm(editId) {
   var setV = function(id, v) { var el = document.getElementById(id); if (el) el.value = (v == null ? '' : v); };
   setV('prod_date', p.date);
   setV('prod_chef', p.chef);
-  setV('prod_taux_perte', p.taux_perte);
+  setV('prod_taux_perte', prodTauxOuverture(p));
   setV('prod_article_id', p.article_id || '');
   setV('prod_observations', p.observations);
   setV('prod_numero', p.numero || '');
@@ -13164,6 +13179,26 @@ function supprimerLignesSemiChoisis() {
 }
 
 /* ==================== HISTORIQUE ==================== */
+/* Libellé de la colonne « Article / Produit » : le libellé de l'article
+   sélectionné sur la fiche, sinon un résumé de ce qui a réellement été
+   produit (lattes, plots, CP, assemblage, en-cours) pour ne jamais
+   afficher « - » alors que la fiche contient des lignes. */
+function prodResumeArticle(p) {
+  try {
+    var art = (p.article_id && getArticles().find(function(a) { return a.id === p.article_id; })) || null;
+    if (art) return (art.code ? art.code + ' — ' : '') + (art.designation || art.code || '');
+    var bits = [];
+    function _nb(arr) { var n = 0; try { (arr || []).forEach(function(l) { if (parseFloat(l.qte) > 0) n++; }); } catch (e) {} return n; }
+    var nL = _nb(p.lattes), nP = _nb(p.plots), nC = _nb(p.cp), nA = _nb(p.assemblage), nE = _nb(p.encours);
+    if (nL) bits.push('Lattes (' + nL + ')');
+    if (nP) bits.push('Plots (' + nP + ')');
+    if (nC) bits.push('CP (' + nC + ')');
+    if (nA) bits.push('Assemblage (' + nA + ')');
+    if (nE) bits.push('En-cours (' + nE + ')');
+    if (bits.length) return bits.join(', ');
+    return (p.observations || '').slice(0, 40) || '—';
+  } catch (e) { return '-'; }
+}
 function render_history() {
   var prods = getProductions().filter(function(p) { return monthMatch(p.date); }).slice().reverse();
   var losses = getLosses().filter(function(l) { return monthMatch(l.date); }).slice().reverse();
@@ -13197,8 +13232,8 @@ function render_history() {
       h += '<tr>';
       h += '<td><strong>' + escH(p.numero || '-') + '</strong></td>';
       h += '<td>' + fmtD(p.date) + '</td>';
-      h += '<td>' + escH(art ? (art.code + ' — ' + art.designation) : '-') + '</td>';
-      h += '<td>' + escH(p.chef || '-') + '</td>';
+    h += '<td>' + escH(prodResumeArticle(p)) + '</td>';
+    h += '<td>' + escH(p.chef || '-') + '</td>';
       h += '<td style="text-align:right">' + ((p.vol_sortie_bois || 0).toFixed(4)) + ' m³</td>';
       h += '<td style="text-align:right">' + ((p.vol_lattes || 0).toFixed(4)) + ' m³</td>';
       h += '<td style="text-align:right">' + ((p.vol_plots || 0).toFixed(4)) + ' m³</td>';
