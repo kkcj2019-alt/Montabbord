@@ -10825,6 +10825,7 @@ function render_dashboard() {
   var volAchatsMois = getAchats().filter(function(a) { return (a.date || '').indexOf(thisM) === 0; })
     .reduce(function(s, a) { return s + (a.total_volume || 0); }, 0);
   try { if (typeof reconcilierInventairesSemiValides === 'function') reconcilierInventairesSemiValides(); } catch (eR) {}
+  try { if (typeof reparerInventairesPFAppliques === 'function') reparerInventairesPFAppliques(); } catch (eRPF) {}
   var volInitialTab = 0;
   var tipInitialTab = '';
   try {
@@ -14055,7 +14056,7 @@ function remettreZeroStockFinished() {
   } catch (e) { try { toast('Remise à zéro impossible', 'error'); } catch (e2) {} }
 }
 
-function render_stock_finished() { syncCatalogueToStock(); try { syncMirrorFinishedAll(true); } catch (eM) {} return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
+function render_stock_finished() { syncCatalogueToStock(); try { syncMirrorFinishedAll(true); } catch (eM) {} try { if (typeof reparerInventairesPFAppliques === 'function') reparerInventairesPFAppliques(); } catch (eRPF) {} return renderStockFiche('stock-finished', getStockFinished, 'Fiche de Stock - Produits Finis', 'showAddStock'); }
 
 
 /* ==================== STOCK SEMI-FINIS ==================== */
@@ -14066,6 +14067,7 @@ function render_stock_finished() { syncCatalogueToStock(); try { syncMirrorFinis
 function render_stock_semi() {
   syncCatalogueToStock();
   try { if (typeof reconcilierInventairesSemiValides === 'function') reconcilierInventairesSemiValides(); } catch (eR) {}
+  try { if (typeof reparerInventairesPFAppliques === 'function') reparerInventairesPFAppliques(); } catch (eRPF) {}
   var etat = getSection('stockSemiEtat', 'tout');
   var listTous = semiAggregate(getGlobalMonth());
   var totGen = 0, zeroGen = 0, totVolGen = 0;
@@ -15159,6 +15161,7 @@ function render_stock_raw() {
 
   if (tab === 'semi') {
     try { if (typeof reconcilierInventairesSemiValides === 'function') reconcilierInventairesSemiValides(); } catch (eR) {}
+    try { if (typeof reparerInventairesPFAppliques === 'function') reparerInventairesPFAppliques(); } catch (eRPF) {}
     var semiTous = semiAggregate(getGlobalMonth());
     var totSQGen = 0, totSZGen = 0, totSVGen = 0;
     semiTous.forEach(function (e) {
@@ -19560,7 +19563,39 @@ function applyInventoryAsInitial(month, items, opts) {
             var _k = String(_a.code || (s && s.code) || '').trim().toUpperCase();
             if (_k && _k === _codeF) _idxF.push(i);
           });
-          if (!_idxF.length) return;
+          if (!_idxF.length) {
+            /* L'article figure TOUJOURS a l'inventaire (calcInventoryItems),
+               meme sans ligne dans stockFinished (lignes creees plus tard par
+               syncCatalogueToStock). Avant, on sautait silencieusement : la
+               validation annoncait « Appliqué au stock » sans ecrire le PF —
+               le registre affichait ensuite « Ecart non justifie » et le
+               stock restait a 0. On CREE la ligne, comme les semi-finis. */
+            var _rqF = parseFloat(it.real_qte) || 0;
+            var _dsF = (opts && opts.date) || (month ? month + '-01' : today());
+            var _artF = {};
+            try {
+              if (it.article_id) _artF = getArticles().find(function (x) { return x.id === it.article_id; }) || {};
+              if (!_artF.id && _codeF) _artF = getArticles().find(function (x) { return String((x && x.code) || '').trim().toUpperCase() === _codeF; }) || {};
+            } catch (eAF) {}
+            _snap('stockFinished', it.ref, 0, _rqF);
+            finished.push({
+              id: genId(),
+              article_id: _artF.id || it.article_id || '',
+              code: it.code || _artF.code || _codeF,
+              designation: it.nom || _artF.designation || it.code || _codeF,
+              quantite: 0,
+              date: _dsF,
+              created_at: _dsF + 'T12:00:00.000Z',
+              updated_at: new Date().toISOString()
+            });
+            var _nfIdx = finished.length - 1;
+            if (it.ref) finMap[it.ref] = _nfIdx;
+            if (finished[_nfIdx].code) finMap[finished[_nfIdx].code] = _nfIdx;
+            if (_artF.code) finMap[_artF.code] = _nfIdx;
+            _invLog(finished, _nfIdx, _rqF);
+            finished[_nfIdx].quantite = _rqF;
+            return;
+          }
           var _curF = 0;
           _idxF.forEach(function (i) { _curF += parseFloat(finished[i].quantite) || 0; });
           _snap('stockFinished', it.ref, _curF, it.real_qte);
@@ -19671,6 +19706,111 @@ function reconcilierInventairesSemiValides() {
       setStockSemi(semi);
     }
   } catch (eR) { console.warn('reconcilierInventairesSemiValides', eR); }
+}
+
+/* Rattrapage des inventaires PF valides jamais ecrits en stock.
+   applyInventoryAsInitial sautait silencieusement un produit fini dont la
+   ligne stockFinished n'existait pas encore au moment de la validation (l
+   article figure pourtant toujours a l'ecran via calcInventoryItems). Resultat :
+   stock a 0 + « Ecart non justifie » au registre. On rejoue ici, une fois, les
+   inventaires valides dont AUCUNE ecriture de rapprochement (_invId) n'a ete
+   tracee : delta applique sur les lignes du code, ligne creee si absente, meme
+   trace _invBase qu'une validation normale. Les inventaires deja appliques
+   (mouvements _invId presents) et ceux suivis de vrais mouvements posterieurs
+   sont laisses intacts — idempotent. */
+function reparerInventairesPFAppliques() {
+  try {
+    var invs = (getInventories() || []).filter(function(x) { return x && x.statut === 'valide'; });
+    if (!invs.length) return;
+    invs.sort(function(a, b) { return String(a.date || '').localeCompare(String(b.date || '')); });
+    var movs = getMovements() || [];
+    var appliques = {};
+    movs.forEach(function(m) { if (m && m._invId) appliques[String(m._invId)] = true; });
+    var arts = getArticles() || [];
+    var fin = getStockFinished() || [];
+    var modif = false, mirroirs = {};
+    invs.forEach(function(inv) {
+      if (!inv || appliques[String(inv.id)]) return;
+      var d = String(inv.date || '').slice(0, 10) || (inv.month ? inv.month + '-01' : today());
+      var pfItems = (inv.items || []).filter(function(it) {
+        if (!it || (it.store !== 'stockFinished' && it.store !== 'stockPalettes')) return false;
+        var k = String(it.ref || it.code || '').trim().toUpperCase();
+        return !!k && k !== '-';
+      });
+      if (!pfItems.length) return;
+      /* Garde-fou : si de vrais mouvements (hors ecritures d'inventaire)
+         existent apres la date de l'inventaire, le stock a deja bouge depuis —
+         on ne reecrase pas l'activite posterieure. Les deux dates sont
+         normalisees en chaine AAAA-MM-JJ (sinon '2026-10' compare a un annee
+         numerique fausse toujours le test). */
+      var apresActivite = false;
+      pfItems.forEach(function(it) {
+        if (apresActivite) return;
+        var K = String(it.ref || it.code || '').trim().toUpperCase();
+        var a = arts.find(function(x) { return String((x && x.code) || '').trim().toUpperCase() === K; });
+        if (!a) return;
+        movs.forEach(function(m) {
+          if (apresActivite || !m || m.article_id !== a.id) return;
+          if (m._invBase) return;
+          if (String(m.date || '').slice(0, 10) > String(d)) apresActivite = true;
+        });
+      });
+      if (apresActivite) return;
+      pfItems.forEach(function(it) {
+        var K = String(it.ref || it.code || '').trim().toUpperCase();
+        var rq = parseFloat(it.real_qte) || 0;
+        var idxs = [];
+        fin.forEach(function(s, i) {
+          var a = (s && s.article_id) ? (arts.find(function(x) { return x.id === s.article_id; }) || {}) : {};
+          var k2 = String(a.code || (s && s.code) || '').trim().toUpperCase();
+          if (k2 && k2 === K) idxs.push(i);
+        });
+        if (idxs.length) {
+          var cur = 0;
+          idxs.forEach(function(i) { cur += parseFloat(fin[i].quantite) || 0; });
+          if (Math.abs(rq - cur) < 0.0001) return;
+          var t = idxs[0];
+          var avant = parseFloat(fin[t].quantite) || 0;
+          var aid = fin[t].article_id || '';
+          if (aid) {
+            movs.push({ id: genId(), date: d, type: 'sortie', article_id: aid, quantite: avant, reference: '', motif: 'Annulation inventaire - stock théorique', _invBase: true, _invId: inv.id, created_at: new Date().toISOString() });
+            movs.push({ id: genId(), date: d, type: 'ajustement', article_id: aid, quantite: rq, reference: '', motif: 'Correction inventaire - stock réel', _invBase: true, _invId: inv.id, created_at: new Date().toISOString() });
+            mirroirs[aid] = true;
+          }
+          fin[t].quantite = avant + (rq - cur);
+          fin[t].updated_at = new Date().toISOString();
+          modif = true;
+        } else {
+          var aF = arts.find(function(x) { return String((x && x.code) || '').trim().toUpperCase() === K; }) || {};
+          if (!aF.id && it.article_id) aF = arts.find(function(x) { return x.id === it.article_id; }) || {};
+          fin.push({
+            id: genId(),
+            article_id: aF.id || it.article_id || '',
+            code: it.code || aF.code || K,
+            designation: it.nom || aF.designation || it.code || K,
+            quantite: rq,
+            date: d,
+            created_at: d + 'T12:00:00.000Z',
+            updated_at: new Date().toISOString()
+          });
+          if (aF.id) {
+            movs.push({ id: genId(), date: d, type: 'sortie', article_id: aF.id, quantite: 0, reference: '', motif: 'Annulation inventaire - stock théorique', _invBase: true, _invId: inv.id, created_at: new Date().toISOString() });
+            movs.push({ id: genId(), date: d, type: 'ajustement', article_id: aF.id, quantite: rq, reference: '', motif: 'Correction inventaire - stock réel', _invBase: true, _invId: inv.id, created_at: new Date().toISOString() });
+            mirroirs[aF.id] = true;
+          }
+          modif = true;
+        }
+      });
+      appliques[String(inv.id)] = true;
+    });
+    if (modif) {
+      setStockFinished(fin);
+      setMovements(movs);
+      try {
+        Object.keys(mirroirs).forEach(function(aid) { syncMirrorFinished(aid); });
+      } catch (eMi) {}
+    }
+  } catch (eR) { console.warn('reparerInventairesPFAppliques', eR); }
 }
 
 

@@ -1691,6 +1691,76 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Inventaire finis : valider cree la ligne de stock absente (article sans ecriture) au lieu de sauter',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      var arts = getArticles();
+      arts.push({ id:'a-e2', code:'E2', designation:'PALETTE E2', categorie:'finished' });
+      setArticles(arts);
+      setStockFinished([]);
+      setSection('mouvements', []);
+      applyInventoryAsInitial('2026-10', [{ code:'E2', ref:'E2', store:'stockFinished', real_qte: 7 }],
+        { date:'2026-10-19', supervisor:'GOLI', invId:'inv-e2' });
+      var st = getStockFinished();
+      var ligne = null;
+      for (var i = 0; i < st.length; i++) if (String(st[i].code).toUpperCase() === 'E2') { ligne = st[i]; break; }
+      var rel = getMovements().filter(function(m){ return m._invBase && m._invId === 'inv-e2'; });
+      (ligne && ligne.quantite === 7 && ligne.article_id === 'a-e2' && rel.length === 2)
+        ? 'OK : ligne creee a 7 avec article_id + 2 ecritures de rapprochement'
+        : 'ECHEC : ligne=' + (ligne ? ligne.quantite : 'absente') + ' rel=' + rel.length
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire finis : le rattrapage applique un inventaire valide jamais ecrit (stock a 0), une seule fois',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      var arts = getArticles();
+      arts.push({ id:'a-bbag', code:'BBAG', designation:'BOITE BAGUETTE', categorie:'finished' });
+      setArticles(arts);
+      setInventories([{ id:'inv-bbag', statut:'valide', date:'2026-10-19', supervisor:'GOLI',
+        items:[{ store:'stockFinished', ref:'BBAG', code:'BBAG', real_qte: 51 }] }]);
+      setStockFinished([{ id:'sf-bbag', article_id:'a-bbag', code:'BBAG', designation:'BOITE BAGUETTE', quantite: 0, created_at:'2026-10-20' }]);
+      setSection('mouvements', []);
+      reparerInventairesPFAppliques();
+      var q1 = getStockFinished()[0].quantite;
+      var n1 = getMovements().filter(function(m){ return m._invBase && m._invId === 'inv-bbag'; }).length;
+      reparerInventairesPFAppliques();
+      var q2 = getStockFinished()[0].quantite;
+      var n2 = getMovements().filter(function(m){ return m._invBase && m._invId === 'inv-bbag'; }).length;
+      (q1 === 51 && n1 === 2 && q2 === 51 && n2 === 2)
+        ? 'OK : stock repasse a 51 + trace, 2e passage sans effet'
+        : 'ECHEC q1=' + q1 + ' n1=' + n1 + ' q2=' + q2 + ' n2=' + n2
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire finis : le rattrapage n ecrase pas les vrais mouvements posterieurs',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      var arts = getArticles();
+      arts.push({ id:'a-nes', code:'NES', designation:'NESTABLE', categorie:'finished' });
+      setArticles(arts);
+      setInventories([{ id:'inv-nes', statut:'valide', date:'2026-09-30',
+        items:[{ store:'stockFinished', ref:'NES', code:'NES', real_qte: 100 }] }]);
+      setStockFinished([{ id:'sf-nes', article_id:'a-nes', code:'NES', quantite: 40, created_at:'2026-10-01' }]);
+      setMovements([{ id:'mv-nes', article_id:'a-nes', date:'2026-10-10', type:'sortie', quantite: 60, motif:'Vente BL-1' }]);
+      reparerInventairesPFAppliques();
+      var q = getStockFinished()[0].quantite;
+      var n = getMovements().filter(function(m){ return m._invBase && m._invId === 'inv-nes'; }).length;
+      (q === 40 && n === 0)
+        ? 'OK : stock 40 (100-60 vente) preserve, aucune reecriture'
+        : 'ECHEC q=' + q + ' n=' + n
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Finis : remettre a zero ramene chaque produit sans mouvement a 0 avec trace',
     app: 'production.html', store: storeRealiste,
     code: `
