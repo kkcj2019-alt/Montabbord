@@ -9,7 +9,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script>
-window.__APP_VERSION='2026-10-19-251';
+window.__APP_VERSION='2026-10-19-252';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -6993,7 +6993,14 @@ function voirBaseReparation(id) {
   h += '<td style="padding:6px 7px;text-align:center;color:var(--dim)">—</td>';
   h += '</tr>';
   var _mvsIdx = (b.mouvements || []).map(function (mm, ii) { return { m: mm, i: ii }; });
-  _mvsIdx.sort(function (x, y) { return String(x.m.date).localeCompare(String(y.date)); });
+  /* Tri par DATE DU MOUVEMENT (y.m.date) : la version precedente comparait
+     `String(y.date)` (undefined sur le wrapper) → ordre melange garanti par
+     un comparateur incoherent. stabilite : ordre d'origine a date egale. */
+  _mvsIdx.sort(function (x, y) {
+    var dx = String((x.m && x.m.date) || ''), dy = String((y.m && y.m.date) || '');
+    if (dx === dy) return x.i - y.i;
+    return dx.localeCompare(dy);
+  });
   _mvsIdx.forEach(function (w) {
     var m = w.m;
     var q = parseFloat(m.qte) || 0;
@@ -10100,7 +10107,7 @@ function prodSplitEcrire(uid, docPartiel, identity) {
    ajouter un brouillon de fiche, mon envoi ecrase son ajout — et l'autre
    poste ne voit jamais ma fiche.
    Juste avant l'envoi, on relit donc (frais, hors cache 30 s) les lignes
-   cloud des sections sale et on fait une union local-gagnant par id :
+    cloud des sections sale et on fait une Union local-gagnant par id :
    mes items restent tels quels, les items ajoutes par l'autre poste sont
    CONSERVES et partent avec mon envoi.
    Erreur silencieuse : le push continue avec l'ancien contenu (comportement
@@ -10115,7 +10122,9 @@ function prodFusionnerSectionsAvantEnvoi(uid) {
       var sk = dirty[i];
       if (!sk || sk === '__prodUpdatedAt' || prodIsUiKey(sk)) continue;
       var lv = getDB()[sk];
-      if (Array.isArray(lv) && lv.length) cles.push('mdb_production.' + sk);
+      /* Tableau vide compris : si j'ai tout supprime, il faut quand meme
+         relire le cloud pour ne pas ecraser les ajouts des autres postes. */
+      if (Array.isArray(lv)) cles.push('mdb_production.' + sk);
     }
     if (!cles.length) return Promise.resolve();
     return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).in('cle', cles).then(function(r) {
@@ -10123,22 +10132,51 @@ function prodFusionnerSectionsAvantEnvoi(uid) {
       var rows = r.data || [];
       if (!rows.length) return;
       var local2 = getDB();
+      var baseAll = null;
+      try { baseAll = prodBaseHashLire(); } catch (eBH0) { baseAll = null; }
       var changed = false;
       for (var j = 0; j < rows.length; j++) {
         var rw = rows[j];
         if (!rw || typeof rw.cle !== 'string' || rw.cle.indexOf('mdb_production.') !== 0) continue;
         var sec = rw.cle.slice('mdb_production.'.length);
         if (!sec || !Array.isArray(local2[sec]) || !Array.isArray(rw.data)) continue;
-        /* Union local-gagnant : mes items restent tels quels (meme en cas de
-           conflit — c'est MON envoi qui repart, echouer sur mon edition serait
-           un recul) ; les items distants inconnus localement sont ajoutes.
-           (prodFusionTrois sansBase ferait l'inverse : cloud gagnant — bon
-           pour le pull, faux ici.) */
-        var seenL = {}, merged = [], jj;
+        /* Fusion TROIS BRANCHES (base = dernier etat cloud connu, par id) :
+           - id envoye par l'autre poste et jamais vu ici -> AJOUTE
+           - id supprime localement (present en base) -> RESTE supprime
+           (l'ancienne union « local gagnant » le RESUSCITAIT a chaque envoi :
+           la fiche supprimée revenait toute seule);
+           - id present des deux cotes -> le cote qui n'a PAS change (== base)
+           cede, l'autre (ma saisie en attente OU la leur) gagne. Avant, ma
+           copie stale gagnait toujours : les saisies de l'autre poste etaient
+           ecrasees a mon prochain envoi. */
+        var baseSec = (baseAll && baseAll[sec] && typeof baseAll[sec] === 'object') ? baseAll[sec] : null;
+        var cloudIds = {}, jj;
+        for (jj = 0; jj < rw.data.length; jj++) {
+          try {
+            var _ci0 = rw.data[jj];
+            if (_ci0 && _ci0.id !== undefined && _ci0.id !== null && _ci0.id !== '') cloudIds['id:' + String(_ci0.id)] = true;
+          } catch (eCI0) {}
+        }
+        var seenL = {}, merged = [], dropL = false;
         for (jj = 0; jj < local2[sec].length; jj++) {
           var li = local2[sec][jj];
+          var lid = null;
+          try { if (li && li.id !== undefined && li.id !== null && li.id !== '') lid = 'id:' + String(li.id); } catch (eLI) {}
+          if (lid && baseSec && baseSec[lid] !== undefined && !cloudIds[lid]) {
+            /* Id en base mais ABSENT du cloud : suppression distante depuis mon
+               dernier tirage. InchangǸ chez moi -> je l'adopte (pas d'envoi) ;
+               modifiǸ chez moi -> ma version part (regle du pull prodFusionTrois). */
+            try {
+              if (prodHashStr(JSON.stringify(li)) === baseSec[lid]) { dropL = true; continue; }
+            } catch (eAd) {}
+          }
+          if (!lid) {
+            /* Sans id : signature de contenu, pour ne pas reajouter une copie
+               identique deja presente (anciennes lignes genId du cloud). */
+            try { seenL['s:' + prodHashStr(JSON.stringify(li))] = true; } catch(eSL) {}
+          }
           merged.push(li);
-          try { if (li && li.id !== undefined && li.id !== null && li.id !== '') seenL['id:' + String(li.id)] = true; } catch(eL) {}
+          if (lid) seenL[lid] = true;
         }
         var addD = false;
         for (jj = 0; jj < rw.data.length; jj++) {
@@ -10146,12 +10184,48 @@ function prodFusionnerSectionsAvantEnvoi(uid) {
           if (!ci || typeof ci !== 'object') continue;
           var cid = null;
           try { if (ci.id !== undefined && ci.id !== null && ci.id !== '') cid = 'id:' + String(ci.id); } catch(eC) {}
-          if (cid && seenL[cid]) continue;
+          if (!cid) {
+            var dupS = null;
+            try { dupS = 's:' + prodHashStr(JSON.stringify(ci)); } catch(eDS) {}
+            if (dupS && seenL[dupS]) continue;
+            merged.push(ci);
+            addD = true;
+            if (dupS) seenL[dupS] = true;
+            continue;
+          }
+          var present = seenL[cid] === true;
+          if (present) {
+            /* Meme id : local == base (je n'ai rien change) -> version distante
+               (l'autre poste a modifie) ; sinon ma version gagne. */
+            try {
+              if (baseSec && baseSec[cid] !== undefined) {
+                var _liX = null;
+                for (var lj = 0; lj < merged.length; lj++) {
+                  var _cL = merged[lj];
+                  try { if (_cL && _cL.id !== undefined && _cL.id !== null && _cL.id !== '' && 'id:' + String(_cL.id) === cid) { _liX = _cL; break; } } catch (eLX) {}
+                }
+                if (_liX && prodHashStr(JSON.stringify(_liX)) === baseSec[cid]) {
+                  var hCloud = prodHashStr(JSON.stringify(ci));
+                  if (hCloud !== baseSec[cid]) {
+                    merged[lj] = ci;
+                    addD = true;
+                  }
+                }
+              }
+            } catch(eCf) {}
+            continue;
+          }
+          /* Absent localement : en base = ma suppression (jamais ressuscite) ;
+             hors base = ajout legitime de l'autre poste. */
+          if (baseSec && baseSec[cid] !== undefined) continue;
           merged.push(ci);
-          if (cid) seenL[cid] = true;
+          seenL[cid] = true;
           addD = true;
         }
-        if (addD) { local2[sec] = merged; changed = true; }
+        /* addD (ajout distant adopte) OU dropL (suppression distante adoptee) :
+           sans dropL, la suppression adoptee n'etait jamais ecrite dans le
+           local et l'envoi suivant la ressuscitait. */
+        if (addD || dropL) { local2[sec] = merged; changed = true; }
         /* Composants : apres l'union, supprime les doublons causes par les
            anciennes lignes genId du cloud (elles reviendraient a chaque push). */
         if (sec === 'composants' && Array.isArray(local2[sec]) && local2[sec].length > 1) {
@@ -10204,10 +10278,20 @@ function prodPushNow() {
       local = prodMergeObjs(local, cloudData.mdb_production);
       try { setDB(local); } catch(e) {}
       markProdAllSectionsDirty();
-    } else if (!_prodDirtySections || Object.keys(_prodDirtySections).length === 0) {
-      local.__prodUpdatedAt = Date.now();
-      try { setDB(local); } catch(e) {}
     }
+    /* Horodatage AVANCE a chaque envoi (sections sale ou pas) : l'app
+       principale (index.html) refuse un cloud dont __prodUpdatedAt est
+       <= au sien. Sans ce bump, le cloud gardait un marqueur ancien et
+       index IGNORAIT les sections poussées -> « la synchro ne va pas
+       de la maison de travail vers la maison ». Un envoi echoue : le
+       prochain essai rebump, aucun risque de recul (Date.now() monotone). */
+    try {
+      var _nowP = Date.now();
+      if ((local.__prodUpdatedAt || 0) < _nowP) {
+        local.__prodUpdatedAt = _nowP;
+        setDB(local);
+      }
+    } catch(eBUMPP) {}
     /* Ecriture par cle : mdb_upsert_enterprise fusionne au niveau des cles (jsonb ||),
        donc on n'envoie QUE les cles possedees par le module production. Toutes les autres
        (mdb_employes, mdb_paye, mdb_operationsCaisse...) restent intactes. */

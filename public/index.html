@@ -26,7 +26,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-19-263';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-19-264';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -1899,6 +1899,210 @@ function mergeObjetPartage(cloud, local) {
   return out;
 }
 
+/* ==== Fusion production : MEME MOTEUR QUE production.html ====
+   L'app principale ecrit aussi mdb_production (Achats de la Gestion
+   Commerciale, Couts). Sans base d'empreintes, l'union « local gagnant »
+   renvoyait au cloud les fiches supprimees et ecrasait les saisies fraiches
+   d'un autre poste (« ce que j'ai saisi hier a ete efface »). Le format de
+   mdb_prod_basehash est identique a production.html : les deux modules
+   partagent le localStorage, il faut donc absolument les memes hashes. */
+function iProdHashStr(x) { var h = 0; try { var w = String(x || ''); for (var i = 0; i < w.length; i++) { h = ((h << 5) - h + w.charCodeAt(i)) | 0; } return (h >>> 0) + ':' + w.length; } catch (e) { return '0:0'; } }
+function iProdIdItem(x, idx) {
+  try { if (x && x.id !== undefined && x.id !== null && x.id !== '') return 'id:' + String(x.id); } catch (e) {}
+  try { return 'json:' + iProdHashStr(JSON.stringify(x)); } catch (e) { return 'idx:' + idx; }
+}
+function iProdBaseLire() { try { return JSON.parse(localStorage.getItem('mdb_prod_basehash') || '{}') || {}; } catch (e) { return {}; } }
+function iProdBaseEcrire(b) { try { localStorage.setItem('mdb_prod_basehash', JSON.stringify(b || {})); } catch (e) {} }
+function iProdBaseSectionMaj(entree, section, valeur) {
+  try {
+    if (Array.isArray(valeur)) {
+      var m = {};
+      for (var i = 0; i < valeur.length; i++) m[iProdIdItem(valeur[i], i)] = iProdHashStr(JSON.stringify(valeur[i]));
+      entree[section] = m;
+    } else {
+      entree[section] = { __scalaire: iProdHashStr(JSON.stringify(valeur === undefined ? null : valeur)) };
+    }
+  } catch (e) {}
+}
+/* Base := dernier etat cloud vu (sections de l'objet recu ou envoye). */
+function iProdBaseDepuisObjet(cloudProd) {
+  try {
+    if (!cloudProd || typeof cloudProd !== 'object' || Array.isArray(cloudProd)) return;
+    var ab = iProdBaseLire();
+    for (var k in cloudProd) {
+      if (!cloudProd.hasOwnProperty(k) || k === '__prodUpdatedAt') continue;
+      if (typeof crIsUiKey === 'function' && crIsUiKey(k)) continue;
+      iProdBaseSectionMaj(ab, k, cloudProd[k]);
+    }
+    iProdBaseEcrire(ab);
+  } catch (e) {}
+}
+/* Fusion trois branches (copie de prodFusionTrois, production.html) :
+   - nouveau distant (pas en base, present distant) -> AJOUTE, meme si local sale
+   - supprime distant (en base, absent distant, local inchange) -> RETIRE
+   - supprime local (en base, absent local) -> RESTE supprime, jamais ressuscite
+   - modifie des deux cotes -> le local en attente gagne (il sera pousse)
+   - modifie distant seul -> distant gagne
+   Retourne {valeur, change}. Sans base du tout : union, local gagnant. */
+function iProdFusion3(baseSec, lv, cv) {
+  var sansBase = (baseSec === undefined || baseSec === null);
+  var base = (!sansBase && baseSec && typeof baseSec === 'object') ? baseSec : {};
+  if (!Array.isArray(lv) || !Array.isArray(cv)) {
+    if (cv === undefined) return { valeur: lv, change: false };
+    var hl, hc;
+    try { hl = iProdHashStr(JSON.stringify(lv === undefined ? null : lv)); } catch (eS1) { hl = null; }
+    try { hc = iProdHashStr(JSON.stringify(cv)); } catch (eS2) { hc = null; }
+    if (hl === hc) return { valeur: lv, change: false };
+    if (sansBase || base.__scalaire === undefined || hl === base.__scalaire) return { valeur: cv, change: true };
+    return { valeur: lv, change: false };
+  }
+  var lMap = {}, cMap = {}, i;
+  for (i = 0; i < lv.length; i++) { if (lv[i] && typeof lv[i] === 'object') lMap[iProdIdItem(lv[i], i)] = lv[i]; }
+  for (i = 0; i < cv.length; i++) { if (cv[i] && typeof cv[i] === 'object') cMap[iProdIdItem(cv[i], i)] = cv[i]; }
+  var out = [], change = false, id, it, cit, hb, hl2, hc2;
+  for (i = 0; i < lv.length; i++) {
+    it = lv[i];
+    if (!it || typeof it !== 'object') { out.push(it); continue; }
+    id = iProdIdItem(it, i);
+    if (cMap[id] === undefined) {
+      hb = base[id];
+      if (hb === undefined && !sansBase) { out.push(it); continue; }
+      if (sansBase) { out.push(it); continue; }
+      try { hl2 = iProdHashStr(JSON.stringify(it)); } catch (eL) { hl2 = null; }
+      if (hl2 !== null && hl2 === hb) { change = true; continue; }
+      out.push(it);
+    } else {
+      cit = cMap[id];
+      try { hl2 = iProdHashStr(JSON.stringify(it)); } catch (eL2) { hl2 = null; }
+      try { hc2 = iProdHashStr(JSON.stringify(cit)); } catch (eC2) { hc2 = null; }
+      if (hl2 === hc2) { out.push(it); continue; }
+      hb = base[id];
+      if (sansBase || hb === undefined || (hl2 !== null && hl2 === hb)) { out.push(cit); change = true; }
+      else out.push(it);
+    }
+  }
+  for (i = 0; i < cv.length; i++) {
+    cit = cv[i];
+    if (!cit || typeof cit !== 'object') continue;
+    id = iProdIdItem(cit, i);
+    if (lMap[id] === undefined && base[id] === undefined) { out.push(cit); change = true; }
+  }
+  return { valeur: out, change: change };
+}
+/* Reception (pull) : fusionne le cloud contre la base SANS modifier l'argument
+   local (les sites de reception comparent ensuite l'objet retourne). La base
+   suit le cloud vu : prochaine fusion = suppressions distantes vs locales. */
+function iProdFusionRecue(cloudProd, localProd) {
+  var src = (localProd && typeof localProd === 'object' && !Array.isArray(localProd)) ? localProd : {};
+  var local = {};
+  for (var k0 in src) { if (Object.prototype.hasOwnProperty.call(src, k0)) local[k0] = src[k0]; }
+  if (!cloudProd || typeof cloudProd !== 'object' || Array.isArray(cloudProd)) return local;
+  var base = iProdBaseLire();
+  for (var k in cloudProd) {
+    if (!cloudProd.hasOwnProperty(k) || k === '__prodUpdatedAt') continue;
+    if (typeof crIsUiKey === 'function' && crIsUiKey(k)) continue;
+    var r = iProdFusion3(base[k], local[k], cloudProd[k]);
+    if (r.change) local[k] = r.valeur;
+  }
+  try {
+    var ctu = cloudProd.__prodUpdatedAt || 0, ltu = local.__prodUpdatedAt || 0;
+    if (ctu > ltu) local.__prodUpdatedAt = ctu;
+  } catch (eM) {}
+  iProdBaseDepuisObjet(cloudProd);
+  return local;
+}
+/* Une section avant envoi : regle des trois branches cote POUSSSEE
+   (copie de prodFusionnerSectionsAvantEnvoi, production.html). */
+function iProdAvantEnvoiSection(baseSec, lArr, cArr) {
+  var base = (baseSec && typeof baseSec === 'object') ? baseSec : null;
+  var cloudIds = {}, jj;
+  for (jj = 0; jj < cArr.length; jj++) {
+    try { var _ci0 = cArr[jj]; if (_ci0 && _ci0.id !== undefined && _ci0.id !== null && _ci0.id !== '') cloudIds['id:' + String(_ci0.id)] = true; } catch (e0) {}
+  }
+  var seenL = {}, merged = [], dropL = false;
+  for (jj = 0; jj < lArr.length; jj++) {
+    var li = lArr[jj];
+    var lid = null;
+    try { if (li && li.id !== undefined && li.id !== null && li.id !== '') lid = 'id:' + String(li.id); } catch (e1) {}
+    if (lid && base && base[lid] !== undefined && !cloudIds[lid]) {
+      try { if (iProdHashStr(JSON.stringify(li)) === base[lid]) { dropL = true; continue; } } catch (e2) {}
+    }
+    if (!lid) { try { seenL['s:' + iProdHashStr(JSON.stringify(li))] = true; } catch (e3) {} }
+    merged.push(li);
+    if (lid) seenL[lid] = true;
+  }
+  var addD = false;
+  for (jj = 0; jj < cArr.length; jj++) {
+    var ci = cArr[jj];
+    if (!ci || typeof ci !== 'object') continue;
+    var cid = null;
+    try { if (ci.id !== undefined && ci.id !== null && ci.id !== '') cid = 'id:' + String(ci.id); } catch (e4) {}
+    if (!cid) {
+      var dupS = null;
+      try { dupS = 's:' + iProdHashStr(JSON.stringify(ci)); } catch (e5) {}
+      if (dupS && seenL[dupS]) continue;
+      merged.push(ci); addD = true;
+      if (dupS) seenL[dupS] = true;
+      continue;
+    }
+    if (seenL[cid] === true) {
+      try {
+        if (base && base[cid] !== undefined) {
+          var _liX = null, _lj = -1;
+          for (var z = 0; z < merged.length; z++) {
+            var _cL = merged[z];
+            try { if (_cL && _cL.id !== undefined && _cL.id !== null && _cL.id !== '' && 'id:' + String(_cL.id) === cid) { _liX = _cL; _lj = z; break; } } catch (e6) {}
+          }
+          if (_liX && _lj >= 0 && iProdHashStr(JSON.stringify(_liX)) === base[cid]) {
+            if (iProdHashStr(JSON.stringify(ci)) !== base[cid]) { merged[_lj] = ci; addD = true; }
+          }
+        }
+      } catch (e7) {}
+      continue;
+    }
+    if (base && base[cid] !== undefined) continue;
+    merged.push(ci);
+    seenL[cid] = true;
+    addD = true;
+  }
+  var changed = addD || dropL;
+  return { valeur: (changed ? merged : lArr), change: changed };
+}
+/* Avant envoi (push) : objet mdb_production a envoyer. Sections locales
+   fusionnees contre le cloud frais deja lu par pushToCloud + la base.
+   Marqueur : JAMAIS de recul, et AVANCE a chaque envoi (index refuse un
+   cloud dont le marqueur n'a pas bouge — meme garde que production). */
+function iProdFusionAvantEnvoi(cloudProd, localProd) {
+  var local = (localProd && typeof localProd === 'object' && !Array.isArray(localProd)) ? localProd : {};
+  var cloud = (cloudProd && typeof cloudProd === 'object' && !Array.isArray(cloudProd)) ? cloudProd : {};
+  var out = {};
+  var keys = {};
+  for (var kc in cloud) { if (Object.prototype.hasOwnProperty.call(cloud, kc)) keys[kc] = true; }
+  for (var kl in local) { if (Object.prototype.hasOwnProperty.call(local, kl)) keys[kl] = true; }
+  var base = iProdBaseLire();
+  for (var k in keys) {
+    if (k === '__prodUpdatedAt') continue;
+    var lv = local[k], cv = cloud[k];
+    if (Array.isArray(lv) && Array.isArray(cv)) {
+      out[k] = iProdAvantEnvoiSection(base[k], lv, cv).valeur;
+    } else if (lv === undefined) {
+      out[k] = cv;
+    } else if (cv === undefined) {
+      out[k] = lv;
+    } else {
+      var bl = base[k];
+      var hlL = null, hlC = null;
+      try { hlL = iProdHashStr(JSON.stringify(lv)); } catch (eA) {}
+      try { hlC = iProdHashStr(JSON.stringify(cv)); } catch (eB) {}
+      if (bl && bl.__scalaire !== undefined && hlL !== null && hlL === hlC) out[k] = cv;
+      else if (bl && bl.__scalaire !== undefined && hlL === bl.__scalaire && hlL !== hlC) out[k] = cv;
+      else out[k] = lv;
+    }
+  }
+  out.__prodUpdatedAt = Math.max(Date.now(), local.__prodUpdatedAt || 0, cloud.__prodUpdatedAt || 0);
+  return out;
+}
+
 /* Union ADDITIVE de deux tableaux (jamais de perte, jamais d'ecrasement) :
    - lignes de pointage (horaire/montage) : cle metier employe+jour(+article),
      insensible aux reconstructions qui regenerent des id aleatoires ;
@@ -2201,7 +2405,9 @@ function pushToCloud() {
            locale en bloc. L'app principale peut etre perimee (module Paie ou
            Exploitation ouverts a cote) : remplacer alors l'objet entier effacait
            le pointage deja synchronise. On fusionne section par section. */
-        data[k] = mergeObjetPartage(cloud[k], lv);
+        data[k] = (k === 'mdb_production' && typeof iProdFusionAvantEnvoi === 'function')
+          ? iProdFusionAvantEnvoi(cloud[k], lv)
+          : mergeObjetPartage(cloud[k], lv);
         if (k === 'mdb_paye' && data[k] && typeof data[k] === 'object' && !Array.isArray(data[k])) {
           /* Jamais de doublons metier sur le pointage (reconstructions multi-postes). */
           ['pointage', 'pointageMontage'].forEach(function (sec) {
@@ -2228,6 +2434,11 @@ function pushToCloud() {
     }
     return firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
       window._lastCloudSet = Date.now();
+      /* Base := contenu envoye : la prochaine fusion distinguera mes
+         suppressions (jamais ressuscitees) des nouveautes des autres postes. */
+      try {
+        if (data && data.mdb_production && typeof iProdBaseDepuisObjet === 'function') iProdBaseDepuisObjet(data.mdb_production);
+      } catch(eBP) {}
       var cleared = [];
       for (var bi = 0; bi < batch.length; bi++) {
         var bk = batch[bi];
@@ -6449,6 +6660,12 @@ entRef.get().then(function(doc) {
             /* Cles d'interface (onglets, filtres) : jamais reimportees du cloud,
                elles ne vivent que dans mdb_ui_prefs. */
             if (key === 'mdb_production' && typeof crPurgeUiKeys === 'function') crPurgeUiKeys(finalVal);
+            if (key === 'mdb_production' && typeof iProdFusionRecue === 'function') {
+              /* Fusion trois branches plutot que remplacement en bloc : les
+                 saisies locales jamais poussees (Achats ecrits sans marqueur
+                 dirty avant correctif) survivent, et la base suit le cloud vu. */
+              try { finalVal = iProdFusionRecue(finalVal, DB.get(key) || {}); } catch(eIPR) {}
+            }
             DB.set(key, finalVal);
           }
         }
@@ -6544,7 +6761,9 @@ function startRealtimeSync(uid) {
             _dm = _syncFiltreTombstonesGenerique(key, _dm);
             if (JSON.stringify(_dm) !== JSON.stringify(_dl)) { DB.set(key, _dm); changed = true; }
           } else if (_dl && data[key] && typeof _dl === 'object' && typeof data[key] === 'object' && !Array.isArray(_dl) && !Array.isArray(data[key])) {
-            var _do = mergeObjetPartage(data[key], _dl);
+            var _do = (key === 'mdb_production' && typeof iProdFusionRecue === 'function')
+              ? iProdFusionRecue(data[key], _dl)
+              : mergeObjetPartage(data[key], _dl);
             if (JSON.stringify(_do) !== JSON.stringify(_dl)) { DB.set(key, _do); changed = true; }
           }
         } catch (eDG) {}
@@ -6604,7 +6823,9 @@ var local = DB.get(key);
            de pointage absents de l'Index, pousses par un autre poste. */
         if (data[key] && typeof data[key] === 'object' && !Array.isArray(data[key])
             && local && typeof local === 'object' && !Array.isArray(local)) {
-          var _mgPartage = mergeObjetPartage(data[key], local);
+          var _mgPartage = (key === 'mdb_production' && typeof iProdFusionRecue === 'function')
+            ? iProdFusionRecue(data[key], local)
+            : mergeObjetPartage(data[key], local);
           if (JSON.stringify(_mgPartage) !== localStr) { DB.set(key, _mgPartage); changed = true; }
           continue;
         }
@@ -41765,7 +41986,14 @@ function writeProdLocal(section, value) {
 function initProdLocal() {}
 function getDB() { return getProdDB(); }
 function setDB(v) {
-  try { DB.set('mdb_production', v); if (typeof markDirty === 'function') markDirty('mdb_production'); } catch (e) {}
+  try {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      var _mS = Date.now();
+      if ((v.__prodUpdatedAt || 0) < _mS) v.__prodUpdatedAt = _mS;
+    }
+    DB.set('mdb_production', v);
+    if (typeof markDirty === 'function') markDirty('mdb_production');
+  } catch (e) {}
 }
 function getDefinitions() { var d = crGetSection('definitions', []); return Array.isArray(d) ? d : []; }
 function getLivraisons() { var l = crGetSection('livraisons', []); return Array.isArray(l) ? l : []; }
@@ -49704,7 +49932,17 @@ function deleteBcFournisseur(id) {
    (bordereaux + stocks MP / semi / finis / marchandises / consommables). */
 var _tempAchatItems = [];
 function apProdGet() { try { return dbObj('mdb_production'); } catch(e) { return {}; } }
-function apProdSet(p) { try { if (typeof crPurgeUiKeys === 'function') crPurgeUiKeys(p); localStorage.setItem('mdb_production', JSON.stringify(p)); } catch(e) {} }
+function apProdSet(p) {
+  try {
+    if (typeof crPurgeUiKeys === 'function') crPurgeUiKeys(p);
+    /* Marqueur + file de push : sans ces deux lignes, un achat ecrit ici
+       restait LOCAL indefiniment (jamais marque sale -> jamais envoye) et
+       le marqueur ancien faisait IgnoreR les sections par les autres postes. */
+    p.__prodUpdatedAt = Date.now();
+    localStorage.setItem('mdb_production', JSON.stringify(p));
+    if (typeof markDirty === 'function') markDirty('mdb_production');
+  } catch(e) {}
+}
 function apProdArr(p, k) { if (!p[k] || !Array.isArray(p[k])) p[k] = []; return p[k]; }
 function apCatLabel(c) { return c === 'raw-materials' ? 'Matière Première' : c === 'finished' ? 'Produits Finis' : c === 'semi' ? 'Semi-Finis' : c === 'merchandises' ? 'Marchandises' : c === 'epi' ? 'EPI' : 'Consommables'; }
 function apNorm(x) { return String(x || '').trim().toLowerCase(); }

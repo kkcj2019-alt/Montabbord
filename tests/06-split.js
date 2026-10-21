@@ -362,6 +362,133 @@ async function run(rapport) {
       rapport.ko('repli legacy sur erreur passagere : idx=' + idx + ' conditionne=' + repliConditionne + ' libre=' + repliLibre);
     }
   } catch (e) { rapport.ko('pas de repli legacy : exception ' + (e && e.message)); }
+
+  /* ---------- 9. Fusion production : trois branches + avant-envoi ---------- */
+  try {
+    const h = chargerApp('production.html', storeRealiste());
+    const res = String(await vm.runInContext(`
+      (function () {
+        var A1 = { id: 'a', v: 1 }, A2 = { id: 'a', v: 2 }, B = { id: 'b', v: 9 };
+        var base = {}; prodBaseSectionMaj(base, 's', [A1]);
+        var r1 = prodFusionTrois(base.s, [A1], [A2]);
+        var r2 = prodFusionTrois(base.s, [{ id: 'a', v: 5 }], [A2]);
+        var r3 = prodFusionTrois(base.s, [], [A1, B]);
+        var r4 = prodFusionTrois(base.s, [A1], []);
+        var okT = r1.change === true && r1.valeur.length === 1 && r1.valeur[0].v === 2
+          && r2.change === false && r2.valeur[0].v === 5
+          && r3.valeur.length === 1 && r3.valeur[0].id === 'b'
+          && r4.change === true && r4.valeur.length === 0;
+        /* Avant-envoi end-to-end avec faux Supabase : la suppression du autre
+           poste n'est pas ressuscitee, la modif adoptee, la suppression locale
+           (id en base, absent cloud) reste supprimee (dropL). */
+        var SA = { id: 'sa', code: 'P1', designation: 'Pointes', quantite: 100 };
+        var SA2 = { id: 'sa', code: 'P1', designation: 'Pointes', quantite: 150 };
+        var SX = { id: 'sx', code: 'P2', designation: 'Clous', quantite: 50 };
+        var SY = { id: 'sy', code: 'P3', designation: 'Rondelles', quantite: 10 };
+        var SM = { id: 'sm', code: 'M1', designation: 'Machin', quantite: 5 };
+        var SM2 = { id: 'sm', code: 'M1', designation: 'Machin', quantite: 9 };
+        localStorage.setItem('mdb_production', JSON.stringify({
+          stockConsum: [SA, SX], stockSemi: [SM2], __prodUpdatedAt: 10
+        }));
+        var b2 = {};
+        prodBaseSectionMaj(b2, 'stockConsum', [SA, SX]);
+        prodBaseSectionMaj(b2, 'stockSemi', [SM]);
+        prodBaseHashEcrire(b2);
+        var fauxApi = {
+          select: function () { return fauxApi; },
+          eq: function () { return fauxApi; },
+          in: function () {
+            return Promise.resolve({ error: null, data: [
+              { cle: 'mdb_production.stockConsum', data: [SA2, SY] },
+              { cle: 'mdb_production.stockSemi', data: [] }
+            ] });
+          }
+        };
+        _prodSB = { from: function () { return fauxApi; } };
+        _prodDirtySections = { stockConsum: true, stockSemi: true };
+        return prodFusionnerSectionsAvantEnvoi('E1').then(function () {
+          var db = getDB();
+          var cs = db.stockConsum || [], ss = db.stockSemi || [];
+          var idsC = cs.map(function (x) { return x.id; }).join(',');
+          var qSA = null;
+          cs.forEach(function (x) { if (x.id === 'sa') qSA = x.quantite; });
+          var okA = cs.length === 2 && idsC === 'sa,sy' && qSA === 150;
+          var okS = ss.length === 1 && ss[0].id === 'sm' && ss[0].quantite === 9;
+          return (okT && okA && okS)
+            ? 'OK : fusion 3 branches + avant-envoi (sa=150, sy ajoute, sx tombe, sm modifie garde)'
+            : 'ECHEC t=' + okT + ' a=' + okA + ' s=' + okS + ' idsC=' + idsC + ' ss=' + JSON.stringify(ss);
+        });
+      })()
+    `, h.ctx)).trim();
+    if (res.indexOf('OK') === 0) rapport.ok('production.html : ' + res);
+    else rapport.ko('production.html : ' + res);
+  } catch (e) { rapport.ko('production fusion : exception ' + e.message); }
+
+  /* ---------- 10. Index : meme moteur + apProdSet pousse enfin ---------- */
+  try {
+    const h = chargerApp('index.html', storeRealiste());
+    const res = String(await vm.runInContext(`
+      (function () {
+        var A1 = { id: 'a', v: 1 }, A2 = { id: 'a', v: 2 }, B = { id: 'b', v: 9 }, C = { id: 'c', v: 7 };
+        var base = {}; iProdBaseSectionMaj(base, 's', [A1]);
+        var r1 = iProdFusion3(base.s, [A1], [A2]);
+        var r2 = iProdFusion3(base.s, [{ id: 'a', v: 5 }], [A2]);
+        var r3 = iProdFusion3(base.s, [], [A1, B]);
+        var r4 = iProdFusion3(base.s, [A1], []);
+        var okT = r1.change === true && r1.valeur[0].v === 2
+          && r2.valeur[0].v === 5
+          && r3.valeur.length === 1 && r3.valeur[0].id === 'b'
+          && r4.valeur.length === 0;
+        var A1b = { id: 'a', v: 10 }, A3 = { id: 'a', v: 3 };
+        var bA = {}; iProdBaseSectionMaj(bA, 'stockConsum', [A1, B]); iProdBaseEcrire(bA);
+        var t0 = Date.now();
+        var av = iProdFusionAvantEnvoi(
+          { stockConsum: [A3, C], __prodUpdatedAt: 111 },
+          { stockConsum: [A1b, B], __prodUpdatedAt: 5 });
+        var avIds = (av.stockConsum || []).map(function (x) { return x.id; }).join(',');
+        var avV = (av.stockConsum || [{}])[0].v;
+        var okAv = avIds === 'a,c' && avV === 10 && av.__prodUpdatedAt >= t0 && av.__prodUpdatedAt >= 111;
+        var bB = {}; iProdBaseSectionMaj(bB, 'stockConsum', [A1, B]); iProdBaseEcrire(bB);
+        var loc = { stockConsum: [A1b, B], __prodUpdatedAt: 5 };
+        var locAvant = JSON.stringify(loc);
+        var rec = iProdFusionRecue({ stockConsum: [A3, C], __prodUpdatedAt: 200 }, loc);
+        var recIds = (rec.stockConsum || []).map(function (x) { return x.id; }).join(',');
+        var recV = (rec.stockConsum || [{}])[0].v;
+        var bApr = iProdBaseLire();
+        var okRec = JSON.stringify(loc) === locAvant
+          && recIds === 'a,c' && recV === 10 && rec.__prodUpdatedAt === 200
+          && bApr.stockConsum && bApr.stockConsum['id:c'] !== undefined
+          && bApr.stockConsum['id:b'] === undefined;
+        var p0 = apProdGet(); var m0 = p0.__prodUpdatedAt || 0;
+        p0.achats = (p0.achats || []).concat([{ id: 'zz', reference: 'TST', date: '2026-01-01', items: [] }]);
+        apProdSet(p0);
+        var p1 = JSON.parse(localStorage.getItem('mdb_production') || '{}');
+        var dirtyOk = !!_dirtyKeys['mdb_production'];
+        var mOk = (p1.__prodUpdatedAt || 0) > 0 && (p1.__prodUpdatedAt || 0) >= m0;
+        var okSet = dirtyOk && mOk && (p1.achats || []).some(function (x) { return x.id === 'zz'; });
+        return (okT && okAv && okRec && okSet)
+          ? 'OK : iProd 3 branches + avant-envoi + recue non mutante + apProdSet marque sale'
+          : 'ECHEC t=' + okT + ' av=' + okAv + ' rec=' + okRec + ' set=' + okSet + ' avIds=' + avIds;
+      })()
+    `, h.ctx)).trim();
+    if (res.indexOf('OK') === 0) rapport.ok('index.html : ' + res);
+    else rapport.ko('index.html : ' + res);
+  } catch (e) { rapport.ko('index fusion : exception ' + e.message); }
+
+  /* ---------- 11. Correctifs synchro presents dans les sources ---------- */
+  try {
+    const srcProd = fs.readFileSync(path.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const srcIdx = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okDropL = srcProd.indexOf('addD || dropL') !== -1;
+    const okBump = srcProd.indexOf('local.__prodUpdatedAt = _nowP') !== -1;
+    const okPush = srcIdx.indexOf('iProdFusionAvantEnvoi(cloud[k], lv)') !== -1;
+    const nbDirty = srcIdx.split("markDirty('mdb_production')").length - 1;
+    if (okDropL && okBump && okPush && nbDirty >= 3) {
+      rapport.ok('sources : dropL + bump marqueur (production) + avant-envoi/index + apProdSet dirty (' + nbDirty + ' markDirty)');
+    } else {
+      rapport.ko('sources synchro : dropL=' + okDropL + ' bump=' + okBump + ' push=' + okPush + ' dirty=' + nbDirty);
+    }
+  } catch (e) { rapport.ko('sources synchro : exception ' + (e && e.message)); }
 }
 
 module.exports = { run };
