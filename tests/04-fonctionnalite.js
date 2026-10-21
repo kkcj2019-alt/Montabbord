@@ -2210,7 +2210,11 @@ attenduPrefixe: 'OK'
     code: `
       var jours = new Date().toISOString().slice(0, 10);
       var prods = getProductions();
-      prods.push({ id: 'p2', numero: '2609002', date: jours, statut: 'draft', vol_sortie_bois: 4, vol_total: 4, sortie_bois: [], lattes: [], plots: [], cp: [], assemblage: [],
+      /* Un brouillon n'impacte ni le stock ni la fiche WIP : son encours ne
+         doit donc PAS apparaitre sur la carte (qui ne lit que les validees). */
+      prods.push({ id: 'pBrouillon', numero: '2609001', date: jours, statut: 'draft', vol_sortie_bois: 4, vol_total: 4, sortie_bois: [], lattes: [], plots: [], cp: [], assemblage: [],
+        encours: [{ code: 'B1', qte: 99, volume: 99, wip_type: 'entrée' }] });
+      prods.push({ id: 'pValide', numero: '2609002', date: jours, statut: 'validated', vol_sortie_bois: 4, vol_total: 4, sortie_bois: [], lattes: [], plots: [], cp: [], assemblage: [],
         encours: [{ code: 'E1', qte: 10, volume: 2.5, wip_type: 'entrée' }, { code: 'E1', qte: 4, volume: 1.0, wip_type: 'reprise' }] });
       setProductions(prods);
       CURRENT_PAGE = 'dashboard'; renderPage();
@@ -2218,7 +2222,7 @@ attenduPrefixe: 'OK'
       var i = h.indexOf('kpi-encours');
       var carte = i === -1 ? '' : h.slice(i, i + 320);
       (i !== -1 && carte.indexOf('1.50 m') !== -1 && carte.indexOf('En Cours Production') !== -1)
-        ? 'OK : 2.5 entree - 1.0 reprise = 1.50 m3 en En Cours (et non le total du brouillon)'
+        ? 'OK : brouillon ignore (99 exclu), 2.5 entree - 1.0 reprise = 1.50 m3 valide'
         : 'ECHEC : ' + (carte || h.substr(0, 200)).replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').substr(0, 200)
     `,
     attenduPrefixe: 'OK'
