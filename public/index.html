@@ -1874,21 +1874,51 @@ function mergeObjetPartage(cloud, local) {
       for (var _li = 0; _li < lv.length && !_hasId; _li++) { if (lv[_li] && lv[_li].id !== undefined && lv[_li].id !== null) _hasId = true; }
       if (!_hasId) {
         out[k] = lv.length > 0 ? lv : cv;
-      } else {
-      var byId = {}, ordre = [];
-      cv.forEach(function (x) {
-        if (x && x.id !== undefined && x.id !== null) { byId[x.id] = x; ordre.push(x.id); }
-        else ordre.push({ __sansId: x });
-      });
-      lv.forEach(function (x) {
-        if (x && x.id !== undefined && x.id !== null) { if (!(x.id in byId)) ordre.push(x.id); byId[x.id] = x; }
-        else ordre.push({ __sansId: x });
-      });
-      out[k] = ordre.map(function (id) {
-        return (id && typeof id === 'object' && id.__sansId !== undefined) ? id.__sansId : byId[id];
-      });
-      }
-    } else if (Array.isArray(lv) && !Array.isArray(cv)) {
+  } else {
+  var byId = {}, ordre = [];
+  cv.forEach(function (x) {
+    if (x && x.id !== undefined && x.id !== null) { byId[x.id] = x; ordre.push(x.id); }
+    else ordre.push({ __sansId: x });
+  });
+  lv.forEach(function (x) {
+    if (x && x.id !== undefined && x.id !== null) { if (!(x.id in byId)) ordre.push(x.id); byId[x.id] = x; }
+    else ordre.push({ __sansId: x });
+  });
+  /* Filtrage tombstones : une ligne supprimee cote Paie (pointage horaire ou
+     montage) ne doit JAMAIS revenir via cette union. Paye empile id + cle
+     metier dans <section>_tombstones ; sans ce filtre, un monteur efface
+     reaparaissait (et la journee effacee revenait) des que le cloud renvoyait
+     une copie encore porteuse de la ligne. */
+  var _tomSet = null;
+  try {
+    var _bySec = { pointage: 'pointage_tombstones', pointageMontage: 'pointageMontage_tombstones' };
+    for (var _secM in _bySec) {
+      if (!Object.prototype.hasOwnProperty.call(_bySec, _secM)) continue;
+      if (k !== _secM) continue;
+      var _tomArr = [];
+      if (Array.isArray(cloud[_bySec[_secM]])) _tomArr = _tomArr.concat(cloud[_bySec[_secM]]);
+      if (Array.isArray(local[_bySec[_secM]])) _tomArr = _tomArr.concat(local[_bySec[_secM]]);
+      if (!_tomArr.length) break;
+      _tomSet = {};
+      _tomArr.forEach(function (t) { try { _tomSet[String(t)] = true; } catch (eT) {} });
+      break;
+    }
+  } catch (eTom) { _tomSet = null; }
+  var _filtrerTom = function (r) {
+    if (!r || typeof r !== 'object') return true;
+    if (!_tomSet) return true;
+    if (r.id !== undefined && r.id !== null && _tomSet[String(r.id)]) return false;
+    if (r.employee_id && r.date) {
+      var _art = (r.article_code === undefined || r.article_code === null) ? '' : String(r.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (_tomSet['cle:pt:' + String(r.employee_id) + '|' + String(r.date) + '|' + _art]) return false;
+    }
+    return true;
+  };
+  out[k] = ordre.map(function (id) {
+    return (id && typeof id === 'object' && id.__sansId !== undefined) ? id.__sansId : byId[id];
+  }).filter(_filtrerTom);
+  }
+} else if (Array.isArray(lv) && !Array.isArray(cv)) {
       out[k] = lv;
     } else if (lv && typeof lv === 'object' && cv && typeof cv === 'object' && !Array.isArray(lv) && !Array.isArray(cv)) {
       out[k] = mergeObjetPartage(cv, lv);
@@ -41550,7 +41580,7 @@ function renderCoutRevient() {
   window._crQte = (_q0 > 0) ? _q0 : 1;
   if (window._crMarge === undefined || window._crMarge === null || window._crMarge === '') window._crMarge = 20;
   var arts = [];
-  try { arts = getArticles() || []; } catch (eA) { arts = []; }
+  try { arts = (typeof acArticlesPF === 'function' ? acArticlesPF() : getArticles()) || []; } catch (eA) { arts = []; }
   if (typeof acIsProduitFini === 'function') {
     arts = arts.filter(function(a) { return acIsProduitFini(a); });
   }
@@ -47112,6 +47142,37 @@ function acPiedImpression() {
     '<span>' + escH(acJour(new Date()) ? fmtD(acJour(new Date())) : '') + '</span></div></body></html>';
 }
 
+/* ==== acArticlesPF ==== */
+/* Le selecteur « Palette (produit fini) » doit proposer les PF des DEUX
+   referentiels : la Nomenclature de l'index (mdb_nomenclature) ET les
+   articles d'Exploitation (mdb_production.articles). Sans cette union, le
+   dropdown sortait VIDE quand la nomenclature locale etait vide (poste qui
+   n'a jamais cree de PF dans l'index) alors qu'Exploitation en avait. */
+function acArticlesPF() {
+  var normCode = function(c) { return String(c || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+  var vus = {};
+  var out = [];
+  var nomArts = [];
+  try { nomArts = getArticles() || []; } catch (eN) { nomArts = []; }
+  nomArts.forEach(function(a) {
+    if (!a || !a.id) return;
+    var nc = normCode(a.code);
+    if (nc && vus[nc]) return;
+    if (nc) vus[nc] = true;
+    out.push(a);
+  });
+  var prodArts = [];
+  try { prodArts = getProdSection('articles', []) || []; } catch (eP) { prodArts = []; }
+  prodArts.forEach(function(a) {
+    if (!a || !a.id) return;
+    var nc = normCode(a.code);
+    if (nc && vus[nc]) return;
+    if (nc) vus[nc] = true;
+    out.push(a);
+  });
+  return out;
+}
+
 /* ==== showCoutArticleAuto ==== */
 function showCoutArticleAuto(id) {
   var m = '<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)this.remove()"><div class="modal" style="max-width:720px">';
@@ -47375,7 +47436,7 @@ function render_cout_revient() {
       Conformement au catalogue (voir renderNomenclature), un article SANS
       typeArticle est un produit fini par defaut : sans ce repli, la liste
       sortait VIDE pour tous les PF qui n'avaient jamais ete re-types. */
-   var arts = getArticles().filter(function (x) {
+    var arts = (typeof acArticlesPF === 'function' ? acArticlesPF() : getArticles()).filter(function (x) {
     if (!x) return false;
     if (x.statut === 'inactive') return false;
     var cat = String(x.categorie || '').toLowerCase();

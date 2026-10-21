@@ -11835,11 +11835,13 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       var h = render_cout_revient.toString();
       /* Le selecteur « Palette (produit fini) » listait consommables,
          semi-finis et marchandises. */
+      var source = /typeof acArticlesPF === 'function' \\? acArticlesPF\\(\\) : getArticles\\(\\)/.test(h)
+        || /acArticlesPF\\(\\)/.test(h);
       var filtre = /getArticles\\(\\)\\.filter\\(function \\(x\\)/.test(h);
       var gardePF = /produit_fini/.test(h);
-      (filtre && gardePF)
+      (source && gardePF)
         ? 'OK : la liste est filtree sur les produits finis uniquement'
-        : 'ECHEC filtre=' + filtre + ' garde=' + gardePF
+        : 'ECHEC source=' + source + ' filtre=' + filtre + ' garde=' + gardePF
     `,
     attenduPrefixe: 'OK'
   });
