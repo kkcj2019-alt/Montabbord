@@ -1677,6 +1677,64 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
+    nom: 'Inventaire finis date : l ecart ne touche pas les lignes creees apres la date (stock conserve)',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setStockFinished([
+        { id:'g1', code:'PALINV', designation:'PALETTES INV', quantite: 100, created_at:'2026-09-15' },
+        { id:'g2', code:'PALINV', designation:'PALETTES INV', quantite: 50, created_at:'2026-10-10' }
+      ]);
+      applyInventoryAsInitial('2026-10', [{ code:'PALINV', ref:'PALINV', store:'stockFinished', real_qte: 90 }],
+        { date:'2026-10-01', supervisor:'S', invId:'inv-post' });
+      var st = getStockFinished(), tot = 0, qAv = -1, qAp = -1;
+      for (var i = 0; i < st.length; i++) if (String(st[i].code) === 'PALINV') { tot += parseFloat(st[i].quantite) || 0; if (String(st[i].id) === 'g1') qAv = st[i].quantite; if (String(st[i].id) === 'g2') qAp = st[i].quantite; }
+      (tot === 140 && qAv === 90 && qAp === 50) ? 'OK : ligne pre-date a 90, ligne post-date 50 intacte, total 140'
+        : 'ECHEC tot=' + tot + ' av=' + qAv + ' ap=' + qAp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Inventaire semi date : l ecart ignore les lignes creees apres la date',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setStockSemi([
+        { id:'s1', code:'SINV', designation:'SEMI INV', quantite: 200, created_at:'2026-09-15' },
+        { id:'s2', code:'SINV', designation:'SEMI INV', quantite: 80, created_at:'2026-10-10' }
+      ]);
+      applyInventoryAsInitial('2026-10', [{ code:'SINV', ref:'SINV', store:'stockSemi', real_qte: 150 }],
+        { date:'2026-10-01', supervisor:'S', invId:'inv-post-s' });
+      var st = getStockSemi(), tot = 0, qAv = -1, qAp = -1;
+      for (var i = 0; i < st.length; i++) if (String(st[i].code) === 'SINV') { tot += parseFloat(st[i].quantite) || 0; if (String(st[i].id) === 's1') qAv = st[i].quantite; if (String(st[i].id) === 's2') qAp = st[i].quantite; }
+      (tot === 230 && qAv === 150 && qAp === 80) ? 'OK : ligne pre-date a 150, ligne post-date 80 intacte, total 230'
+        : 'ECHEC tot=' + tot + ' av=' + qAv + ' ap=' + qAp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Rattrapage inventaire PF date : ecart applique aux seules lignes anterieures a la date',
+    app: 'production.html', store: storeRealiste,
+    code: `
+      setSection('composants', []);
+      setStockFinished([
+        { id:'r1', code:'PALREP', designation:'PALETTES REP', quantite: 100, created_at:'2026-09-15' },
+        { id:'r2', code:'PALREP', designation:'PALETTES REP', quantite: 50, created_at:'2026-10-10' }
+      ]);
+      setSection('mouvements', []);
+      setInventories([{ id:'inv-rep', statut:'valide', date:'2026-10-01', month:'2026-10', items:[{ store:'stockFinished', ref:'PALREP', code:'PALREP', real_qte: 90 }] }]);
+      reparerInventairesPFAppliques();
+      var st = getStockFinished(), tot = 0, qAv = -1, qAp = -1;
+      for (var i = 0; i < st.length; i++) if (String(st[i].code) === 'PALREP') { tot += parseFloat(st[i].quantite) || 0; if (String(st[i].id) === 'r1') qAv = st[i].quantite; if (String(st[i].id) === 'r2') qAp = st[i].quantite; }
+      (tot === 140 && qAv === 90 && qAp === 50) ? 'OK : rattrapage ecart -10 sur ligne pre-date, post-date intacte'
+        : 'ECHEC tot=' + tot + ' av=' + qAv + ' ap=' + qAp
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Fiche finis : le registre montre l ecart quand le stock ne colle pas aux mouvements',
     app: 'production.html', store: storeRealiste,
     code: `
@@ -1728,14 +1786,14 @@ attenduPrefixe: 'OK'
       setStockFinished([{ id:'sf-bbag', article_id:'a-bbag', code:'BBAG', designation:'BOITE BAGUETTE', quantite: 0, created_at:'2026-10-20' }]);
       setSection('mouvements', []);
       reparerInventairesPFAppliques();
-      var q1 = getStockFinished()[0].quantite;
+      var tot1 = 0; getStockFinished().forEach(function(s){ if (String(s.code) === 'BBAG') tot1 += parseFloat(s.quantite) || 0; });
       var n1 = getMovements().filter(function(m){ return m._invBase && m._invId === 'inv-bbag'; }).length;
       reparerInventairesPFAppliques();
-      var q2 = getStockFinished()[0].quantite;
+      var tot2 = 0; getStockFinished().forEach(function(s){ if (String(s.code) === 'BBAG') tot2 += parseFloat(s.quantite) || 0; });
       var n2 = getMovements().filter(function(m){ return m._invBase && m._invId === 'inv-bbag'; }).length;
-      (q1 === 51 && n1 === 2 && q2 === 51 && n2 === 2)
-        ? 'OK : stock repasse a 51 + trace, 2e passage sans effet'
-        : 'ECHEC q1=' + q1 + ' n1=' + n1 + ' q2=' + q2 + ' n2=' + n2
+      (tot1 === 51 && n1 === 2 && tot2 === 51 && n2 === 2)
+        ? 'OK : total 51 via ligne datee inventaire (ligne post-date 0 intacte), 2e passage sans effet'
+        : 'ECHEC tot1=' + tot1 + ' n1=' + n1 + ' tot2=' + tot2 + ' n2=' + n2
     `,
     attenduPrefixe: 'OK'
   });
@@ -7375,12 +7433,14 @@ r.push({
       saveAchatByCategory({ preventDefault: function(){} }, 'consumables');
       var movs = getMovements();
       var entree = movs.filter(function(m){ return m.type === 'entree' && m.reference === 'REF-P5'; });
+      var lstock = (getStockConsum()||[]).filter(function(x){ return String(x.code||'').toUpperCase() === 'P5'; });
       CURRENT_PAGE = 'stock-movements'; renderPage();
       var h = document.getElementById('content').innerHTML || '';
       (entree.length === 1 && entree[0].code === 'P5' && entree[0].motif === 'Achat REF-P5'
+        && lstock.length === 1 && lstock[0].motif === 'Achat REF-P5' && lstock[0].obs === 'Achat REF-P5'
         && h.indexOf('P5') !== -1 && h.indexOf('Entrée') !== -1)
-        ? 'OK : entrée journal + affichage P5 dans Mouvements de Stock'
-        : 'ECHEC : ' + JSON.stringify(movs)
+        ? 'OK : entrée journal + ligne stock tracée + affichage P5'
+        : 'ECHEC : ' + JSON.stringify(movs) + ' | stock=' + JSON.stringify(lstock)
     `,
     attenduPrefixe: 'OK'
   });
@@ -7408,7 +7468,30 @@ r.push({
     attenduPrefixe: 'OK'
   });
 
-r.push({
+  r.push({
+    nom: 'App principale : la ligne stock ecrite par un achat conso porte la reference du BL (motif/obs)',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var p2b = apProdGet();
+      p2b.movements = [];
+      p2b.stockConsum = [];
+      p2b.achats = [];
+      apProdSet(p2b);
+      document.getElementById('ach_ref').value = 'REF-P5C';
+      document.getElementById('ach_date').value = getToday();
+      document.getElementById('ach_fournisseur').value = 'TIJANI';
+      _tempAchatItems = [{ code:'P5', designation:'Pointes 5', quantity:100000, unit_price:0.28, total_price:56000, paquets:2000, cond:50, ctype:'POINTE', cartons:40 }];
+      saveApAchat(null, 'consumables');
+      var apr = apProdGet();
+      var lc = (apr.stockConsum||[]).filter(function(x){ return String(x.code||'').toUpperCase() === 'P5'; });
+      (lc.length === 1 && lc[0].motif === 'Achat REF-P5C' && lc[0].obs === 'Achat REF-P5C')
+        ? 'OK : ligne stock portant Achat REF-P5C'
+        : 'ECHEC : ' + JSON.stringify(apr.stockConsum)
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'App principale : ajouter une ligne P5 en modification reporte l\'ecart au stock',
     app: 'index.html', store: storeRealiste,
     code: `

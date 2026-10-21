@@ -9,7 +9,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script>
-window.__APP_VERSION='2026-10-19-252';
+window.__APP_VERSION='2026-10-19-253';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -5092,9 +5092,11 @@ function acInterrogerProduction(mode, d1, d2) {
   window._acDu = du;
   window._acAu = au;
 
-  // 1. Récupérer les fiches de production
+  // 1. Récupérer les fiches de production (brouillons exclus : ils n'ont
+  //    aucun impact stock et ne doivent pas gonfler le bilan)
   var prods = getProductions().filter(function(x) {
     if (!x || !x.date) return false;
+    if (x.statut === 'draft') return false;
     var d = String(x.date).slice(0, 10);
     return isJour ? (d === jourX) : (d >= du && d <= au);
   });
@@ -5247,6 +5249,7 @@ function acInterrogationBlocHtml() {
 
   var prods = getProductions().filter(function(x) {
     if (!x || !x.date) return false;
+    if (x.statut === 'draft') return false;
     var d = String(x.date).slice(0, 10);
     return isJour ? (d === jourX) : (d >= du && d <= au);
   });
@@ -8232,6 +8235,7 @@ function render_cout_production() {
   var dateUnique = window._acProdDateUnique || '';
   var prods = getProductions().filter(function (x) {
     if (!x) return false;
+    if (x.statut === 'draft') return false;
     if (dateUnique) return x.date === dateUnique;
     return acDansPeriode(x.date, p.du, p.au);
   }).sort(function (a, b) { return String(a.date || '').localeCompare(String(b.date || '')); });
@@ -8472,7 +8476,7 @@ function acAppliquerModeAuto() {
   try {
     var du = acJour(cfg.datePointage);
     if (du) {
-      var jour = getProductions().filter(function (x) { return x && acJour(x.date) === du && x.assemblage && x.assemblage.length; });
+      var jour = getProductions().filter(function (x) { return x && x.statut !== 'draft' && acJour(x.date) === du && x.assemblage && x.assemblage.length; });
       if (jour.length) {
         var q = 0;
         jour.forEach(function (x) { (x.assemblage || []).forEach(function (l) { q += parseFloat(l.qte) || 0; }); });
@@ -16141,8 +16145,12 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
   /* Entree de stock d'un achat consommable : on CUMULE dans la fiche du
      produit au lieu d'en creer une nouvelle a chaque achat. C'etait l'origine
      des fiches en double (le meme code en avait plusieurs). */
-  function _saveAchatConsumStock(items, fournisseur, dateAchat) {
+  function _saveAchatConsumStock(items, fournisseur, dateAchat, ref) {
     var _dAchat = dateAchat || today();
+    /* Trace l'entree d'achat dans la fiche de stock : la reference du BL,
+       reprise dans motif/obs, est affichee par le registre (buildConsoMovements)
+       a cote du fournisseur. */
+    var _obsAchat = ref ? ('Achat ' + ref) : '';
     var consumStock = getStockConsum();
     (items || []).forEach(function(it) {
       var key = String(it.code || it.designation || '').trim().toUpperCase();
@@ -16176,6 +16184,8 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
           emplacement: it.emplacement || '',
           prix_carton: it.prix_carton || 0,
           prix_unitaire: it.unit_price,
+          motif: _obsAchat,
+          obs: _obsAchat,
           created_at: _dAchat
         });
         return;
@@ -16193,6 +16203,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
          restent absents et consoNorm les deduit du total de paquets. */
       if (ln && it.cartons != null && (l.cartons === undefined || l.cartons === null || l.cartons === '')) l.cartons = 0;
       if (ln && it.cartons != null) l.cartons = (parseFloat(l.cartons) || 0) + (parseFloat(it.cartons) || 0);
+      if (_obsAchat) { if (!l.motif) l.motif = _obsAchat; if (!l.obs) l.obs = _obsAchat; }
       l.updated_at = new Date().toISOString();
     });
     setStockConsum(consumStock);
@@ -19624,9 +19635,24 @@ function applyInventoryAsInitial(month, items, opts) {
            ou on crée la ligne dans stockSemi si elle n'existait pas encore. */
         var _codeS = String(it.ref || it.code || '').trim().toUpperCase();
         var _invDS = (opts && opts.date) || (month ? month + '-01' : today());
+        /* Meme garde-fou que les finis : l'ecart ne concerne que les lignes
+           creees au plus tard la date de l'inventaire. */
+        var _dInvS = String((opts && opts.date) || '').slice(0, 10);
+        var _mInvS = month || (_dInvS ? _dInvS.slice(0, 7) : '');
+        function _avantInvS(s) {
+          if (!s) return true;
+          var _c = String((s.created_at || s.date) || '');
+          var _m = _c.match(/(\d{4})-(\d{2})/);
+          if (_mInvS && _m && (_m[1] + '-' + _m[2]) > _mInvS) return false;
+          if (_dInvS) {
+            var _d = _c.match(/(\d{4})-(\d{2})-(\d{2})/);
+            if (_d && (_d[1] + '-' + _d[2] + '-' + _d[3]) > _dInvS) return false;
+          }
+          return true;
+        }
         var _idxS = [], _curS = 0;
         semi.forEach(function(s, i) {
-          if (String((s && s.code) || '').trim().toUpperCase() === _codeS) { _idxS.push(i); }
+          if (String((s && s.code) || '').trim().toUpperCase() === _codeS && _avantInvS(s)) { _idxS.push(i); }
         });
         if (_idxS.length) {
           _idxS.forEach(function(i) { _curS += parseFloat(semi[i].quantite) || 0; });
@@ -19669,11 +19695,30 @@ function applyInventoryAsInitial(month, items, opts) {
            (ex : stock 1310 affiche pour un inventaire enregistre a 0). */
         (function () {
           var _codeF = String(it.ref || it.code || '').trim().toUpperCase();
+          /* Date de l'inventaire : le reel compte le stock A CETTE DATE.
+             Seules les lignes creees au plus tard ce jour sont concernees par
+             l'ecart ; les lignes POSTERIEURES (activite apres l'inventaire)
+             doivent rester intactes. Avant, l'ecart s'appliquait a TOUTES les
+             lignes : une reference comptee 0 a la date annulait les entrees
+             posterieures (16 refs PF tombees a 0 apres inventaire date). */
+          var _dInvF = String((opts && opts.date) || '').slice(0, 10);
+          var _mInvF = month || (_dInvF ? _dInvF.slice(0, 7) : '');
+          function _avantInvF(s) {
+            if (!s) return true;
+            var _c = String((s.created_at || s.date) || '');
+            var _m = _c.match(/(\d{4})-(\d{2})/);
+            if (_mInvF && _m && (_m[1] + '-' + _m[2]) > _mInvF) return false;
+            if (_dInvF) {
+              var _d = _c.match(/(\d{4})-(\d{2})-(\d{2})/);
+              if (_d && (_d[1] + '-' + _d[2] + '-' + _d[3]) > _dInvF) return false;
+            }
+            return true;
+          }
           var _idxF = [];
           finished.forEach(function (s, i) {
             var _a = (s && s.article_id) ? (getArticles().find(function (x) { return x.id === s.article_id; }) || {}) : {};
             var _k = String(_a.code || (s && s.code) || '').trim().toUpperCase();
-            if (_k && _k === _codeF) _idxF.push(i);
+            if (_k && _k === _codeF && _avantInvF(s)) _idxF.push(i);
           });
           if (!_idxF.length) {
             /* L'article figure TOUJOURS a l'inventaire (calcInventoryItems),
@@ -19875,7 +19920,14 @@ function reparerInventairesPFAppliques() {
         fin.forEach(function(s, i) {
           var a = (s && s.article_id) ? (arts.find(function(x) { return x.id === s.article_id; }) || {}) : {};
           var k2 = String(a.code || (s && s.code) || '').trim().toUpperCase();
-          if (k2 && k2 === K) idxs.push(i);
+          if (k2 && k2 === K) {
+            /* Meme garde-fou que l'application : l'ecart ne concerne que les
+               lignes creees au plus tard la date de l'inventaire. */
+            var _cL = String((s.created_at || s.date) || '');
+            var _dL = _cL.match(/(\d{4})-(\d{2})-(\d{2})/);
+            if (_dL && (_dL[1] + '-' + _dL[2] + '-' + _dL[3]) > String(d)) return;
+            idxs.push(i);
+          }
         });
         if (idxs.length) {
           var cur = 0;
@@ -28310,7 +28362,7 @@ function saveAchatByCategory(e, category) {
     });
     setStockMerch(merchStock);
   } else if (category === 'consumables' && !existing) {
-    _saveAchatConsumStock(_tempAchatItems, fournisseur, (typeof date !== 'undefined' && date) ? date : today());
+    _saveAchatConsumStock(_tempAchatItems, fournisseur, (typeof date !== 'undefined' && date) ? date : today(), ref);
     /* Journal des mouvements : entrées achats consommables (POINTE, etc.)
        pour la page Mouvements de Stock. Pas d'article_id (hors table
        articles) : on porte le code + la designation sur l'entrée. */
