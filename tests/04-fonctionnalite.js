@@ -13673,7 +13673,9 @@ function run(rapport) {
     const okDef = srcTc.indexOf('function codeConnexionOK(') !== -1;
     const okPrompt = srcTc.indexOf("window.prompt('Saisissez votre code de connexion pour approuver ce transfert :'") !== -1;
     const okAppel = srcTc.indexOf('if (!codeConnexionOK(codeCs)) { toast(\'Code de connexion incorrect\', \'error\'); return; }') !== -1;
-    const okCompte = srcTc.indexOf('list[i].password && String(list[i].password) === c') !== -1;
+    /* V2 : le code de connexion se verifie via mdbPassCheck (empreinte
+       sha256 avec sel, ancien champ en clair encore accepte en lecture). */
+    const okCompte = srcTc.indexOf('if (mdbPassCheck(list[i], c)) return true;') !== -1;
     const okExclusion = srcTc.indexOf('if (sansCompte) {') !== -1; /* code entreprise seulement sans compte local */
     if (okDef && okPrompt && okAppel && okCompte && okExclusion) {
       rapport.ok('Transferts caisse : approbation protégée par le code de connexion de l\u2019agent (compte mdb_users, code entreprise seulement sans compte)');
