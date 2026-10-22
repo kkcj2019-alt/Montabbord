@@ -9,7 +9,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script>
-window.__APP_VERSION='2026-10-19-254';
+window.__APP_VERSION='2026-10-19-255';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -10336,7 +10336,27 @@ function prodPushNow() {
       if (window._prodNomModifie) {
         var _nomm = JSON.parse(localStorage.getItem('mdb_nomenclature') || 'null');
         if (Array.isArray(_nomm)) {
-          payload.mdb_nomenclature = _nomm;
+          /* Union avec le cloud plutot que remplacement en bloc : un produit
+             ajoute cote index PENDANT que Exploitation restaure un autre
+             produit n'etait pas dans _nomm -> l'envoi complet l'effacait du
+             cloud. Les suppressions cote index survivent via les tombstones
+             (filtres cote reception). */
+          var _nomCloud = (cloudData.mdb_nomenclature && Array.isArray(cloudData.mdb_nomenclature)) ? cloudData.mdb_nomenclature : [];
+          var _nomSeen = {}, _nomMerged = [];
+          for (var _nli = 0; _nli < _nomm.length; _nli++) {
+            _nomMerged.push(_nomm[_nli]);
+            var _nid = _nomm[_nli] && _nomm[_nli].id;
+            if (_nid !== undefined && _nid !== null && _nid !== '') _nomSeen[String(_nid)] = true;
+          }
+          for (var _nci = 0; _nci < _nomCloud.length; _nci++) {
+            var _nit = _nomCloud[_nci];
+            var _nid2 = _nit && _nit.id;
+            if (_nid2 === undefined || _nid2 === null || _nid2 === '' || !_nomSeen[String(_nid2)]) {
+              _nomMerged.push(_nit);
+              if (_nid2 !== undefined && _nid2 !== null && _nid2 !== '') _nomSeen[String(_nid2)] = true;
+            }
+          }
+          payload.mdb_nomenclature = _nomMerged;
           window._prodNomEnAttente = true;
         }
       }
@@ -10425,6 +10445,13 @@ function prodPushNow() {
       for (var kRs in _secSnap) { if (_secSnap.hasOwnProperty(kRs)) window._prodDirtySections[kRs] = true; }
       if (_dirtySnap || Object.keys(window._prodDirtySections || {}).length > 0) _prodDirty = true;
     } catch (eRs) {}
+    /* Nomenclature envoyee mais ecriture echouee : les drapeaux ont ete
+       consommes AVANT l'envoi (reset anticip\u00e9) — sans cette remise en file,
+       la restauration d'un produit fini ne partait JAMAIS apres un echec
+       reseau et restait bloquee locale jusqu'a la restauration suivante. */
+    try {
+      if (_nomEnAttente) { window._prodNomEnAttente = true; window._prodNomModifie = true; }
+    } catch (eRsNom) {}
     prodSyncStatus('○ erreur synchro', '#dc2626');
     try { _prodPushT = setTimeout(prodPushNow, Math.min(60000, 5000 * _prodFail)); } catch(e) {}
   });
@@ -10707,7 +10734,21 @@ function prodPullNow(silent) {
     var r4 = Array.isArray(row.data.mdb_codesCaisse) ? acApplyCaisseCloud(row.data.mdb_codesCaisse, 'mdb_codesCaisse') : false;
     var r5 = Array.isArray(row.data.mdb_caisses) ? acApplyCaisseCloud(row.data.mdb_caisses, 'mdb_caisses') : false;
     if ((rN || r1 || r2 || r3 || r4 || r5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
-  }).catch(function(err) {});
+  }).catch(function(err) {
+    /* Catch muet : une panne de lecture restait invisible (statut trompeur
+       « synchro OK » d'un push precedent, aucun log). On trace et on montre
+       un statut d'erreur, limit\u00e9 a 1/min pour ne pas clignoter au sondage
+       30 s. Le repli legacy de la table decoupee est deja gere en amont
+       (prodSplitLireCles). */
+    try { console.warn('[Prod] pull error:', err); } catch(eW) {}
+    try {
+      var _nowPe = Date.now();
+      if (!window._prodPullErrAt || _nowPe - window._prodPullErrAt > 60000) {
+        window._prodPullErrAt = _nowPe;
+        if (!silent) prodSyncStatus('○ erreur réception', '#dc2626');
+      }
+    } catch(eSt) {}
+  });
 }
 function prodStartRealtime() {
   var uid = _prodUid || prodEnterpriseUid();

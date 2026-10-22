@@ -26,7 +26,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-19-268';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-19-269';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2469,6 +2469,28 @@ function pushToCloud() {
     }
     return firebaseDb.collection('enterprises').doc(currentUser.id).set(data, {merge:true}).then(function() {
       window._lastCloudSet = Date.now();
+      /* Cache de push : on injecte ce qu'on vient d'ecrire (deja fusionne)
+         pour que la prochaine ecriture parte d'un etat a jour SANS
+         retelercharger le document entier (~2,3 Mo). Sans cette maj, le
+         cache restait d'AVANT notre ecriture pendant 25 s. */
+      try {
+        if (window._lastCloudData && typeof window._lastCloudData === 'object' && data && typeof data === 'object') {
+          for (var _pk in data) { if (Object.prototype.hasOwnProperty.call(data, _pk)) window._lastCloudData[_pk] = data[_pk]; }
+          window._lastCloudAt = Date.now();
+        } else { window._lastCloudAt = 0; }
+      } catch(eUC) {}
+      /* Notre ecriture a bouge updated_at cote serveur : on relit la valeur
+         pour que NOTRE sonde ne retelecharge pas ce que nous venons d'ecrire
+         (echo apres chaque push, aligne sur paye qui note payload.updated_at). */
+      try {
+        var _sbEcho = window.SB_CLIENT;
+        if (_sbEcho && _sbEcho.from && currentUser && currentUser.id) {
+          _sbEcho.from('enterprises').select('updated_at').eq('id', currentUser.id).limit(1).then(function (resE) {
+            var rowE = resE && resE.data && resE.data[0];
+            if (rowE && rowE.updated_at) window._mdbVuTs = String(rowE.updated_at);
+          }).catch(function () {});
+        }
+      } catch(eET) {}
       /* Base := contenu envoye : la prochaine fusion distinguera mes
          suppressions (jamais ressuscitees) des nouveautes des autres postes. */
       try {
@@ -6751,6 +6773,7 @@ function loadCloudData(uid, callback) {
   _receivingSnapshot = true;
   var entRef = firebaseDb.collection('enterprises').doc(uid);
   var done = false;
+  window._mdbLastLoadOk = false;
   function finish() {
     if (done) return;
     done = true;
@@ -6771,6 +6794,10 @@ entRef.get().then(function(doc) {
       var cloudEnt = (data['mdb_entreprise'] && typeof data['mdb_entreprise'] === 'object') ? data['mdb_entreprise'] : data;
       var localEnt = DB.get('mdb_entreprise') || {};
       if (typeof localEnt !== 'object' || Array.isArray(localEnt)) localEnt = {};
+      /* Cle sale = modif d'entreprise pas encore poussee : le local gagne,
+         sinon la fusion « cloud gagne » ci-dessous ecrasait la saisie en
+         attente (nom, devise, codes...) des que le chargement cloud arrivait. */
+      if (!_dirtyKeys['mdb_entreprise']) {
       var mergedEnt = Object.assign({}, localEnt);
       for (var _ek in cloudEnt) {
         if (Object.prototype.hasOwnProperty.call(cloudEnt, _ek)) {
@@ -6809,6 +6836,7 @@ entRef.get().then(function(doc) {
         mergedEnt.prefinancementDureeDefaut = localEnt.prefinancementDureeDefaut || 6;
       }
       DB.set('mdb_entreprise', mergedEnt);
+      } /* fin branche non-salée de mdb_entreprise */
       try {
         for (var i = 0; i < DATA_KEYS.length; i++) {
           var key = DATA_KEYS[i];
@@ -6926,6 +6954,7 @@ entRef.get().then(function(doc) {
         _receivingSnapshot = false;
       }
     }
+    window._mdbLastLoadOk = true;
     finish();
   }).catch(function(e) {
     console.warn('Cloud load error:', e);
@@ -7042,7 +7071,13 @@ var local = DB.get(key);
           var _ml = String(_le.validationCode || '').trim();
           if (_mc) _me.validationCode = _mc;
           else if (_ml) _me.validationCode = _ml;
-          if (JSON.stringify(_me) !== localStr) { DB.set(key, _me); changed = true; }
+          /* Comparaison contre LA valeur locale de cette cle : l'ancien code
+             comparait a localStr, variable HOISTEE mais calculee PLUS BAS
+             (au tour de boucle suivant) => string d'une AUTRE cle ou
+             undefined : la fusion etait tantot ecrasee sans effet, tantot
+             ecrite inutilement, et les changements d'entreprise recus du
+             cloud pouvaient etre ignores. */
+          if (JSON.stringify(_me) !== JSON.stringify(local)) { DB.set(key, _me); changed = true; }
           continue;
         }
         if (key === 'mdb_bc_colors') {
@@ -7201,8 +7236,17 @@ function _mdbStartSonde(uid) {
              timestamp, pour reessayer au prochain tick une fois la saisie
              terminee (sinon les champs se videraient en pleine frappe). */
           if (_mdbFormActiveGuard()) return;
-          window._mdbVuTs = ts;
+          /* Le cloud a CHANGE (autre poste) : on invalide le cache de push.
+             Sans ca, la prochaine ecriture fusionnerait depuis une copie
+             d'AVANT ce changement et re-effacerait les lignes fraiches
+             (meme piege que le cache 30 s de paye, resolu la-bas par un
+             parametre force sur la lecture). */
+          window._lastCloudAt = 0;
           loadCloudData(uid, function () {
+            /* Timestamp consomme SEULEMENT apres chargement reussi : en cas
+               d'echec reseau on ne l'enregistre pas, et le prochain tick
+               reessaie la meme valeur au lieu de rater la saisie distante. */
+            if (window._mdbLastLoadOk) window._mdbVuTs = ts;
             if (typeof currentPage !== 'undefined' && currentPage && !_dirtyKeys[currentPage]) {
               try { navigateTo(currentPage); } catch (eN) {}
             }
@@ -7229,7 +7273,14 @@ function forceSync() {
 }
 
 document.addEventListener('visibilitychange', function() {
-  if (!document.hidden && currentUser && currentUser.id && !_loadingCloud) {
+  /* Sortie d'onglet : envoi immediat des cles sales (meme logique que paye).
+     Le pagehide seul ne couvre pas tous les mobiles ; ici on pousse des que
+     la page passe en arriere-plan, en plus du re-poussee au retour visible. */
+  if (document.hidden) {
+    if (currentUser && currentUser.id && Object.keys(_dirtyKeys).length > 0) { try { pushToCloud(); } catch(eHid) {} }
+    return;
+  }
+  if (currentUser && currentUser.id && !_loadingCloud) {
     pushToCloud();
   }
 });

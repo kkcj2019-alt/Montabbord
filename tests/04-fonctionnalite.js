@@ -13397,9 +13397,11 @@ function run(rapport) {
     const srcG = fsG.readFileSync(pathG.join(__dirname, '..', 'public', 'index.html'), 'utf8');
     const okDef = srcG.indexOf('function _mdbFormActiveGuard()') !== -1;
     /* sonde : la garde doit etre testee AVANT d'enregistrer le timestamp
-       (sinon la modification distante serait perdue, pas differ\u00e9e). */
+       (sinon la modification distante serait perdue, pas differ\u00e9e).
+       Fenetre portee a 2400 : la sonde inclut maintenant l'invalidation du
+       cache de push et le chargement conditionne (_mdbLastLoadOk). */
     const iSonde = srcG.indexOf('function _mdbStartSonde');
-    const segSonde = iSonde >= 0 ? srcG.slice(iSonde, iSonde + 1600) : '';
+    const segSonde = iSonde >= 0 ? srcG.slice(iSonde, iSonde + 2400) : '';
     const iGuardSonde = segSonde.indexOf('_mdbFormActiveGuard()');
     const iTs = segSonde.indexOf('window._mdbVuTs = ts;');
     const okSonde = iGuardSonde !== -1 && iTs !== -1 && iGuardSonde < iTs;

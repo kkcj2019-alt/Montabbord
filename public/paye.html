@@ -15,7 +15,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-17-281";
+      window.__APP_VERSION = "2026-10-17-282";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -7875,6 +7875,31 @@ window._payeVuTs = ts;
           setAPList(_newAcsP);
         }
       }
+      /* Miroir de _purgeOrphanAcomptesP : retire les pièces de caisse qui
+         portent encore un lien vers un acompte/prêt inexistant (le lien
+         inverse). Appelée après chaque pull cloud mais la fonction n'existait
+         pas : ReferenceError avale par le try/catch, et les miroirs d'acomptes
+         supprimés restaient en caisse. On ne touche JAMAIS aux opérations
+         sans lien acomptePretId ( vraies pièces financières ). */
+      function _purgeOrphanOpsCaisse() {
+        var _acsC = payeArr("mdb_acomptesPrets");
+        var _acIdsC = {};
+        for (var _aic = 0; _aic < _acsC.length; _aic++)
+          if (_acsC[_aic] && _acsC[_aic].id) _acIdsC[_acsC[_aic].id] = true;
+        var _opsC = payeArr("mdb_operationsCaisse");
+        var _toRemC = [];
+        for (var _oic = 0; _oic < _opsC.length; _oic++) {
+          var _opC = _opsC[_oic];
+          if (!_opC || !_opC.acomptePretId) continue;
+          if (!_acIdsC[_opC.acomptePretId]) _toRemC.push(_opC);
+        }
+        if (_toRemC.length) {
+          var _newOpsC = _opsC.filter(function (x) {
+            return _toRemC.indexOf(x) === -1;
+          });
+          DB.setMain("mdb_operationsCaisse", _newOpsC);
+        }
+      }
 
       /* ==================== HELPERS DONNEES PARTAGEES ==================== */
       /* Employés : source unique = mdb_employes (partagé avec l'app principale) */
@@ -9460,6 +9485,49 @@ function renderPrimeEmpMatrix() {
           periode: peri || "",
           commentaire: comm,
         };
+      }
+      /* Écriture côté pointage : enregistre le congé payé du mois dans le
+         modèle officiel congeRecords (upsert du paiement sur la dernière
+         période du salarié). Sans cette fonction, saveCongeUI levait une
+         ReferenceError et le congé saisi depuis le pointage n'était jamais
+         stocké. */
+      function setCongePaie(empId, mois, montant, periode, commentaire) {
+        if (!empId || !mois) return;
+        var recs = getCongeRecords();
+        var per = String(periode || "").trim();
+        var perDeb = per ? per.split("|")[0] : "";
+        var perFin = per && per.indexOf("|") !== -1 ? per.split("|")[1] : "";
+        /* Priorité : enregistrement existant de la même période, sinon le
+         dernier enregistrement du salarié (lecture getCongeRecord). */
+        var rec = null;
+        for (var i = recs.length - 1; i >= 0 && !rec; i--) {
+          var _r = recs[i];
+          if (!_r || _r.employee_id !== empId) continue;
+          if (perDeb && (_r.debut_periode === perDeb || _r.debut_conge === perDeb)) rec = _r;
+        }
+        if (!rec) {
+          for (var i2 = recs.length - 1; i2 >= 0 && !rec; i2--) {
+            if (recs[i2] && recs[i2].employee_id === empId) rec = recs[i2];
+          }
+        }
+        if (!rec) {
+          rec = { id: DB.id(), employee_id: empId, debut_periode: "", fin_periode: "", duree_jours: 0, commentaire: "", paiements: [] };
+          recs.push(rec);
+        }
+        if (!rec.paiements) rec.paiements = [];
+        var pay = null;
+        for (var j = 0; j < rec.paiements.length; j++) {
+          if (rec.paiements[j] && rec.paiements[j].mois === mois) { pay = rec.paiements[j]; break; }
+        }
+        if (!pay) { pay = { mois: mois, montant: 0, commentaire: "" }; rec.paiements.push(pay); }
+        pay.montant = parseFloat(montant) || 0;
+        pay.commentaire = String(commentaire || "");
+        if (perDeb) {
+          rec.debut_conge = perDeb;
+          if (/^\d{4}-\d{2}-\d{2}$/.test(perDeb)) rec.debut_periode = perDeb;
+        }
+        if (perFin && /^\d{4}-\d{2}-\d{2}$/.test(perFin)) rec.fin_periode = perFin;
+        setCongeRecords(recs);
       }
       function getCongePaidTotal(empId) {
         var recs = getCongeRecords().filter(function (r) {
@@ -24143,6 +24211,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         return !getPrixArticlesRegles().some(function (r) { return r && r.code && parseFloat(r.prix) > 0; });
       }
       /* ===== MODALE : PRIX DES ARTICLES (variables par période / employé / date) ===== */
+      /* Libellé de date des règles de prix (AAAA-MM-JJ -> JJ/MM/AA). Fonction
+         appelée par ptPrixArticlesRender mais absente du fichier : la liste
+         des règles levait une ReferenceError et ne s'affichait jamais. */
+      function _ptImDateLbl(x) {
+        var p = String(x).split("-");
+        if (p.length === 3) return p[2] + "/" + p[1] + "/" + String(p[0]).slice(2);
+        return String(x);
+      }
       function showModalPrixArticles() {
         var ams = getArticlesMontage() || [];
         var emps = (getPersonnelActifs() || []).filter(function (p) { return p.en_paie !== false; });
