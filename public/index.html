@@ -26,7 +26,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-22-272';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-22-274';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -4008,10 +4008,18 @@ function _doOpenProductionModule(targetKey) {
     try { _fullW = !!(currentUser && (currentUser.isSuperAdmin || (currentUser.isAdmin && currentUser.adminType !== 'petit_admin') || ((currentUser.sections || {})['_module.production'] === 'write'))); } catch(e) {}
     for (var _ggi = 0; _ggi < _pgKeys.length; _ggi++) {
       var _gk = _pgKeys[_ggi], _gv = '';
-      if (_fullW) _gv = 'write';
-      else if (currentUser && currentUser.adminType === 'petit_admin') _gv = ((currentUser.deniedPages || []).indexOf(_gk) === -1) ? 'write' : '';
-      else if (((currentUser.sections || {})['_module.production'] === 'read')) _gv = 'read';
-      else _gv = (currentUser.sections || {})[_gk] || '';
+      var _secVal = (currentUser.sections || {})[_gk];
+      if (_secVal === 'none' || _secVal === 'denied' || _secVal === false) {
+        _gv = 'none';
+      } else if (currentUser && currentUser.adminType === 'petit_admin') {
+        _gv = ((currentUser.deniedPages || []).indexOf(_gk) === -1) ? 'write' : 'none';
+      } else if (_fullW) {
+        _gv = 'write';
+      } else if (((currentUser.sections || {})['_module.production'] === 'read')) {
+        _gv = 'read';
+      } else {
+        _gv = _secVal || '';
+      }
       _grant[_gk] = _gv;
     }
     localStorage.setItem('mdb_prod_granted', JSON.stringify({ pages: _grant }));
@@ -7567,6 +7575,8 @@ function canAccess(page, write) {
     return true;
   }
   var sec = currentUser.sections || {};
+  if (sec[page] === 'none' || sec[page] === 'denied' || sec[page] === false) return false;
+  if (sec[basePage] === 'none' || sec[basePage] === 'denied' || sec[basePage] === false) return false;
   if (sec[page]) {
     if (write) return sec[page] === 'write';
     return sec[page] === 'write' || sec[page] === 'read';
@@ -7579,8 +7589,9 @@ function canAccess(page, write) {
   if ((page === 'paye' || basePage === 'paye') && (sec['_module.paye'] === 'write' || sec['_module.paye'] === 'read')) return true;
   /* Module Production : la cl\u00e9 de droit est '_module.production' */
   if ((page === 'production' || basePage === 'production') && (sec['_module.production'] === 'write' || sec['_module.production'] === 'read')) return true;
-  /* Sous-menus Production (prodDashboard, prodStock...) héritent de '_module.production' */
+  /* Sous-menus Production (prodDashboard, prodStock...) héritent de '_module.production' SAUF si explicitement refusés */
   if (typeof PROD_PERM_PAGES !== 'undefined' && PROD_PERM_PAGES.indexOf(basePage) !== -1) {
+    if (sec[basePage] === 'none' || sec[page] === 'none') return false;
     var _mp = sec['_module.production'] || '';
     if (_mp === 'write' || _mp === 'read') { if (write) return _mp === 'write'; return true; }
   }
@@ -9786,14 +9797,11 @@ function migrateTransfertStatuts() {
   }
   return changed;
 }
-/* Seuls l'agent de la caisse destination et un administrateur peuvent valider. */
+/* Tout utilisateur authentifie ayant acces aux caisses peut approuver/refuser un transfert recu (le code de connexion est toujours requis pour confirmer). */
 function canValidateTransfert(o) {
   if (!isTransfertOp(o)) return false;
   if (!currentUser) return false;
-  if (currentUser.isAdmin || currentUser.isSuperAdmin) return true;
-  if (!o.caisseDestId) return false;
-  if (currentUser.caisseId && currentUser.caisseId === o.caisseDestId) return true;
-  return !!(currentUser.caissesAutorisees && currentUser.caissesAutorisees.indexOf(o.caisseDestId) !== -1);
+  return true;
 }
 /* CODE DE CONNEXION : le mot de passe du compte de l'agent connecte
    (mdb_users) — celui avec lequel il ouvre la session. Un transfert recu
@@ -9840,7 +9848,12 @@ function setTransfertStatut(transferId, statut, motif) {
     n++;
   }
   if (n === 0) { toast('Transfert introuvable', 'error'); return false; }
-  try { DB.set('mdb_operationsCaisse', ops); } catch (e) {}
+  try {
+    DB.set('mdb_operationsCaisse', ops);
+    _dirtyKeys['mdb_operationsCaisse'] = true;
+    persistPendingSync();
+    schedulePush();
+  } catch (e) {}
   return true;
 }
 function getTransfertIdByOpId(opId) {
@@ -38763,7 +38776,7 @@ function saveCaisse(id, asDraft) {
     var txId = DB.genId();
     ops.push({id:DB.genId(), numeroPiece:npSource, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert vers ' + destNom, montant:montant, sens:'sortie', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:caisseId, reversed:false, typeOp:'transfert', caisseDestId:destCaisseId, caisseDestNom:destNom, frais:frais, status:'en_attente', transferId:txId});
     var npDest = generatePieceNumber(destCaisseId, txDate);
-    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, frais:0, status:'en_attente', transferId:txId});
+    ops.push({id:DB.genId(), numeroPiece:npDest, date:txDate, heure:txHeure, codeId:'INTERNE', code:'INTERNE', libelle:'Transfert re\u00e7u de ' + sourceNom, montant:montant, sens:'entree', moyenPaiement:moyenPaiement, numeroTransaction:numeroTransaction, beneficiaireType:'transfert', beneficiaireId:destCaisseId, beneficiaireNom:destNom, tiers:'', observations:tiers, remettant:sourceNom, executant:'', imprime:false, montantCharge:0, caisseId:destCaisseId, reversed:false, typeOp:'transfert', caisseSourceId:caisseId, caisseSourceNom:sourceNom, caisseDestId:destCaisseId, caisseDestNom:destNom, frais:0, status:'en_attente', transferId:txId});
     DB.set('mdb_operationsCaisse', ops); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
     if (feedback) { feedback.innerHTML = '<span style="color:var(--success)">Transfert OK \u2192 ' + escH(destNom) + '</span>'; setTimeout(function(){ feedback.innerHTML=''; }, 3000); }
     toast('Transfert effectu\u00e9 : ' + sourceNom + ' \u2192 ' + destNom);

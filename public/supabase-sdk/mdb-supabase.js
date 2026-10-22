@@ -172,19 +172,27 @@
     return lots;
   }
 
-  /* Lot par lot, 2 en parallele : assez rapide, sans saturer PostgREST. */
+  /* Lot par lot séquentiel avec retry : évite les conflits de verrous Postgres (timeouts 57014) sur Supabase Nano */
   function upsertLots(lots) {
-    var i = 0, parallel = 2;
-    function worker() {
-      if (i >= lots.length) return Promise.resolve();
-      var lot = lots[i++];
-      return sb.from(SPLIT_TABLE).upsert(lot, { onConflict: 'enterprise_id,cle' })
-        .then(function (r) { if (r.error) throw r.error; })
-        .then(worker);
+    var idx = 0;
+    function doOneLot() {
+      if (idx >= lots.length) return Promise.resolve();
+      var lot = lots[idx++];
+      function send(retries) {
+        return sb.from(SPLIT_TABLE).upsert(lot, { onConflict: 'enterprise_id,cle' })
+          .then(function (r) {
+            if (r.error) {
+              var is57014 = r.error.code === '57014' || /57014|timeout/i.test(r.error.message || '');
+              if (is57014 && retries > 0) {
+                return new Promise(function(resolve) { setTimeout(resolve, 800); }).then(function() { return send(retries - 1); });
+              }
+              throw r.error;
+            }
+          });
+      }
+      return send(2).then(doOneLot);
     }
-    var workers = [];
-    for (var w = 0; w < Math.min(parallel, lots.length); w++) workers.push(worker());
-    return Promise.all(workers);
+    return doOneLot();
   }
 
   function writeEnterpriseSplit(uid, data) {

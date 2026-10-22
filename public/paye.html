@@ -15,7 +15,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-22-287";
+      window.__APP_VERSION = "2026-10-22-290";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -8694,6 +8694,9 @@ function renderPrimeEmpMatrix() {
           p.employes = p.employes || [];
           if (p.employes.indexOf(empId) === -1) { p.employes.push(empId); setPrimesSpec(primes); }
         }
+        /* Push immédiat : un push différé peut laisser le cloud avoir le dessus
+           sur la valeur locale si un snapshot arrive avant les 2.5 s. */
+        try { pushPayeCloud(true); } catch(ePPC){}
         renderPrimeEmpMatrix();
       }
       function pmeBase(empId, val) {
@@ -9456,6 +9459,9 @@ function renderPrimeEmpMatrix() {
           }
           setManualLines(all);
         }
+        /* Push immédiat : protège contre l'écrasement par un snapshot cloud
+           arrivant avant la fenêtre de 2.5 s du push différé. */
+        try { pushPayeCloud(true); } catch(ePPC){}
         try {
           toast("Valeur enregistrée : " + fmt(v), "success");
         } catch (eT) {}
@@ -15750,6 +15756,17 @@ function addArticleMontageFromPt(e) {
               (p.en_paie !== false || empCategorie(p) === "externe")
             );
           });
+        /* Filtres "Impression groupée" : si une fonction ou un type est
+           sélectionné, l'auto-complétion individuelle est restreinte
+           aux mêmes employés (cohérence avec le filtre bulk). */
+        try {
+          var _bpf = (document.getElementById("bulk-print-fonction") || {}).value || "";
+          if (_bpf) list = list.filter(function(p){ return (p.fonction || "") === _bpf; });
+        } catch(_ef){}
+        try {
+          var _bpt = (document.getElementById("bulk-print-type") || {}).value || "";
+          if (_bpt) list = list.filter(function(p){ return empCategorie(p) === _bpt; });
+        } catch(_et){}
         var q = (val || "").toLowerCase().trim();
         var filtered = q
           ? list.filter(function (p) {
@@ -18588,7 +18605,8 @@ html +=
       /* Heures d'AFFICHAGE d'un jour, INDEPENDANTES du flag present :
          un pointage marque absent avec des creneaux restes (residu de
          « marquer absent » du pointage groupe) doit quand meme montrer
-         ses heures — la modale affiche deja « R+X.XXh » dans ce cas. */
+         ses heures. Pour le rendement : arrivée et départ sans pause =
+         présence physique seule, 0h payées (paie via montage). */
       function ptHeuresAffTotal(rec) {
         if (!rec) return 0;
         try {
@@ -18598,10 +18616,19 @@ html +=
             na: rec.n_arrivee, np1: rec.n_pause, np2: rec.n_reprise, nf: rec.n_fin,
             libres: rec.h_libres, isR: _isRrec
           });
-          /* Rendement : ptCoreCalc renvoie tout dans r (j et n à 0). */
+          /* Rendement : ptCoreCalc renvoie les heures de créneaux avec pause dans r.
+             Si arrivée et départ seuls sans pause -> 0h payées. Ne jamais repêcher h_j_manual. */
           var t = (c.j || 0) + (c.n || 0) + (c.r || 0);
-          if (t <= 0) t = (parseHeure(rec.h_j_manual || "") || 0) + (parseHeure(rec.h_n_manual || "") || 0);
-          if (t <= 0) t = parseFloat(rec.h_libres) || 0;
+          if (!_isRrec) {
+            if (t <= 0) t = (parseHeure(rec.h_j_manual || "") || 0) + (parseHeure(rec.h_n_manual || "") || 0);
+          } else {
+            var hasCre = !!(rec.j_arrivee || rec.j_pause || rec.j_reprise || rec.j_fin ||
+                            rec.n_arrivee || rec.n_pause || rec.n_reprise || rec.n_fin);
+            if (!hasCre && t <= 0) {
+              t = parseFloat(rec.h_libres) || 0;
+            }
+          }
+          if (t <= 0 && !_isRrec) t = parseFloat(rec.h_libres) || 0;
           return Math.round(t * 100) / 100;
         } catch (eAff) { return 0; }
       }
@@ -20794,16 +20821,16 @@ function peTogglePst() {
               }
             });
           } catch(eMF){}
-          doc.setFontSize(14); doc.setFont("helvetica","bold");
-          doc.text("Fiche de pointage détaillée",105,13,{align:"center"});
+          doc.setFontSize(13); doc.setFont("helvetica","bold");
+          doc.text("Fiche de pointage détaillée",105,10,{align:"center"});
           /* Nom bien en évidence : bandeau sombre + nom en grand */
           doc.setFillColor(15,23,42);
-          doc.rect(14,17,182,10,"F");
-          doc.setFontSize(12); doc.setFont("helvetica","bold"); doc.setTextColor(255,255,255);
-          doc.text(emp.nom+" "+(emp.prenoms||""),105,24,{align:"center"});
+          doc.rect(12,13,186,8,"F");
+          doc.setFontSize(11); doc.setFont("helvetica","bold"); doc.setTextColor(255,255,255);
+          doc.text(emp.nom+" "+(emp.prenoms||""),105,18.5,{align:"center"});
           doc.setTextColor(0,0,0);
-          doc.setFontSize(9); doc.setFont("helvetica","normal");
-          doc.text("Matricule : "+emp.matricule+" | Mois : "+ptMoisLabel(mois)+" | Fonction : "+(emp.fonction||"-"),105,31,{align:"center"});
+          doc.setFontSize(8); doc.setFont("helvetica","normal");
+          doc.text("Matricule : "+emp.matricule+" | Mois : "+ptMoisLabel(mois)+" | Fonction : "+(emp.fonction||"-"),105,24.5,{align:"center"});
           var cols = ["Date","Pointages","Jour(H)","Nuit(H)","Total(H)","Observations"];
           var rows = [];
           var isPST = []; // track PST days for red total
@@ -20849,9 +20876,9 @@ function peTogglePst() {
               if (rec.faute_societe) obs="Faute société";
               if (rec.pst_a_rattraper) obs = (obs ? obs + " \u2014 " : "") + "\u00e0 rattraper";
               if (rec.jour_rattrapage) obs="Jour de rattrapage";
-              /* Le MOTIF r\u00e9el de la faute entreprise est imp\u00e9r\u00e9ment
+              /* Le MOTIF réel de la faute entreprise est impérément
                  sur la fiche : sans lui, on ne savait pas de quoi il
-                 s'agissait ("juste pay\u00e9 sans travail"). */
+                 s'agissait ("juste payé sans travail"). */
               var _isFauteJ = (rec.absent_paye === true || rec.faute_societe === true);
               var _fmFaute = "";
               if (_isFauteJ) {
@@ -20861,7 +20888,7 @@ function peTogglePst() {
                    répète le motif déjà cité → on ne la recolle pas. Une
                    observation vraiment libre (sans parenthèses) est gardée. */
                 var _fobs = String(rec.observation || rec.obs || "").trim();
-                obs = "Absent pay\u00e9 (faute entreprise)" + (_fmFaute ? " \u2014 " + _fmFaute : " \u2014 motif non pr\u00e9cis\u00e9");
+                obs = "Absent payé (faute entreprise)" + (_fmFaute ? " \u2014 " + _fmFaute : " \u2014 motif non précisé");
                 if (_fobs && _fobs.indexOf("(") === -1 && !/^Faute entreprise/i.test(_fobs)) obs += " \u2014 " + _fobs;
               }
               if (montSetF[dk]) {
@@ -20907,22 +20934,26 @@ function peTogglePst() {
               isPST.push(false);
             }
           }
-          doc.autoTable({head:[cols],body:rows,startY:34,theme:"grid",
-            headStyles:{fillColor:[60,60,60],textColor:[255,255,255],fontSize:7},
-            styles:{fontSize:6.5,lineColor:[30,30,30],lineWidth:0.4,cellPadding:2.8,minCellHeight:7},
-            bodyStyles:{lineColor:[30,30,30],lineWidth:0.4},
-            columnStyles:{0:{cellWidth:22},1:{cellWidth:50}},
+          var _rowH = Math.max(5.5, Math.floor((245 / (rows.length + 1)) * 10) / 10);
+          doc.autoTable({head:[cols],body:rows,startY:27,theme:"grid",
+            headStyles:{fillColor:[15,23,42],textColor:[255,255,255],fontSize:7,fontStyle:"bold",minCellHeight:6.5,cellPadding:1.2},
+            styles:{fontSize:6.2,lineColor:[51,65,85],lineWidth:0.3,cellPadding:1.2,minCellHeight:_rowH},
+            bodyStyles:{lineColor:[51,65,85],lineWidth:0.3,minCellHeight:_rowH},
+            columnStyles:{0:{cellWidth:20},1:{cellWidth:42}},
+            margin:{top:27,bottom:10,left:12,right:12},
+            pageBreak:"avoid",
+            rowPageBreak:"avoid",
             didParseCell: function(data) {
               if (data.section === "body" && data.column.index === 4 && isPST[data.row.index]) {
                 data.cell.styles.textColor = [220, 38, 38];
                 data.cell.styles.fontStyle = "bold";
               }
             }});
-          var _fy = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? doc.lastAutoTable.finalY + 6 : 282;
-          doc.setFontSize(8); doc.setFont("helvetica","bold");
+          var _fy = (doc.lastAutoTable && doc.lastAutoTable.finalY) ? Math.min(286, doc.lastAutoTable.finalY + 3) : 286;
+          doc.setFontSize(7.5); doc.setFont("helvetica","bold");
           doc.text("Total JH: "+ptFmtDec(tJ)+"h | NH: "+ptFmtDec(tN)+"h | R: "+ptFmtDec(tR)+"h | Total: "+ptFmtDec((tJ+tN+tR))+"h",105,_fy,{align:"center"});
-          doc.setFontSize(7); doc.setFont("helvetica","normal");
-          doc.text("Heures à rattraper — gagnées: "+ptFmtDec(gTot)+"h | utilisées: "+ptFmtDec(uTot)+"h | solde: "+ptFmtDec((gTot-uTot))+"h",105,_fy+5,{align:"center"});
+          doc.setFontSize(6.5); doc.setFont("helvetica","normal");
+          doc.text("Heures à rattraper — gagnées: "+ptFmtDec(gTot)+"h | utilisées: "+ptFmtDec(uTot)+"h | solde: "+ptFmtDec((gTot-uTot))+"h",105,_fy+4,{align:"center"});
         });
         var fn = "Fiches_Pointage_"+mois+".pdf";
         if (isPrint) { window.open(doc.output("bloburl"),"_blank"); }
@@ -22498,9 +22529,10 @@ function ptMontFilterArts(q) {
       function ptMontValidate(day) {
         savePointageMontage();
         /* Marquer les travailleurs comme présents dans le pointage horaire */
-        var inputs = document.querySelectorAll(
-          "input[data-emp]",
-        );
+        var wiz = document.getElementById("wiz-step-3");
+        var inputs = (wiz && wiz.style.display !== "none" && wiz.querySelectorAll("input[data-emp]").length > 0)
+          ? wiz.querySelectorAll("input[data-emp]")
+          : document.querySelectorAll("#pt-montage-grid input[data-emp], input[data-emp]");
         var empMarked = {};
         inputs.forEach(function (inp) {
           if (parseInt(inp.value) > 0)
@@ -22519,6 +22551,7 @@ function ptMontFilterArts(q) {
               present: true,
               h_j_manual: "",
               h_n_manual: "",
+              updatedAt: Date.now(),
             });
           } else if (
             !existing.present &&
@@ -22526,9 +22559,11 @@ function ptMontFilterArts(q) {
             (!existing.h_n_manual || existing.h_n_manual === "")
           ) {
             existing.present = true;
+            existing.updatedAt = Date.now();
           }
         }
         setPointageData(ptData);
+        try { pushPayeCloud(true); } catch (ePV) {}
         /* Recharger l'onglet heures si on y était */
         if (ptCurrentTab === "heures") loadPointage();
         toast("Journée du " + day + " enregistrée", "success");
@@ -24113,142 +24148,148 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         w.document.close();
         setTimeout(function () { w.print(); }, 300);
       }
-      /* Auto-advance: 1 chiffre → pause 800ms, 2 chiffres → immédiat, Entrée → immédiat */
+      /* Auto-advance: 3 chiffres (ex: 100) -> immédiat ; 2 chiffres -> pause 450ms (laisse le temps de taper 100) ; 1 chiffre -> 900ms ; Entrée / Flèche bas -> immédiat */
       function ptMontAutoAdvance(input) {
         var v = input.value.replace(/\D/g, "");
         if (v === "") return;
         input.value = v;
-        if (v.length >= 2) {
+        clearTimeout(input._ptTimer);
+        if (v.length >= 3) {
           advanceMontageCell(input);
           return;
         }
-        clearTimeout(input._ptTimer);
+        var delay = (v.length === 2) ? 450 : 900;
         input._ptTimer = setTimeout(function () {
           advanceMontageCell(input);
-        }, 800);
+        }, delay);
       }
       function ptMontKeyNav(e, input) {
-        if (e.key === "Enter") {
+        if (e.key === "Enter" || e.key === "ArrowDown") {
           e.preventDefault();
           advanceMontageCell(input);
           return;
         }
         if (e.key === "Tab") return; /* default tab */
-        if (e.key === "ArrowDown") {
-          var td = input.parentNode;
-          var tr = td.parentNode;
-          var nextTr = tr.nextElementSibling;
-          if (nextTr) {
-            var sameIdx = Array.from(tr.children).indexOf(td);
-            var nextTd = nextTr.children[sameIdx];
-            if (nextTd) {
-              var ni = nextTd.querySelector("input");
-              if (ni) {
-                ni.focus();
-                ni.select();
-              }
-            }
-          }
-          e.preventDefault();
-          return;
-        }
         if (e.key === "ArrowUp") {
-          var td2 = input.parentNode;
-          var tr2 = td2.parentNode;
-          var prevTr = tr2.previousElementSibling;
-          if (prevTr) {
-            var si = Array.from(tr2.children).indexOf(td2);
-            var prevTd = prevTr.children[si];
-            if (prevTd) {
-              var pi = prevTd.querySelector("input");
-              if (pi) {
-                pi.focus();
-                pi.select();
+          e.preventDefault();
+          try {
+            var tableU = input.closest("table");
+            if (tableU) {
+              var artU = input.getAttribute("data-article") || "";
+              var inputsU = Array.prototype.slice.call(tableU.querySelectorAll('input[data-article="' + artU.replace(/"/g, '\\"') + '"]'));
+              var idxU = inputsU.indexOf(input);
+              if (idxU > 0) {
+                inputsU[idxU - 1].focus();
+                inputsU[idxU - 1].select();
+                return;
               }
             }
-          }
-          e.preventDefault();
+          } catch (eUp) {}
           return;
         }
       }
       function advanceMontageCell(input) {
         clearTimeout(input._ptTimer);
-        /* Grille de l'assistant (travailleurs en lignes, articles en
-           colonnes) : Entrée descend dans la MÊME colonne (même article,
-           travailleur suivant), pas vers la 1re colonne de la ligne
-           suivante. */
         try {
-          var artC = input.getAttribute && input.getAttribute("data-article");
-          if (artC) {
-            var tdW = input.parentNode;
-            var trW = tdW.parentNode;
-            var nextTrW = trW.nextElementSibling;
-            if (nextTrW) {
-              var sameIdxW = Array.prototype.indexOf.call(trW.children, tdW);
-              var nextTdW = nextTrW.children[sameIdxW];
-              if (nextTdW) {
-                var niW = nextTdW.querySelector("input");
-                if (niW) { niW.focus(); niW.select(); return; }
-              }
-            }
-            return;
-          }
-        } catch (eW) {}
-        /* Si l'onglet Montage n'est plus visible, ne pas déplacer le curseur */
-        var mc = document.getElementById("pt-montage-container");
-        if (mc && mc.style.display === "none") return;
-        var td = input.parentNode;
-        var nextTd = td.nextElementSibling;
-        if (nextTd) {
-          /* next cell (same row, next day) */
-          var ni = nextTd.querySelector("input");
-          if (ni) {
-            ni.focus();
-            ni.select();
-            return;
-          }
-        }
-        /* Last cell in row → go to first cell of next row */
-        var tr = td.parentNode;
-        var nextTr = tr.nextElementSibling;
-        if (nextTr) {
-          var firstTd = nextTr.children[1];
-          if (firstTd) {
-            var fi = firstTd.querySelector("input");
-            if (fi) {
-              fi.focus();
-              fi.select();
+          var table = input.closest("table");
+          if (table) {
+            var art = input.getAttribute("data-article") || "";
+            var inputs = Array.prototype.slice.call(table.querySelectorAll('input[data-article="' + art.replace(/"/g, '\\"') + '"]'));
+            var idx = inputs.indexOf(input);
+            if (idx !== -1 && idx < inputs.length - 1) {
+              var nextInput = inputs[idx + 1];
+              nextInput.focus();
+              nextInput.select();
+              return;
             }
           }
-        }
+        } catch (eAdv) {}
+        /* Repli hiérarchique par ligne */
+        try {
+          var tr = input.closest("tr");
+          var nextTr = tr ? tr.nextElementSibling : null;
+          if (nextTr) {
+            var nextInp = nextTr.querySelector("input[data-article]") || nextTr.querySelector("input");
+            if (nextInp) { nextInp.focus(); nextInp.select(); return; }
+          }
+        } catch (eTr) {}
       }
       /* ==================== POINTAGE MONTAGE SAVE ==================== */
       function savePointageMontage() {
-        var inputs = document.querySelectorAll(
-          "input[data-emp]",
-        );
+        var wiz = document.getElementById("wiz-step-3");
+        var inputs = (wiz && wiz.style.display !== "none" && wiz.querySelectorAll("input[data-emp]").length > 0)
+          ? wiz.querySelectorAll("input[data-emp]")
+          : document.querySelectorAll("#pt-montage-grid input[data-emp], input[data-emp]");
         if (inputs.length === 0) return;
         var day = inputs[0].getAttribute("data-date");
         var allPts = getPointageMontage();
-        /* Reconstruction de la journée : on retire les anciennes saisies du jour puis on enregistre les quantités >= 1.
-           Cela permet de corriger ou de supprimer une quantité lors de la modification d'une journée.
-           IMPORTANT : les lignes retirées doivent être TOMBSTONÉES, sinon la fusion
-           cloud (union + latest-wins par clé métier emp|date|art) ressuscite l'ancienne
-           version — ex. modifier PAL114 → E2, la clé change, l'ancienne ligne PAL114
-           revient au prochain pull et écrase visuellement la correction. */
-        var _anciennesJour = allPts.filter(function (p) {
-          return p.date === day;
+        /* Modification en PLACE : chaque ligne existante (même employé + même
+           article + même jour) est MISE À JOUR (même id, nouveau updatedAt),
+           pas supprimée puis recréée. Les lignes dont l'article a changé
+           (ex. PAL114 → E2) ou qui ont été retirées sont TOMBSTONÉES.
+           Sans ça, la fusion cloud (union + latest-wins par clé emp|date|art)
+           ressuscitait l'ancienne version au prochain pull. */
+        var nouvelles = [];
+        inputs.forEach(function (inp) {
+          var v = parseInt(inp.value) || 0;
+          if (v <= 0) return;
+          var fac = String(inp.getAttribute("data-facture") || "").trim();
+          if (!fac) {
+            var facEl = document.getElementById("pt-montage-facture") || document.getElementById("pt-mont-facture");
+            fac = facEl ? String(facEl.value || "").trim() : "";
+          }
+          nouvelles.push({
+            employee_id: inp.getAttribute("data-emp"),
+            date: inp.getAttribute("data-date"),
+            article_code: inp.getAttribute("data-article"),
+            quantite: v,
+            facture: fac || undefined,
+          });
         });
-        allPts = allPts.filter(function (p) {
-          return p.date !== day;
+        /* Index des nouvelles saisies par employé|article */
+        var newIdx = {};
+        nouvelles.forEach(function (n) {
+          newIdx[n.employee_id + "|" + n.article_code] = n;
         });
-        if (_anciennesJour.length > 0) {
+        var tombstoned = [];
+        var maj = [];
+        allPts.forEach(function (p) {
+          if (p.date !== day) { maj.push(p); return; }
+          var k = p.employee_id + "|" + p.article_code;
+          if (newIdx[k]) {
+            /* Même employé + article : on met à jour en place (id stable) */
+            var n = newIdx[k];
+            p.quantite = n.quantite;
+            if (n.facture) p.facture = n.facture;
+            p._seal = "";
+            p.updatedAt = Date.now();
+            maj.push(p);
+            delete newIdx[k];
+          } else {
+            /* Article retiré ou changé : tombstone */
+            tombstoned.push(p);
+          }
+        });
+        /* Nouvelles lignes (articles pas encore présents ce jour) */
+        Object.keys(newIdx).forEach(function (k) {
+          var n = newIdx[k];
+          maj.push({
+            id: DB.id(),
+            employee_id: n.employee_id,
+            date: n.date,
+            article_code: n.article_code,
+            quantite: n.quantite,
+            facture: n.facture,
+            updatedAt: Date.now(),
+          });
+        });
+        if (tombstoned.length > 0) {
           try {
             var tb = getPayeSection("pointageMontage_tombstones", []);
             if (!Array.isArray(tb)) tb = [];
             var set = {};
             tb.forEach(function (x) { set[String(x)] = true; });
-            _anciennesJour.forEach(function (l) {
+            tombstoned.forEach(function (l) {
               if (l && l.id && !set[String(l.id)]) { tb.push(String(l.id)); set[String(l.id)] = true; }
               var c = _payeCleMetierPointage(l);
               if (c && !set["cle:" + c]) { tb.push("cle:" + c); set["cle:" + c] = true; }
@@ -24257,25 +24298,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             setPayeSection("pointageMontage_tombstones", tb);
           } catch (eTombM) {}
         }
-        inputs.forEach(function (inp) {
-          var v = parseInt(inp.value) || 0;
-          if (v <= 0) return;
-          var rec = {
-            id: DB.id(),
-            employee_id: inp.getAttribute("data-emp"),
-            date: inp.getAttribute("data-date"),
-            article_code: inp.getAttribute("data-article"),
-            quantite: v,
-          };
-          var fac = String(inp.getAttribute("data-facture") || "").trim();
-          if (!fac) {
-            var facEl = document.getElementById("pt-montage-facture") || document.getElementById("pt-mont-facture");
-            fac = facEl ? String(facEl.value || "").trim() : "";
-          }
-          if (fac) rec.facture = fac;
-          allPts.push(rec);
-        });
-        setPointageMontage(allPts);
+        setPointageMontage(maj);
+        try { pushPayeCloud(true); } catch (ePushM) {}
       }
       /* Remonte la Rémunération Montage (27, hors prime) juste après le salaire de base (11).
          La Prime de Production (28) reste avec les primes. */
@@ -36959,7 +36983,7 @@ function printCongeIndividuel(empId) {
         h += ".tot{background:#f1f5f9;font-weight:800}";
         h += ".page-break{page-break-before:always}";
         h +=
-          "@media print{@page{size:A4 portrait!important;margin:10mm}body{padding:8px}.page-break{page-break-before:always}table{width:100%;table-layout:fixed;word-break:break-word}th,td{font-size:9px;padding:4px 6px}}";
+          "@media print{@page{size:A4 portrait!important;margin:8mm}body{padding:6px;font-size:11px}.page-break{page-break-before:always}table{width:100%;table-layout:fixed;word-break:break-word}tr{page-break-inside:avoid}.section-title{page-break-after:avoid}th,td{font-size:9.5px;padding:3px 5px}}.bulletin-page{page-break-inside:avoid;break-inside:avoid}";
         h += ".pbar{position:sticky;top:0;z-index:50;display:flex;gap:10px;align-items:center;background:#0f172a;color:#fff;padding:10px 14px;margin:0 0 12px;border-radius:0 0 10px 10px}.pbtn{padding:8px 16px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;font-weight:700;cursor:pointer;font-size:13px}.pbtn-print{background:#16a34a;border-color:#16a34a;color:#fff}";
         h += "@media print{.pbar{display:none!important}}";
         h += "</style></head><body>";
@@ -36976,6 +37000,7 @@ function printCongeIndividuel(empId) {
           var catEmp = empCategorie(emp);
           var isExt = catEmp === "externe";
           if (idx > 0) h += '<div class="page-break"></div>';
+          h += '<div class="bulletin-page">';
           h += '<div class="header">';
           h += '<div style="display:flex;gap:8px;align-items:center">';
           if (soc.logo)
@@ -37116,6 +37141,8 @@ function printCongeIndividuel(empId) {
             '<div class="net">NET \u00c0 PAYER : ' +
             fmt(calc.totals.net) +
             " FCFA</div>";
+          /* Ferme le bloc bulletin-page (1 page A4 par employé) */
+          h += "</div>";
           /* ===== POINTAGE (si demandé) ===== */
           if (includePointage && !isExt) {
             var ptsEmp = getPointageData().filter(function (p) {
@@ -37274,14 +37301,13 @@ function printCongeIndividuel(empId) {
         h +=
           ".section-title{margin:18px 0 8px;padding:6px 10px;background:#f1f5f9;font-weight:800;text-transform:uppercase;font-size:12px}";
         h += ".tot{background:#f1f5f9;font-weight:800}";
-        h +=
-          "@media print{@page{size:A4 portrait!important;margin:10mm}body{padding:10px;font-size:13px}.page-break{page-break-before:always}table{width:100%;table-layout:fixed;word-break:break-word}tr{page-break-inside:avoid}.section-title{page-break-after:avoid}th,td{font-size:11px;padding:5px 6px}}";
-        h += ".pbar{position:sticky;top:0;z-index:50;display:flex;gap:10px;align-items:center;background:#0f172a;color:#fff;padding:10px 14px;margin:0 0 12px;border-radius:0 0 10px 10px}.pbtn{padding:8px 16px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;font-weight:700;cursor:pointer;font-size:13px}.pbtn-print{background:#16a34a;border-color:#16a34a;color:#fff}";
+        h += "@media print{@page{size:A4 portrait!important;margin:8mm}body{padding:6px;font-size:11px}.page-break{page-break-before:always}table{width:100%;table-layout:fixed;word-break:break-word}tr{page-break-inside:avoid}.section-title{page-break-after:avoid}th,td{font-size:9.5px;padding:3px 5px}}.bulletin-page{page-break-inside:avoid;break-inside:avoid}";
         h += "@media print{.pbar{display:none!important}}";
         h += "</style></head><body>";
         h += bulPrintBar();
 
         /* ===== BULLETIN ===== */
+        h += '<div class="bulletin-page">';
         h += '<div class="header">';
         h += '<div style="display:flex;gap:10px;align-items:center">';
         if (soc.logo)
@@ -37561,6 +37587,8 @@ function printCongeIndividuel(empId) {
           '<div style="text-align:right;font-size:9px;color:#777;margin-top:4px">Document g\u00e9n\u00e9r\u00e9 le ' +
           new Date().toLocaleString("fr-FR") +
           "</div>";
+        /* Ferme le bloc bulletin-page (1 seule page A4 par employé). */
+        h += "</div>";
         if (_hasPTprint || _hasMontPrint) h += '<div class="page-break"></div>';
 
         /* ===== DÉTAIL ACOMPTES & PRÊTS (dernière page, après pointage) ===== */
