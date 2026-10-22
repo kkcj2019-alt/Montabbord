@@ -9743,6 +9743,140 @@ r.push({
     `,
     attenduPrefixe: 'OK'
   });
+
+  r.push({
+    nom: 'R\u00e9cap Heures : jour rendement avec cr\u00e9neaux affiche R + les heures m\u00eame si present=false',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Cas r\u00e9el signal\u00e9 : la modale affiche R+1.17h mais la case du
+         r\u00e9cap n'affichait que « R » (flag present=false laiss\u00e9 par
+         « marquer absent » du pointage group\u00e9, cr\u00e9neaux non effac\u00e9s). */
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var d1 = mz + '-01';
+      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && r.date === d1); });
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d1, present: false, rendement: true,
+                 j_arrivee: '08:50', j_pause: '10:00', j_reprise: '', j_fin: '16:35' });
+      setPayeSection('pointage', pts);
+      setPointageMontage([{ id: DB.id(), employee_id: emp.id, date: d1, article_code: 'BBAG', quantite: 7 }]);
+      renderPtRecap();
+      var html = document.getElementById('pt-recap-container').innerHTML || '';
+      var rows = html.split('<tr ');
+      var cell = '';
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].indexOf('pt-emp-cell') !== -1 && rows[i].indexOf(escH(empNameLine(emp))) !== -1) {
+          var tdi = rows[i].indexOf('<td style="padding:4px 2px;border:1px solid #e2e8f0');
+          if (tdi !== -1) { var tde = rows[i].indexOf('</td>', tdi); cell = rows[i].substring(tdi, tde); }
+          break;
+        }
+      }
+      var ok = cell.indexOf('>R<') !== -1 && cell.indexOf('+ 1h10') !== -1;
+      (ok) ? 'OK : case = R + 1h10 (present=false n efface plus les heures)'
+           : 'ECHEC cell=' + cell;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'R\u00e9cap montage : la case jour affiche R+heures point\u00e9es sous les quantit\u00e9s',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var d1 = mz + '-01';
+      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && r.date === d1); });
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d1, present: false, rendement: true,
+                 j_arrivee: '08:50', j_pause: '10:00', j_reprise: '', j_fin: '16:35' });
+      setPayeSection('pointage', pts);
+      setPointageMontage([{ id: DB.id(), employee_id: emp.id, date: d1, article_code: 'BBAG', quantite: 7 }]);
+      document.getElementById('pt-mois').value = mz;
+      ptMontShowEtat();
+      var h = document.getElementById('pt-montage-etat').innerHTML || '';
+      var ok = h.indexOf('R+1.17h') !== -1 && h.indexOf('BBAG=<b>7</b>') !== -1;
+      (ok) ? 'OK : case montage = BBAG=7 + R+1.17h sous les quantites'
+           : 'ECHEC Rplus=' + (h.indexOf('R+1.17h') !== -1) + ' BBAG=' + (h.indexOf('BBAG=') !== -1) + ' len=' + h.length;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro paie : un tableau vide ne rase plus l\u2019autre c\u00f4t\u00e9 (rec + poussee)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* P0 : un pointage [] local ne pousse plus [] vers le cloud, et un cloud
+         [] ou absent ne rase plus le local plein a l'actualisation. */
+      var ligne = { id: 'p1', employee_id: 'e1', date: '2026-10-05', present: true, h_j_manual: '8' };
+      var mont  = { id: 'm1', employee_id: 'e1', date: '2026-10-05', article_code: 'A', quantite: 3 };
+      var vide  = { pointage: [], pointageMontage: [] };
+      var plein = { pointage: [ligne], pointageMontage: [mont] };
+      var rec    = _payeMergeObj(vide, plein, false);
+      var pousse = _payeMergeObj(vide, plein, true);
+      var rec2   = _payeMergeObj(plein, vide, false);
+      var pousse2= _payeMergeObj(plein, vide, true);
+      var ok = (rec.pointage || []).length === 1 && (pousse.pointage || []).length === 1 &&
+               (rec2.pointage || []).length === 1 && (pousse2.pointage || []).length === 1 &&
+               (rec2.pointageMontage || []).length === 1 && (pousse2.pointageMontage || []).length === 1;
+      (ok) ? 'OK : 4 sens de fusion sans effacement par tableau vide'
+           : 'ECHEC rec=' + (rec.pointage || []).length + ' pousse=' + (pousse.pointage || []).length +
+             ' rec2=' + (rec2.pointage || []).length + ' pousse2=' + (pousse2.pointage || []).length;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro paie : pi\u00e8ces de caisse locales non poussees survivent \u00e0 la r\u00e9ception cloud',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var opLocal = { id: 'o1', date: '2026-10-19', libelle: 'saisie telephone', montant: 5000 };
+      var opCloud = { id: 'o2', date: '2026-10-18', libelle: 'depot', montant: 2000 };
+      DB.setMain('mdb_operationsCaisse', [opLocal]);
+      _payeRecvSharedKeys({ mdb_operationsCaisse: [opCloud] });
+      var got = DB.getMain('mdb_operationsCaisse');
+      var ok = Array.isArray(got) && got.length === 2 &&
+        got.some(function (o) { return o && o.id === 'o1'; }) &&
+        got.some(function (o) { return o && o.id === 'o2'; });
+      (ok) ? 'OK : reception cloud conserve la piece locale non poussee (2 lignes)'
+           : 'ECHEC ' + JSON.stringify(got);
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro paie : deux documents meme employe + meme jour ne fusionnent plus (union)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var d1 = { id: 'x1', numero: 'D-1', employee_id: 'e1', date: '2026-10-05', motif: 'Conge' };
+      var d2 = { id: 'x2', numero: 'D-2', employee_id: 'e1', date: '2026-10-05', motif: 'Maladie' };
+      var u = _payeUnion([d1], [d2]);
+      var pt = { id: 'p1', employee_id: 'e1', date: '2026-10-05', present: true };
+      var u2 = _payeUnion([pt], [{ id: 'p2', employee_id: 'e1', date: '2026-10-05', present: true }]);
+      var ok = u.length === 2 && u2.length === 1;
+      (ok) ? 'OK : deux demandes conservees ; pointage du meme jour reste deduplique (1 ligne)'
+           : 'ECHEC u=' + u.length + ' u2=' + u2.length;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'Synchro index : deux documents meme employe + meme jour ne fusionnent plus',
+    app: 'index.html', store: storeRealiste,
+    code: `
+      var d1 = { id: 'x1', numero: 'D-1', employee_id: 'e1', date: '2026-10-05', motif: 'Conge' };
+      var d2 = { id: 'x2', numero: 'D-2', employee_id: 'e1', date: '2026-10-05', motif: 'Maladie' };
+      var u = syncUnionTableaux([d1], [d2]);
+      var pt = { id: 'p1', employee_id: 'e1', date: '2026-10-05', present: true };
+      var kp = _syncCle(pt);
+      var ok = u.length === 2 && kp.indexOf('M|pt:') === 0;
+      (ok) ? 'OK : demandes distinctes conservees (2 lignes) ; pointage toujours en cle metier'
+           : 'ECHEC u=' + u.length + ' kp=' + kp;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
   r.push({
     nom: 'Montage : le bandeau des jours 1 -> 31 est cliquable',
     app: 'paye.html', store: storeRealiste,

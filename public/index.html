@@ -26,7 +26,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<script>window.__APP_VERSION='2026-10-19-265';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-19-266';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2145,6 +2145,11 @@ function _syncCleMetier(r) {
   try {
     if (!r || typeof r !== "object" || Array.isArray(r)) return "";
     if (r.employee_id && r.date) {
+      /* employee_id+date SANS numero = fait pointage (cle metier, anti-doublon
+         si l'id est regenere). Un numero designe un DOCUMENT (demande RH,
+         conge, ...) : deux documents de meme employe et meme jour restent
+         deux lignes distinctes — pas de fusion silencieuse. */
+      if (r.numero) return "";
       var art = (r.article_code === undefined || r.article_code === null) ? "" : String(r.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
       return "pt:" + String(r.employee_id) + "|" + String(r.date) + "|" + art;
     }
@@ -6566,6 +6571,11 @@ function loadCloudData(uid, callback) {
 entRef.get().then(function(doc) {
     if (doc.exists) {
       var data = doc.data();
+      /* Base de fusion de pushToCloud : rafraichie AUSSI par le chargement et
+         la sonde, pas seulement par le temps reel — avec un abonnement coupe
+         (saturation), un push fusionnait depuis un cloud périmé et effaçait
+         les lignes des autres postes. */
+      try { window._lastCloudData = data; window._lastCloudAt = Date.now(); } catch(eLCD) {}
       var cloudEnt = (data['mdb_entreprise'] && typeof data['mdb_entreprise'] === 'object') ? data['mdb_entreprise'] : data;
       var localEnt = DB.get('mdb_entreprise') || {};
       if (typeof localEnt !== 'object' || Array.isArray(localEnt)) localEnt = {};
@@ -6677,6 +6687,17 @@ entRef.get().then(function(doc) {
            } else if (key === 'mdb_actif') {
             DB.set(key, (val && val.rubriques) ? val : {rubriques:[]});
           } else {
+            /* Objet partage : fusion section par section (local gagne en
+               conflit) plutot que remplacement en bloc — une copie cloud
+               incomplete (module ouvert ailleurs) effacait des donnees
+               locales non salees. mdb_production garde sa fusion versionnee
+               specifique plus bas. */
+            if (key !== 'mdb_production' && localData && typeof localData === 'object' && !Array.isArray(localData)
+                && val && typeof val === 'object' && !Array.isArray(val)) {
+              var _mgObjLd = mergeObjetPartage(val, localData);
+              if (JSON.stringify(_mgObjLd) !== JSON.stringify(localData)) DB.set(key, _mgObjLd);
+              continue;
+            }
             var finalVal = (val !== undefined && val !== null) ? val : [];
             if (Array.isArray(finalVal)) {
               if (key === 'mdb_acomptesPrets') finalVal = stripTombstoned(key, finalVal);
@@ -6859,6 +6880,14 @@ var local = DB.get(key);
           if (JSON.stringify(_mgPartage) !== localStr) { DB.set(key, _mgPartage); changed = true; }
           continue;
         }
+        /* Garde de type : ne JAMAIS remplacer un local non vide par un cloud
+           d'un AUTRE type (tableau <-> autre) — remplacement en bloc =
+           effacement silencieux (cas observe en reception). Un local vide,
+           lui, adopte le cloud. */
+        if (Array.isArray(local) !== Array.isArray(data[key])
+            && local !== null && local !== undefined
+            && data[key] !== null && data[key] !== undefined
+            && !_syncEstVide(local)) continue;
         if (localStr !== cloudStr) {
         /* Reception alignee sur la poussee : union additive par cle metier
            (syncUnionTableaux, le cloud gagne en conflit) + filtre tombstone

@@ -15,7 +15,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-17-278";
+      window.__APP_VERSION = "2026-10-17-279";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6460,10 +6460,22 @@ function payeObj(key) {
         } catch (e) {}
         return false;
       }
+      /* employee_id+date SANS numero = fait pointage (cle metier employe+
+         jour(+article), anti-doublon si l'id est regenere). Un numero
+         designe un DOCUMENT (demande RH, conge, ...) : deux documents de
+         meme employe et meme jour sont deux lignes distinctes. */
+      function _payeLignePointage(r) {
+        try {
+          if (!r || typeof r !== "object" || Array.isArray(r)) return false;
+          return !r.numero && !!(r.employee_id && r.date);
+        } catch (e) { return false; }
+      }
       function _payeItemKey(r) {
         if (r && typeof r === "object") {
-          var _cmk = _payeCleMetierPointage(r);
-          if (_cmk) return _cmk;
+          if (_payeLignePointage(r)) {
+            var _cmk = _payeCleMetierPointage(r);
+            if (_cmk) return _cmk;
+          }
           if (r.code) return "code:" + String(r.code).trim().toLowerCase();
           if (r.id) return "id:" + String(r.id);
           if (r.numero) return "numero:" + String(r.numero).trim().toLowerCase();
@@ -6756,9 +6768,14 @@ function payeObj(key) {
           var sA = Array.isArray(inc[k]) ? inc[k] : null;
           var prim = localFirst ? pA : sA;
           var sec = localFirst ? sA : pA;
+          /* P0 anti-effacement : un cote PREFERE VIDE ne doit JAMAIS ecraser
+             l'autre cote plein (un pointage [] venait raser le cloud, puis
+             chaque poste recevait [] et perdait ses saisies — cascade de
+             disparitions a l'actualisation). Vide + vide = []. Les vraies
+             suppressions passent par les tombstones, pas par un []. */
           if (prim && prim.length > 0) merged[k] = _payeUnion(prim, sec);
-          else if (prim) merged[k] = [];
           else if (sec && sec.length > 0) merged[k] = sec;
+          else if (prim || sec) merged[k] = [];
         }
         /* Pointage : la fusion en union ressusciterait une journée effacée ailleurs.
            On retire les identifiants tombstonés et on garde la trace des suppressions
@@ -6907,8 +6924,18 @@ function payeObj(key) {
                   } catch (ePPC) {}
                 }
               } else {
-                // Le cloud fait foi (suppressions via tombstones) - pas d'union qui ressuscite les supprimés
-                DB.setMain(kX, _payeStripTombstoned(kX, inc));
+                /* Union AVANT strip : un cloud perime (lignes locales jamais
+                   poussees — pieces de caisse saisies hors-ligne) ne doit plus
+                   ecraser les saisies fraiches a la connexion. Les vraies
+                   suppressions restent supprimees (tombstones stries apres
+                   l'union) ; si le local etait plus riche, on repousse. */
+                var _cuU2 = Array.isArray(cur) ? cur : [];
+                var _mU2 = _payeStripTombstoned(kX, _payeUnion(inc, _cuU2));
+                if (JSON.stringify(_mU2) !== JSON.stringify(_cuU2)) DB.setMain(kX, _mU2);
+                var _incU2 = _payeStripTombstoned(kX, Array.isArray(inc) ? inc : []);
+                if (JSON.stringify(_mU2) !== JSON.stringify(_incU2)) {
+                  try { pushPayeCloud(); } catch (ePU2) {}
+                }
               }
             } else {
               DB.setMain(kX, _payeUnion(inc, cu));
@@ -7534,6 +7561,14 @@ function payeObj(key) {
         /* Écriture seulement si le cloud apporte du neuf : le pull se rejoue
            à chaque ouverture, réécrire ~1 Mo à tout coup cognait le quota. */
         var _merged = _payeMergeObj(_cur, _inc, false);
+        /* Meme protection que _payeApplyRemote : le pull d'amorcage (connexion,
+           actualisation) ne doit pas ecraser une saisie de moins de 2 min que le
+           push n'a pas encore vue — c'etait le point efface des que l'on
+           actualisait la page. */
+        try {
+          var _protSn = payeProtegeEcrituresFraiches(_merged, _cur, window._payeEcritLocal, _payeDelaiProtection());
+          if (_protSn && _protSn.protege) _merged = _protSn.fusion;
+        } catch (eProtSn) {}
         var _aSn = "", _bSn = "";
         try { _aSn = JSON.stringify(_merged || {}); } catch (eMA) {}
         try { _bSn = JSON.stringify(_cur || {}); } catch (eMB) {}
@@ -18438,6 +18473,24 @@ html +=
         }
         return c;
       }
+      /* Heures d'AFFICHAGE d'un jour, INDEPENDANTES du flag present :
+         un pointage marque absent avec des creneaux restes (residu de
+         « marquer absent » du pointage groupe) doit quand meme montrer
+         ses heures — la modale affiche deja « R+X.XXh » dans ce cas. */
+      function ptHeuresAffTotal(rec) {
+        if (!rec) return 0;
+        try {
+          var c = ptCoreCalc({
+            ja: rec.j_arrivee, jp1: rec.j_pause, jp2: rec.j_reprise, jf: rec.j_fin,
+            na: rec.n_arrivee, np1: rec.n_pause, np2: rec.n_reprise, nf: rec.n_fin,
+            libres: rec.h_libres, isR: false
+          });
+          var t = (c.j || 0) + (c.n || 0);
+          if (t <= 0) t = (parseHeure(rec.h_j_manual || "") || 0) + (parseHeure(rec.h_n_manual || "") || 0);
+          if (t <= 0) t = parseFloat(rec.h_libres) || 0;
+          return Math.round(t * 100) / 100;
+        } catch (eAff) { return 0; }
+      }
       function ptTimesStr(rec) {
         if (!rec) return "-";
         function rng(a, b) {
@@ -18899,6 +18952,14 @@ html +=
                    (j et n à 0) : sans ce repli la cellule n'affichait que
                    « R », sans les heures du jour. */
                 if (!_hTxtR && hR > 0) _hTxtR = ptFmtHShort(hR);
+                /* Repli decisif : ptCalcDay rend 0 quand present===false
+                   (residu « marquer absent » avec creneaux conserves) alors
+                   que la modale affiche R+X.XXh. On recalcule les heures
+                   pour l'affichage seul (la paie reste basee sur present). */
+                if (!_hTxtR && rec) {
+                  var _hAffR = ptHeuresAffTotal(rec);
+                  if (_hAffR > 0) _hTxtR = ptFmtHShort(_hAffR);
+                }
                 if (montFait || rec.rendement === true) {
                   /* « R + 8h » : la production ET les heures, sur la meme ligne. */
                   cell = '<span style="color:#ea580c;font-weight:800">R</span>' +
@@ -19175,6 +19236,12 @@ html +=
             rec.present = false;
             rec.h_j_manual = "";
             rec.h_n_manual = "";
+            /* Marquer absent efface AUSSI les creneaux et la case rendement :
+               laisser 08:50-16:35 avec present=false figeait le recap en « R »
+               sans heures (tandis que la modale affichait R+X.XXh). */
+            rec.j_arrivee = ""; rec.j_pause = ""; rec.j_reprise = ""; rec.j_fin = "";
+            rec.n_arrivee = ""; rec.n_pause = ""; rec.n_reprise = ""; rec.n_fin = "";
+            rec.rendement = false;
             count++;
           }
         });
@@ -22496,6 +22563,12 @@ function ptMontFilterArts(q) {
           html += '</tbody></table></div>';
         } else {
           /* DETAIL PAR JOUR (Bordures bien nettes et tracées) */
+          var _ptsHeurs = {};
+          try {
+            (getPointageData() || []).forEach(function (rX) {
+              if (rX && rX.employee_id && rX.date) _ptsHeurs[rX.employee_id + "|" + rX.date] = rX;
+            });
+          } catch (ePH) {}
           html += '<div id="pt-mont-scroll" style="overflow-x:auto;max-height:60vh;overflow-y:auto;border:2px solid #cbd5e1;border-radius:10px"><table style="margin-top:0;font-size:0.65rem;border-collapse:collapse;width:100%">';
           html += '<thead><tr><th style="position:sticky;top:0;background:#0f172a;color:#fff;z-index:3;min-width:140px;padding:10px 12px;font-weight:800;letter-spacing:0.5px;border-right:2px solid #cbd5e1;border-bottom:2px solid #cbd5e1">TRAVAILLEUR</th>';
           for (var d = 1; d <= daysInMonth; d++) {
@@ -22513,6 +22586,13 @@ html += '<th style="text-align:center;min-width:65px;font-size:0.62rem;padding:2
               if (dayEntries.length > 0) {
                 cellText = dayEntries.map(function (pe) { return escH(pe.article_code) + "=" + (pe.quantite || 0); }).join(" ");
                 cellHtml = dayEntries.map(function (pe) { return '<span class="pt-badge-qty">' + escH(pe.article_code) + '=<b>' + (pe.quantite || 0) + '</b></span>'; }).join("");
+                /* R + heures du jour pointe : « R+1.17h » sous les quantites,
+                   comme dans la modale (present=false n'efface pas les heures
+                   de l'affichage — ptHeuresAffTotal ignore le flag). */
+                var _hJourM = ptHeuresAffTotal(_ptsHeurs[wk.id + "|" + dk]);
+                if (_hJourM > 0) {
+                  cellHtml += '<div style="color:#ea580c;font-weight:800;font-size:.55rem;margin-top:1px;white-space:nowrap">' + ptFmtR(_hJourM) + '</div>';
+                }
               }
               /* Bouton de suppression : event.stopPropagation() pour ne pas
                  ouvrir la saisie au clic. */
