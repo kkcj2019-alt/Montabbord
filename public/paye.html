@@ -15,7 +15,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-17-282";
+      window.__APP_VERSION = "2026-10-17-283";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6530,6 +6530,70 @@ function payeObj(key) {
         }
         return out;
       }
+      /* Sceau de recence d'une ligne : hash court du contenu (sans updatedAt
+         ni _seal). Si le contenu bouge entre deux sauvegardes, setPointageData
+         / setPointageMontage repose un nouveau updatedAt — la fusion cloud
+         compare ensuite les sceaux (latest-wins) pour que ta CORRECTION
+         remplace l'ancienne version au lieu d'etre ecrasee par elle. */
+      function _payeSceauHash(s) {
+        var h = 5381;
+        for (var i = 0; i < s.length; i++) h = (((h << 5) + h) + s.charCodeAt(i)) | 0;
+        return String(h);
+      }
+      function _payeSceauRecalc(rec) {
+        var copie = {};
+        for (var kk in rec) {
+          if (rec.hasOwnProperty(kk) && kk !== "_seal" && kk !== "updatedAt") copie[kk] = rec[kk];
+        }
+        try { return _payeSceauHash(JSON.stringify(copie)); } catch (e) { return ""; }
+      }
+      function _payeSceauLignes(arr) {
+        try {
+          var now = Date.now();
+          var liste = Array.isArray(arr) ? arr : [];
+          for (var i = 0; i < liste.length; i++) {
+            var rr = liste[i];
+            if (!rr || typeof rr !== "object" || Array.isArray(rr)) continue;
+            var cur = _payeSceauRecalc(rr);
+            if (rr._seal !== cur) { rr.updatedAt = now; rr._seal = cur; }
+          }
+        } catch (eS) {}
+        return arr;
+      }
+      /* Fusion latest-wins des LIGNES de pointage (horaire ou montage) : deux
+         versions du MEME jour (employe+date[+article]) ne doivent plus coexister
+         (doublon) ni etre tranchees par le seul cote prefere (l'ancien ecrasait
+         le nouveau, meme corrige). La version la plus recemment modifiee
+         (updatedAt, pose par le sceau a chaque ecriture) gagne ; egalite ou
+         absence d'horodatage -> le cote prefere garde la priorite (comportement
+         ancien, sans regressions sur les donnees heritees). */
+      function _payeMergePointageLignes(prim, sec) {
+        var a = Array.isArray(prim) ? prim : [];
+        var b = Array.isArray(sec) ? sec : [];
+        var slots = [], index = {};
+        function slot(r) {
+          var k = (r && typeof r === "object") ? _payeItemKey(r) : "";
+          if (!k) { var s0 = { solo: r, hasSolo: true }; slots.push(s0); return s0; }
+          if (!index[k]) { index[k] = { key: k }; slots.push(index[k]); }
+          return index[k];
+        }
+        a.forEach(function (r) { var s = slot(r); if (s.hasSolo) return; s.p = r; });
+        b.forEach(function (r) {
+          var s = slot(r);
+          if (s.hasSolo) return;
+          if (!s.s) s.s = r;
+          else if (_payeEmpTime(r) > _payeEmpTime(s.s)) s.s = r;
+        });
+        return slots.map(function (s) {
+          if (s.hasSolo) return s.solo;
+          if (s.p && s.s) {
+            var tp = _payeEmpTime(s.p), ts = _payeEmpTime(s.s);
+            if (tp !== ts) return ts > tp ? s.s : s.p;
+            return s.p;
+          }
+          return s.p || s.s;
+        });
+      }
       function _payeArticleCode(value) {
         return String(
           (value && typeof value === "object" ? value.code : value) || "",
@@ -6728,7 +6792,13 @@ function payeObj(key) {
              chaque poste recevait [] et perdait ses saisies — cascade de
              disparitions a l'actualisation). Vide + vide = []. Les vraies
              suppressions passent par les tombstones, pas par un []. */
-          if (prim && prim.length > 0) merged[k] = _payeUnion(prim, sec);
+          /* Pointage / montage : latest-wins par cle metier (la modification
+             la plus recente REMPLACE l'ancienne version) — l'union classique
+             gardait l'ancien du cote prefere et perdait la correction. */
+          if (prim && prim.length > 0)
+            merged[k] = (k === "pointage" || k === "pointageMontage")
+              ? _payeMergePointageLignes(prim, sec)
+              : _payeUnion(prim, sec);
           else if (sec && sec.length > 0) merged[k] = sec;
           else if (prim || sec) merged[k] = [];
         }
@@ -8005,6 +8075,10 @@ window._payeVuTs = ts;
          est tracée ici, automatiquement. */
       function setPointageData(v, sansPush) {
         var arr = Array.isArray(v) ? v : [];
+        /* Sceau de recence : toute ligne dont le contenu a bouge est
+           horodatee — la fusion cloud (latest-wins) sait alors que ta
+           modification est la plus recente et la garde. */
+        _payeSceauLignes(arr);
         var raw = getPayeSection("pointage", []);
         raw = Array.isArray(raw) ? raw : [];
         var newIds = {};
@@ -12739,7 +12813,11 @@ function showSection(id) {
         return Array.isArray(v) ? v : [];
       }
       function setPointageMontage(v) {
-        setPayeSection("pointageMontage", v);
+        var _arrM = Array.isArray(v) ? v : [];
+        /* Meme sceau de recence que le pointage horaire : une correction
+           de quantite/article dans la grille montage gagne la fusion. */
+        _payeSceauLignes(_arrM);
+        setPayeSection("pointageMontage", _arrM);
       }
       /* Travailleurs saisissables en montage : tous les actifs (rendement d'abord).
          Les occasionnels (non rendement) peuvent aussi produire — cas rares. */
@@ -18702,20 +18780,17 @@ html +=
         if (cree > 0 || suppr > 0 || maj > 0) setPointageData(garde);
         return cree;
       }
-      /* Un jour est « au rendement » (lettre R) seulement s'il y a une
-             VRAIE production montage ce jour-là, ou si la case rendement
-             du jour est cochée. Le simple fait d'être « au rendement » sur
-             la fiche employé ne suffit pas : sinon des heures pointées
-             normalement s'afficheraient « R+8h ». */
-      /* Le « R » d'un jour de montage : il y a eu production montage
-   ce jour-là, que des heures aient été pointées ou non.
-     - montage seul, sans heures   → « R »
-     - montage + N heures pointées  → « R + Nh » (et non plus seulement
-       les heures : on voit les deux, comme demandé)
-     - heures seules, sans montage → les heures (J: 8h), pas de R
-     - case « Rendement » du jour cochée → R, même sans montage */
+      /* Un jour est « au rendement » (lettre R) SEULEMENT si la case
+         rendement du JOUR est cochée. La production montage ne force plus
+         le R (elle pre-coche la case a la saisie, mais si tu la decoches
+         ta correction fait foi) :
+         - case cochée + heures   → « R + Xh » (modale : R+X.XXh)
+         - case cochée, 0 heure   → « R + 0h »
+         - montage + heures, case NON cochée → les heures seules (J: 2.98h)
+         - montage seul, case NON cochée, 0 heure → « R + 0h » (la
+           production reste visible sans forcer le R)
+         - heures seules, sans montage → les heures, pas de R */
       function ptRecapJourRendement(empRendFiche, recRendJour, montFait) {
-        if (montFait === true) return true;
         if (recRendJour === true) return true;
         return false;
       }
@@ -18913,12 +18988,11 @@ html +=
               var hJ = cc.j,
                 hN = cc.n,
                 hR = cc.r;
-              /* Le « R » n'apparaît que s'il y a une VRAIE production
-                 montage ce jour-là (ou la case rendement du jour cochée).
-                 Un travailleur « au rendement » sur sa fiche mais pointé
-                 avec de simples heures n'affiche plus « R+8h » : on montre
-                 ses heures (J: 8h). Le rendement ne concerne que les jours
-                 de montage. */
+              /* Le « R » n'apparaît que si la case rendement du JOUR est
+                 cochée. Un travailleur « au rendement » pointé avec de
+                 simples heures n'affiche plus « R+8h » : on montre ses
+                 heures (J: 8h). La production montage pre-coche la case a
+                 la saisie, mais une case decochée fait foi (heures seules). */
               var rendReel = ptRecapJourRendement(p.rendement === true, rec.rendement === true, montFait);
               if (isR && !rendReel) {
                 var ccH = ptCalcDay(rec, false);
@@ -19010,6 +19084,13 @@ html +=
                     ptFmtHShort(hN) +
                     "</span>";
                 bg = "background:#f0fdf4;border-color:#bbf7d0;";
+              } else if (montFait && rec.present !== false) {
+                /* Montage pointé, case rendement NON cochée et 0 heure :
+                   « R + 0h » — la production du jour reste visible (et on
+                   ne la confond pas avec une absence « X »). */
+                cell = '<span style="color:#ea580c;font-weight:800">R</span>' +
+                  ' <span style="color:#16a34a;font-weight:800;font-size:.82rem">+ 0h</span>';
+                bg = "background:#fff7ed;border-color:#fed7aa;";
               } else if (rec.present === false && congeVif) {
                 /* Congé planifié : « C » bleu (comme les jours sans ligne). */
                 cell = '<span style="color:#1d4ed8;font-weight:700">C</span>';
@@ -20712,12 +20793,17 @@ function peTogglePst() {
             var rec = empPts.find(function(r){ return r.date===dk; });
             var jStr="-",nStr="-",total="-",obs="";
             if (rec) {
-              var isRf = (emp.rendement===true)||(rec.rendement===true);
+              /* Case rendement du JOUR uniquement : la fiche employé ne
+                 force plus « R+Xh » sur tous les jours d'un monteur (le
+                 récap respectait déjà la case, la fiche doit suivre). */
+              var isRf = (rec.rendement===true);
               var ccf = ptCalcDay(rec, isRf);
               var hJ = ccf.j, hN = ccf.n, hR = ccf.r;
               /* Heures saisies à la main = heures de travail (même au rendement). */
               if ((hJ>0 || hN>0) && hR===0) isRf = false;
-              if (hJ===0 && hN===0 && hR===0 && rec.present===true && !isRf) hJ=8;
+              /* 8h par défaut pour un jour présent sans heures — sauf jour
+                 de montage (la fiche affiche alors « R+0h »). */
+              if (hJ===0 && hN===0 && hR===0 && rec.present===true && !isRf && !montSetF[dk]) hJ=8;
               var ptStr = ptTimesStr(rec);
               if (isRf) {
                 if (rec.absent_paye) {
@@ -20732,6 +20818,9 @@ function peTogglePst() {
                 if (hJ>0) { jStr=ptFmtDec(hJ); tJ+=hJ; }
                 if (hN>0) { nStr=ptFmtDec(hN); tN+=hN; }
                 if (hJ>0||hN>0) total=ptFmtDec(hJ+hN);
+                /* Montage pointé, case non cochée, 0 heure : « R+0h »
+                   (comme le récap — la production reste visible). */
+                else if (montSetF[dk] && rec.present !== false) { jStr="R+0h"; total="R+0h"; }
                 if (rec.present===false) { obs="Absent"; }
               }
               if (rec.faute_societe) obs="Faute société";
@@ -20786,7 +20875,7 @@ function peTogglePst() {
               isPST.push(rec.paye_sans_travail === true);
             } else if ((emp.rendement===true) && montSetF[dk]) {
               var mq2 = ptMontageObs(montQteF, dk);
-              rows.push([dkF,"Montage","R","-","R",(obs ? obs+" — " : "") + "Montage (rendement)" + (mq2 ? " : " + mq2 : "")]);
+              rows.push([dkF,"Montage","R+0h","-","R+0h",(obs ? obs+" — " : "") + "Montage (rendement)" + (mq2 ? " : " + mq2 : "")]);
               isPST.push(false);
             } else {
               if (ptEstFerie(year,mIdx,d)) obs="Férié (chômé)";

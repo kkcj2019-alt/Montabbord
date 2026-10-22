@@ -9708,38 +9708,36 @@ r.push({
   });
 
 r.push({
-    nom: 'R\u00e9cap : montage + heures le m\u00eame jour = R ET les heures',
+    nom: 'R\u00e9cap : montage + heures \u2014 case coch\u00e9e = R + heures, case NON coch\u00e9e = heures seules',
     app: 'paye.html', store: storeRealiste,
     code: `
-      /* Cas r\u00e9el signal\u00e9 : un rendement qui monte des palettes ET qui a
-         1 h 12 de point\u00e9 le m\u00eame jour doit afficher « R » + les heures,
-         pas seulement les heures. */
+      /* Cas r\u00e9el signal\u00e9 : montage + heures le m\u00eame jour. La case
+         rendement du JOUR pilote l'affichage : coch\u00e9e \u2192 « R » + les
+         heures ; d\u00e9coch\u00e9e (modale) \u2192 les heures seules, m\u00eame en
+         pr\u00e9sence d'une production montage. */
       var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
       var emp = emps[0];
       emp.rendement = true;
       setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
       var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
-      var dk = mz + '-02';
-      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && r.date === dk); });
-      /* 1 h 12 point\u00e9es \u00e0 la main */
-      pts.push({ id: DB.id(), employee_id: emp.id, date: dk, present: true, h_j_manual: '1.2' });
+      var d1 = mz + '-02', d2 = mz + '-03';
+      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && (r.date === d1 || r.date === d2)); });
+      /* Jour 1 : case D\u00e9COCH\u00c9E + 1.2 h + montage \u2192 heures seules */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d1, present: true, rendement: false, h_j_manual: '1.2' });
+      /* Jour 2 : case COCH\u00c9E + 8 h + montage \u2192 R + heures */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d2, present: true, rendement: true, h_j_manual: '8' });
       setPayeSection('pointage', pts);
-      /* et 2 palettes mont\u00e9es ce m\u00eame jour */
       setPointageMontage([
-        { id: DB.id(), employee_id: emp.id, date: dk, article_code: 'E2', quantite: 23 },
-        { id: DB.id(), employee_id: emp.id, date: dk, article_code: 'COUV', quantite: 25 }
+        { id: DB.id(), employee_id: emp.id, date: d1, article_code: 'E2', quantite: 23 },
+        { id: DB.id(), employee_id: emp.id, date: d2, article_code: 'COUV', quantite: 25 }
       ]);
-      var montFait = getPointageMontage().some(function (m) {
-        return m && m.employee_id === emp.id && m.date === dk && (m.quantite || 0) > 0;
-      });
-      var rec = getPointageData().filter(function (r) { return r && r.employee_id === emp.id && r.date === dk; })[0];
-      /* Ce que le r\u00e9cap doit retenir : montage = R, et les heures restent l\u00e0s. */
-      var rendReel = ptRecapJourRendement(emp.rendement === true, rec.rendement === true, montFait);
-      var cc = ptCalcDay(rec, rendReel);
-      var ccH = ptCalcDay(rec, false);
-      var ok = montFait === true && rendReel === true && ccH.j === 1.2 && (cc.j === 1.2 || cc.r > 0);
-      (ok) ? 'OK : montage d\u00e9tect\u00e9 -> R + heures conserv\u00e9es (' + ccH.j + ' h, r=' + (cc.r || 0) + ')'
-           : 'ECHEC montFait=' + montFait + ' rendReel=' + rendReel + ' hJ=' + ccH.j + ' cc=' + JSON.stringify(cc);
+      var r1 = ptRecapJourRendement(emp.rendement === true, false, true);   /* case non coch\u00e9e -> pas de R */
+      var r2 = ptRecapJourRendement(emp.rendement === true, true, true);    /* case coch\u00e9e -> R */
+      var cc1 = ptCalcDay(getPointageData().filter(function (r) { return r.date === d1; })[0], r1);
+      var cc2 = ptCalcDay(getPointageData().filter(function (r) { return r.date === d2; })[0], r2);
+      var ok = r1 === false && r2 === true && cc1.j === 1.2 && cc2.j === 8;
+      (ok) ? 'OK : case non coch\u00e9e -> heures seules ; case coch\u00e9e -> R + heures conserv\u00e9es'
+           : 'ECHEC r1=' + r1 + ' r2=' + r2 + ' h1=' + cc1.j + ' h2=' + cc2.j;
     `,
     attenduPrefixe: 'OK'
   });
@@ -9857,6 +9855,85 @@ r.push({
   });
 
   r.push({
+    nom: 'Synchro paie : modification de pointage \u2014 la version la plus r\u00e9cente gagne (latest-wins)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Poste A corrige un jour (case rendement d\u00e9coch\u00e9e + cr\u00e9neaux) ;
+         l'autre cote (cloud/poste B) a encore l'ancienne version. Quel que
+         soit le sens de la fusion, la version la plus r\u00e9cemment modifi\u00e9e
+         (updatedAt, pos\u00e9 par le sceau a chaque \u00e9criture) gagne \u2014 plus
+         jamais « l'ancien \u00e9crase le nouveau » ni de doublon du m\u00eame jour. */
+      var anc  = { id: 'a1', employee_id: 'e1', date: '2026-10-11', present: true, rendement: true,  h_j_manual: '8', updatedAt: 1000 };
+      var nouv = { id: 'a1', employee_id: 'e1', date: '2026-10-11', present: true, rendement: false, j_arrivee: '07:01', j_fin: '10:00', h_j_manual: '', updatedAt: 9000 };
+      var rec  = _payeMergePointageLignes([anc], [nouv]);  /* r\u00e9ception : cloud = ma correction */
+      var pous = _payeMergePointageLignes([nouv], [anc]);  /* pouss\u00e9e : local = ma correction */
+      var egal = _payeMergePointageLignes([anc], [JSON.parse(JSON.stringify(anc))]);
+      var doublon = _payeMergePointageLignes([anc], [{ id: 'z9', employee_id: 'e1', date: '2026-10-11', present: true, updatedAt: 500 }]);
+      var ok = rec.length === 1 && rec[0].rendement === false &&
+               pous.length === 1 && pous[0].j_arrivee === '07:01' &&
+               egal.length === 1 && egal[0].rendement === true &&
+               doublon.length === 1;
+      (ok) ? 'OK : correction gagne des deux c\u00f4t\u00e9s (1 ligne, jamais de doublon du m\u00eame jour)'
+           : 'ECHEC rec=' + JSON.stringify(rec) + ' pous=' + JSON.stringify(pous) +
+             ' egal=' + egal.length + ' doublon=' + doublon.length;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
+    nom: 'R\u00e9cap : case rendement non coch\u00e9e \u2014 montage + heures = heures seules, montage seul = R+0h',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      /* Le cas signal\u00e9 sur la fiche d\u00e9taill\u00e9e : case RENDEMENT d\u00e9coch\u00e9e
+         dans la modale, mais la grille affichait « R+2.98h ». La case du
+         jour fait foi : heures seules avec montage+heures ; montage seul
+         reste visible en « R + 0h ». */
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      emp.rendement = true;
+      setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var d1 = mz + '-01', d2 = mz + '-02';
+      var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && (r.date === d1 || r.date === d2)); });
+      /* Jour 1 : montage seul, case NON coch\u00e9e \u2192 R + 0h */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d1, present: true, rendement: false });
+      /* Jour 2 : montage + 2.98 h (cr\u00e9neaux), case NON coch\u00e9e \u2192 heures seules */
+      pts.push({ id: DB.id(), employee_id: emp.id, date: d2, present: true, rendement: false,
+                 j_arrivee: '07:01', j_pause: '10:00', j_reprise: '', j_fin: '' });
+      setPayeSection('pointage', pts);
+      setPointageMontage([
+        { id: DB.id(), employee_id: emp.id, date: d1, article_code: 'BBAG', quantite: 7 },
+        { id: DB.id(), employee_id: emp.id, date: d2, article_code: 'E2', quantite: 4 }
+      ]);
+      renderPtRecap();
+      var html = document.getElementById('pt-recap-container').innerHTML || '';
+      var rows = html.split('<tr ');
+      var cellJ1 = '', cellJ2 = '';
+      function cellDay(row, n) {
+        var tdi = -1;
+        for (var i = 0; i < n; i++) {
+          tdi = row.indexOf('<td style="padding:4px 2px;border:1px solid #e2e8f0', tdi + 1);
+          if (tdi === -1) return '';
+        }
+        var tde = row.indexOf('</td>', tdi);
+        return tde === -1 ? '' : row.substring(tdi, tde);
+      }
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].indexOf('pt-emp-cell') !== -1 && rows[i].indexOf(escH(empNameLine(emp))) !== -1) {
+          cellJ1 = cellDay(rows[i], 1);
+          cellJ2 = cellDay(rows[i], 2);
+          break;
+        }
+      }
+      var ok = cellJ1.indexOf('>R<') !== -1 && cellJ1.indexOf('+ 0h') !== -1 &&
+               cellJ2.indexOf('J:') !== -1 && cellJ2.indexOf('>R<') === -1;
+      (ok) ? 'OK : montage seul = R+0h ; montage+heures d\u00e9coch\u00e9 = heures seules (pas de R)'
+           : 'ECHEC j1=' + cellJ1 + ' | j2=' + cellJ2;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Synchro paie : pi\u00e8ces de caisse locales non poussees survivent \u00e0 la r\u00e9ception cloud',
     app: 'paye.html', store: storeRealiste,
     code: `
@@ -9925,23 +10002,27 @@ r.push({
     attenduPrefixe: 'OK'
   });
   r.push({
-    nom: 'R\u00e9cap : la lettre R exige une vraie production montage ou la case du jour',
+    nom: 'R\u00e9cap : la lettre R exige la case rendement du jour (montage seul \u2192 R+0h au rendu)',
     app: 'paye.html', store: storeRealiste,
     code: `
+      /* La case du JOUR pilote le R. Le montage ne force plus le R : il
+         pre-coche la case a la saisie ; si l'utilisateur la decoche, les
+         heures s'affichent seules (et un montage sans heures reste
+         visible en « R + 0h » par le rendu de la grille). */
       var cas = [
         [true, false, false, false],  /* fiche au rendement + heures + pas de montage -> PAS de R */
-        [true, false, true, true],    /* fiche + vraie production -> R */
+        [true, false, true, false],   /* fiche + production, case NON coch\u00e9e -> PAS de R (heures seules) */
         [false, true, false, true],   /* case du jour coch\u00e9e -> R */
         [true, true, false, true],    /* fiche + case du jour -> R */
         [false, false, false, false], /* rien -> pas de R */
-        [false, false, true, true]    /* production seule (montage import\u00e9) -> R */
+        [false, false, true, false]   /* production seule, case non coch\u00e9e -> pas de R ici (R+0h g\u00e9r\u00e9 par le rendu) */
       ];
       var fails = [];
       cas.forEach(function (c, i) {
         var r = ptRecapJourRendement(c[0], c[1], c[2]);
         if (r !== c[3]) fails.push(i);
       });
-      (fails.length === 0) ? 'OK : 6 cas (heures sans montage -> pas de R ; montage ou case -> R)'
+      (fails.length === 0) ? 'OK : 6 cas (case du jour = seule source du R ; montage d\u00e9coch\u00e9 = heures seules)'
            : 'ECHEC cas ' + fails.join(',');
     `,
     attenduPrefixe: 'OK'
