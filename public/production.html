@@ -9,7 +9,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script>
-window.__APP_VERSION='2026-10-19-253';
+window.__APP_VERSION='2026-10-19-254';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -1608,7 +1608,12 @@ function jourLabel(j) {
 }
 function fmt(n) { return new Intl.NumberFormat('fr-FR').format(Math.floor(n || 0)); }
 function fmtF(n) { return fmt(n) + ' F'; }
-function escH(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+function escH(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML.replace(/"/g, '&quot;'); }
+function jsArg(v) {
+  var t = (v === null || v === undefined) ? '' : String(v);
+  t = t.replace(/&/g, '&amp;').replace(/\r|\n|\u2028|\u2029/g, ' ');
+  return t.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
 function fmtD(d) {
   if (!d) return '-';
   var s = String(d).trim().slice(0, 10);
@@ -5827,8 +5832,8 @@ function acChampUnite(code, valeurUnites, uniteActuelle) {
   var q = String.fromCharCode(39);
   var unites = acConvertirEnUnites(v, u, code);
   var h = '<span style="display:inline-flex;gap:2px;align-items:center;flex-wrap:wrap">';
-  h += '<input type="number" min="0" step="0.01" value="' + v + '" id="' + id + '" oninput="acUniteEquiv(' + q + id + q + ',' + q + escH(code || '') + q + ');try{calcInvEcart();}catch(e){}" style="width:74px;text-align:right;padding:2px 4px;border:1.5px solid #2563eb;border-radius:4px;font-size:.74rem;font-weight:700">';
-  h += '<select onchange="acUniteChange(' + q + id + q + ',' + q + escH(code || '') + q + ',this.value)" title="Unite de saisie : la conversion vers le stock (la pointe) est automatique" style="font-size:.66rem;padding:2px 2px;border:1px solid #94a3b8;border-radius:3px;background:#fff">';
+  h += '<input type="number" min="0" step="0.01" value="' + v + '" id="' + id + '" oninput="acUniteEquiv(' + q + id + q + ',' + q + jsArg(code || '') + q + ');try{calcInvEcart();}catch(e){}" style="width:74px;text-align:right;padding:2px 4px;border:1.5px solid #2563eb;border-radius:4px;font-size:.74rem;font-weight:700">';
+  h += '<select onchange="acUniteChange(' + q + id + q + ',' + q + jsArg(code || '') + q + ',this.value)" title="Unite de saisie : la conversion vers le stock (la pointe) est automatique" style="font-size:.66rem;padding:2px 2px;border:1px solid #94a3b8;border-radius:3px;background:#fff">';
   h += '<option value="carton"' + (u === 'carton' ? ' selected' : '') + '>carton</option>';
   h += '<option value="paquet"' + (u === 'paquet' ? ' selected' : '') + '>paquet</option>';
   h += '<option value="unite"' + (u === 'unite' ? ' selected' : '') + '>pointe</option>';
@@ -10274,6 +10279,10 @@ function prodPushNow() {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) { prodSyncStatus('○ hors ligne', 'var(--dim)'); return; }
   _prodPushing = true;
   var identity = null;
+  /* Snapshot des sections sales : capture juste avant l'envoi, reinitialise
+     DES L'ENVOI (pas dans .then) et remis en file en cas d'echec — les
+     marquages faits PENDANT le vol survivent ainsi. */
+  var _secSnap = {}, _dirtySnap = false;
   /* Lecture ciblee + cache 30 s : on ne lit que l'identite et les rubriques
      utiles (mdb_production par sections, dettes). L'ancien SELECT * du
      dossier entier (~2,5 Mo) timeoutait a chaque ecriture. */
@@ -10345,6 +10354,18 @@ function prodPushNow() {
     /* Si la RPC section existe, on n'envoie que les sections reellement modifiees :
        le serveur fusionne le reste, donc une saisie concurrente sur une autre section survit. */
     var sectionPayload = prodBuildSectionPayload();
+    /* Reset IMMEDIAT des drapeaux, AVANT l'ecriture async : l'ancien reset
+       dans .then ecrasait les marquages faits PENDANT le vol → saisies
+       locales jamais re-poussees jusqu'a la prochaine edition. En echec,
+       le snapshot _secSnap est remis dans le catch. */
+    try {
+      for (var kSn in window._prodDirtySections) {
+        if (window._prodDirtySections.hasOwnProperty(kSn)) _secSnap[kSn] = true;
+      }
+      _dirtySnap = _prodDirty;
+      window._prodDirtySections = {};
+      _prodDirty = false;
+    } catch (eSn) {}
     try { window._prodSectionsEnvoyees = payload.mdb_production || null; window._prodSectionsPartielles = null; } catch (eSE) {}
     /* La Nomenclature doit partir : on force alors l'envoi complet (la RPC
        par sections n'enverrait que mdb_production et perdrait la suppression). */
@@ -10385,14 +10406,25 @@ function prodPushNow() {
       else if (_sp && typeof _sp === 'object') prodBaseHashMaj(_sp);
       window._prodSectionsEnvoyees = null; window._prodSectionsPartielles = null;
     } catch (eBM) {}
-    _prodDirty = false;
-    _prodDirtySections = {};
     _prodFail = 0;
     _prodPushing = false;
     prodSyncStatus('● synchro OK', '#16a34a');
+    /* Saisies faites PENDANT le vol : leurs drapeaux ont survecu au reset
+       (pose des l'envoi) — si un timer a ete avale par _prodPushing, on
+       relance un envoi pour elles. */
+    try {
+      if (_prodDirty || Object.keys(window._prodDirtySections || {}).length > 0) scheduleProdPush();
+    } catch (eRelP) {}
   }).catch(function(err) {
     _prodPushing = false;
     _prodFail++;
+    /* Echec d'ecriture : les sections envoyees etaient deja reinitialisees
+       (reset a l'envoi) — on les remet en file, sans ecraser les marquages
+       plus recents faits pendant le vol. */
+    try {
+      for (var kRs in _secSnap) { if (_secSnap.hasOwnProperty(kRs)) window._prodDirtySections[kRs] = true; }
+      if (_dirtySnap || Object.keys(window._prodDirtySections || {}).length > 0) _prodDirty = true;
+    } catch (eRs) {}
     prodSyncStatus('○ erreur synchro', '#dc2626');
     try { _prodPushT = setTimeout(prodPushNow, Math.min(60000, 5000 * _prodFail)); } catch(e) {}
   });
@@ -10585,14 +10617,26 @@ function prodApplyCloud(cloudProd, silent) {
   } catch (eB) {}
   if (!change) {
     /* Rien de neuf distant : si le local est lui aussi aligne, on peut se declarer
-       propre (fini le drapeau sale colle qui rendait sourd). */
+       propre (fini le drapeau sale colle qui rendait sourd). Sinon les sections
+       divergentes sont RE-MARQUEES : sans cela, un drapeau perdu (ancien reset
+       pendant le vol) laissait la saisie bloquee en local jusqu'a la prochaine
+       edition, le timer s'arretant sur ! _prodDirty. */
     try {
       var encoreSale = false;
+      var secSale = [];
       for (var k4 in sales) {
         if (!sales.hasOwnProperty(k4)) continue;
-        try { if (JSON.stringify(local[k4]) !== JSON.stringify(cloudProd[k4])) { encoreSale = true; break; } } catch (eJ) { encoreSale = true; break; }
+        try {
+          if (JSON.stringify(local[k4]) !== JSON.stringify(cloudProd[k4])) { encoreSale = true; secSale.push(k4); }
+        } catch (eJ) { encoreSale = true; secSale.push(k4); }
       }
-      if (!encoreSale && Object.keys(window._prodDirtySections || {}).length === 0) _prodDirty = false;
+      if (encoreSale) {
+        for (var k6 = 0; k6 < secSale.length; k6++) markProdSectionDirty(secSale[k6]);
+        _prodDirty = true;
+        try { scheduleProdPush(); } catch (eSp2) {}
+      } else if (Object.keys(window._prodDirtySections || {}).length === 0) {
+        _prodDirty = false;
+      }
     } catch (eP) {}
     return false;
   }
@@ -13485,16 +13529,19 @@ function validateProd(id) {
       }
       p._stockForce = true;
     }
-    deductAssemblageStock(p);
   }
   p.statut = 'validated';
   setProductions(prods);
-  /* Sortie nette : sortie (-) + entrée encours (reste en stock) + reprise (re-sort) */
-  if ((p.sortie_bois && p.sortie_bois.length) || (p.encours && p.encours.length)) {
-    deductBoisSorti(p);
-  } else if (p.article_id && p.quantite) {
-    updateStockArticle(p.article_id, p.quantite, 'entree', 'production', p.numero);
-  }
+  /* MEME sequence d'impacts que la validation depuis le formulaire
+     (_validerFiche) : sortie nette, ENTREE usinage, deduction assemblage,
+     ENTREE produits finis, puis miroir vers Index. Avant, valider depuis
+     l'historique sautait creditUsinageStock / creditAssemblageFini /
+     syncMirrorFinishedAll → stocks semi-finis et finis jamais credits. */
+  deductBoisSorti(p);
+  creditUsinageStock(p);
+  deductAssemblageStock(p);
+  creditAssemblageFini(p);
+  try { syncMirrorFinishedAll(true); } catch (eM2) {}
   toast('Fiche validée ✅');
   renderPage();
 }
@@ -16372,7 +16419,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         + '</div></div>';
       m += mvtHtml;
       m += '<div style="margin-top:1rem;text-align:right;display:flex;gap:.5rem;justify-content:flex-end">'
-        + '<button class="btn btn-accent" onclick="printConsoDetail(\'' + escH(cible) + '\')" title="Imprimer cette fiche">🖨 Imprimer la fiche</button>'
+        + '<button class="btn btn-accent" onclick="printConsoDetail(\'' + jsArg(cible) + '\')" title="Imprimer cette fiche">🖨 Imprimer la fiche</button>'
         + '<button class="btn" onclick="document.getElementById(\'consoDetailOverlay\').remove()">Fermer</button></div>';
       m += '</div></div>';
       var prev = document.getElementById('consoDetailOverlay');
@@ -17328,12 +17375,12 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
           + '<td style="font-weight:600;color:var(--accent)">▸ ' + escH(x.code) + '</td>';
         h += '<td>' + escH(x.des) + '</td><td>' + escH(x.type) + '</td><td>' + escH(x.emplacement) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + fmt(x.unites) + '</td>';
-        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button></td></tr>';
+        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + jsArg(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button></td></tr>';
         h += '<tr id="' + detIdD + '" style="display:none;background:#fff7ed"><td colspan="6" style="padding:8px 10px">'
           + '<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem">'
           + '<div style="font-size:.72rem;font-weight:800;color:#9a3412;text-transform:uppercase;letter-spacing:.04em">'
           + 'Mouvements — ' + escH(x.code) + '</div>'
-          + '<button class="btn" onclick="event.stopPropagation();printConsoDetail(\'' + escH(x.code) + '\')" title="Imprimer cette fiche" style="font-size:.68rem;padding:2px 8px">🖨 Imprimer</button>'
+          + '<button class="btn" onclick="event.stopPropagation();printConsoDetail(\'' + jsArg(x.code) + '\')" title="Imprimer cette fiche" style="font-size:.68rem;padding:2px 8px">🖨 Imprimer</button>'
           + '</div>'
           + _consoRegistreHtml(_consoLignes(x.code), x.code)
           + '</td></tr>';
@@ -17361,14 +17408,14 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? '-' : fmt(x.unites)) + '</td>';
         h += '<td style="text-align:right;font-weight:700">' + (isDiv ? fmt(x.paquets) : _fmtPaq(x.paquets)) + '</td>';
         h += '<td style="text-align:right;font-weight:800;color:var(--accent)">' + (isDiv ? '-' : _fmtCart(x.paquets, _ppcL)) + '</td>';
-        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button>'
-          + (consoBaseATransformer(x.code) ? ' <button class="btn" onclick="convertirBaseEnPaquets(\'' + escH(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Stock initial saisi en PAQUETS mais enregistre comme des pointes (conditionnement introuvable a l\u2019epoque). Cliquez pour convertir : 89 paquets = 89 x 180 = 16 020 pointes.">⚙️ Convertir</button>' : '')
+        h += '<td style="white-space:nowrap"><button class="btn btn-red" onclick="supprimerProduitConso(\'' + jsArg(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Supprimer ce produit (uniquement s\u2019il n\u2019a aucun mouvement)">🗑️</button>'
+          + (consoBaseATransformer(x.code) ? ' <button class="btn" onclick="convertirBaseEnPaquets(\'' + jsArg(x.code) + '\')" style="font-size:.68rem;padding:2px 8px" title="Stock initial saisi en PAQUETS mais enregistre comme des pointes (conditionnement introuvable a l\u2019epoque). Cliquez pour convertir : 89 paquets = 89 x 180 = 16 020 pointes.">⚙️ Convertir</button>' : '')
           + '</td></tr>';
         h += '<tr id="' + detId + '" style="display:none;background:#fff7ed"><td colspan="9" style="padding:8px 10px">'
           + '<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem">'
           + '<div style="font-size:.72rem;font-weight:800;color:#9a3412;text-transform:uppercase;letter-spacing:.04em">'
           + 'Mouvements — ' + escH(x.code) + '</div>'
-          + '<button class="btn" onclick="event.stopPropagation();printConsoDetail(\'' + escH(x.code) + '\')" title="Imprimer cette fiche" style="font-size:.68rem;padding:2px 8px">🖨 Imprimer</button>'
+          + '<button class="btn" onclick="event.stopPropagation();printConsoDetail(\'' + jsArg(x.code) + '\')" title="Imprimer cette fiche" style="font-size:.68rem;padding:2px 8px">🖨 Imprimer</button>'
           + '</div>'
           + _consoRegistreHtml(_consoLignes(x.code), x.code)
           + '</td></tr>';
@@ -26521,11 +26568,7 @@ function toggleAccordion(id) {
    genere en HTML (attribut onclick). escH() seul ne protege pas le
    guillemet simple, qui fermerait la chaine. */
 function achatJsArg(v) {
-  var t = (v === null || v === undefined) ? '' : String(v);
-  t = escH(t);
-  t = t.replace(/\\/g, '\\\\');
-  t = t.replace(/'/g, "\\'");
-  return t.replace(/\r|\n/g, ' ');
+  return jsArg(v);
 }
 function editAchat(id) {
   var achats = getAchats();
@@ -29870,10 +29913,10 @@ function renderQualiteModule(containerId) {
       recs.slice(0, 4).forEach(function(r) {
         html += '<div style="padding:0.75rem;border-radius:10px;background:#f8fafc;border:1px solid #f1f5f9;margin-bottom:0.6rem;display:flex;justify-content:space-between;align-items:center">';
         html += '<div>';
-        html += '<div style="font-weight:700;font-size:0.85rem;color:#0f172a">' + (r.code || 'NC') + ' — ' + (r.client || 'Client') + '</div>';
-        html += '<div style="font-size:0.75rem;color:#64748b">' + (r.produit || 'Produit') + ' · ' + (r.typeDefaut || 'Défaut') + '</div>';
+        html += '<div style="font-weight:700;font-size:0.85rem;color:#0f172a">' + escH(r.code || 'NC') + ' — ' + escH(r.client || 'Client') + '</div>';
+        html += '<div style="font-size:0.75rem;color:#64748b">' + escH(r.produit || 'Produit') + ' · ' + escH(r.typeDefaut || 'Défaut') + '</div>';
         html += '</div>';
-        html += '<span style="background:' + (r.gravite==='Critique'?'#fef2f2':'#fff7ed') + ';color:' + (r.gravite==='Critique'?'#ef4444':'#ea580c') + ';font-size:0.72rem;padding:3px 8px;border-radius:6px;font-weight:700">' + (r.gravite || 'Moyenne') + '</span>';
+        html += '<span style="background:' + (r.gravite==='Critique'?'#fef2f2':'#fff7ed') + ';color:' + (r.gravite==='Critique'?'#ef4444':'#ea580c') + ';font-size:0.72rem;padding:3px 8px;border-radius:6px;font-weight:700">' + escH(r.gravite || 'Moyenne') + '</span>';
         html += '</div>';
       });
     }
@@ -29895,15 +29938,15 @@ function renderQualiteModule(containerId) {
       html += '<tbody>';
       recs.forEach(function(r) {
         html += '<tr style="border-bottom:1px solid #f1f5f9">';
-        html += '<td style="padding:10px 12px;font-weight:700;color:#0f172a">' + (r.code || r.id) + '</td>';
-        html += '<td style="font-weight:600">' + (r.client || '-') + '</td>';
-        html += '<td>' + (r.produit || '-') + '</td>';
-        html += '<td style="color:#64748b">' + (r.blRef || '-') + '</td>';
-        html += '<td><span style="background:#eff6ff;color:#3b82f6;padding:2px 8px;border-radius:6px;font-weight:600;font-size:0.75rem">' + (r.typeDefaut || '-') + '</span></td>';
-        html += '<td><span style="background:' + (r.gravite==='Critique'?'#fef2f2':'#fff7ed') + ';color:' + (r.gravite==='Critique'?'#ef4444':'#ea580c') + ';padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + (r.gravite || '-') + '</span></td>';
+        html += '<td style="padding:10px 12px;font-weight:700;color:#0f172a">' + escH(r.code || r.id) + '</td>';
+        html += '<td style="font-weight:600">' + escH(r.client || '-') + '</td>';
+        html += '<td>' + escH(r.produit || '-') + '</td>';
+        html += '<td style="color:#64748b">' + escH(r.blRef || '-') + '</td>';
+        html += '<td><span style="background:#eff6ff;color:#3b82f6;padding:2px 8px;border-radius:6px;font-weight:600;font-size:0.75rem">' + escH(r.typeDefaut || '-') + '</span></td>';
+        html += '<td><span style="background:' + (r.gravite==='Critique'?'#fef2f2':'#fff7ed') + ';color:' + (r.gravite==='Critique'?'#ef4444':'#ea580c') + ';padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + escH(r.gravite || '-') + '</span></td>';
         html += '<td style="font-weight:700;color:#ef4444">' + (parseFloat(r.coutNonQualite)||0).toLocaleString() + ' F</td>';
-        html += '<td><span style="background:#ecfdf5;color:#10b981;padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + (r.statut || 'En cours') + '</span></td>';
-        html += '<td style="text-align:right;padding:10px 12px"><button onclick="supprimerReclamation(\'' + r.id + '\')" style="background:none;border:none;cursor:pointer;color:#ef4444;font-size:1rem" title="Supprimer">🗑️</button></td>';
+        html += '<td><span style="background:#ecfdf5;color:#10b981;padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + escH(r.statut || 'En cours') + '</span></td>';
+        html += '<td style="text-align:right;padding:10px 12px"><button onclick="supprimerReclamation(\'' + jsArg(r.id) + '\')" style="background:none;border:none;cursor:pointer;color:#ef4444;font-size:1rem" title="Supprimer">🗑️</button></td>';
         html += '</tr>';
       });
       html += '</tbody></table></div>';
@@ -29923,15 +29966,15 @@ function renderQualiteModule(containerId) {
       enqs.forEach(function(eq) {
         html += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:1rem">';
         html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.6rem">';
-        html += '<div><strong style="font-size:0.95rem;color:#0f172a">' + (eq.client || 'Client') + '</strong><div style="font-size:0.75rem;color:#64748b">' + (eq.date || '') + '</div></div>';
-        html += '<div style="font-size:1.2rem;font-weight:800;color:#10b981">' + (eq.noteGlobale || 5) + ' ⭐</div>';
+        html += '<div><strong style="font-size:0.95rem;color:#0f172a">' + escH(eq.client || 'Client') + '</strong><div style="font-size:0.75rem;color:#64748b">' + escH(eq.date || '') + '</div></div>';
+        html += '<div style="font-size:1.2rem;font-weight:800;color:#10b981">' + escH(eq.noteGlobale || 5) + ' ⭐</div>';
         html += '</div>';
-        html += '<div style="font-size:0.8rem;color:#475569;margin-bottom:0.6rem;background:#fff;padding:0.6rem;border-radius:8px;border:1px solid #f1f5f9">« ' + (eq.commentaires || 'Aucun commentaire') + ' »</div>';
+        html += '<div style="font-size:0.8rem;color:#475569;margin-bottom:0.6rem;background:#fff;padding:0.6rem;border-radius:8px;border:1px solid #f1f5f9">« ' + escH(eq.commentaires || 'Aucun commentaire') + ' »</div>';
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:0.72rem;color:#64748b">';
-        html += '<div>Produit: <strong>' + (eq.noteProduit || 5) + '/5</strong></div>';
-        html += '<div>Délais: <strong>' + (eq.noteDelai || 5) + '/5</strong></div>';
-        html += '<div>Emballage: <strong>' + (eq.noteEmballage || 5) + '/5</strong></div>';
-        html += '<div>Service: <strong>' + (eq.noteService || 5) + '/5</strong></div>';
+        html += '<div>Produit: <strong>' + escH(eq.noteProduit || 5) + '/5</strong></div>';
+        html += '<div>Délais: <strong>' + escH(eq.noteDelai || 5) + '/5</strong></div>';
+        html += '<div>Emballage: <strong>' + escH(eq.noteEmballage || 5) + '/5</strong></div>';
+        html += '<div>Service: <strong>' + escH(eq.noteService || 5) + '/5</strong></div>';
         html += '</div>';
         html += '</div>';
       });
@@ -29953,13 +29996,13 @@ function renderQualiteModule(containerId) {
       html += '<tbody>';
       acts.forEach(function(a) {
         html += '<tr style="border-bottom:1px solid #f1f5f9">';
-        html += '<td style="padding:10px 12px;font-weight:700;color:#0f172a">' + (a.code || a.id) + '</td>';
-        html += '<td><span style="background:#fef2f2;color:#ef4444;padding:2px 6px;border-radius:4px;font-weight:700">' + (a.ncRef || '-') + '</span></td>';
-        html += '<td style="max-width:200px">' + (a.cause || '-') + '</td>';
-        html += '<td style="font-weight:600;max-width:250px">' + (a.action || '-') + '</td>';
-        html += '<td>' + (a.responsable || '-') + '</td>';
-        html += '<td style="color:#64748b">' + (a.echeance || '-') + '</td>';
-        html += '<td><span style="background:#eff6ff;color:#3b82f6;padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + (a.statut || 'En cours') + '</span></td>';
+        html += '<td style="padding:10px 12px;font-weight:700;color:#0f172a">' + escH(a.code || a.id) + '</td>';
+        html += '<td><span style="background:#fef2f2;color:#ef4444;padding:2px 6px;border-radius:4px;font-weight:700">' + escH(a.ncRef || '-') + '</span></td>';
+        html += '<td style="max-width:200px">' + escH(a.cause || '-') + '</td>';
+        html += '<td style="font-weight:600;max-width:250px">' + escH(a.action || '-') + '</td>';
+        html += '<td>' + escH(a.responsable || '-') + '</td>';
+        html += '<td style="color:#64748b">' + escH(a.echeance || '-') + '</td>';
+        html += '<td><span style="background:#eff6ff;color:#3b82f6;padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + escH(a.statut || 'En cours') + '</span></td>';
         html += '</tr>';
       });
       html += '</tbody></table></div>';
@@ -29980,13 +30023,13 @@ function renderQualiteModule(containerId) {
       html += '<tbody>';
       ctrls.forEach(function(c) {
         html += '<tr style="border-bottom:1px solid #f1f5f9">';
-        html += '<td style="padding:10px 12px;font-weight:600">' + (c.date || '-') + '</td>';
-        html += '<td style="font-weight:700">' + (c.typeControle || '-') + '</td>';
-        html += '<td>' + (c.lot || '-') + '</td>';
-        html += '<td>' + (c.inspecteur || '-') + '</td>';
-        html += '<td style="font-weight:700;color:#3b82f6">' + (c.valMesuree || '-') + '</td>';
-        html += '<td style="color:#64748b">' + (c.normeTarget || '-') + '</td>';
-        html += '<td><span style="background:' + (c.resultat==='Conforme'?'#ecfdf5':'#fef2f2') + ';color:' + (c.resultat==='Conforme'?'#10b981':'#ef4444') + ';padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + (c.resultat || 'Conforme') + '</span></td>';
+        html += '<td style="padding:10px 12px;font-weight:600">' + escH(c.date || '-') + '</td>';
+        html += '<td style="font-weight:700">' + escH(c.typeControle || '-') + '</td>';
+        html += '<td>' + escH(c.lot || '-') + '</td>';
+        html += '<td>' + escH(c.inspecteur || '-') + '</td>';
+        html += '<td style="font-weight:700;color:#3b82f6">' + escH(c.valMesuree || '-') + '</td>';
+        html += '<td style="color:#64748b">' + escH(c.normeTarget || '-') + '</td>';
+        html += '<td><span style="background:' + (c.resultat==='Conforme'?'#ecfdf5':'#fef2f2') + ';color:' + (c.resultat==='Conforme'?'#10b981':'#ef4444') + ';padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.75rem">' + escH(c.resultat || 'Conforme') + '</span></td>';
         html += '</tr>';
       });
       html += '</tbody></table></div>';
