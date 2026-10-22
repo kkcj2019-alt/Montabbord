@@ -9804,6 +9804,35 @@ r.push({
   });
 
   r.push({
+    nom: 'R\u00e9cap : montage sans aucun pointage affiche R + 0h (pas un R nu)',
+    app: 'paye.html', store: storeRealiste,
+    code: `
+      var emps = getPersonnelActifs().filter(function (e) { return e.en_paie !== false; });
+      var emp = emps[0];
+      emp.rendement = true;
+      setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
+      var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
+      var d1 = mz + '-01';
+      setPointageMontage([{ id: DB.id(), employee_id: emp.id, date: d1, article_code: 'BBAG', quantite: 5 }]);
+      renderPtRecap();
+      var html = document.getElementById('pt-recap-container').innerHTML || '';
+      var rows = html.split('<tr ');
+      var cell = '';
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].indexOf('pt-emp-cell') !== -1 && rows[i].indexOf(escH(empNameLine(emp))) !== -1) {
+          var tdi = rows[i].indexOf('<td style="padding:4px 2px;border:1px solid #e2e8f0');
+          if (tdi !== -1) { var tde = rows[i].indexOf('</td>', tdi); cell = rows[i].substring(tdi, tde); }
+          break;
+        }
+      }
+      var ok = cell.indexOf('>R<') !== -1 && cell.indexOf('+ 0h') !== -1;
+      (ok) ? 'OK : montage seul = R + 0h (heure absente rendue visible)'
+           : 'ECHEC cell=' + cell;
+    `,
+    attenduPrefixe: 'OK'
+  });
+
+  r.push({
     nom: 'Synchro paie : un tableau vide ne rase plus l\u2019autre c\u00f4t\u00e9 (rec + poussee)',
     app: 'paye.html', store: storeRealiste,
     code: `
