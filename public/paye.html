@@ -15,7 +15,7 @@
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <script>
-      window.__APP_VERSION = "2026-10-22-290";
+      window.__APP_VERSION = "2026-10-22-291";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -2238,6 +2238,7 @@
           <button class="btn btn-sec" style="padding:5px 12px;font-size:.72rem" onclick="ptActualiser()">🔄 Actualiser</button>
           <button class="btn btn-sec" style="padding:5px 12px;font-size:.72rem" onclick="showModalFeries()">🎉 Jours fériés</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#059669;color:white" onclick="showEtatAssiduite()">📋 État d'assiduité</button>
+          <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#0284c7;color:white;font-weight:700" onclick="showModalFichePresenceJour()">📄 Fiche de présence du jour</button>
           <span id="pt-header-exports" style="display: none">
             <button class="btn btn-sec" style="padding:4px 12px;font-size:.75rem" onclick="window.print()">🖨 Imprimer</button>
             <button class="btn btn-sec" style="padding:4px 12px;font-size:.75rem" onclick="fichesDownloadPDF()">📄 PDF</button>
@@ -4465,13 +4466,13 @@
             <strong style="font-size: 0.78rem">Impression groupée :</strong>
             <div id="paie-groupe-fonction" class="form-group" style="max-width: 180px; margin-bottom: 0">
               <label style="font-size: 0.72rem">Filtrer par fonction</label
-              ><select id="bulk-print-fonction" style="font-size: 0.75rem">
+              ><select id="bulk-print-fonction" onchange="onPaieFilterChange()" style="font-size: 0.75rem">
                 <option value="">Toutes les fonctions</option>
               </select>
             </div>
             <div id="paie-groupe-type" class="form-group" style="max-width: 180px; margin-bottom: 0">
               <label style="font-size: 0.72rem">Type d'employé</label
-              ><select id="bulk-print-type" style="font-size: 0.75rem">
+              ><select id="bulk-print-type" onchange="onPaieFilterChange()" style="font-size: 0.75rem">
                 <option value="">Tous</option>
                 <option value="titulaire">Titulaires</option>
                 <option value="journalier">Journaliers</option>
@@ -8671,12 +8672,17 @@ function renderPrimeEmpMatrix() {
         p.employes = p.employes || [];
         var ix = p.employes.indexOf(empId);
         if (on && ix === -1) p.employes.push(empId);
-        if (!on && ix !== -1) {
-          p.employes.splice(ix, 1);
+        if (!on) {
+          if (ix !== -1) p.employes.splice(ix, 1);
           if (p.overrides) delete p.overrides[empId];
-          try { removeEmpIndivPrime(empId, primeId); } catch(eRm){}
+          var mois = "";
+          try { mois = getPayeMonth(); } catch(eM){}
+          if (mois) {
+            try { addEmpIndivPrime(empId, primeId, 0, p.label || p.type || "Prime", mois); } catch(eAd){}
+          }
         }
         setPrimesSpec(primes);
+        try { pushPayeCloud(true); } catch(ePPC){}
         renderPrimeEmpMatrix();
       }
       function pmeMontant(primeId, empId, val) {
@@ -8686,16 +8692,20 @@ function renderPrimeEmpMatrix() {
         var p = null;
         for (var i = 0; i < primes.length; i++) if (primes[i].id === primeId) { p = primes[i]; break; }
         if (!p) return;
-        if (val === "" || val == null) {
-          try { removeEmpIndivPrime(empId, primeId, mois || undefined); } catch(eRm){}
-        } else {
-          var label = p.type === "custom" ? (p.label || "Prime") : (p.label || p.type);
-          try { addEmpIndivPrime(empId, primeId, parseFloat(val) || 0, label, mois || undefined); } catch(eAd){}
-          p.employes = p.employes || [];
-          if (p.employes.indexOf(empId) === -1) { p.employes.push(empId); setPrimesSpec(primes); }
+        var numVal = parseFloat(val);
+        if (isNaN(numVal)) numVal = 0;
+        var label = p.type === "custom" ? (p.label || "Prime") : (p.label || p.type);
+        try { addEmpIndivPrime(empId, primeId, numVal, label, mois || undefined); } catch(eAd){}
+        p.employes = p.employes || [];
+        if (numVal > 0 && p.employes.indexOf(empId) === -1) {
+          p.employes.push(empId);
+        } else if (numVal === 0) {
+          var eix = p.employes.indexOf(empId);
+          if (eix !== -1) p.employes.splice(eix, 1);
         }
-        /* Push immédiat : un push différé peut laisser le cloud avoir le dessus
-           sur la valeur locale si un snapshot arrive avant les 2.5 s. */
+        if (p.overrides) delete p.overrides[empId];
+        setPrimesSpec(primes);
+        /* Push immédiat : protège contre l'écrasement cloud */
         try { pushPayeCloud(true); } catch(ePPC){}
         renderPrimeEmpMatrix();
       }
@@ -9442,10 +9452,20 @@ function renderPrimeEmpMatrix() {
           /* Montant MENSUEL : n'écrase plus le montant global du catalogue */
           var primes = getPrimesSpec();
           var plabel = '';
+          var p = null;
           for (var pi = 0; pi < primes.length; pi++) {
-            if (primes[pi].id === itemId) { plabel = primes[pi].label || primes[pi].type || ''; break; }
+            if (primes[pi].id === itemId) { p = primes[pi]; plabel = p.label || p.type || ''; break; }
           }
           addEmpIndivPrime(empId, itemId, v, plabel, mois);
+          if (p) {
+            if (p.overrides) delete p.overrides[empId];
+            if (v > 0 && p.employes && p.employes.indexOf(empId) === -1) p.employes.push(empId);
+            else if (v === 0 && p.employes) {
+              var ix = p.employes.indexOf(empId);
+              if (ix !== -1) p.employes.splice(ix, 1);
+            }
+            setPrimesSpec(primes);
+          }
         } else if (type === 'manual') {
           var lines = getManualLinesEmp(empId, mois);
           for (var li = 0; li < lines.length; li++) {
@@ -9498,10 +9518,21 @@ function renderPrimeEmpMatrix() {
         if (type === 'manual') {
           removeManualLine(empId, mois, itemId);
         } else if (type === 'catalogue') {
+          /* Ne pas supprimer la prime du catalogue général ! On met le montant
+             de cet employé à 0 pour ce mois et on nettoie l'override. */
+          addEmpIndivPrime(empId, itemId, 0, "", mois);
           var primes = getPrimesSpec();
-          primes = primes.filter(function(p) { return p.id !== itemId; });
-          setPrimesSpec(primes);
+          var p = primes.find(function(x) { return x.id === itemId; });
+          if (p) {
+            if (p.overrides) delete p.overrides[empId];
+            if (p.employes) {
+              var ix = p.employes.indexOf(empId);
+              if (ix !== -1) p.employes.splice(ix, 1);
+            }
+            setPrimesSpec(primes);
+          }
         }
+        try { pushPayeCloud(true); } catch(ePPC){}
         generateBulletin();
       }
       function getExternJours(empId, mois) {
@@ -15739,6 +15770,30 @@ function addArticleMontageFromPt(e) {
             el.value = cur;
         }
       }
+      function onPaieFilterChange() {
+        var bpf = (document.getElementById("bulk-print-fonction") || {}).value || "";
+        var bpt = (document.getElementById("bulk-print-type") || {}).value || "";
+        var sel = document.getElementById("paie-select-emp");
+        var inp = document.getElementById("paie-search-emp");
+        var curId = sel ? sel.value : "";
+        if (curId) {
+          var p = getPersonnel().find(function (x) { return x.id === curId; });
+          if (p) {
+            var matchF = !bpf || (p.fonction || "") === bpf;
+            var matchT = !bpt || empCategorie(p) === bpt;
+            if (!matchF || !matchT) {
+              if (sel) sel.value = "";
+              if (inp) inp.value = "";
+              var out = document.getElementById("paie-output");
+              if (out) out.innerHTML = "";
+            }
+          }
+        }
+        if (inp) {
+          inp.focus();
+          onPaieSearchInput("");
+        }
+      }
       function onPaieSearchFocus() {
         var inp = document.getElementById("paie-search-emp");
         if (inp) onPaieSearchInput(inp.value);
@@ -18602,6 +18657,21 @@ html +=
         }
         return c;
       }
+      function ptIsEmpRendement(empOrId) {
+        if (!empOrId) return false;
+        var emp = (typeof empOrId === "object" && empOrId) ? empOrId : null;
+        if (!emp) {
+          try {
+            var emps = getPersonnel();
+            emp = emps.find(function(e){ return e && (e.id === empOrId || e.matricule === empOrId); });
+          } catch(e){}
+        }
+        if (!emp) return false;
+        if (emp.rendement === true) return true;
+        var f = String(emp.fonction || "").toLowerCase();
+        if (f.indexOf("monteur") !== -1 || f.indexOf("montage") !== -1) return true;
+        return false;
+      }
       /* Heures d'AFFICHAGE d'un jour, INDEPENDANTES du flag present :
          un pointage marque absent avec des creneaux restes (residu de
          « marquer absent » du pointage groupe) doit quand meme montrer
@@ -18610,7 +18680,7 @@ html +=
       function ptHeuresAffTotal(rec) {
         if (!rec) return 0;
         try {
-          var _isRrec = rec.rendement === true;
+          var _isRrec = (rec.rendement === true) || ptIsEmpRendement(rec.employee_id);
           var c = ptCoreCalc({
             ja: rec.j_arrivee, jp1: rec.j_pause, jp2: rec.j_reprise, jf: rec.j_fin,
             na: rec.n_arrivee, np1: rec.n_pause, np2: rec.n_reprise, nf: rec.n_fin,
@@ -18832,6 +18902,8 @@ html +=
          - heures seules, sans montage → les heures, pas de R */
       function ptRecapJourRendement(empRendFiche, recRendJour, montFait) {
         if (recRendJour === true) return true;
+        if (montFait === true) return true;
+        if (empRendFiche === true) return true;
         return false;
       }
       function renderPtRecap() {
@@ -24148,7 +24220,272 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         w.document.close();
         setTimeout(function () { w.print(); }, 300);
       }
-      /* Auto-advance: 3 chiffres (ex: 100) -> immédiat ; 2 chiffres -> pause 450ms (laisse le temps de taper 100) ; 1 chiffre -> 900ms ; Entrée / Flèche bas -> immédiat */
+      /* ==================== FICHE DE PRÉSENCE JOURNALIÈRE ==================== */
+      function showModalFichePresenceJour(dateTarget) {
+        var today = dateTarget || (new Date().toISOString().slice(0, 10));
+        var modal = document.getElementById("pt-modal");
+        if (!modal) return;
+        var emps = getPersonnel().filter(function(p){ return p.en_paie !== false; })
+          .sort(function(a,b){ return String(a.matricule||"").localeCompare(String(b.matricule||""), undefined, {numeric:true}); });
+        var depts = getServices();
+        var pts = getPointageData().filter(function(p){ return p && p.date === today; });
+        var ptMap = {};
+        pts.forEach(function(p){ if(p && p.employee_id) ptMap[p.employee_id] = p; });
+        var montMap = {};
+        try {
+          (getPointageMontage() || []).forEach(function(m){
+            if (m && m.date === today && (m.quantite || 0) > 0) montMap[m.employee_id] = true;
+          });
+        } catch(eM){}
+        
+        var presCount = 0, absCount = 0, nonPointeCount = 0;
+        emps.forEach(function(e){
+          var rec = ptMap[e.id];
+          if (!rec) { nonPointeCount++; return; }
+          var h = parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"");
+          if (rec.present === true || h > 0 || montMap[e.id] || rec.faute_societe === true) presCount++;
+          else absCount++;
+        });
+        var presRate = emps.length > 0 ? ((presCount / emps.length) * 100).toFixed(1) : "0.0";
+
+        var html = '<div style="padding:20px;max-width:1150px;margin:0 auto;max-height:92vh;overflow-y:auto">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px">' +
+            '<div><h3 style="font-size:1.15rem;font-weight:800;color:#0f172a;margin:0">📋 Fiche de Présence Journalière</h3>' +
+            '<div style="font-size:.75rem;color:#64748b;margin-top:2px">Situation quotidienne des effectifs, pointages et émargement du personnel</div></div>' +
+            '<button onclick="closePtModal()" style="border:none;background:transparent;font-size:1.2rem;cursor:pointer;color:#999" title="Fermer">✕</button>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 14px;margin-bottom:12px">' +
+            '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+              '<label style="font-size:.8rem;font-weight:700">Date :</label>' +
+              '<input type="date" id="fpj-date" value="' + today + '" onchange="showModalFichePresenceJour(this.value)" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.82rem;font-weight:700">' +
+              '<input type="text" id="fpj-search" placeholder="Rechercher nom, matricule..." oninput="filterFichePresenceTable()" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem;min-width:180px">' +
+            '</div>' +
+            '<div style="display:flex;gap:8px">' +
+              '<button class="btn" onclick="printFichePresenceJour(\'' + today + '\', false)" style="background:#16a34a;color:#fff;padding:7px 16px;font-size:.8rem;font-weight:700">🖨️ Imprimer la Fiche du jour</button>' +
+              '<button class="btn btn-sec" onclick="printFichePresenceJour(\'' + today + '\', true)" style="padding:7px 14px;font-size:.8rem">📄 Émargement vierge</button>' +
+            '</div>' +
+          '</div>' +
+          '<div style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:8px 12px;margin-bottom:12px">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px">' +
+              '<span style="font-size:.75rem;font-weight:800;color:#334155;text-transform:uppercase">Filtrer & Imprimer par Département(s) :</span>' +
+              '<label style="font-size:.74rem;font-weight:700;color:#2563eb;cursor:pointer"><input type="checkbox" id="fpj-dept-all" checked onchange="toggleAllFpjDepts(this.checked)" style="vertical-align:middle;margin-right:4px"> Tous sélectionner / désélectionner</label>' +
+            '</div>' +
+            '<div id="fpj-dept-checkboxes" style="display:flex;gap:8px;flex-wrap:wrap">' +
+              depts.map(function(d){
+                return '<label style="font-size:.75rem;background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:4px 8px;cursor:pointer;display:inline-flex;align-items:center;gap:4px">' +
+                  '<input type="checkbox" class="fpj-dept-chk" value="' + escH(d) + '" checked onchange="filterFichePresenceTable()">' + escH(d) + '</label>';
+              }).join('') +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center">' +
+            '<div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:8px 16px;font-size:.82rem;color:#166534"><strong>📊 Taux de Présence :</strong> <span id="fpj-rate-badge" style="font-size:1.1rem;font-weight:900;color:#15803d">' + presRate + '%</span></div>' +
+            '<div style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:8px 14px;font-size:.8rem"><strong>Total effectif :</strong> <span id="fpj-total-badge">' + emps.length + '</span></div>' +
+            '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:8px 14px;font-size:.8rem;color:#166534"><strong>Présents :</strong> <span id="fpj-pres-badge">' + presCount + '</span></div>' +
+            '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 14px;font-size:.8rem;color:#991b1b"><strong>Absents :</strong> <span id="fpj-abs-badge">' + absCount + '</span></div>' +
+            '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 14px;font-size:.8rem;color:#92400e"><strong>Non pointés :</strong> <span id="fpj-np-badge">' + nonPointeCount + '</span></div>' +
+          '</div>' +
+          '<div style="overflow-x:auto;max-height:55vh;border:1px solid #cbd5e1;border-radius:8px">' +
+            '<table id="fpj-table" style="width:100%;border-collapse:collapse;font-size:.76rem">' +
+              '<thead><tr style="background:#0f172a;color:#fff;position:sticky;top:0;z-index:2">' +
+                '<th style="padding:7px;text-align:center">N°</th>' +
+                '<th style="padding:7px;text-align:left">Matricule</th>' +
+                '<th style="padding:7px;text-align:left">Employé</th>' +
+                '<th style="padding:7px;text-align:left">Département / Fonction</th>' +
+                '<th style="padding:7px;text-align:center">Statut</th>' +
+                '<th style="padding:7px;text-align:center">Pointages (Arrivée - Départ)</th>' +
+                '<th style="padding:7px;text-align:right">Jour (H)</th>' +
+                '<th style="padding:7px;text-align:right">Nuit (H)</th>' +
+                '<th style="padding:7px;text-align:left">Observations</th>' +
+              '</tr></thead><tbody>';
+        
+        emps.forEach(function(e, ix){
+          var rec = ptMap[e.id];
+          var hJ = rec ? parseHeure(rec.h_j_manual||"") : 0;
+          var hN = rec ? parseHeure(rec.h_n_manual||"") : 0;
+          var isMont = montMap[e.id] === true;
+          var isPresent = rec ? (rec.present === true || hJ > 0 || hN > 0 || isMont || rec.faute_societe === true) : false;
+          var statutHtml = '<span style="color:#94a3b8;font-weight:600">Non pointé</span>';
+          if (rec) {
+            if (rec.faute_societe) statutHtml = '<span style="color:#d97706;font-weight:700">Faute entreprise</span>';
+            else if (rec.absent_paye) statutHtml = '<span style="color:#7c3aed;font-weight:700">Absent payé</span>';
+            else if (rec.present === false) statutHtml = '<span style="color:#dc2626;font-weight:700">Absent (' + escH(rec.motif || 'Non justifié') + ')</span>';
+            else if (isMont) statutHtml = '<span style="color:#2563eb;font-weight:700">Montage / Rendement</span>';
+            else if (isPresent) statutHtml = '<span style="color:#16a34a;font-weight:700">Présent</span>';
+          }
+          var creneaux = (rec && (rec.j_arrivee || rec.j_fin)) ? (rec.j_arrivee || '--') + ' - ' + (rec.j_fin || '--') : (rec && rec.n_arrivee ? 'Nuit: ' + rec.n_arrivee + ' - ' + (rec.n_fin||'--') : '—');
+          var obs = (rec && (rec.observation || rec.obs || '')) || '';
+          var zebra = (ix % 2 === 0) ? '#fff' : '#f8fafc';
+          var deptVal = (e.service || e.fonction || '').trim();
+          html += '<tr class="fpj-row" data-is-pres="' + (isPresent ? '1' : '0') + '" data-is-abs="' + (rec && rec.present === false ? '1' : '0') + '" data-is-np="' + (!rec ? '1' : '0') + '" data-dept="' + escH(deptVal) + '" data-search="' + escH(((e.matricule||'') + ' ' + e.nom + ' ' + (e.prenoms||'') + ' ' + (e.fonction||'')).toLowerCase()) + '" style="background:' + zebra + ';border-top:1px solid #e2e8f0">' +
+            '<td style="padding:6px;text-align:center;color:#94a3b8">' + (ix + 1) + '</td>' +
+            '<td style="padding:6px;font-weight:700">' + escH(e.matricule || '—') + '</td>' +
+            '<td style="padding:6px;font-weight:700">' + escH(empNameLine(e)) + '</td>' +
+            '<td style="padding:6px;color:#475569">' + escH(deptVal || '—') + '</td>' +
+            '<td style="padding:6px;text-align:center">' + statutHtml + '</td>' +
+            '<td style="padding:6px;text-align:center">' + escH(creneaux) + '</td>' +
+            '<td style="padding:6px;text-align:right;font-weight:700">' + (hJ > 0 ? ptFmtDec(hJ) : '—') + '</td>' +
+            '<td style="padding:6px;text-align:right;font-weight:700">' + (hN > 0 ? ptFmtDec(hN) : '—') + '</td>' +
+            '<td style="padding:6px;color:#64748b">' + escH(obs) + '</td>' +
+          '</tr>';
+        });
+        html += '</tbody></table></div></div>';
+        modal.innerHTML = html;
+        modal.style.display = "block";
+      }
+
+      function toggleAllFpjDepts(check) {
+        document.querySelectorAll(".fpj-dept-chk").forEach(function(cb){ cb.checked = check; });
+        filterFichePresenceTable();
+      }
+
+      function filterFichePresenceTable() {
+        var q = ((document.getElementById("fpj-search") || {}).value || "").toLowerCase().trim();
+        var chks = document.querySelectorAll(".fpj-dept-chk");
+        var activeDepts = {};
+        var anyChecked = false;
+        chks.forEach(function(c){ if(c.checked) { activeDepts[c.value] = true; anyChecked = true; } });
+
+        var rows = document.querySelectorAll(".fpj-row");
+        var visTotal = 0, visPres = 0, visAbs = 0, visNp = 0;
+        rows.forEach(function(r){
+          var rD = r.getAttribute("data-dept") || "";
+          var rS = r.getAttribute("data-search") || "";
+          var okD = (!anyChecked) || activeDepts[rD] === true || Object.keys(activeDepts).some(function(k){ return rD.indexOf(k) !== -1; });
+          var okS = !q || rS.indexOf(q) !== -1;
+          var show = okD && okS;
+          r.style.display = show ? "" : "none";
+          if (show) {
+            visTotal++;
+            if (r.getAttribute("data-is-pres") === "1") visPres++;
+            else if (r.getAttribute("data-is-abs") === "1") visAbs++;
+            else visNp++;
+          }
+        });
+        var rateEl = document.getElementById("fpj-rate-badge");
+        if (rateEl) {
+          var rate = visTotal > 0 ? ((visPres / visTotal) * 100).toFixed(1) : "0.0";
+          rateEl.textContent = rate + "%";
+        }
+        var tb = document.getElementById("fpj-total-badge"); if (tb) tb.textContent = visTotal;
+        var pb = document.getElementById("fpj-pres-badge"); if (pb) pb.textContent = visPres;
+        var ab = document.getElementById("fpj-abs-badge"); if (ab) ab.textContent = visAbs;
+        var nb = document.getElementById("fpj-np-badge"); if (nb) nb.textContent = visNp;
+      }
+
+      function printFichePresenceJour(dateTarget, isVierge) {
+        var dateStr = dateTarget || new Date().toISOString().slice(0, 10);
+        var chks = document.querySelectorAll(".fpj-dept-chk");
+        var activeDepts = {};
+        var anyChecked = false;
+        chks.forEach(function(c){ if(c.checked) { activeDepts[c.value] = true; anyChecked = true; } });
+
+        var emps = getPersonnel().filter(function(p){
+          if (p.en_paie === false) return false;
+          if (!anyChecked) return true;
+          var d = (p.service || p.fonction || '').trim();
+          return activeDepts[d] === true || Object.keys(activeDepts).some(function(k){ return d.indexOf(k) !== -1; });
+        }).sort(function(a,b){ return String(a.matricule||"").localeCompare(String(b.matricule||""), undefined, {numeric:true}); });
+
+        var pts = getPointageData().filter(function(p){ return p && p.date === dateStr; });
+        var ptMap = {};
+        pts.forEach(function(p){ if(p && p.employee_id) ptMap[p.employee_id] = p; });
+        var montMap = {};
+        try {
+          (getPointageMontage() || []).forEach(function(m){
+            if (m && m.date === dateStr && (m.quantite || 0) > 0) montMap[m.employee_id] = true;
+          });
+        } catch(eM){}
+        
+        var presCount = 0, absCount = 0;
+        emps.forEach(function(e){
+          var rec = ptMap[e.id];
+          var h = rec ? (parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"")) : 0;
+          if (rec && (rec.present === true || h > 0 || montMap[e.id] || rec.faute_societe === true)) presCount++;
+          else if (rec && rec.present === false) absCount++;
+        });
+        var rateP = emps.length > 0 ? ((presCount / emps.length) * 100).toFixed(1) : "0.0";
+
+        var soc = payeObj("mdb_entreprise");
+        var dFr = new Date(dateStr).toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+        
+        var w = window.open("", "_blank");
+        if (!w) return toast("Popup bloquée — autorisez les popups", "error");
+        var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche de Présence — ' + dateStr + '</title>' +
+          '<style>' +
+          '@page { size: A4 landscape; margin: 8mm 6mm; }' +
+          'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; padding: 10px; color: #0f172a; font-size: 10px; }' +
+          '.hdr { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 10px; }' +
+          '.stats-bar { display: flex; gap: 14px; font-size: 10px; font-weight: 700; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 12px; margin-bottom: 10px; }' +
+          'table { width: 100%; border-collapse: collapse; font-size: 8.5px; }' +
+          'th, td { border: 1px solid #334155; padding: 4px 6px; }' +
+          'th { background: #0f172a; color: #fff; text-transform: uppercase; font-size: 8px; }' +
+          '.emarg { width: 110px; height: 18px; }' +
+          '@media print { .no-print { display: none !important; } }' +
+          '</style></head><body>' +
+          '<div class="no-print" style="margin-bottom:10px;text-align:right">' +
+            '<button onclick="window.print()" style="padding:8px 18px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer">🖨️ Imprimer la fiche</button>' +
+          '</div>' +
+          '<div class="hdr">' +
+            '<div style="display:flex;align-items:center;gap:12px">' +
+              (soc.logo ? '<img src="' + soc.logo + '" style="max-height:48px">' : '') +
+              '<div><div style="font-size:16px;font-weight:800;text-transform:uppercase">' + escH(soc.nom || 'ACSER') + '</div>' +
+              '<div style="font-size:11px;color:#475569;font-weight:600">FICHE DE PRÉSENCE JOURNALIÈRE & ÉMARGEMENT</div></div>' +
+            '</div>' +
+            '<div style="text-align:right">' +
+              '<div style="font-size:13px;font-weight:800;text-transform:capitalize">' + escH(dFr) + '</div>' +
+              '<div style="font-size:10px;color:#64748b">Date : ' + dateStr + '</div>' +
+            '</div>' +
+          '</div>' +
+          (!isVierge ? ('<div class="stats-bar">' +
+            '<div>Effectif : <b>' + emps.length + '</b></div>' +
+            '<div style="color:#16a34a">Présents : <b>' + presCount + '</b></div>' +
+            '<div style="color:#dc2626">Absents : <b>' + absCount + '</b></div>' +
+            '<div style="color:#2563eb">Taux de présence : <b>' + rateP + '%</b></div>' +
+          '</div>') : '') +
+          '<table>' +
+            '<thead><tr>' +
+              '<th style="width:24px;text-align:center">N°</th>' +
+              '<th style="width:55px;text-align:left">Matricule</th>' +
+              '<th style="text-align:left">Nom & Prénoms</th>' +
+              '<th style="text-align:left">Département / Fonction</th>' +
+              '<th style="width:70px;text-align:center">Statut</th>' +
+              '<th style="width:65px;text-align:center">Arrivée</th>' +
+              '<th style="width:65px;text-align:center">Départ</th>' +
+              '<th style="width:50px;text-align:right">Heures</th>' +
+              '<th style="width:120px;text-align:center">Émargement / Signature</th>' +
+            '</tr></thead><tbody>';
+        
+        emps.forEach(function(e, ix){
+          var rec = ptMap[e.id];
+          var arr = (!isVierge && rec && rec.j_arrivee) ? rec.j_arrivee : '';
+          var dep = (!isVierge && rec && rec.j_fin) ? rec.j_fin : '';
+          var hJ = (!isVierge && rec) ? (parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"")) : 0;
+          var isMont = montMap[e.id] === true;
+          var st = isVierge ? '' : (rec ? (rec.faute_societe ? 'Faute soc.' : rec.absent_paye ? 'Abs. payé' : rec.present === false ? 'Absent' : isMont ? 'Montage' : 'Présent') : 'Non pointé');
+          var bg = isVierge ? '#fff' : (rec && rec.present === false ? '#fef2f2' : '#fff');
+          h += '<tr style="background:' + bg + '">' +
+            '<td style="text-align:center;color:#64748b">' + (ix + 1) + '</td>' +
+            '<td style="font-weight:700">' + escH(e.matricule || '—') + '</td>' +
+            '<td style="font-weight:700">' + escH(empNameLine(e)) + '</td>' +
+            '<td>' + escH(e.service || e.fonction || '—') + '</td>' +
+            '<td style="text-align:center;font-weight:700">' + escH(st) + '</td>' +
+            '<td style="text-align:center">' + escH(arr) + '</td>' +
+            '<td style="text-align:center">' + escH(dep) + '</td>' +
+            '<td style="text-align:right;font-weight:700">' + (hJ > 0 ? ptFmtDec(hJ) + 'h' : '') + '</td>' +
+            '<td class="emarg"></td>' +
+          '</tr>';
+        });
+        h += '</tbody></table>' +
+          '<div style="display:flex;justify-content:space-between;margin-top:16px;font-size:10px">' +
+            '<div>Éditée le ' + new Date().toLocaleString("fr-FR") + '</div>' +
+            '<div style="text-align:center;border-top:1px solid #0f172a;width:200px;padding-top:4px">Visa & Signature Direction / RH</div>' +
+          '</div>' +
+          '<script>window.onload=function(){try{window.print();}catch(e){}}<\/script></body></html>';
+        w.document.write(h);
+        w.document.close();
+      }
+
+      /* Auto-advance: 3 chiffres (ex: 100) -> immédiat ; 2 chiffres -> pause 400ms ; Entrée / Flèche bas -> immédiat */
       function ptMontAutoAdvance(input) {
         var v = input.value.replace(/\D/g, "");
         if (v === "") return;
@@ -24158,13 +24495,13 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           advanceMontageCell(input);
           return;
         }
-        var delay = (v.length === 2) ? 450 : 900;
+        var delay = (v.length === 2) ? 400 : 750;
         input._ptTimer = setTimeout(function () {
           advanceMontageCell(input);
         }, delay);
       }
       function ptMontKeyNav(e, input) {
-        if (e.key === "Enter" || e.key === "ArrowDown") {
+        if (e.key === "Enter" || e.keyCode === 13 || e.key === "ArrowDown") {
           e.preventDefault();
           advanceMontageCell(input);
           return;
@@ -24173,14 +24510,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         if (e.key === "ArrowUp") {
           e.preventDefault();
           try {
-            var tableU = input.closest("table");
+            var tableU = input.closest("table") || document.querySelector(".pt-mont-grid");
             if (tableU) {
               var artU = input.getAttribute("data-article") || "";
               var inputsU = Array.prototype.slice.call(tableU.querySelectorAll('input[data-article="' + artU.replace(/"/g, '\\"') + '"]'));
               var idxU = inputsU.indexOf(input);
               if (idxU > 0) {
-                inputsU[idxU - 1].focus();
-                inputsU[idxU - 1].select();
+                var prevInp = inputsU[idxU - 1];
+                setTimeout(function(){ try { prevInp.focus(); prevInp.select(); } catch(e){} }, 10);
                 return;
               }
             }
@@ -24190,29 +24527,35 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
       }
       function advanceMontageCell(input) {
         clearTimeout(input._ptTimer);
+        var target = null;
         try {
-          var table = input.closest("table");
+          var table = input.closest("table") || document.querySelector(".pt-mont-grid");
           if (table) {
             var art = input.getAttribute("data-article") || "";
             var inputs = Array.prototype.slice.call(table.querySelectorAll('input[data-article="' + art.replace(/"/g, '\\"') + '"]'));
             var idx = inputs.indexOf(input);
             if (idx !== -1 && idx < inputs.length - 1) {
-              var nextInput = inputs[idx + 1];
-              nextInput.focus();
-              nextInput.select();
-              return;
+              target = inputs[idx + 1];
             }
           }
         } catch (eAdv) {}
-        /* Repli hiérarchique par ligne */
-        try {
-          var tr = input.closest("tr");
-          var nextTr = tr ? tr.nextElementSibling : null;
-          if (nextTr) {
-            var nextInp = nextTr.querySelector("input[data-article]") || nextTr.querySelector("input");
-            if (nextInp) { nextInp.focus(); nextInp.select(); return; }
-          }
-        } catch (eTr) {}
+        if (!target) {
+          try {
+            var tr = input.closest("tr");
+            var nextTr = tr ? tr.nextElementSibling : null;
+            if (nextTr) {
+              target = nextTr.querySelector("input[data-article]") || nextTr.querySelector("input");
+            }
+          } catch (eTr) {}
+        }
+        if (target) {
+          setTimeout(function () {
+            try {
+              target.focus();
+              target.select();
+            } catch (eFoc) {}
+          }, 15);
+        }
       }
       /* ==================== POINTAGE MONTAGE SAVE ==================== */
       function savePointageMontage() {
@@ -28223,10 +28566,19 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           var hJ = 0,
             hN = 0;
           if (rec) {
-            if (rec.h_j_manual !== undefined && rec.h_j_manual !== "")
-              hJ = parseHeure(rec.h_j_manual);
-            if (rec.h_n_manual !== undefined && rec.h_n_manual !== "")
-              hN = parseHeure(rec.h_n_manual);
+            var _isEmpRendStat = emp.rendement === true || String(emp.fonction||'').toLowerCase().indexOf('monteur') !== -1 || rec.rendement === true;
+            if (_isEmpRendStat) {
+              /* Travailleur au rendement / monteur : arrivée et départ sans pause = preuve de présence (0h payées, salaire via montage).
+                 Seuls les créneaux atelier (avec pause) ou heures libres manuelles sont payés. */
+              var ccfStat = ptCalcDay(rec, true);
+              hJ = ccfStat.r || 0;
+              hN = 0;
+            } else {
+              if (rec.h_j_manual !== undefined && rec.h_j_manual !== "")
+                hJ = parseHeure(rec.h_j_manual);
+              if (rec.h_n_manual !== undefined && rec.h_n_manual !== "")
+                hN = parseHeure(rec.h_n_manual);
+            }
             /* Jour faute-payé SANS heures saisies (ex. rattraper seul) : la
                grille affiche quand même « ✔ 8 ». Les heures dues (gagnées)
                comptent comme heures payées, sinon le total les oublie. */
@@ -28235,9 +28587,10 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               if (_gFaute > 0) hJ = _gFaute;
             }
             /* Do not force hJ = 8 if no hours entered */
-            if (hJ > 0 || hN > 0) daysPresent++;
-            if (rec.present === true || hJ > 0 || hN > 0) {
-              if (isWeekday && (hJ > 0 || hN > 0)) { businessPresent++; businessPresentSalary++; }
+            var _estPresStat = (hJ > 0 || hN > 0 || rec.present === true || montageDaysSet[dk] === true);
+            if (_estPresStat) daysPresent++;
+            if (_estPresStat) {
+              if (isWeekday) { businessPresent++; businessPresentSalary++; }
             }
             // Faute société (chômage technique) : absent mais payé comme présent pour salaire, pas pour transport
             if (rec.faute_societe === true && isWeekday && hJ === 0 && hN === 0 && !rec.present) {
