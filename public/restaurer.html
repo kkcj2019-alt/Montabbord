@@ -7,25 +7,135 @@ body{font-family:system-ui;background:#f3f4f6;display:flex;align-items:center;ju
 .card{background:#fff;border-radius:12px;padding:32px;width:500px;box-shadow:0 4px 6px rgba(0,0,0,.1)}
 h1{font-size:20px;margin-bottom:8px;color:#111827}
 p{font-size:14px;color:#6b7280;margin-bottom:16px}
-input{margin-bottom:16px}
-.btn{display:none;padding:12px 24px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:15px;cursor:pointer;font-weight:600}
+.input-group{margin-bottom:16px}
+label{display:block;font-size:13px;font-weight:600;color:#374151;margin-bottom:6px}
+input{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px}
+.btn-row{display:flex;gap:8px;margin-top:8px}
+.btn{padding:12px 24px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:15px;cursor:pointer;font-weight:600}
 .btn:hover{background:#1d4ed8}
+.btn-sec{background:#64748b}
+.btn-sec:hover{background:#475569}
+.btn-danger{background:#dc2626}
+.btn-danger:hover{background:#b91c1c}
 #status{font-size:13px;color:#374151;margin-top:12px;white-space:pre-wrap;max-height:400px;overflow-y:auto;background:#f9fafb;padding:12px;border-radius:6px;border:1px solid #e5e7eb}
 .success{color:#16a34a;font-weight:600}
+.warning{color:#b45309;font-weight:600}
+label.opt{display:flex;align-items:center;gap:8px;font-size:13px;color:#374151;cursor:pointer}
+label.opt input{width:auto;margin:0}
 </style>
 </head>
 <body>
 <div class="card">
-<h1>Restauration des donn&eacute;es</h1>
-<p>S&eacute;lectionnez le fichier <strong>backup-mdb-2026-07-28 (2).json</strong></p>
+<h1>Restauration des données</h1>
+<p>Sélectionnez le fichier <strong>backup-mdb-*.json</strong></p>
+<div class="input-group">
 <input type="file" id="fileInput" accept=".json">
-<button class="btn" id="restoreBtn">Restaurer</button>
+</div>
+<div class="btn-row">
+<button class="btn btn-danger" id="replaceBtn">Remplacer (efface & recrée)</button>
+<button class="btn btn-sec" id="mergeBtn">Fusionner (union par ID)</button>
+</div>
+<label class="opt"><input type="checkbox" id="markPending" checked> Marquer pour envoi cloud (pendingSync)</label>
 <div id="status"></div>
 </div>
 <script>
 var fileInput=document.getElementById('fileInput');
-var restoreBtn=document.getElementById('restoreBtn');
+var replaceBtn=document.getElementById('replaceBtn');
+var mergeBtn=document.getElementById('mergeBtn');
+var markPending=document.getElementById('markPending');
 var statusDiv=document.getElementById('status');
+var loadedData=null, loadedKeys=[];
+
+function log(msg, cls){ statusDiv.innerHTML=(cls?'<span class="'+cls+'">':'')+msg+(cls?'</span>':''); }
+
+function itemKey(r){
+  if(!r||typeof r!=='object') return '';
+  if(r.employee_id&&r.date) return 'pt:'+r.employee_id+'|'+r.date;
+  if(r.code) return 'code:'+String(r.code).trim().toLowerCase();
+  if(r.id) return 'id:'+String(r.id);
+  if(r.numero) return 'numero:'+String(r.numero).trim().toLowerCase();
+  try{return 'json:'+JSON.stringify(r);}catch(e){}
+  return '';
+}
+
+function empTime(r){
+  var t=r&&r.updatedAt;
+  if(typeof t==='number') return t;
+  var p=Date.parse(t);
+  return isFinite(p)?p:0;
+}
+
+function pickRecent(a,b){
+  var ta=empTime(a), tb=empTime(b);
+  if(ta!==tb) return ta>tb?a:b;
+  var sa='',sb='';
+  try{sa=JSON.stringify(a);}catch(e1){}
+  try{sb=JSON.stringify(b);}catch(e2){}
+  return sa>=sb?a:b;
+}
+
+function unionByKey(localArr, incArr){
+  var a=Array.isArray(localArr)?localArr:[];
+  var b=Array.isArray(incArr)?incArr:[];
+  var out=[], seen={};
+  for(var i=0;i<a.length;i++){
+    var r=a[i], k=itemKey(r);
+    if(k){ if(!seen[k]){out.push(r);seen[k]=true;} }
+    else{out.push(r);}
+  }
+  for(var i=0;i<b.length;i++){
+    var r=b[i], k=itemKey(r);
+    if(k){
+      if(!seen[k]){out.push(r);seen[k]=true;}
+    }else{out.push(r);}
+  }
+  return out;
+}
+
+function mergeEmployes(localArr, incArr){
+  var mapL={}, mapC={}, order=[], seen={}, out=[];
+  (Array.isArray(localArr)?localArr:[]).forEach(function(r){
+    if(r&&r.id){
+      if(!seen[r.id]){seen[r.id]=true;order.push(r.id);}
+      mapL[r.id]=r;
+    }
+  });
+  (Array.isArray(incArr)?incArr:[]).forEach(function(r){
+    if(r&&r.id){
+      if(!seen[r.id]){seen[r.id]=true;order.push(r.id);}
+      mapC[r.id]=r;
+    }
+  });
+  order.forEach(function(id){
+    var a=mapL[id], b=mapC[id];
+    if(a&&!b) out.push(a);
+    else if(b&&!a) out.push(b);
+    else out.push(pickRecent(a,b));
+  });
+  (Array.isArray(localArr)?localArr:[]).forEach(function(r){if(!r||!r.id)out.push(r);});
+  (Array.isArray(incArr)?incArr:[]).forEach(function(r){if(!r||!r.id)out.push(r);});
+  return out;
+}
+
+function mergeValues(localVal, incVal, key){
+  if(!Array.isArray(localVal) && !Array.isArray(incVal)){
+    if(typeof localVal==='object' && localVal!==null && typeof incVal==='object' && incVal!==null){
+      var merged={};
+      for(var k in localVal) merged[k]=localVal[k];
+      for(var k in incVal) merged[k]=incVal[k];
+      return merged;
+    }
+    return incVal;
+  }
+  var localArr=Array.isArray(localVal)?localVal:[];
+  var incArr=Array.isArray(incVal)?incVal:[];
+  if(key==='mdb_employes') return mergeEmployes(localArr, incArr);
+  if(key==='mdb_feries') return unionByKey(localArr, incArr);
+  if(key.indexOf('mdb_acomptesPrets')===0 || key==='mdb_operationsCaisse' || key==='mdb_banqueOperations' || key==='mdb_pointage' || key==='mdb_pointageMontage' || key==='mdb_primesSpec'){
+    return unionByKey(localArr, incArr);
+  }
+  return unionByKey(localArr, incArr);
+}
 
 fileInput.addEventListener('change',function(){
   var file=fileInput.files[0];
@@ -34,30 +144,49 @@ fileInput.addEventListener('change',function(){
   reader.onload=function(ev){
     try{
       var data=JSON.parse(ev.target.result);
-      var keys=Object.keys(data).filter(function(k){return k.indexOf('mdb_')===0});
-      statusDiv.textContent='Fichier charg\u00e9 : '+keys.length+' cl\u00e9s trouv\u00e9es';
-      restoreBtn.style.display='inline-block';
-      restoreBtn.onclick=function(){
-        var count=0;
-        var pending={};
-        try{pending=JSON.parse(localStorage.getItem('mdb_pendingSync'))||{};}catch(eP){}
-        for(var i=0;i<keys.length;i++){
-          var k=keys[i];
-          var v=data[k];
-          if(v!==null&&v!==undefined){
-            try{localStorage.setItem(k,JSON.stringify(v));count++;
-              if(k!=='mdb_currentUser'&&k.indexOf('mdb_draft_')===-1&&k.indexOf('mdb_sa')!==0&&k.indexOf('mdb_pending')===-1&&k!=='mdb_sync_queue'){pending[k]=true;}
-            }catch(e){}
-          }
-        }
-        try{localStorage.setItem('mdb_pendingSync',JSON.stringify(pending));}catch(eQ){}
-        statusDiv.innerHTML='<span class="success">'+count+' clés restaurées et marquées pour envoi !</span>\n\nFermez cette page puis ouvrez <a href="https://montabbord.web.app" target="_blank">montabbord.web.app</a> (reconnexion automatique, ou connectez-vous si demandé) : vos données restaurées seront envoyées au cloud (✓ Sync) et un Actualiser ne les effacera plus.';
-        restoreBtn.style.display='none';
-      };
-    }catch(e){statusDiv.textContent='Erreur : '+e.message}
+      loadedKeys=Object.keys(data).filter(function(k){return k.indexOf('mdb_')===0});
+      loadedData=data;
+      log('Fichier chargé : '+loadedKeys.length+' clés mdb_ trouvées');
+      replaceBtn.style.display='inline-block';
+      mergeBtn.style.display='inline-block';
+    }catch(e){log('Erreur lecture : '+e.message,'warning');}
   };
   reader.readAsText(file);
 });
+
+function doRestore(mode){
+  if(!loadedData||!loadedKeys.length){log('Aucun fichier chargé','warning');return;}
+  var count=0;
+  var pending={};
+  try{pending=JSON.parse(localStorage.getItem('mdb_pendingSync'))||{};}catch(eP){}
+  for(var i=0;i<loadedKeys.length;i++){
+    var k=loadedKeys[i];
+    var v=loadedData[k];
+    if(v===null||v===undefined) continue;
+    try{
+      var existing=null;
+      try{existing=JSON.parse(localStorage.getItem(k));}catch(e){}
+      var merged;
+      if(mode==='replace' || existing===null){
+        merged=v;
+      }else{
+        merged=mergeValues(existing, v, k);
+      }
+      localStorage.setItem(k,JSON.stringify(merged));
+      count++;
+      if(markPending.checked && k!=='mdb_currentUser' && k.indexOf('mdb_draft_')===-1 && k.indexOf('mdb_sa')!==0 && k.indexOf('mdb_pending')===-1 && k!=='mdb_sync_queue'){
+        pending[k]=true;
+      }
+    }catch(e){}
+  }
+  try{localStorage.setItem('mdb_pendingSync',JSON.stringify(pending));}catch(eQ){}
+  log('<span class="success">'+count+' clés '+ (mode==='replace'?'restaurées (remplace)':'fusionnées (union par ID)') +' et marquées pour envoi !</span>\n\nFermez cette page puis ouvrez <a href="https://montabbord.web.app" target="_blank">montabbord.web.app</a> (reconnexion auto ou reconnexion) : les données seront envoyées au cloud (✓ Sync) et un Actualiser ne les effacera plus.','success');
+  replaceBtn.style.display='none';
+  mergeBtn.style.display='none';
+}
+
+replaceBtn.onclick=function(){doRestore('replace');};
+mergeBtn.onclick=function(){doRestore('merge');};
 </script>
 </body>
 </html>
