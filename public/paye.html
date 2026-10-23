@@ -4539,13 +4539,19 @@
               <label>Mois</label
               ><input type="month" id="lp-mois" onchange="loadLivrePaie()" />
             </div>
-            <div class="tab-pills" style="margin-bottom: 0">
+            <div class="tab-pills" id="lp-filter-pills" style="margin-bottom: 0">
               <button class="active" onclick="setLPFilter('all')">Tous</button>
               <button onclick="setLPFilter('titulaire')">Titulaires</button>
               <button onclick="setLPFilter('journalier')">Journaliers</button>
               <button onclick="setLPFilter('externe')">
                 Prestataires externes
               </button>
+            </div>
+            <div class="tab-pills" id="lp-vue-pills" style="margin-bottom: 0">
+              <button class="active" onclick="setLPVue('avant')">
+                Vue avant paie
+              </button>
+              <button onclick="setLPVue('apres')">Vue après paie</button>
             </div>
             <button class="btn" onclick="loadLivrePaie()">Actualiser</button>
             <button class="btn btn-sec" onclick="exportLP()">Export CSV</button>
@@ -4567,6 +4573,14 @@
             <div class="stat-card" style="border-left-color: var(--green)">
               <div class="lbl">Net à Payer</div>
               <div class="val" id="lp-tot-net">0 F</div>
+            </div>
+            <div class="stat-card" style="border-left-color: var(--primary)">
+              <div class="lbl">Déjà Payé</div>
+              <div class="val" id="lp-tot-paye">0 F</div>
+            </div>
+            <div class="stat-card" style="border-left-color: var(--gold)">
+              <div class="lbl">Solde Restant</div>
+              <div class="val" id="lp-tot-solde">0 F</div>
             </div>
           </div>
           <div
@@ -5384,6 +5398,15 @@
             <div class="form-group">
               <label>Date Naissance</label
               ><input type="date" name="date_naissance" />
+            </div>
+            <div class="form-group">
+              <label>Nationalité</label
+              ><input
+                type="text"
+                name="nationalite"
+                placeholder="Ex : Ivoirienne"
+                value="Ivoirienne"
+              />
             </div>
             <div class="form-group">
               <label>Téléphone</label><input type="text" name="telephone" />
@@ -16112,6 +16135,10 @@ function addArticleMontageFromPt(e) {
           prenoms: _upperWorkerNameP(f.elements["prenoms"].value),
           sexe: f.elements["sexe"].value,
           date_naissance: f.elements["date_naissance"].value,
+          nationalite:
+            (f.elements["nationalite"]
+              ? f.elements["nationalite"].value.trim()
+              : "") || "Ivoirienne",
           telephone: f.elements["telephone"].value,
           date_entree: f.elements["date_entree"].value,
           type_contrat: f.elements["type_contrat"].value,
@@ -24172,6 +24199,21 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         f = String(f).trim();
         return f || "Non assigné";
       }
+      /* État de la fiche, persisté d'un re-rendu à l'autre :
+         - groupement : par fonction OU par département (service)
+         - vue        : tous / pointés / non pointés (la liste diminue au fur et à mesure)
+         - sélection  : employés cochés pour une action groupée en 1 clic      */
+      var fpjGroupMode = "fonction";
+      var fpjSortMode = "matricule";
+      var fpjViewMode = "np";
+      var fpjSel = {};
+      function fpjGroupKey(e) {
+        if (fpjGroupMode === "departement") {
+          var d = String((e && (e.service || e.departement)) || "").trim();
+          return d || "Non assigné";
+        }
+        return fpjGetFonctionName(e);
+      }
 
       function showModalFichePresenceJour(dateTarget) {
         var today = dateTarget || (new Date().toISOString().slice(0, 10));
@@ -24187,10 +24229,10 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           });
         } catch(eM){}
 
-        /* Regroupement par Fonction */
+        /* Regroupement par Fonction OU par Département */
         var fctMap = {};
         allEmps.forEach(function(e){
-          var fn = fpjGetFonctionName(e);
+          var fn = fpjGroupKey(e);
           if (!fctMap[fn]) fctMap[fn] = [];
           fctMap[fn].push(e);
         });
@@ -24199,9 +24241,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           return a.localeCompare(b, undefined, {sensitivity: "base"});
         });
 
-        /* Tri de chaque groupe d'employés par matricule */
+        /* Tri de chaque groupe : matricule (défaut) ou nom */
         fctList.forEach(function(fn){
           fctMap[fn].sort(function(a, b){
+            if (fpjSortMode === "nom") {
+              var c = String(a.nom || "").localeCompare(String(b.nom || ""), undefined, {sensitivity: "base"});
+              if (c !== 0) return c;
+              return String(a.prenoms || "").localeCompare(String(b.prenoms || ""), undefined, {sensitivity: "base"});
+            }
             return String(a.matricule||"").localeCompare(String(b.matricule||""), undefined, {numeric: true});
           });
         });
@@ -24226,13 +24273,17 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         });
         var globTotal = allEmps.length;
         var globRate = globTotal > 0 ? ((globPres / globTotal) * 100).toFixed(1) : "0.0";
+        var groupLabel = fpjGroupMode === "departement" ? "Par Département" : "Par Fonction / Atelier";
+        var viewTotals = { all: globTotal, pres: globPres + globAbs, np: globNp };
+        /* Plus rien à pointer : on n'affiche pas un tableau « non pointés » vide */
+        if (fpjViewMode === "np" && globNp === 0 && globTotal > 0) fpjViewMode = "all";
 
         var html = '<div id="fpj-scroll-body" style="padding:16px 20px;max-width:1250px;margin:0 auto;max-height:92vh;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px">' +
             '<div>' +
               '<h3 style="font-size:1.2rem;font-weight:900;color:#0f172a;margin:0;display:flex;align-items:center;gap:8px">' +
                 '<span>📋 Fiche de Présence Journalière</span>' +
-                '<span style="font-size:.72rem;background:#0ea5e9;color:#fff;padding:2px 8px;border-radius:12px;font-weight:700">Par Fonction / Atelier</span>' +
+                '<span id="fpj-group-badge" style="font-size:.72rem;background:#0ea5e9;color:#fff;padding:2px 8px;border-radius:12px;font-weight:700">' + groupLabel + '</span>' +
               '</h3>' +
               '<div style="font-size:.74rem;color:#64748b;margin-top:2px">Organisation matinale du travail : cochez Présent / Absent en 1 clic par employé ou atelier. Saisie des heures réelles par la suite.</div>' +
             '</div>' +
@@ -24244,13 +24295,27 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
               '<div style="display:flex;align-items:center;gap:6px">' +
                 '<label style="font-size:.8rem;font-weight:800;color:#1e293b">📅 Date :</label>' +
-                '<input type="date" id="fpj-date" value="' + today + '" onchange="showModalFichePresenceJour(this.value)" style="padding:6px 10px;border:1.5px solid #0ea5e9;border-radius:6px;font-size:.82rem;font-weight:800;background:#fff;color:#0f172a">' +
+                '<input type="date" id="fpj-date" value="' + today + '" onchange="fpjClearSel();showModalFichePresenceJour(this.value)" style="padding:6px 10px;border:1.5px solid #0ea5e9;border-radius:6px;font-size:.82rem;font-weight:800;background:#fff;color:#0f172a">' +
               '</div>' +
               '<input type="text" id="fpj-search" placeholder="🔍 Rechercher nom, matricule, atelier..." oninput="filterFichePresenceTable()" style="padding:6px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:.8rem;min-width:210px;background:#fff">' +
               '<div style="display:flex;align-items:center;gap:6px">' +
+                '<label style="font-size:.76rem;font-weight:700;color:#475569">Regrouper par :</label>' +
+                '<select id="fpj-group-select" onchange="fpjSetGroupMode(this.value)" style="padding:6px 10px;border:1.5px solid #0ea5e9;border-radius:6px;font-size:.78rem;font-weight:700;background:#fff;color:#0f172a">' +
+                  '<option value="fonction"' + (fpjGroupMode === "fonction" ? ' selected' : '') + '>Fonction / Atelier</option>' +
+                  '<option value="departement"' + (fpjGroupMode === "departement" ? ' selected' : '') + '>Département</option>' +
+                '</select>' +
+              '</div>' +
+              '<div style="display:flex;align-items:center;gap:6px">' +
+                '<label style="font-size:.76rem;font-weight:700;color:#475569">Trier :</label>' +
+                '<select id="fpj-sort-select" onchange="fpjSetSortMode(this.value)" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem;font-weight:700;background:#fff;color:#0f172a">' +
+                  '<option value="matricule"' + (fpjSortMode === "matricule" ? ' selected' : '') + '>Matricule</option>' +
+                  '<option value="nom"' + (fpjSortMode === "nom" ? ' selected' : '') + '>Nom A→Z</option>' +
+                '</select>' +
+              '</div>' +
+              '<div style="display:flex;align-items:center;gap:6px">' +
                 '<label style="font-size:.76rem;font-weight:700;color:#475569">Filtrer Fonction :</label>' +
                 '<select id="fpj-fonction-select" onchange="filterFichePresenceTable()" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem;font-weight:700;background:#fff;color:#0f172a">' +
-                  '<option value="">Toutes les fonctions (' + globTotal + ')</option>' +
+                  '<option value="">' + (fpjGroupMode === "departement" ? 'Tous les départements' : 'Toutes les fonctions') + ' (' + globTotal + ')</option>' +
                   fctList.map(function(fn){
                     var st = fctStats[fn];
                     return '<option value="' + escH(fn) + '">' + escH(fn) + ' (' + st.pres + '/' + st.total + ' - ' + st.taux + '%)</option>';
@@ -24284,12 +24349,41 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#166534"><strong>Présents :</strong> <span id="fpj-pres-badge" style="font-weight:800">' + globPres + '</span></div>' +
             '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#991b1b"><strong>Absents :</strong> <span id="fpj-abs-badge" style="font-weight:800">' + globAbs + '</span></div>' +
             '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#92400e"><strong>Non pointés :</strong> <span id="fpj-np-badge" style="font-weight:800">' + globNp + '</span></div>' +
+            /* Vue : la liste diminue au fur et à mesure du pointage */
+            '<div style="display:flex;gap:4px;align-items:center;margin-left:auto;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:4px 8px">' +
+              '<span style="font-size:.7rem;font-weight:800;color:#475569;text-transform:uppercase">Afficher :</span>' +
+              '<button type="button" id="fpj-view-all" class="fpj-view-btn" onclick="fpjSetView(\'all\')" style="border-radius:12px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer;border:1px solid transparent;background:#fff;color:#334155">👥 Tous (' + viewTotals.all + ')</button>' +
+              '<button type="button" id="fpj-view-pt" class="fpj-view-btn" onclick="fpjSetView(\'pt\')" style="border-radius:12px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer;border:1px solid transparent;background:#fff;color:#166534">✅ Pointés (' + viewTotals.pres + ')</button>' +
+              '<button type="button" id="fpj-view-np" class="fpj-view-btn" onclick="fpjSetView(\'np\')" style="border-radius:12px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer;border:1px solid transparent;background:#fff;color:#92400e">⏳ Non pointés (' + viewTotals.np + ')</button>' +
+            '</div>' +
+          '</div>' +
+
+          /* Proposition : pointer le reste des non pointés */
+          (globNp > 0 ? (
+            '<div id="fpj-reste-bar" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#fffbeb;border:1.5px dashed #f59e0b;border-radius:8px;padding:8px 14px;margin-bottom:12px">' +
+              '<span style="font-size:.8rem;font-weight:800;color:#92400e">⏳ Il reste <strong id="fpj-reste-count">' + globNp + '</strong> non pointé(s) — voulez-vous pointer le reste ?</span>' +
+              '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+                '<button type="button" onclick="fpjMarkRemaining(true)" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer" title="Marquer présent tous les employés encore non pointés">✅ Tous présents</button>' +
+                '<button type="button" onclick="fpjMarkRemaining(false)" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer" title="Marquer absent tous les employés encore non pointés">❌ Tous absents</button>' +
+                '<button type="button" onclick="fpjSetView(\'np\')" style="background:#fff;color:#92400e;border:1px solid #f59e0b;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">Voir la liste</button>' +
+              '</div>' +
+            '</div>') : '') +
+
+          /* Barre de sélection multiple : cocher plusieurs lignes puis agir en 1 clic */
+          '<div id="fpj-selbar" style="display:none;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#eff6ff;border:1.5px solid #60a5fa;border-radius:8px;padding:8px 14px;margin-bottom:12px">' +
+            '<span id="fpj-selbar-count" style="font-size:.8rem;font-weight:800;color:#1d4ed8">0 sélectionné(s)</span>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+              '<button type="button" onclick="fpjApplySel(true)" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">✅ Marquer Présents</button>' +
+              '<button type="button" onclick="fpjApplySel(false)" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">❌ Marquer Absents</button>' +
+              '<button type="button" onclick="fpjClearSel()" style="background:#fff;color:#475569;border:1px solid #cbd5e1;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">Décocher</button>' +
+            '</div>' +
           '</div>' +
 
           /* Table des employés classée par fonction */
           '<div style="overflow-x:auto;max-height:56vh;border:1.5px solid #cbd5e1;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">' +
             '<table id="fpj-table" style="width:100%;border-collapse:collapse;font-size:.76rem">' +
               '<thead><tr style="background:#0f172a;color:#fff;position:sticky;top:0;z-index:3">' +
+                '<th style="padding:8px 4px;text-align:center;width:28px"><input type="checkbox" id="fpj-selall" onchange="fpjSelectAllVisible(this.checked)" title="Tout cocher (lignes affichées)" style="cursor:pointer;accent-color:#0284c7;width:14px;height:14px"></th>' +
                 '<th style="padding:8px 6px;text-align:center;width:34px">N°</th>' +
                 '<th style="padding:8px 8px;text-align:left;width:75px">Matricule</th>' +
                 '<th style="padding:8px 8px;text-align:left;min-width:180px">Employé</th>' +
@@ -24309,7 +24403,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
           /* En-tête de section par fonction */
           html += '<tr class="fpj-fct-header-row" data-fct="' + escH(fn) + '" style="background:#1e293b;color:#fff;position:sticky;top:33px;z-index:2">' +
-            '<td colspan="10" style="padding:7px 12px;border-top:2px solid #334155;border-bottom:2px solid #0f172a">' +
+            '<td colspan="11" style="padding:7px 12px;border-top:2px solid #334155;border-bottom:2px solid #0f172a">' +
               '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">' +
                 '<div style="display:flex;align-items:center;gap:10px">' +
                   '<span style="font-size:.85rem;font-weight:900;letter-spacing:0.5px;color:#38bdf8">🏷️ ' + escH(fn.toUpperCase()) + '</span>' +
@@ -24359,7 +24453,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             var zebra = (globalIx % 2 === 0) ? '#fff' : '#f8fafc';
             var searchTxt = ((e.matricule||'') + ' ' + e.nom + ' ' + (e.prenoms||'') + ' ' + fn + ' ' + (e.service||'')).toLowerCase();
 
-            html += '<tr class="fpj-row" data-fct="' + escH(fn) + '" data-is-pres="' + (isPresent ? '1' : '0') + '" data-is-abs="' + (isAbsent ? '1' : '0') + '" data-is-np="' + (isNonPointe ? '1' : '0') + '" data-search="' + escH(searchTxt) + '" style="background:' + zebra + ';border-top:1px solid #e2e8f0">' +
+            html += '<tr class="fpj-row" data-emp="' + e.id + '" data-fct="' + escH(fn) + '" data-is-pres="' + (isPresent ? '1' : '0') + '" data-is-abs="' + (isAbsent ? '1' : '0') + '" data-is-np="' + (isNonPointe ? '1' : '0') + '" data-search="' + escH(searchTxt) + '" style="background:' + zebra + ';border-top:1px solid #e2e8f0">' +
+              '<td style="padding:6px 4px;text-align:center"><input type="checkbox" class="fpj-chk" data-emp="' + e.id + '" onchange="fpjToggleSel(this)" title="Sélectionner pour action groupée" style="cursor:pointer;accent-color:#0284c7;width:14px;height:14px"></td>' +
               '<td style="padding:6px 4px;text-align:center;color:#94a3b8;font-weight:600">' + globalIx + '</td>' +
               '<td style="padding:6px;font-weight:800;color:#0f172a">' + escH(e.matricule || '—') + '</td>' +
               '<td style="padding:6px;font-weight:700;color:#1e293b">' + escH(empNameLine(e)) + '</td>' +
@@ -24397,6 +24492,182 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         html += '</tbody></table></div></div>';
         openPtModal(html, true, true);
+
+        /* Vue (tous/pointés/non pointés) + sélection conservée d'un re-rendu à l'autre */
+        document.querySelectorAll(".fpj-chk").forEach(function(cb){
+          if (fpjSel[cb.getAttribute("data-emp")]) cb.checked = true;
+        });
+        fpjUpdateSelBar();
+        filterFichePresenceTable();
+      }
+
+      function fpjSetGroupMode(mode) {
+        fpjGroupMode = (mode === "departement") ? "departement" : "fonction";
+        var badge = document.getElementById("fpj-group-badge");
+        if (badge) badge.textContent = fpjGroupMode === "departement" ? "Par Département" : "Par Fonction / Atelier";
+        var dateStr = (document.getElementById("fpj-date") || {}).value || new Date().toISOString().slice(0, 10);
+        var searchVal = (document.getElementById("fpj-search") || {}).value || "";
+        var scrollPos = (document.getElementById("fpj-scroll-body") || {}).scrollTop || 0;
+        showModalFichePresenceJour(dateStr);
+        setTimeout(function(){
+          var c = document.getElementById("fpj-scroll-body");
+          if (c) c.scrollTop = scrollPos;
+          var s = document.getElementById("fpj-search");
+          if (s && searchVal) s.value = searchVal;
+          filterFichePresenceTable();
+        }, 10);
+      }
+
+      function fpjSetSortMode(mode) {
+        fpjSortMode = (mode === "nom") ? "nom" : "matricule";
+        var dateStr = (document.getElementById("fpj-date") || {}).value || new Date().toISOString().slice(0, 10);
+        var searchVal = (document.getElementById("fpj-search") || {}).value || "";
+        var selFct = (document.getElementById("fpj-fonction-select") || {}).value || "";
+        var scrollPos = (document.getElementById("fpj-scroll-body") || {}).scrollTop || 0;
+        showModalFichePresenceJour(dateStr);
+        setTimeout(function(){
+          var c = document.getElementById("fpj-scroll-body");
+          if (c) c.scrollTop = scrollPos;
+          var s = document.getElementById("fpj-search");
+          if (s && searchVal) s.value = searchVal;
+          var sf = document.getElementById("fpj-fonction-select");
+          if (sf && selFct) sf.value = selFct;
+          filterFichePresenceTable();
+        }, 10);
+      }
+
+      /* Vue : la liste diminue au fur et à mesure que l'on pointe */
+      function fpjSetView(mode) {
+        fpjViewMode = (mode === "pt" || mode === "np") ? mode : "all";
+        filterFichePresenceTable();
+      }
+
+      /* Sélection multiple */
+      function fpjToggleSel(cb) {
+        var id = cb.getAttribute("data-emp");
+        if (cb.checked) fpjSel[id] = true;
+        else delete fpjSel[id];
+        fpjUpdateSelBar();
+      }
+
+      function fpjSelectAllVisible(checked) {
+        document.querySelectorAll(".fpj-chk").forEach(function(cb){
+          var row = cb.closest ? cb.closest(".fpj-row") : null;
+          var visible = !row || row.style.display !== "none";
+          if (!visible) return;
+          cb.checked = checked;
+          var id = cb.getAttribute("data-emp");
+          if (checked) fpjSel[id] = true;
+          else delete fpjSel[id];
+        });
+        fpjUpdateSelBar();
+      }
+
+      function fpjClearSel() {
+        fpjSel = {};
+        document.querySelectorAll(".fpj-chk").forEach(function(cb){ cb.checked = false; });
+        var sa = document.getElementById("fpj-selall");
+        if (sa) sa.checked = false;
+        fpjUpdateSelBar();
+      }
+
+      function fpjSelIds() {
+        return Object.keys(fpjSel || {});
+      }
+
+      function fpjUpdateSelBar() {
+        var ids = fpjSelIds();
+        var bar = document.getElementById("fpj-selbar");
+        var cnt = document.getElementById("fpj-selbar-count");
+        if (cnt) cnt.textContent = ids.length + " sélectionné(s)";
+        if (bar) bar.style.display = ids.length > 0 ? "flex" : "none";
+        var sa = document.getElementById("fpj-selall");
+        if (sa) sa.checked = ids.length > 0 && ids.length >= document.querySelectorAll(".fpj-chk").length;
+      }
+
+      /* Marquer en 1 clic tous les employés sélectionnés */
+      function fpjApplySel(isPres) {
+        var ids = fpjSelIds();
+        if (!ids.length) return toast("Cochez d'abord au moins un employé", "error");
+        var dateStr = (document.getElementById("fpj-date") || {}).value || new Date().toISOString().slice(0, 10);
+        var count = 0;
+        ids.forEach(function(empId){
+          var pts = getPointageData();
+          var idx = pts.findIndex(function(p){ return p && p.employee_id === empId && p.date === dateStr; });
+          var rec = idx !== -1 ? pts[idx] : { id: DB.id(), employee_id: empId, date: dateStr };
+          rec.present = isPres;
+          if (!isPres) {
+            rec.motif = rec.motif || "Non justifié";
+            rec.h_j_manual = "";
+            rec.h_n_manual = "";
+            rec.faute_societe = false;
+            rec.absent_paye = false;
+          } else {
+            if (rec.motif) delete rec.motif;
+            rec.faute_societe = false;
+            rec.absent_paye = false;
+          }
+          if (idx !== -1) pts[idx] = rec;
+          else pts.push(rec);
+          setPointageData(pts);
+          count++;
+        });
+        fpjSel = {};
+        toast((isPres ? "✓ " : "✗ ") + count + " employé(s) marqué(s) " + (isPres ? "présents" : "absents"), "success");
+        fpjRerenderFiche(dateStr, true);
+      }
+
+      /* Proposition : pointer le reste des non pointés */
+      function fpjMarkRemaining(isPres) {
+        var dateStr = (document.getElementById("fpj-date") || {}).value || new Date().toISOString().slice(0, 10);
+        var pts = getPointageData();
+        var ptMap = {};
+        pts.forEach(function(p){ if (p && p.employee_id) ptMap[p.employee_id + "|" + p.date] = p; });
+        var count = 0;
+        getPersonnel().filter(function(p){ return p.en_paie !== false; }).forEach(function(e){
+          var rec = ptMap[e.id + "|" + dateStr];
+          var already = rec ? (rec.present === true || rec.present === false || parseHeure(rec.h_j_manual||"") > 0 || parseHeure(rec.h_n_manual||"") > 0) : false;
+          if (already) return;
+          var newRec = rec || { id: DB.id(), employee_id: e.id, date: dateStr };
+          newRec.present = isPres;
+          if (!isPres) {
+            newRec.motif = newRec.motif || "Non justifié";
+            newRec.h_j_manual = "";
+            newRec.h_n_manual = "";
+          } else {
+            if (newRec.motif) delete newRec.motif;
+          }
+          if (rec) {
+            var i = pts.indexOf(rec);
+            if (i !== -1) pts[i] = newRec; else pts.push(newRec);
+          } else pts.push(newRec);
+          count++;
+        });
+        if (!count) return toast("Aucun employé non pointé restant", "info");
+        setPointageData(pts);
+        toast((isPres ? "✓ " : "✗ ") + count + " non pointé(s) marqué(s) " + (isPres ? "présents" : "absents"), "success");
+        fpjRerenderFiche(dateStr, false);
+      }
+
+      /* Re-rendu commun en conservant scroll, recherche, filtre et vue */
+      function fpjRerenderFiche(dateStr, clearSel) {
+        if (clearSel) fpjSel = {};
+        var container = document.getElementById("fpj-scroll-body");
+        var scrollPos = container ? container.scrollTop : 0;
+        var searchVal = (document.getElementById("fpj-search") || {}).value || "";
+        var selFct = (document.getElementById("fpj-fonction-select") || {}).value || "";
+
+        showModalFichePresenceJour(dateStr);
+
+        setTimeout(function(){
+          var c = document.getElementById("fpj-scroll-body");
+          if (c) c.scrollTop = scrollPos;
+          var s = document.getElementById("fpj-search");
+          if (s && searchVal) s.value = searchVal;
+          var sf = document.getElementById("fpj-fonction-select");
+          if (sf && selFct) sf.value = selFct;
+          filterFichePresenceTable();
+        }, 10);
       }
 
       function fpjSelectChip(fctName) {
@@ -24430,23 +24701,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         setPointageData(pts);
 
-        /* Sauvegarde scroll et filtres pour fluidité instantanée */
-        var container = document.getElementById("fpj-scroll-body");
-        var scrollPos = container ? container.scrollTop : 0;
-        var searchVal = (document.getElementById("fpj-search") || {}).value || "";
-        var selFct = (document.getElementById("fpj-fonction-select") || {}).value || "";
-
-        showModalFichePresenceJour(dateStr);
-
-        setTimeout(function(){
-          var c = document.getElementById("fpj-scroll-body");
-          if (c) c.scrollTop = scrollPos;
-          var s = document.getElementById("fpj-search");
-          if (s && searchVal) s.value = searchVal;
-          var sf = document.getElementById("fpj-fonction-select");
-          if (sf && selFct) sf.value = selFct;
-          if (searchVal || selFct) filterFichePresenceTable();
-        }, 10);
+        /* On retire l'employé pointé de la sélection et on re-rend sans perdre l'état */
+        delete fpjSel[empId];
+        fpjRerenderFiche(dateStr, false);
       }
 
       function fpjSetGroupPresence(targetFct, isPres) {
@@ -24455,8 +24712,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         var emps = getPersonnel().filter(function(p){
           if (p.en_paie === false) return false;
           if (targetFct) {
-            var fn = fpjGetFonctionName(p);
-            return fn === targetFct;
+            return fpjGroupKey(p) === targetFct;
           }
           return true;
         });
@@ -24483,22 +24739,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         setPointageData(pts);
         toast((isPres ? "✓ " : "✗ ") + count + " employé(s) marqué(s) " + (isPres ? "présents" : "absents") + (targetFct ? " (" + targetFct + ")" : ""), "success");
 
-        var container = document.getElementById("fpj-scroll-body");
-        var scrollPos = container ? container.scrollTop : 0;
-        var searchVal = (document.getElementById("fpj-search") || {}).value || "";
-        var selFct = (document.getElementById("fpj-fonction-select") || {}).value || "";
-
-        showModalFichePresenceJour(dateStr);
-
-        setTimeout(function(){
-          var c = document.getElementById("fpj-scroll-body");
-          if (c) c.scrollTop = scrollPos;
-          var s = document.getElementById("fpj-search");
-          if (s && searchVal) s.value = searchVal;
-          var sf = document.getElementById("fpj-fonction-select");
-          if (sf && selFct) sf.value = selFct;
-          if (searchVal || selFct) filterFichePresenceTable();
-        }, 10);
+        fpjRerenderFiche(dateStr, true);
       }
 
       function fpjChangeMotif(empId, dateStr) {
@@ -24534,7 +24775,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         }
         setPointageData(pts);
         toast("Motif d'absence enregistré : " + sel, "success");
-        showModalFichePresenceJour(dateStr);
+        fpjRerenderFiche(dateStr, false);
       }
 
       function filterFichePresenceTable() {
@@ -24552,23 +24793,45 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           }
         });
 
+        /* État des boutons de vue */
+        var viewStyles = {
+          all: "background:#0f172a;color:#fff;border:1px solid #0f172a",
+          pt: "background:#dcfce7;color:#15803d;border:1px solid #86efac",
+          np: "background:#fffbeb;color:#92400e;border:1px solid #f59e0b"
+        };
+        ["all", "pt", "np"].forEach(function(v){
+          var el = document.getElementById("fpj-view-" + v);
+          if (el) el.setAttribute("style", "border-radius:12px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer;" + (viewStyles[v] || ""));
+        });
+
         var rows = document.querySelectorAll(".fpj-row");
-        var visTotal = 0, visPres = 0, visAbs = 0, visNp = 0;
+        var scopeTotal = 0, scopePres = 0, scopeAbs = 0, scopeNp = 0;
+        var visTotal = 0;
         var visFctCounts = {};
 
         rows.forEach(function(r){
           var rFct = r.getAttribute("data-fct") || "";
           var rS = r.getAttribute("data-search") || "";
+          var isPres = r.getAttribute("data-is-pres") === "1";
+          var isAbs = r.getAttribute("data-is-abs") === "1";
+          var isNp = r.getAttribute("data-is-np") === "1";
           var okFct = !selFct || rFct === selFct;
           var okS = !q || rS.indexOf(q) !== -1;
-          var show = okFct && okS;
+          var inScope = okFct && okS;
+          var okView = fpjViewMode === "all" ||
+            (fpjViewMode === "pt" && (isPres || isAbs)) ||
+            (fpjViewMode === "np" && isNp);
+          var show = inScope && okView;
           r.style.display = show ? "" : "none";
+          if (inScope) {
+            scopeTotal++;
+            if (isPres) scopePres++;
+            else if (isAbs) scopeAbs++;
+            else scopeNp++;
+          }
           if (show) {
             visTotal++;
             visFctCounts[rFct] = (visFctCounts[rFct] || 0) + 1;
-            if (r.getAttribute("data-is-pres") === "1") visPres++;
-            else if (r.getAttribute("data-is-abs") === "1") visAbs++;
-            else visNp++;
           }
         });
 
@@ -24580,13 +24843,35 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         var rateEl = document.getElementById("fpj-rate-badge");
         if (rateEl) {
-          var rate = visTotal > 0 ? ((visPres / visTotal) * 100).toFixed(1) : "0.0";
+          var rate = scopeTotal > 0 ? ((scopePres / scopeTotal) * 100).toFixed(1) : "0.0";
           rateEl.textContent = rate + "%";
         }
-        var tb = document.getElementById("fpj-total-badge"); if (tb) tb.textContent = visTotal;
-        var pb = document.getElementById("fpj-pres-badge"); if (pb) pb.textContent = visPres;
-        var ab = document.getElementById("fpj-abs-badge"); if (ab) ab.textContent = visAbs;
-        var nb = document.getElementById("fpj-np-badge"); if (nb) nb.textContent = visNp;
+        var tb = document.getElementById("fpj-total-badge"); if (tb) tb.textContent = scopeTotal;
+        var pb = document.getElementById("fpj-pres-badge"); if (pb) pb.textContent = scopePres;
+        var ab = document.getElementById("fpj-abs-badge"); if (ab) ab.textContent = scopeAbs;
+        var nb = document.getElementById("fpj-np-badge"); if (nb) nb.textContent = scopeNp;
+
+        /* Compteurs des boutons de vue (tous / pointés / non pointés) */
+        var counts = {
+          all: scopeTotal,
+          pt: scopePres + scopeAbs,
+          np: scopeNp
+        };
+        var viewLabels = {
+          all: "👥 Tous",
+          pt: "✅ Pointés",
+          np: "⏳ Non pointés"
+        };
+        ["all", "pt", "np"].forEach(function(v){
+          var el = document.getElementById("fpj-view-" + v);
+          if (el) el.textContent = viewLabels[v] + " (" + counts[v] + ")";
+        });
+
+        /* La barre « pointer le reste » suit le nombre de non pointés du périmètre */
+        var resteBar = document.getElementById("fpj-reste-bar");
+        if (resteBar) resteBar.style.display = scopeNp > 0 ? "flex" : "none";
+        var resteTxt = document.getElementById("fpj-reste-count");
+        if (resteTxt) resteTxt.textContent = scopeNp;
       }
 
       function printFichePresenceJour(dateTarget, isVierge) {
@@ -24596,8 +24881,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         var emps = getPersonnel().filter(function(p){
           if (p.en_paie === false) return false;
           if (selFct) {
-            var fn = fpjGetFonctionName(p);
-            return fn === selFct;
+            return fpjGroupKey(p) === selFct;
           }
           return true;
         });
@@ -24612,10 +24896,10 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           });
         } catch(eM){}
 
-        /* Regroupement par fonction */
+        /* Regroupement par fonction ou département */
         var fctMap = {};
         emps.forEach(function(e){
-          var fn = fpjGetFonctionName(e);
+          var fn = fpjGroupKey(e);
           if (!fctMap[fn]) fctMap[fn] = [];
           fctMap[fn].push(e);
         });
@@ -24626,6 +24910,11 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         fctList.forEach(function(fn){
           fctMap[fn].sort(function(a, b){
+            if (fpjSortMode === "nom") {
+              var c = String(a.nom || "").localeCompare(String(b.nom || ""), undefined, {sensitivity: "base"});
+              if (c !== 0) return c;
+              return String(a.prenoms || "").localeCompare(String(b.prenoms || ""), undefined, {sensitivity: "base"});
+            }
             return String(a.matricule||"").localeCompare(String(b.matricule||""), undefined, {numeric: true});
           });
         });
@@ -24664,7 +24953,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '<div style="display:flex;align-items:center;gap:12px">' +
               (soc.logo ? '<img src="' + soc.logo + '" style="max-height:48px">' : '') +
               '<div><div style="font-size:16px;font-weight:800;text-transform:uppercase">' + escH(soc.nom || 'ACSER') + '</div>' +
-              '<div style="font-size:11px;color:#475569;font-weight:600">FICHE DE PRÉSENCE JOURNALIÈRE & ÉMARGEMENT PAR FONCTION</div></div>' +
+              '<div style="font-size:11px;color:#475569;font-weight:600">FICHE DE PRÉSENCE JOURNALIÈRE & ÉMARGEMENT ' + (fpjGroupMode === "departement" ? "PAR DÉPARTEMENT" : "PAR FONCTION") + '</div></div>' +
             '</div>' +
             '<div style="text-align:right">' +
               '<div style="font-size:13px;font-weight:800;text-transform:capitalize">' + escH(dFr) + '</div>' +
@@ -24704,7 +24993,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
           /* Ligne d'en-tête de fonction dans l'impression */
           h += '<tr style="background:#1e293b;color:#fff;font-weight:800"><td colspan="9" style="padding:5px 8px;font-size:9.5px;letter-spacing:0.5px">' +
-            '🏷️ FONCTION : ' + escH(fn.toUpperCase()) +
+            '🏷️ ' + (fpjGroupMode === "departement" ? "DÉPARTEMENT : " : "FONCTION : ") + escH(fn.toUpperCase()) +
             ' — Effectif : ' + list.length + ' | Présents : ' + fPres + ' | Absents : ' + fAbs + ' (Taux : ' + fRate + '%)' +
           '</td></tr>';
 
@@ -31447,7 +31736,7 @@ function panierVerserJour() {
       function setLPFilter(f) {
         lpFilter = f;
         document
-          .querySelectorAll("#lp-controls .tab-pills button")
+          .querySelectorAll("#lp-filter-pills button")
           .forEach(function (b, i) {
             b.classList.toggle(
               "active",
@@ -31455,6 +31744,19 @@ function panierVerserJour() {
                 (f === "titulaire" && i === 1) ||
                 (f === "journalier" && i === 2) ||
                 (f === "externe" && i === 3),
+            );
+          });
+        loadLivrePaie();
+      }
+      function setLPVue(v) {
+        lpVue = v === "apres" ? "apres" : "avant";
+        document
+          .querySelectorAll("#lp-vue-pills button")
+          .forEach(function (b, i) {
+            b.classList.toggle(
+              "active",
+              (lpVue === "avant" && i === 0) ||
+                (lpVue === "apres" && i === 1),
             );
           });
         loadLivrePaie();
@@ -31489,7 +31791,15 @@ function panierVerserJour() {
           tBrut = 0,
           tCotis = 0,
           tImp = 0,
-          tNet = 0;
+          tNet = 0,
+          tPaye = 0,
+          tSolde = 0;
+        var apres = lpVue === "apres";
+        var paid = {};
+        try {
+          if (typeof psalPaidByEmp === "function")
+            paid = psalPaidByEmp(mois) || {};
+        } catch (ePai) {}
         groups.forEach(function (g) {
           var personnel = getPersonnel().filter(function (p) {
             return (
@@ -31500,16 +31810,21 @@ function panierVerserJour() {
           });
           var cols = 18,
             theadHtml =
-              '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Salaire</th><th style="text-align:right">Transport</th><th style="text-align:right">Cong\u00e9</th><th style="text-align:right">Gratification</th><th style="text-align:right">Brut</th><th style="text-align:right">Brut Fiscal</th><th style="text-align:right">Brut Social</th><th style="text-align:right">CMU (S)</th><th style="text-align:right">Imp\u00f4t Brut</th><th style="text-align:right">R\u00e9duc. Imp\u00f4t</th><th style="text-align:right">CNPS (6,3%)</th><th style="text-align:right">ITS</th><th style="text-align:right">Acomptes</th><th style="text-align:right">Pr\u00eats</th><th style="text-align:right">Report</th><th style="text-align:right">Prime</th><th style="text-align:right">NET</th></tr>';
+              '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Salaire</th><th style="text-align:right">Transport</th><th style="text-align:right">Cong\u00e9</th><th style="text-align:right">Gratification</th><th style="text-align:right">Brut</th><th style="text-align:right">Brut Fiscal</th><th style="text-align:right">Brut Social</th><th style="text-align:right">CMU (S)</th><th style="text-align:right">Imp\u00f4t Brut</th><th style="text-align:right">R\u00e9duc. Imp\u00f4t</th><th style="text-align:right">CNPS (6,3%)</th><th style="text-align:right">ITS</th><th style="text-align:right">Acomptes</th><th style="text-align:right">Pr\u00eats</th><th style="text-align:right">Report</th><th style="text-align:right">Prime</th><th style="text-align:right">Net \u00e0 payer</th>';
           if (g[0] === "journalier") {
             theadHtml =
-              '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Taux Journalier</th><th style="text-align:right">Taux Horaire</th><th style="text-align:right">H. Jour</th><th style="text-align:right">H. Nuit</th><th style="text-align:right">HS</th><th style="text-align:right">Gratification</th><th style="text-align:right">Acompte</th><th style="text-align:right">Pr\u00eat</th><th style="text-align:right">Report</th><th style="text-align:right">Prime</th><th style="text-align:right">NET</th></tr>';
+              '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Taux Journalier</th><th style="text-align:right">Taux Horaire</th><th style="text-align:right">H. Jour</th><th style="text-align:right">H. Nuit</th><th style="text-align:right">HS</th><th style="text-align:right">Gratification</th><th style="text-align:right">Acompte</th><th style="text-align:right">Pr\u00eat</th><th style="text-align:right">Report</th><th style="text-align:right">Prime</th><th style="text-align:right">Net \u00e0 payer</th>';
             cols = 12;
           } else if (g[0] === "externe") {
             theadHtml =
-              '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Forfait Mensuel</th><th style="text-align:right">Jours</th><th style="text-align:right">Montant Prorata</th><th style="text-align:right">Gratification</th><th style="text-align:right">Acompte</th><th style="text-align:right">Pr\u00eat</th><th style="text-align:right">Report</th><th style="text-align:right">Prime</th><th style="text-align:right">NET</th></tr>';
+              '<tr><th>Matricule - Nom & Pr\u00e9noms</th><th style="text-align:right">Forfait Mensuel</th><th style="text-align:right">Jours</th><th style="text-align:right">Montant Prorata</th><th style="text-align:right">Gratification</th><th style="text-align:right">Acompte</th><th style="text-align:right">Pr\u00eat</th><th style="text-align:right">Report</th><th style="text-align:right">Prime</th><th style="text-align:right">Net \u00e0 payer</th>';
             cols = 10;
           }
+          if (apres)
+            theadHtml +=
+              '<th style="text-align:right;color:var(--green)">D\u00e9j\u00e0 pay\u00e9</th><th style="text-align:right;color:var(--gold)">Solde \u00e0 payer</th>';
+          theadHtml += "</tr>";
+          if (apres) cols += 2;
           html +=
             '<div style="padding:.55rem 1rem;background:#1e293b;color:#fff;font-weight:800;font-size:.75rem;letter-spacing:.5px">' +
             g[1] +
@@ -31519,7 +31834,11 @@ function panierVerserJour() {
             personnel.length +
             " personne" +
             (personnel.length > 1 ? "s" : "") +
-            ")</span></div>";
+            ")</span>" +
+            (apres
+              ? ' <span style="font-weight:800;font-size:.64rem;color:#fbbf24">\u25b6 APR\u00c8S PAIE</span>'
+              : ' <span style="font-weight:800;font-size:.64rem;color:#94a3b8">\u25b6 AVANT PAIE</span>') +
+            "</div>";
           if (personnel.length === 0) {
             html +=
               '<div style="padding:1.5rem;text-align:center;color:var(--dim)">Aucun employ\u00e9 dans cette cat\u00e9gorie pour ce mois</div>';
@@ -31530,6 +31849,8 @@ function panierVerserJour() {
           var FT = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
           var FJ = [0,0,0,0,0,0,0,0,0];
           var FE = [0,0,0,0,0,0,0,0,0];
+          var gPaye = 0,
+            gSolde = 0;
           personnel.forEach(function (emp) {
             var c = calculatePayroll(emp, mois);
             var cotis =
@@ -31686,6 +32007,21 @@ function panierVerserJour() {
                 fmt(c.totals.net) +
                 "</td></tr>";
             }
+            var payeV = paid[emp.id] || 0;
+            var soldeV = Math.max(0, (c.totals.net || 0) - payeV);
+            tPaye += payeV;
+            tSolde += soldeV;
+            gPaye += payeV;
+            gSolde += soldeV;
+            if (apres)
+              row = row.replace(
+                /<\/tr>$/,
+                '<td style="text-align:right;color:var(--green)">' +
+                  fmt(payeV) +
+                  '</td><td style="text-align:right;color:var(--gold);font-weight:700">' +
+                  fmt(soldeV) +
+                  "</td></tr>",
+              );
             html += row;
           });
           var footCells = "";
@@ -31703,6 +32039,13 @@ function panierVerserJour() {
             for (var ftk = 0; ftk < 16; ftk++) footCells += '<td style="text-align:right">' + fmt(FT[ftk]) + "</td>";
             footCells += '<td style="text-align:right;color:var(--green)">' + fmt(FT[16]) + "</td>";
           }
+          if (apres)
+            footCells +=
+              '<td style="text-align:right;color:var(--green)">' +
+              fmt(gPaye) +
+              '</td><td style="text-align:right;color:var(--gold)">' +
+              fmt(gSolde) +
+              "</td>";
           html +=
             '<tfoot><tr style="background:#f1f5f9;font-weight:800"><td style="text-align:right">TOT. LIVRE</td>' + footCells + "</tr></tfoot>";
           html += "</tbody></table>";
@@ -31712,6 +32055,10 @@ function panierVerserJour() {
         document.getElementById("lp-tot-cotis").textContent = fmtF(tCotis);
         document.getElementById("lp-tot-impots").textContent = fmtF(tImp);
         document.getElementById("lp-tot-net").textContent = fmtF(tNet);
+        var elPaye = document.getElementById("lp-tot-paye");
+        if (elPaye) elPaye.textContent = fmtF(tPaye);
+        var elSolde = document.getElementById("lp-tot-solde");
+        if (elSolde) elSolde.textContent = fmtF(tSolde);
       }
       function exportLP() {
         var mois =
@@ -31719,6 +32066,14 @@ function panierVerserJour() {
             document.getElementById("lp-mois").value) ||
           new Date().toISOString().slice(0, 7);
         var isAll = typeof lpFilter === "undefined" || lpFilter === "all";
+        var apresLP = typeof lpVue !== "undefined" && lpVue === "apres";
+        var paidLP = {};
+        if (apresLP) {
+          try {
+            if (typeof psalPaidByEmp === "function")
+              paidLP = psalPaidByEmp(mois) || {};
+          } catch (ePL) {}
+        }
         var groups = [];
         if (typeof lpFilter !== "undefined") {
           if (lpFilter === "journalier")
@@ -31792,6 +32147,8 @@ function panierVerserJour() {
             mois +
             "  |  Filtre: " +
             (typeof lpFilter !== "undefined" ? lpFilter : "all") +
+            "  |  Vue: " +
+            (apresLP ? "après paie" : "avant paie") +
             "  |  Édité le " +
             new Date().toLocaleDateString("fr-FR"),
         ]);
@@ -31842,7 +32199,12 @@ function panierVerserJour() {
           "Prime",
           "NET",
         ];
-        var totalCols = 18;
+        if (apresLP) {
+          hdrTit.push("Déjà payé", "Solde à payer");
+          hdrJou.push("Déjà payé", "Solde à payer");
+          hdrExt.push("Déjà payé", "Solde à payer");
+        }
+        var totalCols = apresLP ? 20 : 18;
         var headerTopCount = aoa.length;
         var merges = [];
         for (var _mr = 0; _mr < headerTopCount; _mr++) {
@@ -31905,6 +32267,8 @@ function panierVerserJour() {
           var XT = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
           var XJ = [0,0,0,0,0,0,0,0,0];
           var XE = [0,0,0,0,0,0,0,0,0];
+          var XP = 0,
+            XS = 0;
           perso.forEach(function (emp) {
             var c = null;
             try {
@@ -32003,6 +32367,14 @@ function panierVerserJour() {
                 XE[xei] += (typeof xv === "number" ? xv : 0);
               }
             }
+            if (apresLP) {
+              var payeX = paidLP[emp.id] || 0;
+              var netX = typeof t.net === "number" ? t.net : 0;
+              var soldeX = Math.max(0, netX - payeX);
+              row.push(payeX, soldeX);
+              XP += payeX;
+              XS += soldeX;
+            }
             aoa.push(row);
           });
           if (perso.length === 0) {
@@ -32022,6 +32394,10 @@ function panierVerserJour() {
               for (var tji = 0; tji < 9; tji++) totRow[3 + tji] = XJ[tji];
             } else {
               for (var tei = 0; tei < 9; tei++) totRow[1 + tei] = XE[tei];
+            }
+            if (apresLP) {
+              totRow[hdr.length - 2] = XP;
+              totRow[hdr.length - 1] = XS;
             }
             aoa.push(totRow);
             totalRows.push(rTot);
@@ -32193,8 +32569,11 @@ function panierVerserJour() {
                     right: { style: "thin", color: { rgb: "CBD5E1" } },
                   },
                 };
-                if (cc2 === totalCols - 1 && ws[ad]) {
+                if ((apresLP ? cc2 === totalCols - 3 : cc2 === totalCols - 1) && ws[ad]) {
                   ws[ad].s.font.color = { rgb: "059669" };
+                }
+                if (apresLP && cc2 === totalCols - 1 && ws[ad]) {
+                  ws[ad].s.font.color = { rgb: "B45309" };
                 }
               }
             });
@@ -35057,6 +35436,7 @@ function printCongeIndividuel(empId) {
       /* ==================== DASHBOARD ==================== */
       var _dashChartContrats, _dashChartDepts;
       var lpFilter = "all";
+      var lpVue = "avant";
       function _fmtMoisLabel(mois) {
         if (!mois) return "";
         var parts = mois.split("-");
@@ -39296,6 +39676,7 @@ function printCongeIndividuel(empId) {
           loadCategories();
         } catch (eLC) {}
         lpFilter = "all";
+        lpVue = "avant";
         var saved = localStorage.getItem("paye_currentSection") || "dashboard";
         /* Intégré dans production.html (Exploitation → Pointage) via iframe
            same-origin : paye.html#pointage ouvre directement le pointage. */
