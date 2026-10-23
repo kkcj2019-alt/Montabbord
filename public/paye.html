@@ -24207,12 +24207,67 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
       var fpjSortMode = "matricule";
       var fpjViewMode = "np";
       var fpjSel = {};
+      function fpjGetDeptName(e) {
+        var d = String((e && (e.service || e.departement)) || "").trim();
+        return d || "Non assigné";
+      }
       function fpjGroupKey(e) {
-        if (fpjGroupMode === "departement") {
-          var d = String((e && (e.service || e.departement)) || "").trim();
-          return d || "Non assigné";
-        }
-        return fpjGetFonctionName(e);
+        return fpjGroupMode === "departement" ? fpjGetDeptName(e) : fpjGetFonctionName(e);
+      }
+      /* Statistiques d'une liste d'employés pour une date (présents / absents / non pointés) */
+      function fpjStatsOf(list, ptMap, montMap) {
+        var st = { total: list.length, pres: 0, abs: 0, np: 0 };
+        list.forEach(function(e){
+          var rec = ptMap[e.id];
+          var h = rec ? (parseHeure(rec.h_j_manual || "") + parseHeure(rec.h_n_manual || "")) : 0;
+          var isMont = !!(montMap && montMap[e.id]);
+          var isPres = rec ? (rec.present === true || h > 0 || isMont || rec.faute_societe === true || rec.absent_paye === true) : false;
+          if (isPres) st.pres++;
+          else if (rec && rec.present === false) st.abs++;
+          else st.np++;
+        });
+        st.taux = st.total > 0 ? ((st.pres / st.total) * 100).toFixed(0) : "0";
+        return st;
+      }
+      function fpjSortEmps(list) {
+        return list.slice().sort(function(a, b){
+          if (fpjSortMode === "nom") {
+            var c = String(a.nom || "").localeCompare(String(b.nom || ""), undefined, { sensitivity: "base" });
+            if (c !== 0) return c;
+            return String(a.prenoms || "").localeCompare(String(b.prenoms || ""), undefined, { sensitivity: "base" });
+          }
+          return String(a.matricule || "").localeCompare(String(b.matricule || ""), undefined, { numeric: true });
+        });
+      }
+      /* Hiérarchie : par Fonction, ou par Département PUIS Fonction (Département → Fonction) */
+      function fpjBuildSections(emps, ptMap, montMap) {
+        var byDept = {};
+        emps.forEach(function(e){
+          var d = fpjGroupMode === "departement" ? fpjGetDeptName(e) : "—";
+          var f = fpjGetFonctionName(e);
+          if (!byDept[d]) byDept[d] = {};
+          if (!byDept[d][f]) byDept[d][f] = [];
+          byDept[d][f].push(e);
+        });
+        var cmp = function(a, b){ return a.localeCompare(b, undefined, { sensitivity: "base" }); };
+        var sections = [];
+        var deptStats = {};
+        Object.keys(byDept).sort(cmp).forEach(function(d){
+          var dList = [];
+          Object.keys(byDept[d]).sort(cmp).forEach(function(f){
+            var list = fpjSortEmps(byDept[d][f]);
+            dList = dList.concat(list);
+            sections.push({
+              dept: fpjGroupMode === "departement" ? d : "",
+              fct: f,
+              primary: fpjGroupMode === "departement" ? d : f,
+              list: list,
+              stats: fpjStatsOf(list, ptMap, montMap)
+            });
+          });
+          deptStats[d] = { stats: fpjStatsOf(dList, ptMap, montMap) };
+        });
+        return { sections: sections, deptStats: deptStats };
       }
 
       function showModalFichePresenceJour(dateTarget) {
@@ -24229,56 +24284,59 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           });
         } catch(eM){}
 
-        /* Regroupement par Fonction OU par Département */
-        var fctMap = {};
-        allEmps.forEach(function(e){
-          var fn = fpjGroupKey(e);
-          if (!fctMap[fn]) fctMap[fn] = [];
-          fctMap[fn].push(e);
-        });
+        /* Regroupement : par Fonction, ou par Département PUIS Fonction */
+        var hier = fpjBuildSections(allEmps, ptMap, montMap);
+        var sections = hier.sections;
+        var deptStats = hier.deptStats;
 
-        var fctList = Object.keys(fctMap).sort(function(a, b){
-          return a.localeCompare(b, undefined, {sensitivity: "base"});
-        });
-
-        /* Tri de chaque groupe : matricule (défaut) ou nom */
-        fctList.forEach(function(fn){
-          fctMap[fn].sort(function(a, b){
-            if (fpjSortMode === "nom") {
-              var c = String(a.nom || "").localeCompare(String(b.nom || ""), undefined, {sensitivity: "base"});
-              if (c !== 0) return c;
-              return String(a.prenoms || "").localeCompare(String(b.prenoms || ""), undefined, {sensitivity: "base"});
-            }
-            return String(a.matricule||"").localeCompare(String(b.matricule||""), undefined, {numeric: true});
-          });
-        });
-
-        /* Statistiques globales et par fonction */
+        /* Statistiques globales + par groupe principal (département ou fonction) */
         var globPres = 0, globAbs = 0, globNp = 0;
-        var fctStats = {};
-        fctList.forEach(function(fn){
-          var list = fctMap[fn];
-          var st = { total: list.length, pres: 0, abs: 0, np: 0 };
-          list.forEach(function(e){
-            var rec = ptMap[e.id];
-            var h = rec ? (parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"")) : 0;
-            var isMont = !!montMap[e.id];
-            var isPres = rec ? (rec.present === true || h > 0 || isMont || rec.faute_societe === true || rec.absent_paye === true) : false;
-            if (isPres) { st.pres++; globPres++; }
-            else if (rec && rec.present === false) { st.abs++; globAbs++; }
-            else { st.np++; globNp++; }
-          });
-          st.taux = st.total > 0 ? ((st.pres / st.total) * 100).toFixed(0) : "0";
-          fctStats[fn] = st;
+        var primaryStats = {};
+        sections.forEach(function(s){
+          var st = s.stats;
+          globPres += st.pres; globAbs += st.abs; globNp += st.np;
+          if (!primaryStats[s.primary]) primaryStats[s.primary] = { total: 0, pres: 0, abs: 0, np: 0 };
+          var p = primaryStats[s.primary];
+          p.total += st.total; p.pres += st.pres; p.abs += st.abs; p.np += st.np;
+        });
+        var primaryList = Object.keys(primaryStats).sort(function(a, b){
+          return a.localeCompare(b, undefined, { sensitivity: "base" });
+        });
+        primaryList.forEach(function(k){
+          var p = primaryStats[k];
+          p.taux = p.total > 0 ? ((p.pres / p.total) * 100).toFixed(0) : "0";
         });
         var globTotal = allEmps.length;
         var globRate = globTotal > 0 ? ((globPres / globTotal) * 100).toFixed(1) : "0.0";
-        var groupLabel = fpjGroupMode === "departement" ? "Par Département" : "Par Fonction / Atelier";
+        var groupLabel = fpjGroupMode === "departement" ? "Par Département \u203a Fonction" : "Par Fonction / Atelier";
+        var filterLabel = fpjGroupMode === "departement" ? "Filtrer Département" : "Filtrer Fonction";
         var viewTotals = { all: globTotal, pres: globPres + globAbs, np: globNp };
         /* Plus rien à pointer : on n'affiche pas un tableau « non pointés » vide */
         if (fpjViewMode === "np" && globNp === 0 && globTotal > 0) fpjViewMode = "all";
 
-        var html = '<div id="fpj-scroll-body" style="padding:16px 20px;max-width:1250px;margin:0 auto;max-height:92vh;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif">' +
+        var fpjStyle = '<style>' +
+          '#fpj-scroll-body .fpj-btn{transition:transform .12s ease, box-shadow .12s ease, filter .12s ease, background .12s ease}' +
+          '#fpj-scroll-body .fpj-btn:hover{filter:brightness(1.07);transform:translateY(-1px);box-shadow:0 4px 10px rgba(15,23,42,.22)}' +
+          '#fpj-scroll-body .fpj-btn:active{transform:translateY(1px) scale(.96);box-shadow:inset 0 2px 5px rgba(0,0,0,.28);filter:brightness(.94)}' +
+          '#fpj-scroll-body .fpj-pres:hover{background:#dcfce7 !important}' +
+          '#fpj-scroll-body .fpj-abs:hover{background:#fee2e2 !important}' +
+          '#fpj-scroll-body .fpj-row{transition:background .12s ease, box-shadow .12s ease}' +
+          '#fpj-scroll-body .fpj-row:hover{background:#e0f2fe !important;box-shadow:inset 4px 0 0 #0284c7}' +
+          '#fpj-scroll-body .fpj-row:hover td{background:transparent}' +
+          '#fpj-scroll-body .fpj-fct-chip{transition:transform .12s ease, box-shadow .12s ease, filter .12s ease}' +
+          '#fpj-scroll-body .fpj-fct-chip:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(2,132,199,.32);filter:brightness(1.03)}' +
+          '#fpj-scroll-body .fpj-fct-chip:active{transform:scale(.94)}' +
+          '#fpj-scroll-body .fpj-view-btn{transition:transform .12s ease, filter .12s ease}' +
+          '#fpj-scroll-body .fpj-view-btn:hover{filter:brightness(1.06)}' +
+          '#fpj-scroll-body .fpj-view-btn:active{transform:scale(.95)}' +
+          '#fpj-scroll-body .fpj-close{transition:transform .18s ease, background .18s ease, color .18s ease}' +
+          '#fpj-scroll-body .fpj-close:hover{background:#e11d48 !important;color:#fff !important;transform:rotate(90deg) scale(1.08)}' +
+          '#fpj-scroll-body .fpj-close:active{transform:rotate(90deg) scale(.9)}' +
+          '#fpj-scroll-body .fpj-chk,#fpj-scroll-body input[type=checkbox]{cursor:pointer}' +
+          '#fpj-scroll-body .fpj-chk:hover{outline:2px solid #60a5fa;outline-offset:2px;border-radius:3px}' +
+          '</style>';
+
+        var html = fpjStyle + '<div id="fpj-scroll-body" style="padding:16px 20px;max-width:1250px;margin:0 auto;max-height:92vh;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Arial,sans-serif;background:#f8fafc">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px">' +
             '<div>' +
               '<h3 style="font-size:1.2rem;font-weight:900;color:#0f172a;margin:0;display:flex;align-items:center;gap:8px">' +
@@ -24287,7 +24345,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               '</h3>' +
               '<div style="font-size:.74rem;color:#64748b;margin-top:2px">Organisation matinale du travail : cochez Présent / Absent en 1 clic par employé ou atelier. Saisie des heures réelles par la suite.</div>' +
             '</div>' +
-            '<button onclick="closePtModal()" style="border:none;background:#f1f5f9;color:#475569;width:32px;height:32px;border-radius:50%;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.2s" title="Fermer" onmouseover="this.style.background=\'#e2e8f0\'" onmouseout="this.style.background=\'#f1f5f9\'">✕</button>' +
+            '<button class="fpj-close" onclick="closePtModal()" style="border:none;background:#f1f5f9;color:#475569;width:34px;height:34px;border-radius:50%;font-size:1.15rem;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Fermer">✕</button>' +
           '</div>' +
 
           /* Barre de commande supérieure */
@@ -24302,7 +24360,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 '<label style="font-size:.76rem;font-weight:700;color:#475569">Regrouper par :</label>' +
                 '<select id="fpj-group-select" onchange="fpjSetGroupMode(this.value)" style="padding:6px 10px;border:1.5px solid #0ea5e9;border-radius:6px;font-size:.78rem;font-weight:700;background:#fff;color:#0f172a">' +
                   '<option value="fonction"' + (fpjGroupMode === "fonction" ? ' selected' : '') + '>Fonction / Atelier</option>' +
-                  '<option value="departement"' + (fpjGroupMode === "departement" ? ' selected' : '') + '>Département</option>' +
+                  '<option value="departement"' + (fpjGroupMode === "departement" ? ' selected' : '') + '>Département \u203a Fonction</option>' +
                 '</select>' +
               '</div>' +
               '<div style="display:flex;align-items:center;gap:6px">' +
@@ -24313,31 +24371,31 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 '</select>' +
               '</div>' +
               '<div style="display:flex;align-items:center;gap:6px">' +
-                '<label style="font-size:.76rem;font-weight:700;color:#475569">Filtrer Fonction :</label>' +
+                '<label style="font-size:.76rem;font-weight:700;color:#475569">' + filterLabel + ' :</label>' +
                 '<select id="fpj-fonction-select" onchange="filterFichePresenceTable()" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem;font-weight:700;background:#fff;color:#0f172a">' +
                   '<option value="">' + (fpjGroupMode === "departement" ? 'Tous les départements' : 'Toutes les fonctions') + ' (' + globTotal + ')</option>' +
-                  fctList.map(function(fn){
-                    var st = fctStats[fn];
+                  primaryList.map(function(fn){
+                    var st = primaryStats[fn];
                     return '<option value="' + escH(fn) + '">' + escH(fn) + ' (' + st.pres + '/' + st.total + ' - ' + st.taux + '%)</option>';
                   }).join('') +
                 '</select>' +
               '</div>' +
             '</div>' +
             '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
-              '<button class="btn" onclick="fpjSetGroupPresence(\'\', true)" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer" title="Marquer toute l\'entreprise présente en 1 clic">⚡ Tout le monde Présent</button>' +
-              '<button class="btn" onclick="printFichePresenceJour(\'' + today + '\', false)" style="background:#16a34a;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer">🖨️ Imprimer la Fiche du jour</button>' +
-              '<button class="btn btn-sec" onclick="printFichePresenceJour(\'' + today + '\', true)" style="padding:6px 12px;font-size:.76rem;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer">📄 Émargement vierge</button>' +
+              '<button class="btn fpj-btn" onclick="fpjSetGroupPresence(\'\', true)" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer" title="Marquer toute l\'entreprise présente en 1 clic">⚡ Tout le monde Présent</button>' +
+              '<button class="btn fpj-btn" onclick="printFichePresenceJour(\'' + today + '\', false)" style="background:#16a34a;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer">🖨️ Imprimer la Fiche du jour</button>' +
+              '<button class="btn btn-sec fpj-btn" onclick="printFichePresenceJour(\'' + today + '\', true)" style="padding:6px 12px;font-size:.76rem;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer">📄 Émargement vierge</button>' +
             '</div>' +
           '</div>' +
 
-          /* Chips de navigation rapide par Fonction */
+          /* Chips de navigation rapide par groupe principal (fonction ou département) */
           '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px">' +
-            '<span style="font-size:.72rem;font-weight:800;color:#475569;text-transform:uppercase;margin-right:4px">Accès rapide atelier :</span>' +
-            '<button type="button" class="fpj-fct-chip" onclick="fpjSelectChip(\'\')" style="background:#0f172a;color:#fff;border:none;border-radius:14px;padding:3px 10px;font-size:.72rem;font-weight:700;cursor:pointer">Toutes (' + globTotal + ')</button>' +
-            fctList.map(function(fn){
-              var st = fctStats[fn];
+            '<span style="font-size:.72rem;font-weight:800;color:#475569;text-transform:uppercase;margin-right:4px">Accès rapide ' + (fpjGroupMode === "departement" ? "département" : "atelier") + ' :</span>' +
+            '<button type="button" class="fpj-fct-chip" data-grp-name="" onclick="fpjSelectChip(\'\')" style="background:#0f172a;color:#fff;border:none;border-radius:14px;padding:3px 10px;font-size:.72rem;font-weight:700;cursor:pointer">Toutes (' + globTotal + ')</button>' +
+            primaryList.map(function(fn){
+              var st = primaryStats[fn];
               var bgChip = st.pres === st.total && st.total > 0 ? '#dcfce7;color:#15803d;border:1px solid #86efac' : (st.abs > 0 ? '#fee2e2;color:#b91c1c;border:1px solid #fca5a5' : '#fff;color:#334155;border:1px solid #cbd5e1');
-              return '<button type="button" class="fpj-fct-chip" data-fct-name="' + escH(fn) + '" onclick="fpjSelectChip(\'' + escH(fn).replace(/'/g, "\\'") + '\')" style="background:' + bgChip + ';border-radius:14px;padding:3px 10px;font-size:.72rem;font-weight:700;cursor:pointer">' +
+              return '<button type="button" class="fpj-fct-chip" data-grp-name="' + escH(fn) + '" onclick="fpjSelectChip(\'' + escH(fn).replace(/'/g, "\\'") + '\')" style="background:' + bgChip + ';border-radius:14px;padding:3px 10px;font-size:.72rem;font-weight:700;cursor:pointer">' +
                 escH(fn) + ' <span style="font-weight:800">(' + st.pres + '/' + st.total + ')</span></button>';
             }).join('') +
           '</div>' +
@@ -24363,9 +24421,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '<div id="fpj-reste-bar" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#fffbeb;border:1.5px dashed #f59e0b;border-radius:8px;padding:8px 14px;margin-bottom:12px">' +
               '<span style="font-size:.8rem;font-weight:800;color:#92400e">⏳ Il reste <strong id="fpj-reste-count">' + globNp + '</strong> non pointé(s) — voulez-vous pointer le reste ?</span>' +
               '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-                '<button type="button" onclick="fpjMarkRemaining(true)" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer" title="Marquer présent tous les employés encore non pointés">✅ Tous présents</button>' +
-                '<button type="button" onclick="fpjMarkRemaining(false)" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer" title="Marquer absent tous les employés encore non pointés">❌ Tous absents</button>' +
-                '<button type="button" onclick="fpjSetView(\'np\')" style="background:#fff;color:#92400e;border:1px solid #f59e0b;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">Voir la liste</button>' +
+                '<button type="button" class="fpj-btn" onclick="fpjMarkRemaining(true)" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer" title="Marquer présent tous les employés encore non pointés">✅ Tous présents</button>' +
+                '<button type="button" class="fpj-btn" onclick="fpjMarkRemaining(false)" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer" title="Marquer absent tous les employés encore non pointés">❌ Tous absents</button>' +
+                '<button type="button" class="fpj-btn" onclick="fpjSetView(\'np\')" style="background:#fff;color:#92400e;border:1px solid #f59e0b;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">Voir la liste</button>' +
               '</div>' +
             '</div>') : '') +
 
@@ -24373,9 +24431,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           '<div id="fpj-selbar" style="display:none;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#eff6ff;border:1.5px solid #60a5fa;border-radius:8px;padding:8px 14px;margin-bottom:12px">' +
             '<span id="fpj-selbar-count" style="font-size:.8rem;font-weight:800;color:#1d4ed8">0 sélectionné(s)</span>' +
             '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-              '<button type="button" onclick="fpjApplySel(true)" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">✅ Marquer Présents</button>' +
-              '<button type="button" onclick="fpjApplySel(false)" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">❌ Marquer Absents</button>' +
-              '<button type="button" onclick="fpjClearSel()" style="background:#fff;color:#475569;border:1px solid #cbd5e1;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">Décocher</button>' +
+              '<button type="button" class="fpj-btn" onclick="fpjApplySel(true)" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">✅ Marquer Présents</button>' +
+              '<button type="button" class="fpj-btn" onclick="fpjApplySel(false)" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">❌ Marquer Absents</button>' +
+              '<button type="button" class="fpj-btn" onclick="fpjClearSel()" style="background:#fff;color:#475569;border:1px solid #cbd5e1;border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer">Décocher</button>' +
             '</div>' +
           '</div>' +
 
@@ -24397,29 +24455,50 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               '</tr></thead><tbody>';
 
         var globalIx = 0;
-        fctList.forEach(function(fn){
-          var list = fctMap[fn];
-          var st = fctStats[fn];
+        var lastDept = null;
+        sections.forEach(function(sec){
+          var list = sec.list;
+          var st = sec.stats;
+          var fctEsc = escH(sec.fct).replace(/'/g, "\\'");
+          var deptEsc = escH(sec.dept).replace(/'/g, "\\'");
 
-          /* En-tête de section par fonction */
-          html += '<tr class="fpj-fct-header-row" data-fct="' + escH(fn) + '" style="background:#1e293b;color:#fff;position:sticky;top:33px;z-index:2">' +
-            '<td colspan="11" style="padding:7px 12px;border-top:2px solid #334155;border-bottom:2px solid #0f172a">' +
+          /* Bandeau Département (mode Département → Fonction uniquement) */
+          if (fpjGroupMode === "departement" && sec.dept !== lastDept) {
+            lastDept = sec.dept;
+            var ds = (deptStats[sec.dept] && deptStats[sec.dept].stats) || { total: 0, pres: 0, abs: 0, np: 0, taux: "0" };
+            html += '<tr class="fpj-dept-header-row" data-dept="' + escH(sec.dept) + '" style="background:linear-gradient(90deg,#0f172a 0%,#1e3a8a 100%);color:#fff;position:sticky;top:33px;z-index:2">' +
+              '<td colspan="11" style="padding:9px 12px;border-top:2px solid #0b1220;border-bottom:2px solid #0b1220">' +
+                '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">' +
+                  '<span style="font-size:.9rem;font-weight:900;letter-spacing:.6px">🏢 ' + escH(sec.dept.toUpperCase()) + '</span>' +
+                  '<span style="font-size:.72rem;background:rgba(255,255,255,.16);color:#e2e8f0;padding:3px 10px;border-radius:10px;font-weight:700">' +
+                    ds.total + ' employé(s) · <strong style="color:#4ade80">' + ds.pres + ' Présent(s)</strong> · <strong style="color:#fca5a5">' + ds.abs + ' Absent(s)</strong> · <strong style="color:#93c5fd">' + ds.np + ' Non pointé(s)</strong> · Taux : ' + ds.taux + '%' +
+                  '</span>' +
+                '</div>' +
+              '</td>' +
+            '</tr>';
+          }
+
+          /* En-tête de fonction (sous-groupe) */
+          var subIndent = fpjGroupMode === "departement" ? "padding-left:30px;" : "";
+          var subTop = fpjGroupMode === "departement" ? 70 : 33;
+          html += '<tr class="fpj-fct-header-row" data-fct="' + escH(sec.fct) + '" data-dept="' + escH(sec.dept) + '" style="background:#1e293b;color:#fff;position:sticky;top:' + subTop + 'px;z-index:1">' +
+            '<td colspan="11" style="' + subIndent + 'padding-top:6px;padding-bottom:6px;padding-right:12px;border-top:1px solid #334155;border-bottom:1px solid #0f172a">' +
               '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">' +
                 '<div style="display:flex;align-items:center;gap:10px">' +
-                  '<span style="font-size:.85rem;font-weight:900;letter-spacing:0.5px;color:#38bdf8">🏷️ ' + escH(fn.toUpperCase()) + '</span>' +
-                  '<span style="font-size:.74rem;background:#334155;color:#e2e8f0;padding:2px 8px;border-radius:10px;font-weight:700">' +
+                  '<span style="font-size:.8rem;font-weight:800;letter-spacing:0.4px;color:#7dd3fc">' + (fpjGroupMode === "departement" ? '\u21b3 ' : '') + '🏷️ ' + escH(sec.fct.toUpperCase()) + '</span>' +
+                  '<span style="font-size:.72rem;background:#334155;color:#e2e8f0;padding:2px 8px;border-radius:10px;font-weight:700">' +
                     st.total + ' employé(s) · <strong style="color:#4ade80">' + st.pres + ' Présent(s)</strong> · <strong style="color:#f87171">' + st.abs + ' Absent(s)</strong> · Taux : ' + st.taux + '%' +
                   '</span>' +
                 '</div>' +
                 '<div style="display:flex;gap:6px;align-items:center">' +
-                  '<button type="button" onclick="fpjSetGroupPresence(\'' + escH(fn).replace(/'/g, "\\'") + '\', true)" style="background:#16a34a;color:#fff;border:none;border-radius:5px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer" title="Marquer tous les employés de ' + escH(fn) + ' comme présents le matin">⚡ Tous Présents</button>' +
-                  '<button type="button" onclick="fpjSetGroupPresence(\'' + escH(fn).replace(/'/g, "\\'") + '\', false)" style="background:#dc2626;color:#fff;border:none;border-radius:5px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer" title="Marquer tous les employés de ' + escH(fn) + ' comme absents">⚡ Tous Absents</button>' +
+                  '<button type="button" class="fpj-btn" onclick="fpjSetGroupFonction(\'' + fctEsc + '\', \'' + deptEsc + '\', true)" style="background:#16a34a;color:#fff;border:none;border-radius:5px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer" title="Marquer cette fonction présente">⚡ Tous Présents</button>' +
+                  '<button type="button" class="fpj-btn" onclick="fpjSetGroupFonction(\'' + fctEsc + '\', \'' + deptEsc + '\', false)" style="background:#dc2626;color:#fff;border:none;border-radius:5px;padding:3px 10px;font-size:.72rem;font-weight:800;cursor:pointer" title="Marquer cette fonction absente">⚡ Tous Absents</button>' +
                 '</div>' +
               '</div>' +
             '</td>' +
           '</tr>';
 
-          /* Lignes employés de la fonction */
+          /* Lignes employés du sous-groupe */
           list.forEach(function(e){
             globalIx++;
             var rec = ptMap[e.id];
@@ -24442,7 +24521,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             } else if (isAbsent) {
               motifBadge = '<div style="margin-top:3px;font-size:.68rem;color:#b91c1c">' +
                 '<span style="font-weight:700">Motif : ' + escH(rec.motif || 'Non justifié') + '</span> ' +
-                '<button type="button" onclick="fpjChangeMotif(\'' + e.id + '\', \'' + today + '\')" style="background:transparent;border:none;color:#2563eb;text-decoration:underline;cursor:pointer;font-size:.68rem;padding:0">✏️ Changer</button>' +
+                '<button type="button" class="fpj-btn" onclick="fpjChangeMotif(\'' + e.id + '\', \'' + today + '\')" style="background:transparent;border:none;color:#2563eb;text-decoration:underline;cursor:pointer;font-size:.68rem;padding:0">✏️ Changer</button>' +
               '</div>';
             } else if (isMont) {
               motifBadge = '<span style="display:inline-block;margin-top:2px;font-size:.66rem;font-weight:800;color:#1d4ed8;background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;padding:1px 6px">⚙️ Rendement: ' + qMont + ' pcs</span>';
@@ -24451,22 +24530,22 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             var creneaux = (rec && (rec.j_arrivee || rec.j_fin)) ? (rec.j_arrivee || '--') + ' - ' + (rec.j_fin || '--') : (rec && rec.n_arrivee ? 'Nuit: ' + rec.n_arrivee + ' - ' + (rec.n_fin||'--') : '—');
             var obs = (rec && (rec.observation || rec.obs || '')) || '';
             var zebra = (globalIx % 2 === 0) ? '#fff' : '#f8fafc';
-            var searchTxt = ((e.matricule||'') + ' ' + e.nom + ' ' + (e.prenoms||'') + ' ' + fn + ' ' + (e.service||'')).toLowerCase();
+            var searchTxt = ((e.matricule||'') + ' ' + e.nom + ' ' + (e.prenoms||'') + ' ' + sec.fct + ' ' + sec.dept + ' ' + (e.service||'')).toLowerCase();
 
-            html += '<tr class="fpj-row" data-emp="' + e.id + '" data-fct="' + escH(fn) + '" data-is-pres="' + (isPresent ? '1' : '0') + '" data-is-abs="' + (isAbsent ? '1' : '0') + '" data-is-np="' + (isNonPointe ? '1' : '0') + '" data-search="' + escH(searchTxt) + '" style="background:' + zebra + ';border-top:1px solid #e2e8f0">' +
+            html += '<tr class="fpj-row" data-emp="' + e.id + '" data-grp="' + escH(sec.primary) + '" data-fct="' + escH(sec.fct) + '" data-dept="' + escH(sec.dept) + '" data-is-pres="' + (isPresent ? '1' : '0') + '" data-is-abs="' + (isAbsent ? '1' : '0') + '" data-is-np="' + (isNonPointe ? '1' : '0') + '" data-search="' + escH(searchTxt) + '" style="background:' + zebra + ';border-top:1px solid #e2e8f0">' +
               '<td style="padding:6px 4px;text-align:center"><input type="checkbox" class="fpj-chk" data-emp="' + e.id + '" onchange="fpjToggleSel(this)" title="Sélectionner pour action groupée" style="cursor:pointer;accent-color:#0284c7;width:14px;height:14px"></td>' +
               '<td style="padding:6px 4px;text-align:center;color:#94a3b8;font-weight:600">' + globalIx + '</td>' +
               '<td style="padding:6px;font-weight:800;color:#0f172a">' + escH(e.matricule || '—') + '</td>' +
               '<td style="padding:6px;font-weight:700;color:#1e293b">' + escH(empNameLine(e)) + '</td>' +
-              '<td style="padding:6px;color:#475569;font-size:.74rem">' + escH((e.service || fn || '—')) + '</td>' +
+              '<td style="padding:6px;color:#475569;font-size:.74rem">' + escH((e.service || sec.fct || '—')) + '</td>' +
 
               /* Colonne Pointage Rapide Matin */
               '<td style="padding:6px 8px;text-align:center">' +
                 '<div style="display:inline-flex;gap:6px;align-items:center;justify-content:center">' +
-                  '<button type="button" onclick="fpjQuickSet(\'' + e.id + '\', \'' + today + '\', true)" style="' + bgPresBtn + ';border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s" title="Cliquer pour marquer Présent">' +
+                  '<button type="button" class="fpj-btn fpj-pres" onclick="fpjQuickSet(\'' + e.id + '\', \'' + today + '\', true)" style="' + bgPresBtn + ';border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Cliquer pour marquer Présent">' +
                     (isPresent ? '✓ Présent' : 'Présent') +
                   '</button>' +
-                  '<button type="button" onclick="fpjQuickSet(\'' + e.id + '\', \'' + today + '\', false)" style="' + bgAbsBtn + ';border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s" title="Cliquer pour marquer Absent">' +
+                  '<button type="button" class="fpj-btn fpj-abs" onclick="fpjQuickSet(\'' + e.id + '\', \'' + today + '\', false)" style="' + bgAbsBtn + ';border-radius:6px;padding:5px 12px;font-size:.74rem;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Cliquer pour marquer Absent">' +
                     (isAbsent ? '✗ Absent' : 'Absent') +
                   '</button>' +
                 '</div>' +
@@ -24482,7 +24561,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
               /* Bouton Pointer Heures Réelles */
               '<td style="padding:6px;text-align:center">' +
-                '<button type="button" onclick="showModalEditPointage(\'' + e.id + '\', \'' + today + '\')" style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:4px 8px;font-size:.72rem;font-weight:700;color:#2563eb;cursor:pointer" title="Saisir les heures réelles d\'arrivée et départ">⏱️ Pointer</button>' +
+                '<button type="button" class="fpj-btn" onclick="showModalEditPointage(\'' + e.id + '\', \'' + today + '\')" style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:6px;padding:4px 8px;font-size:.72rem;font-weight:700;color:#2563eb;cursor:pointer" title="Saisir les heures réelles d\'arrivée et départ">⏱️ Pointer</button>' +
               '</td>' +
 
               '<td style="padding:6px;color:#64748b;font-size:.72rem">' + escH(obs) + '</td>' +
@@ -24504,7 +24583,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
       function fpjSetGroupMode(mode) {
         fpjGroupMode = (mode === "departement") ? "departement" : "fonction";
         var badge = document.getElementById("fpj-group-badge");
-        if (badge) badge.textContent = fpjGroupMode === "departement" ? "Par Département" : "Par Fonction / Atelier";
+        if (badge) badge.textContent = fpjGroupMode === "departement" ? "Par Département \u203a Fonction" : "Par Fonction / Atelier";
         var dateStr = (document.getElementById("fpj-date") || {}).value || new Date().toISOString().slice(0, 10);
         var searchVal = (document.getElementById("fpj-search") || {}).value || "";
         var scrollPos = (document.getElementById("fpj-scroll-body") || {}).scrollTop || 0;
@@ -24742,6 +24821,42 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         fpjRerenderFiche(dateStr, true);
       }
 
+      /* Marquer une fonction précise (et son département en mode Département → Fonction) */
+      function fpjSetGroupFonction(fct, dept, isPres) {
+        var dateStr = (document.getElementById("fpj-date") || {}).value || new Date().toISOString().slice(0, 10);
+        var pts = getPointageData();
+        var emps = getPersonnel().filter(function(p){
+          if (p.en_paie === false) return false;
+          if (fpjGetFonctionName(p) !== fct) return false;
+          if (dept && fpjGetDeptName(p) !== dept) return false;
+          return true;
+        });
+
+        var count = 0;
+        emps.forEach(function(e){
+          var idx = pts.findIndex(function(p){ return p && p.employee_id === e.id && p.date === dateStr; });
+          var rec = idx !== -1 ? pts[idx] : { id: DB.id(), employee_id: e.id, date: dateStr };
+          rec.present = isPres;
+          if (!isPres) {
+            rec.motif = rec.motif || "Non justifié";
+            rec.h_j_manual = "";
+            rec.h_n_manual = "";
+          } else {
+            if (rec.motif) delete rec.motif;
+            rec.faute_societe = false;
+            rec.absent_paye = false;
+          }
+          if (idx !== -1) pts[idx] = rec;
+          else pts.push(rec);
+          count++;
+        });
+
+        setPointageData(pts);
+        toast((isPres ? "✓ " : "✗ ") + count + " employé(s) marqué(s) " + (isPres ? "présents" : "absents") + " (" + fct + ")", "success");
+
+        fpjRerenderFiche(dateStr, true);
+      }
+
       function fpjChangeMotif(empId, dateStr) {
         var pts = getPointageData();
         var rec = pts.find(function(p){ return p && p.employee_id === empId && p.date === dateStr; });
@@ -24780,12 +24895,12 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
       function filterFichePresenceTable() {
         var q = ((document.getElementById("fpj-search") || {}).value || "").toLowerCase().trim();
-        var selFct = ((document.getElementById("fpj-fonction-select") || {}).value || "").trim();
+        var selGrp = ((document.getElementById("fpj-fonction-select") || {}).value || "").trim();
 
         /* Mise à jour des styles des chips */
         document.querySelectorAll(".fpj-fct-chip").forEach(function(chip){
-          var chipFct = (chip.getAttribute("data-fct-name") || "").trim();
-          if (chipFct === selFct || (!chipFct && !selFct)) {
+          var chipGrp = (chip.getAttribute("data-grp-name") || "").trim();
+          if (chipGrp === selGrp || (!chipGrp && !selGrp)) {
             chip.style.outline = "2px solid #0284c7";
             chip.style.outlineOffset = "1px";
           } else {
@@ -24806,18 +24921,19 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         var rows = document.querySelectorAll(".fpj-row");
         var scopeTotal = 0, scopePres = 0, scopeAbs = 0, scopeNp = 0;
-        var visTotal = 0;
-        var visFctCounts = {};
+        var visFct = {}, visDept = {};
 
         rows.forEach(function(r){
+          var rGrp = r.getAttribute("data-grp") || "";
           var rFct = r.getAttribute("data-fct") || "";
+          var rDept = r.getAttribute("data-dept") || "";
           var rS = r.getAttribute("data-search") || "";
           var isPres = r.getAttribute("data-is-pres") === "1";
           var isAbs = r.getAttribute("data-is-abs") === "1";
           var isNp = r.getAttribute("data-is-np") === "1";
-          var okFct = !selFct || rFct === selFct;
+          var okGrp = !selGrp || rGrp === selGrp;
           var okS = !q || rS.indexOf(q) !== -1;
-          var inScope = okFct && okS;
+          var inScope = okGrp && okS;
           var okView = fpjViewMode === "all" ||
             (fpjViewMode === "pt" && (isPres || isAbs)) ||
             (fpjViewMode === "np" && isNp);
@@ -24830,15 +24946,21 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             else scopeNp++;
           }
           if (show) {
-            visTotal++;
-            visFctCounts[rFct] = (visFctCounts[rFct] || 0) + 1;
+            visFct[rDept + "||" + rFct] = true;
+            if (rDept) visDept[rDept] = true;
           }
         });
 
-        /* Affichage/masquage des en-têtes de fonction */
+        /* Affichage/masquage des en-têtes de fonction (sous-groupes) */
         document.querySelectorAll(".fpj-fct-header-row").forEach(function(hr){
           var hrFct = hr.getAttribute("data-fct") || "";
-          hr.style.display = (visFctCounts[hrFct] > 0) ? "" : "none";
+          var hrDept = hr.getAttribute("data-dept") || "";
+          hr.style.display = visFct[hrDept + "||" + hrFct] ? "" : "none";
+        });
+        /* Affichage/masquage des bandeaux département */
+        document.querySelectorAll(".fpj-dept-header-row").forEach(function(dr){
+          var dDept = dr.getAttribute("data-dept") || "";
+          dr.style.display = visDept[dDept] ? "" : "none";
         });
 
         var rateEl = document.getElementById("fpj-rate-badge");
@@ -24896,28 +25018,10 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           });
         } catch(eM){}
 
-        /* Regroupement par fonction ou département */
-        var fctMap = {};
-        emps.forEach(function(e){
-          var fn = fpjGroupKey(e);
-          if (!fctMap[fn]) fctMap[fn] = [];
-          fctMap[fn].push(e);
-        });
-
-        var fctList = Object.keys(fctMap).sort(function(a, b){
-          return a.localeCompare(b, undefined, {sensitivity: "base"});
-        });
-
-        fctList.forEach(function(fn){
-          fctMap[fn].sort(function(a, b){
-            if (fpjSortMode === "nom") {
-              var c = String(a.nom || "").localeCompare(String(b.nom || ""), undefined, {sensitivity: "base"});
-              if (c !== 0) return c;
-              return String(a.prenoms || "").localeCompare(String(b.prenoms || ""), undefined, {sensitivity: "base"});
-            }
-            return String(a.matricule||"").localeCompare(String(b.matricule||""), undefined, {numeric: true});
-          });
-        });
+        /* Regroupement : par Fonction, ou par Département PUIS Fonction */
+        var hierP = fpjBuildSections(emps, ptMap, montMap);
+        var sectionsP = hierP.sections;
+        var deptStatsP = hierP.deptStats;
 
         var presCount = 0, absCount = 0;
         emps.forEach(function(e){
@@ -24953,7 +25057,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '<div style="display:flex;align-items:center;gap:12px">' +
               (soc.logo ? '<img src="' + soc.logo + '" style="max-height:48px">' : '') +
               '<div><div style="font-size:16px;font-weight:800;text-transform:uppercase">' + escH(soc.nom || 'ACSER') + '</div>' +
-              '<div style="font-size:11px;color:#475569;font-weight:600">FICHE DE PRÉSENCE JOURNALIÈRE & ÉMARGEMENT ' + (fpjGroupMode === "departement" ? "PAR DÉPARTEMENT" : "PAR FONCTION") + '</div></div>' +
+              '<div style="font-size:11px;color:#475569;font-weight:600">FICHE DE PRÉSENCE JOURNALIÈRE & ÉMARGEMENT ' + (fpjGroupMode === "departement" ? "PAR DÉPARTEMENT \u203a FONCTION" : "PAR FONCTION") + '</div></div>' +
             '</div>' +
             '<div style="text-align:right">' +
               '<div style="font-size:13px;font-weight:800;text-transform:capitalize">' + escH(dFr) + '</div>' +
@@ -24980,20 +25084,24 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '</tr></thead><tbody>';
 
         var pGlobalIx = 0;
-        fctList.forEach(function(fn){
-          var list = fctMap[fn];
-          var fPres = 0, fAbs = 0;
-          list.forEach(function(e){
-            var rec = ptMap[e.id];
-            var h = rec ? (parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"")) : 0;
-            if (rec && (rec.present === true || h > 0 || montMap[e.id] || rec.faute_societe === true || rec.absent_paye === true)) fPres++;
-            else if (rec && rec.present === false) fAbs++;
-          });
-          var fRate = list.length > 0 ? ((fPres / list.length) * 100).toFixed(0) : "0";
+        var pLastDept = null;
+        sectionsP.forEach(function(sec){
+          var list = sec.list;
+          var fPres = sec.stats.pres, fAbs = sec.stats.abs, fRate = sec.stats.taux;
+
+          /* Bandeau département (mode Département → Fonction) */
+          if (fpjGroupMode === "departement" && sec.dept !== pLastDept) {
+            pLastDept = sec.dept;
+            var dsP = (deptStatsP[sec.dept] && deptStatsP[sec.dept].stats) || { total: 0, pres: 0, abs: 0, taux: "0" };
+            h += '<tr style="background:#0f172a;color:#fff;font-weight:800"><td colspan="9" style="padding:6px 8px;font-size:11px;letter-spacing:0.8px;border-top:2px solid #000">' +
+              '🏢 DÉPARTEMENT : ' + escH(sec.dept.toUpperCase()) +
+              ' — Effectif : ' + dsP.total + ' | Présents : ' + dsP.pres + ' | Absents : ' + dsP.abs + ' | Taux : ' + dsP.taux + '%' +
+            '</td></tr>';
+          }
 
           /* Ligne d'en-tête de fonction dans l'impression */
-          h += '<tr style="background:#1e293b;color:#fff;font-weight:800"><td colspan="9" style="padding:5px 8px;font-size:9.5px;letter-spacing:0.5px">' +
-            '🏷️ ' + (fpjGroupMode === "departement" ? "DÉPARTEMENT : " : "FONCTION : ") + escH(fn.toUpperCase()) +
+          h += '<tr style="background:#1e293b;color:#fff;font-weight:800"><td colspan="9" style="padding:5px 8px' + (fpjGroupMode === "departement" ? ' 5px 8px 5px 22px' : '') + ';font-size:9.5px;letter-spacing:0.5px">' +
+            (fpjGroupMode === "departement" ? '↳ 🏷️ FONCTION : ' : '🏷️ FONCTION : ') + escH(sec.fct.toUpperCase()) +
             ' — Effectif : ' + list.length + ' | Présents : ' + fPres + ' | Absents : ' + fAbs + ' (Taux : ' + fRate + '%)' +
           '</td></tr>';
 
@@ -25011,7 +25119,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               '<td style="text-align:center;color:#64748b">' + pGlobalIx + '</td>' +
               '<td style="font-weight:700">' + escH(e.matricule || '—') + '</td>' +
               '<td style="font-weight:700">' + escH(empNameLine(e)) + '</td>' +
-              '<td>' + escH(e.service || fn || '—') + '</td>' +
+              '<td>' + escH(e.service || sec.fct || '—') + '</td>' +
               '<td style="text-align:center;font-weight:700;' + (rec && rec.present === false ? 'color:#dc2626' : (rec && rec.present === true ? 'color:#16a34a' : '')) + '">' + escH(st) + '</td>' +
               '<td style="text-align:center">' + escH(arr) + '</td>' +
               '<td style="text-align:center">' + escH(dep) + '</td>' +
