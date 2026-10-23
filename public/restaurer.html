@@ -17,11 +17,12 @@ input{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;fo
 .btn-sec:hover{background:#475569}
 .btn-danger{background:#dc2626}
 .btn-danger:hover{background:#b91c1c}
-#status{font-size:13px;color:#374151;margin-top:12px;white-space:pre-wrap;max-height:400px;overflow-y:auto;background:#f9fafb;padding:12px;border-radius:6px;border:1px solid #e5e7eb}
+#status{font-size:12px;color:#374151;margin-top:12px;white-space:pre-wrap;max-height:400px;overflow-y:auto;background:#f9fafb;padding:12px;border-radius:6px;border:1px solid #e5e7eb}
 .success{color:#16a34a;font-weight:600}
 .warning{color:#b45309;font-weight:600}
 label.opt{display:flex;align-items:center;gap:8px;font-size:13px;color:#374151;cursor:pointer}
 label.opt input{width:auto;margin:0}
+.debug{font-size:11px;color:#6b7280;font-family:monospace;background:#1e293b;color:#e2e8f0;padding:8px;border-radius:4px;margin-top:8px;max-height:200px;overflow:auto}
 </style>
 </head>
 <body>
@@ -36,24 +37,42 @@ label.opt input{width:auto;margin:0}
 <button class="btn btn-sec" id="mergeBtn">Fusionner (union par ID)</button>
 </div>
 <label class="opt"><input type="checkbox" id="markPending" checked> Marquer pour envoi cloud (pendingSync)</label>
+<label class="opt"><input type="checkbox" id="debugMode"> Mode debug (logs détaillés)</label>
 <div id="status"></div>
+<div id="debugLog" class="debug" style="display:none"></div>
 </div>
 <script>
 var fileInput=document.getElementById('fileInput');
 var replaceBtn=document.getElementById('replaceBtn');
 var mergeBtn=document.getElementById('mergeBtn');
 var markPending=document.getElementById('markPending');
+var debugMode=document.getElementById('debugMode');
 var statusDiv=document.getElementById('status');
+var debugLog=document.getElementById('debugLog');
 var loadedData=null, loadedKeys=[];
 
 function log(msg, cls){ statusDiv.innerHTML=(cls?'<span class="'+cls+'">':'')+msg+(cls?'</span>':''); }
+function dlog(msg){
+  if(debugMode.checked){
+    var t=new Date().toLocaleTimeString();
+    debugLog.textContent+='['+t+'] '+msg+'\n';
+    debugLog.scrollTop=debugLog.scrollHeight;
+  }
+  console.log('[RESTORE]', msg);
+}
+debugMode.onchange=function(){ debugLog.style.display=debugMode.checked?'block':'none'; };
 
 function itemKey(r){
   if(!r||typeof r!=='object') return '';
+  // Pointage : employee_id + date
   if(r.employee_id&&r.date) return 'pt:'+r.employee_id+'|'+r.date;
-  if(r.code) return 'code:'+String(r.code).trim().toLowerCase();
+  // Caisse / pièces : id, code, numero, numeroPiece, caisseOpId
   if(r.id) return 'id:'+String(r.id);
+  if(r.code) return 'code:'+String(r.code).trim().toLowerCase();
   if(r.numero) return 'numero:'+String(r.numero).trim().toLowerCase();
+  if(r.numeroPiece) return 'numPiece:'+String(r.numeroPiece).trim().toLowerCase();
+  if(r.caisseOpId) return 'caisseOpId:'+String(r.caisseOpId);
+  if(r.pieceId) return 'pieceId:'+String(r.pieceId);
   try{return 'json:'+JSON.stringify(r);}catch(e){}
   return '';
 }
@@ -74,26 +93,46 @@ function pickRecent(a,b){
   return sa>=sb?a:b;
 }
 
-function unionByKey(localArr, incArr){
+function unionByKey(localArr, incArr, label){
   var a=Array.isArray(localArr)?localArr:[];
   var b=Array.isArray(incArr)?incArr:[];
   var out=[], seen={};
+  dlog('unionByKey('+label+'): local='+a.length+' items, inc='+b.length+' items');
   for(var i=0;i<a.length;i++){
     var r=a[i], k=itemKey(r);
-    if(k){ if(!seen[k]){out.push(r);seen[k]=true;} }
-    else{out.push(r);}
+    if(k){ if(!seen[k]){out.push(r);seen[k]=true; dlog('  +local['+i+'] key='+k); } }
+    else{out.push(r); dlog('  +local['+i+'] no-key');}
   }
   for(var i=0;i<b.length;i++){
     var r=b[i], k=itemKey(r);
     if(k){
-      if(!seen[k]){out.push(r);seen[k]=true;}
-    }else{out.push(r);}
+      if(!seen[k]){out.push(r);seen[k]=true; dlog('  +inc['+i+'] key='+k);}
+      else{ dlog('  -inc['+i+'] duplicate key='+k+' (local wins)'); }
+    }else{out.push(r); dlog('  +inc['+i+'] no-key');}
   }
+  dlog('unionByKey('+label+') result: '+out.length+' items');
   return out;
+}
+
+function empTime(r){
+  var t=r&&r.updatedAt;
+  if(typeof t==='number') return t;
+  var p=Date.parse(t);
+  return isFinite(p)?p:0;
+}
+
+function pickRecent(a,b){
+  var ta=empTime(a), tb=empTime(b);
+  if(ta!==tb) return ta>tb?a:b;
+  var sa='',sb='';
+  try{sa=JSON.stringify(a);}catch(e1){}
+  try{sb=JSON.stringify(b);}catch(e2){}
+  return sa>=sb?a:b;
 }
 
 function mergeEmployes(localArr, incArr){
   var mapL={}, mapC={}, order=[], seen={}, out=[];
+  dlog('mergeEmployes: local='+ (Array.isArray(localArr)?localArr.length:0) +', inc='+(Array.isArray(incArr)?incArr.length:0));
   (Array.isArray(localArr)?localArr:[]).forEach(function(r){
     if(r&&r.id){
       if(!seen[r.id]){seen[r.id]=true;order.push(r.id);}
@@ -108,12 +147,13 @@ function mergeEmployes(localArr, incArr){
   });
   order.forEach(function(id){
     var a=mapL[id], b=mapC[id];
-    if(a&&!b) out.push(a);
-    else if(b&&!a) out.push(b);
-    else out.push(pickRecent(a,b));
+    if(a&&!b){out.push(a); dlog('  emp '+id+' -> local only');}
+    else if(b&&!a){out.push(b); dlog('  emp '+id+' -> inc only');}
+    else{var picked=pickRecent(a,b); out.push(picked); dlog('  emp '+id+' -> picked '+(picked===a?'local':'inc')); }
   });
   (Array.isArray(localArr)?localArr:[]).forEach(function(r){if(!r||!r.id)out.push(r);});
   (Array.isArray(incArr)?incArr:[]).forEach(function(r){if(!r||!r.id)out.push(r);});
+  dlog('mergeEmployes result: '+out.length+' items');
   return out;
 }
 
@@ -123,19 +163,32 @@ function mergeValues(localVal, incVal, key){
       var merged={};
       for(var k in localVal) merged[k]=localVal[k];
       for(var k in incVal) merged[k]=incVal[k];
+      dlog('mergeValues('+key+'): object merge');
       return merged;
     }
     return incVal;
   }
   var localArr=Array.isArray(localVal)?localVal:[];
   var incArr=Array.isArray(incVal)?incVal:[];
+  dlog('mergeValues('+key+'): arrays local='+localArr.length+' inc='+incArr.length);
   if(key==='mdb_employes') return mergeEmployes(localArr, incArr);
-  if(key==='mdb_feries') return unionByKey(localArr, incArr);
+  if(key==='mdb_feries') return unionByKey(localArr, incArr, key);
   if(key.indexOf('mdb_acomptesPrets')===0 || key==='mdb_operationsCaisse' || key==='mdb_banqueOperations' || key==='mdb_pointage' || key==='mdb_pointageMontage' || key==='mdb_primesSpec'){
-    return unionByKey(localArr, incArr);
+    return unionByKey(localArr, incArr, key);
   }
-  return unionByKey(localArr, incArr);
+  return unionByKey(localArr, incArr, key);
 }
+
+var fileInput=document.getElementById('fileInput');
+var replaceBtn=document.getElementById('replaceBtn');
+var mergeBtn=document.getElementById('mergeBtn');
+var markPending=document.getElementById('markPending');
+var debugMode=document.getElementById('debugMode');
+var statusDiv=document.getElementById('status');
+var debugLog=document.getElementById('debugLog');
+var loadedData=null, loadedKeys=[];
+
+function log(msg, cls){ statusDiv.innerHTML=(cls?'<span class="'+cls+'">':'')+msg+(cls?'</span>':''); }
 
 fileInput.addEventListener('change',function(){
   var file=fileInput.files[0];
@@ -149,6 +202,7 @@ fileInput.addEventListener('change',function(){
       log('Fichier chargé : '+loadedKeys.length+' clés mdb_ trouvées');
       replaceBtn.style.display='inline-block';
       mergeBtn.style.display='inline-block';
+      debugLog.textContent='';
     }catch(e){log('Erreur lecture : '+e.message,'warning');}
   };
   reader.readAsText(file);
@@ -159,6 +213,7 @@ function doRestore(mode){
   var count=0;
   var pending={};
   try{pending=JSON.parse(localStorage.getItem('mdb_pendingSync'))||{};}catch(eP){}
+  dlog('=== START '+mode.toUpperCase()+' ===');
   for(var i=0;i<loadedKeys.length;i++){
     var k=loadedKeys[i];
     var v=loadedData[k];
@@ -166,21 +221,25 @@ function doRestore(mode){
     try{
       var existing=null;
       try{existing=JSON.parse(localStorage.getItem(k));}catch(e){}
+      dlog('Key: '+k+' | existing='+(existing? (Array.isArray(existing)?existing.length+' items':'object') :'null') +' | backup='+(v? (Array.isArray(v)?v.length+' items':'object') :'null'));
       var merged;
       if(mode==='replace' || existing===null){
         merged=v;
+        dlog('  -> REPLACE');
       }else{
         merged=mergeValues(existing, v, k);
+        dlog('  -> MERGE result='+(Array.isArray(merged)?merged.length+' items':typeof merged));
       }
       localStorage.setItem(k,JSON.stringify(merged));
       count++;
       if(markPending.checked && k!=='mdb_currentUser' && k.indexOf('mdb_draft_')===-1 && k.indexOf('mdb_sa')!==0 && k.indexOf('mdb_pending')===-1 && k!=='mdb_sync_queue'){
         pending[k]=true;
       }
-    }catch(e){}
+    }catch(e){ dlog('  ERROR on '+k+': '+e.message); }
   }
   try{localStorage.setItem('mdb_pendingSync',JSON.stringify(pending));}catch(eQ){}
-  log('<span class="success">'+count+' clés '+ (mode==='replace'?'restaurées (remplace)':'fusionnées (union par ID)') +' et marquées pour envoi !</span>\n\nFermez cette page puis ouvrez <a href="https://montabbord.web.app" target="_blank">montabbord.web.app</a> (reconnexion auto ou reconnexion) : les données seront envoyées au cloud (✓ Sync) et un Actualiser ne les effacera plus.','success');
+  dlog('=== END '+mode.toUpperCase()+' count='+count+' ===');
+  log('<span class="success">'+count+' clés '+ (mode==='replace'?'restaurées (remplace)':'fusionnées (union par ID)') +' !</span>\n\nOuvrez <a href="https://montabbord.web.app" target="_blank">montabbord.web.app</a> → les données seront envoyées au cloud (✓ Sync).','success');
   replaceBtn.style.display='none';
   mergeBtn.style.display='none';
 }
