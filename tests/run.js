@@ -25,7 +25,8 @@ const ETAPES = [
   { cle: '06', nom: 'split', charger: () => require('./06-split.js') },
   { cle: '07', nom: 'pf-source', charger: () => require('./07-pf-source.js') },
   { cle: '08', nom: 'securite', charger: () => require('./08-securite.js') },
-  { cle: '09', nom: 'synchro', charger: () => require('./09-synchro.js') }
+  { cle: '09', nom: 'synchro', charger: () => require('./09-synchro.js') },
+  { cle: '10', nom: 'multiposte', charger: () => require('./10-multiposte.js') }
 ];
 
 const rapport = new Rapport('MONTABBORD — CONTROLE QUALITE DES APPLICATIONS');

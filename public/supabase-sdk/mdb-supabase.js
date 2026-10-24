@@ -195,24 +195,332 @@
     return doOneLot();
   }
 
+  /* ========================================================================
+     SYNCHRO BLINDEE (ecriture a controle de version + fusion a 3 points)
+     Probleme corrige : chaque rubrique est UNE ligne ecrasee en entier ; deux
+     postes qui enregistrent presque en meme temps s'ecrasaient (le dernier
+     arrive gagnait, la saisie de l'autre disparaissait du serveur).
+     Maintenant, pour chaque rubrique :
+       1. on n'ecrit QUE ce qui a change depuis notre derniere ecriture ;
+       2. l'ecriture est conditionnelle : elle n'a lieu que si la ligne n'a pas
+          ete modifiee entre-temps par un autre poste (compare-and-set sur
+          updated_at) ;
+       3. si quelqu'un a ecrit entre-temps, on relit la ligne fraiche et on
+          FUSIONNE ligne a ligne avec 3 points (ce que j'avais, ce que je
+          veux, ce que le serveur a maintenant) : mes ajouts/modifs sont
+          gardes, ceux des autres aussi ;
+       4. un garde-fou refuse qu'une ecriture retire d'un coup une grosse
+          part d'une liste sans suppression volontaire (tombstones).
+     ======================================================================== */
+  var _rowBase = {};   /* uid|cle -> { ts, json } : ce que CE poste a ecrit en dernier */
+  var _rowsCache = {}; /* uid -> { cle: json } : copie des lignes serveur (lecture ciblee) */
+  var _watchers = {};  /* uid -> [fonction] : rafraichir les pages apres une fusion */
+  var SYNC = window.MDB_SYNC = { lastWriteOk: 0, lastWriteErr: 0, lastFetchOk: 0, errStreak: 0,
+    lastError: '', conflits: 0, fusions: 0, garde: 0, enCours: 0 };
+
+  function bkey(uid, cle) { return uid + '|' + cle; }
+  function sjson(x) { try { return JSON.stringify(x); } catch (e) { return ''; } }
+  function isPlain(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && !(o instanceof Date); }
+  function idOf(x) { return (x && typeof x === 'object' && x.id !== undefined && x.id !== null && String(x.id) !== '') ? String(x.id) : null; }
+  function allIdArr(a) { if (!Array.isArray(a)) return false; for (var i = 0; i < a.length; i++) if (idOf(a[i]) === null) return false; return true; }
+  function countOf(x) { return Array.isArray(x) ? x.length : (isPlain(x) ? Object.keys(x).length : 1); }
+  /* Egalite EXACTE d'horodatage (Postgres = microsecondes) : 'Z' == '+00:00', zeros de fin ignores */
+  function normTs(t) { return String(t || '').replace('Z', '+00:00').replace(/\.(\d*?)0+(?=[+-])/, '.$1').replace(/\.(?=[+-])/, ''); }
+  function sameTs(a, b) { if (!a || !b) return false; return normTs(a) === normTs(b); }
+  function cacheSet(uid, cle, data) { (_rowsCache[uid] = _rowsCache[uid] || {})[cle] = sjson(data); }
+
+  /* ---- Journal local des 200 dernieres ecritures (pour retrouver qui a efface quoi) ---- */
+  var _jr = null, _jT = null;
+  function journal(e) {
+    try {
+      e.t = isoNow();
+      if (!_jr) { try { _jr = JSON.parse(localStorage.getItem('mdb_sync_journal') || '[]'); } catch (x) { _jr = []; } if (!Array.isArray(_jr)) _jr = []; }
+      _jr.push(e);
+      if (_jr.length > 200) _jr.splice(0, _jr.length - 200);
+      if (!_jT) _jT = setTimeout(function () { _jT = null; try { localStorage.setItem('mdb_sync_journal', JSON.stringify(_jr)); } catch (x2) {} }, 1500);
+    } catch (e2) {}
+  }
+  window.mdbSyncJournal = function () { try { if (!_jr) _jr = JSON.parse(localStorage.getItem('mdb_sync_journal') || '[]'); } catch (e) { _jr = []; } return (_jr || []).slice(); };
+
+  /* ---- Suppressions volontaires connues (tombstones) pour une rubrique ---- */
+  function tombSet(uid, cle, lignes) {
+    var out = {};
+    try {
+      var t = JSON.parse(localStorage.getItem('mdb_tombstones') || '{}');
+      var m = t && t[cle];
+      if (isPlain(m)) for (var k in m) if (k !== '__resetAt') out[k] = true;
+    } catch (e) {}
+    try {
+      var mm = /^mdb_paye\.(pointage|pointageMontage)$/.exec(cle);
+      if (mm) {
+        var tk = cle + '_tombstones', arrs = [];
+        (lignes || []).forEach(function (l) { if (l && l.cle === tk && Array.isArray(l.data)) arrs.push(l.data); });
+        var cached = _rowsCache[uid] && _rowsCache[uid][tk];
+        if (cached) { try { var ca = JSON.parse(cached); if (Array.isArray(ca)) arrs.push(ca); } catch (e3) {} }
+        arrs.forEach(function (a) { a.forEach(function (x) { out[String(x)] = true; }); });
+      }
+    } catch (e2) {}
+    return out;
+  }
+  function recentReset() {
+    try {
+      var t = JSON.parse(localStorage.getItem('mdb_tombstones') || '{}');
+      var r = t && t.__resetAt;
+      if (typeof r === 'number' && Date.now() - r < 10 * 60 * 1000) return true;
+      var a = parseInt(localStorage.getItem('mdb_sync_allow_mass') || '0', 10);
+      if (a && Date.now() - a < 10 * 60 * 1000) return true;
+    } catch (e) {}
+    return false;
+  }
+
+  /* ---- Garde-fou : une ecriture ne retire pas d'un coup >= 40 % d'une liste (>= 8 lignes) sans tombstones ---- */
+  function guardMass(cle, inc, baseJson, tomb) {
+    try {
+      if (!baseJson || !Array.isArray(inc)) return inc;
+      var base = JSON.parse(baseJson);
+      if (!Array.isArray(base) || base.length < 8 || !allIdArr(base) || !allIdArr(inc)) return inc;
+      if (recentReset()) return inc;
+      var have = {}; inc.forEach(function (x) { have[idOf(x)] = 1; });
+      var miss = base.filter(function (x) { var i = idOf(x); return !have[i] && !tomb[i]; });
+      if (miss.length >= 8 && miss.length >= 0.4 * base.length) {
+        SYNC.garde++;
+        journal({ op: 'GARDE-FOU', cle: cle, retire: miss.length, sur: base.length });
+        try { console.warn('[mdb] GARDE-FOU : ' + miss.length + '/' + base.length + ' lignes de ' + cle + ' disparaissaient sans suppression volontaire : conservees.'); } catch (e) {}
+        return inc.concat(miss);
+      }
+    } catch (e2) {}
+    return inc;
+  }
+
+  /* ---- Fusion a 3 points ---- */
+  function unionTomb(a, b, reset) {
+    if (Array.isArray(a) || Array.isArray(b)) {
+      var seen = {}, out = [];
+      [].concat(Array.isArray(b) ? b : [], Array.isArray(a) ? a : []).forEach(function (x) { var k = sjson(x); if (!seen[k]) { seen[k] = 1; out.push(x); } });
+      return out;
+    }
+    if (isPlain(a) && isPlain(b)) {
+      var o = {}, k;
+      for (k in b) { if (k === '__resetAt') continue; var v = b[k]; if (typeof v === 'number' && reset && v <= reset) continue; o[k] = v; }
+      for (k in a) { if (k === '__resetAt') continue; o[k] = (k in o && isPlain(a[k]) && isPlain(o[k])) ? unionTomb(a[k], o[k], reset) : a[k]; }
+      return o;
+    }
+    return a;
+  }
+  function mergeTomb(inc, fresh) {
+    if (Array.isArray(inc) || Array.isArray(fresh)) return unionTomb(inc, fresh, 0);
+    if (!isPlain(inc) || !isPlain(fresh)) return inc;
+    var ri = typeof inc.__resetAt === 'number' ? inc.__resetAt : 0, rf = typeof fresh.__resetAt === 'number' ? fresh.__resetAt : 0;
+    if (ri > rf) return inc;
+    var o = unionTomb(inc, fresh, ri);
+    var mx = Math.max(ri, rf);
+    if (mx > 0) o.__resetAt = mx;
+    return o;
+  }
+  function merge3Array(inc, base, fresh, tomb) {
+    var bM = {}, fM = {}, iM = {}, out = [], i, x, id, b, f;
+    base.forEach(function (r) { bM[idOf(r)] = r; });
+    fresh.forEach(function (r) { fM[idOf(r)] = r; });
+    inc.forEach(function (r) { iM[idOf(r)] = 1; });
+    for (i = 0; i < inc.length; i++) {
+      x = inc[i]; id = idOf(x); b = bM[id]; f = fM[id];
+      if (f !== undefined && b !== undefined) {
+        if (sjson(x) !== sjson(b)) out.push(x);               /* j'ai modifie : ma version */
+        else out.push(f);                                       /* je n'y ai pas touche : version du serveur */
+      } else if (f !== undefined) out.push(x);                  /* ajoute des deux cotes : la mienne */
+      else if (b !== undefined) { if (sjson(x) !== sjson(b)) out.push(x); /* un autre l'a supprimee ; je l'ai modifiee : je la garde */ }
+      else out.push(x);                                         /* mon ajout */
+    }
+    for (i = 0; i < fresh.length; i++) {
+      x = fresh[i]; id = idOf(x);
+      if (iM[id]) continue;
+      b = bM[id];
+      if (b === undefined) { if (!tomb[id]) out.push(x); }      /* ajoute par un autre poste */
+      else if (sjson(x) !== sjson(b)) out.push(x);              /* je l'ai supprimee mais un autre l'a modifiee : on garde */
+      /* sinon : je l'ai supprimee, personne d'autre n'y a touche -> supprimee */
+    }
+    return out;
+  }
+  function merge3(inc, base, fresh, tomb, name, depth) {
+    if (/tombstone/i.test(name || '')) return mergeTomb(inc, fresh);
+    if (Array.isArray(inc) && Array.isArray(fresh)) {
+      var b = Array.isArray(base) ? base : [];
+      if (allIdArr(inc) && allIdArr(fresh) && allIdArr(b) && (inc.length || fresh.length || b.length)) return merge3Array(inc, b, fresh, tomb);
+      return inc;
+    }
+    if (isPlain(inc) && isPlain(fresh) && (depth || 0) < 4) {
+      var bo = isPlain(base) ? base : null, out = {}, k;
+      for (k in inc) {
+        var iv = inc[k], fv = fresh[k], bv = bo ? bo[k] : undefined;
+        if (fv === undefined) out[k] = iv;
+        else if (bo && bv !== undefined && sjson(iv) === sjson(bv)) out[k] = fv;
+        else out[k] = merge3(iv, bv, fv, tomb, k, (depth || 0) + 1);
+      }
+      for (k in fresh) {
+        if (k in inc) continue;
+        var bv2 = bo ? bo[k] : undefined;
+        if (bo && bv2 !== undefined && sjson(fresh[k]) === sjson(bv2)) continue; /* je l'avais retiree, personne d'autre n'y a touche */
+        out[k] = fresh[k];
+      }
+      return out;
+    }
+    return inc;
+  }
+
+  /* ---- Requetes avec reessai sur incident passager ---- */
+  function passager(err) {
+    var m = String((err && err.message) || ''), c = String((err && err.code) || '');
+    return c === '57014' || /57014|timeout|timed out|fetch|network|502|503|504|500/i.test(m);
+  }
+  function avecReessai(fn, n) {
+    return fn().catch(function (e) {
+      if (n > 0 && passager(e)) return new Promise(function (r) { setTimeout(r, 700 + Math.floor(Math.random() * 500)); }).then(function () { return avecReessai(fn, n - 1); });
+      throw e;
+    });
+  }
+  function lireLigne(uid, cle) {
+    return avecReessai(function () {
+      return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).eq('cle', cle).limit(1)
+        .then(function (r) { if (r.error) throw r.error; return (r.data && r.data[0]) || null; });
+    }, 2);
+  }
+  function majConditionnelle(uid, cle, data, attendu) {
+    var ts = isoNow();
+    return avecReessai(function () {
+      return sb.from(SPLIT_TABLE).update({ data: data, updated_at: ts }).eq('enterprise_id', uid).eq('cle', cle).eq('updated_at', attendu).select('cle,updated_at')
+        .then(function (r) { if (r.error) throw r.error; return (r.data && r.data.length) ? { ok: true, ts: r.data[0].updated_at || ts } : { ok: false }; });
+    }, 2);
+  }
+  function inserer(uid, cle, data) {
+    var ts = isoNow();
+    return avecReessai(function () {
+      return sb.from(SPLIT_TABLE).insert([{ enterprise_id: uid, cle: cle, data: data, updated_at: ts }]).select('cle,updated_at')
+        .then(function (r) {
+          if (r.error) {
+            if (String(r.error.code) === '23505' || /duplicate|already exists/i.test(r.error.message || '')) return { ok: false };
+            throw r.error;
+          }
+          return { ok: true, ts: (r.data && r.data[0] && r.data[0].updated_at) || ts };
+        });
+    }, 2);
+  }
+  function notifierFusion(uid) {
+    var l = _watchers[uid] || [];
+    for (var i = 0; i < l.length; i++) { try { l[i](); } catch (e) {} }
+  }
+
+  /* Ecrit UNE ligne sans jamais ecraser le travail d'un autre poste. */
+  function ecrireLigneSure(uid, ligne, lignes, pre) {
+    var cle = ligne.cle, bk = bkey(uid, cle), tomb = tombSet(uid, cle, lignes);
+    var baseAvant = _rowBase[bk];
+    var inc = baseAvant ? guardMass(cle, ligne.data, baseAvant.json, tomb) : ligne.data;
+    function reussi(r, envoye, fusionne) {
+      /* json = ce que CE poste voulait (base de la prochaine fusion) ;
+         srv = ce que le serveur contient reellement apres l'ecriture. */
+      var srvJ = sjson(fusionne), envJ = sjson(envoye);
+      _rowBase[bk] = { ts: r.ts, json: envJ, srv: srvJ === envJ ? null : srvJ };
+      cacheSet(uid, cle, fusionne);
+      journal({ op: srvJ === envJ ? 'ecrit' : 'FUSION', cle: cle, avant: baseAvant ? countOf(JSON.parse(baseAvant.json)) : null, apres: countOf(fusionne) });
+      if (srvJ !== envJ) { SYNC.fusions++; notifierFusion(uid); }
+    }
+    function conflit(n) {
+      if (n > 5) return Promise.reject(new Error('Conflit de synchro persistant sur ' + cle + ' (reessai automatique)'));
+      if (n > 0 || baseAvant) SYNC.conflits++;
+      var lecture = (n === 0 && pre && pre.hasOwnProperty(cle)) ? Promise.resolve(pre[cle]) : lireLigne(uid, cle);
+      return lecture.then(function (fr) {
+        if (!fr) {
+          return inserer(uid, cle, inc).then(function (r) { if (r.ok) return reussi(r, inc, inc); return conflit(n + 1); });
+        }
+        var base = baseAvant ? JSON.parse(baseAvant.json) : null;
+        var merged = merge3(inc, base, fr.data, tomb, cle, 0);
+        /* Rien a changer sur le serveur (cas courant a l'ouverture) : on note la base, sans ecrire */
+        if (sjson(merged) === sjson(fr.data)) { reussi({ ts: fr.updated_at }, inc, merged); return; }
+        return majConditionnelle(uid, cle, merged, fr.updated_at).then(function (r) {
+          if (r.ok) return reussi(r, inc, merged);
+          return new Promise(function (res) { setTimeout(res, 150 + Math.floor(Math.random() * 250)); }).then(function () { return conflit(n + 1); });
+        });
+      });
+    }
+    if (baseAvant) {
+      /* Si notre derniere ecriture etait une fusion, le serveur contient aussi les
+         lignes des autres postes : on refusionne localement pour ne pas les retirer. */
+      var aEnvoyer = inc;
+      if (baseAvant.srv) {
+        try { aEnvoyer = merge3(inc, JSON.parse(baseAvant.json), JSON.parse(baseAvant.srv), tomb, cle, 0); } catch (eM) { return conflit(0); }
+      }
+      return majConditionnelle(uid, cle, aEnvoyer, baseAvant.ts).then(function (r) {
+        if (r.ok) return reussi(r, inc, aEnvoyer);
+        return conflit(0);
+      });
+    }
+    return conflit(0);
+  }
+
+  var _sentinelleOk = {};
   function writeEnterpriseSplit(uid, data) {
     var lignes = splitDocEnLignes(uid, data);
     var ident = splitIdentite(data);
     var upsertIdent = { id: uid, updated_at: isoNow() };
     for (var k in ident) { if (ident.hasOwnProperty(k)) upsertIdent[k] = ident[k]; }
-    var lots = splitLignesParLots(lignes);
-    try { console.log('[mdb] push decoupe en ' + lots.length + ' lot(s) pour ' + lignes.length + ' ligne(s)'); } catch (eL) {}
-    var p1 = (lignes.length > 0)
-      ? upsertLots(lots)
-      : Promise.resolve();
-    return p1.then(function() {
+    /* Ne reecrire que ce qui a change depuis NOTRE derniere ecriture */
+    var aEcrire = lignes.filter(function (l) {
+      var b = _rowBase[bkey(uid, l.cle)];
+      return !(b && b.json === sjson(l.data));
+    });
+    try { console.log('[mdb] push cible : ' + aEcrire.length + ' rubrique(s) modifiee(s) sur ' + lignes.length); } catch (eL) {}
+    SYNC.enCours++;
+    var idx = 0, pre = {}, ecrites = 0;
+    /* Rubriques jamais ecrites par ce poste : une seule lecture groupee */
+    var sansBase = aEcrire.filter(function (l) { return !_rowBase[bkey(uid, l.cle)]; }).map(function (l) { return l.cle; });
+    function prelire() {
+      if (!sansBase.length) return Promise.resolve();
+      return avecReessai(function () {
+        return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', sansBase)
+          .then(function (r) {
+            if (r.error) throw r.error;
+            sansBase.forEach(function (c) { pre[c] = null; });
+            (r.data || []).forEach(function (row) { pre[row.cle] = row; });
+          });
+      }, 2).catch(function () { pre = {}; });
+    }
+    function suivante() {
+      if (idx >= aEcrire.length) return Promise.resolve();
+      var l = aEcrire[idx++];
+      var avant = _rowBase[bkey(uid, l.cle)];
+      return ecrireLigneSure(uid, l, lignes, pre).catch(function (e) {
+        /* Filet de securite : refus inattendu de l'ecriture conditionnelle (droits,
+           colonne, version du serveur) -> ancien envoi simple plutot que blocage. */
+        if (passager(e) || /Conflit de synchro/.test(String((e && e.message) || ''))) throw e;
+        journal({ op: 'SECOURS', cle: l.cle, message: String((e && e.message) || e) });
+        try { console.warn('[mdb] ecriture protegee refusee, envoi simple pour ' + l.cle + ' :', (e && e.message) || e); } catch (eW) {}
+        delete _rowBase[bkey(uid, l.cle)];
+        return avecReessai(function () {
+          return sb.from(SPLIT_TABLE).upsert([{ enterprise_id: uid, cle: l.cle, data: l.data, updated_at: isoNow() }], { onConflict: 'enterprise_id,cle' })
+            .then(function (r) { if (r.error) throw r.error; });
+        }, 2);
+      }).then(function () {
+        var apres = _rowBase[bkey(uid, l.cle)];
+        if (!avant || !apres || apres.ts !== avant.ts) ecrites++;
+      }).then(suivante);
+    }
+    return prelire().then(suivante).then(function () {
+      if (!ecrites) return;
       return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' })
-        .then(function(r2) { if (r2.error) throw r2.error; });
-    }).then(function() {
+        .then(function (r2) { if (r2.error) throw r2.error; });
+    }).then(function () {
+      if (!ecrites || _sentinelleOk[uid]) return;
       return sb.from(SPLIT_TABLE).upsert(
         [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
         { onConflict: 'enterprise_id,cle' })
-        .then(function(r3) { if (r3.error) throw r3.error; });
+        .then(function (r3) { if (r3.error) throw r3.error; _sentinelleOk[uid] = true; });
+    }).then(function () {
+      SYNC.enCours = Math.max(0, SYNC.enCours - 1);
+      SYNC.lastWriteOk = Date.now(); SYNC.errStreak = 0; SYNC.lastError = '';
+    }, function (e) {
+      SYNC.enCours = Math.max(0, SYNC.enCours - 1);
+      SYNC.lastWriteErr = Date.now(); SYNC.errStreak++; SYNC.lastError = String((e && e.message) || e);
+      journal({ op: 'ERREUR', message: SYNC.lastError });
+      throw e;
     });
   }
 
@@ -281,6 +589,12 @@
       }
       _splitOK = true;
       var lignes = res.data || [];
+      try {
+        var _nc = {};
+        for (var ci = 0; ci < lignes.length; ci++) { if (lignes[ci] && typeof lignes[ci].cle === 'string') _nc[lignes[ci].cle] = sjson(lignes[ci].data); }
+        _rowsCache[uid] = _nc;
+        SYNC.lastFetchOk = Date.now(); SYNC.lastFull = Date.now();
+      } catch (eCache) {}
       var aSentinelle = false;
       for (var i = 0; i < lignes.length; i++) {
         if (lignes[i] && lignes[i].cle === SPLIT_MIGRATION_CLE) { aSentinelle = true; break; }
@@ -582,6 +896,7 @@
   function watchDoc(parentTable, parentId, table, docId, onData, onError) {
     var stopped = false;
     var channel = null;
+    var emitRef = null;
 
     fetchDoc(parentTable, parentId, table, docId).then(function(snap) {
       if (stopped) return;
@@ -597,23 +912,56 @@
       else if (table === 'backups') cfg.filter = 'enterprise_id=eq.' + parentId;
       else if (table === 'license_keys') cfg.filter = 'code=eq.' + docId;
       var chName = 'mdb-' + (useSplit ? SPLIT_TABLE : table) + '-' + parentId + '-' + docId;
-      var debT = null;
+      var debT = null, pend = {}, pendFull = false;
+      function pleinRelecture() {
+        fetchDoc(parentTable, parentId, table, docId).then(function(s2) {
+          if (stopped) return;
+          try { onData(s2); } catch (e2) { console.warn('[SB] snapshot cb error:', e2); }
+        }).catch(function() {});
+      }
+      function emettreDepuisCache() {
+        if (stopped) return;
+        var sn = snapshotFromCache(docId);
+        if (!sn) return pleinRelecture();
+        try { onData(sn); } catch (e3) { console.warn('[SB] snapshot cb error:', e3); }
+      }
+      function flush() {
+        debT = null;
+        if (stopped) return;
+        var full = pendFull, p = pend; pendFull = false; pend = {};
+        var cles = [], dels = [];
+        for (var c in p) {
+          if (!p.hasOwnProperty(c) || c === SPLIT_MIGRATION_CLE) continue;
+          if (p[c].del) { dels.push(c); continue; }
+          var bb = _rowBase[bkey(docId, c)];
+          if (bb && p[c].ts && sameTs(bb.ts, p[c].ts)) continue; /* echo de notre propre ecriture */
+          cles.push(c);
+        }
+        if (!full && !cles.length && !dels.length) return;
+        /* Filet de securite : au moins une relecture complete toutes les 3 minutes */
+        if (full || !_rowsCache[docId] || (Date.now() - (SYNC.lastFull || 0)) > 180000) return pleinRelecture();
+        fetchRowsInto(docId, cles, dels).then(emettreDepuisCache).catch(pleinRelecture);
+      }
+      if (useSplit) {
+        emitRef = emettreDepuisCache;
+        (_watchers[docId] = _watchers[docId] || []).push(emettreDepuisCache);
+      }
       channel = sb.channel(chName).on(
         'postgres_changes', cfg,
         function(payload) {
           if (stopped) return;
           try {
             if (useSplit) {
-              /* Un evenement par ligne modifiee : on coalesce puis relit */
+              /* Un evenement par ligne modifiee : on note QUELLE rubrique a change,
+                 on ignore l'echo de nos propres ecritures, puis on ne relit que
+                 les rubriques modifiees (et non plus tout le dossier, 2,5 Mo). */
+              var evRow = payload && ((payload.new && payload.new.cle) ? payload.new : ((payload.old && payload.old.cle) ? payload.old : null));
+              var evDel = payload && (payload.eventType === 'DELETE' || payload.event === 'DELETE');
+              if (!evRow || !_rowsCache[docId]) pendFull = true;
+              else if (evDel) pend[evRow.cle] = { del: true };
+              else pend[evRow.cle] = { ts: evRow.updated_at };
               if (debT) clearTimeout(debT);
-              debT = setTimeout(function() {
-                debT = null;
-                if (stopped) return;
-                fetchDoc(parentTable, parentId, table, docId).then(function(s2) {
-                  if (stopped) return;
-                  try { onData(s2); } catch (e2) { console.warn('[SB] snapshot cb error:', e2); }
-                }).catch(function() {});
-              }, 400);
+              debT = setTimeout(flush, 400);
               return;
             }
             if (payload.eventType === 'DELETE' || payload.event === 'DELETE') {
@@ -640,8 +988,31 @@
 
     return function() {
       stopped = true;
+      try { var wl = _watchers[docId] || []; _watchers[docId] = wl.filter(function(f) { return f !== emitRef; }); } catch (eW) {}
       if (channel) { try { sb.removeChannel(channel); } catch (e) {} }
     };
+  }
+
+  /* Relecture ciblee : seules les rubriques modifiees sont retelechargees */
+  function fetchRowsInto(uid, cles, dels) {
+    var c = _rowsCache[uid] || (_rowsCache[uid] = {});
+    for (var i = 0; i < dels.length; i++) delete c[dels[i]];
+    if (!cles.length) return Promise.resolve();
+    return _tmo(sb.from(SPLIT_TABLE).select('cle,data').eq('enterprise_id', uid).in('cle', cles), 30000).then(function(res) {
+      if (res.error) throw res.error;
+      var rows = res.data || [];
+      for (var j = 0; j < rows.length; j++) c[rows[j].cle] = sjson(rows[j].data);
+      SYNC.lastFetchOk = Date.now();
+    });
+  }
+  function snapshotFromCache(uid) {
+    var c = _rowsCache[uid];
+    if (!c) return null;
+    var l = [];
+    for (var k in c) { if (!c.hasOwnProperty(k)) continue; try { l.push({ cle: k, data: JSON.parse(c[k]) }); } catch (e) {} }
+    var sn = new DocSnapshot(uid, true, splitAssemble(l));
+    sn._split = true;
+    return sn;
   }
 
   /* ---------- Références type Firestore ---------- */
@@ -753,6 +1124,12 @@
   };
 
   /* Référence canonique : un nom dédié que le code applicatif ne peut pas écraser */
+  /* Ecriture protegee (controle de version + fusion 3 points) reutilisable par les
+     pages qui ont leur propre transport (production.html). */
+  adapter.ecrireRubriques = function(uid, data) {
+    if (_splitOK === false) return Promise.reject({ __splitManquant: true });
+    return writeEnterpriseSplit(uid, deepClean(data || {}));
+  };
   window.__MDB_ADAPTER__ = adapter;
   window.firebaseDb = adapter;
 
@@ -777,4 +1154,43 @@
   };
 
   console.log('[MDB] Adaptateur Supabase prêt (' + SUPABASE_URL + ')');
+
+  /* ========================================================================
+     INDICATEUR DE SYNCHRO (visible dans toutes les pages) : l'utilisateur sait
+     a tout moment si ses saisies sont bien parties et si le poste est a jour.
+     ======================================================================== */
+  (function () {
+    try {
+      if (window.top !== window) return;
+      var el = null;
+      function creer() {
+        if (el || !document.body) return;
+        el = document.createElement('div');
+        el.id = 'mdbSyncBadge';
+        el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483000;font:600 11px/1.2 system-ui,Segoe UI,Arial,sans-serif;padding:4px 9px;border-radius:12px;color:#fff;background:#16a34a;opacity:.88;cursor:pointer;user-select:none;box-shadow:0 1px 4px rgba(0,0,0,.3)';
+        el.onclick = function () { try { console.table(window.mdbSyncJournal().slice(-40)); } catch (e) {} };
+        var st = document.createElement('style');
+        st.textContent = '@media print{#mdbSyncBadge{display:none!important}}';
+        document.head.appendChild(st);
+        document.body.appendChild(el);
+      }
+      function maj() {
+        creer();
+        if (!el) return;
+        var S = window.MDB_SYNC || {}, now = Date.now(), txt, bg;
+        var dern = Math.max(S.lastWriteOk || 0, S.lastFetchOk || 0);
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) { txt = '⚠ Hors ligne — saisies gardees sur ce poste'; bg = '#dc2626'; }
+        else if ((S.errStreak || 0) >= 2) { txt = '⚠ Synchro en attente (' + S.errStreak + ' echecs) — reessai auto'; bg = '#ea580c'; }
+        else if ((S.enCours || 0) > 0) { txt = '↻ Envoi en cours…'; bg = '#2563eb'; }
+        else if (window.__MDB_RT__ === false) { txt = '● Temps reel coupe — actualisation automatique'; bg = '#ca8a04'; }
+        else if (dern) { var sec = Math.round((now - dern) / 1000); txt = '✓ Synchro OK' + (sec < 90 ? '' : ' · ' + Math.round(sec / 60) + ' min'); bg = '#16a34a'; }
+        else { txt = '● Synchro…'; bg = '#64748b'; }
+        el.textContent = txt; el.style.background = bg;
+        el.title = 'Conflits fusionnes : ' + (S.fusions || 0) + ' | Garde-fous : ' + (S.garde || 0) + (S.lastError ? ' | Derniere erreur : ' + S.lastError : '') + ' | Cliquer = journal dans la console (F12)';
+      }
+      setInterval(maj, 4000);
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', maj); else maj();
+      window.addEventListener('online', maj); window.addEventListener('offline', maj);
+    } catch (e) {}
+  })();
 })();
