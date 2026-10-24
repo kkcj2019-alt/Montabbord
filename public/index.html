@@ -6249,11 +6249,14 @@ function doSendResetEmail(email, uid, userLogin) {
   firebaseDb.collection('resetCodes').doc(email.replace(/\./g, '_')).set({code: code, expiry: expiry, email: email, uid: uid || '', login: userLogin || ''}).then(function() {
     var html = '<div style="text-align:center">';
     html += '<p style="font-size:14px;margin-bottom:16px">V\u00e9rification de votre identit\u00e9 pour <strong>' + escH(email) + '</strong></p>';
-    html += '<p style="font-size:13px;color:var(--gray-500);margin-bottom:12px">Votre code de v\u00e9rification :</p>';
-    html += '<div style="font-size:28px;font-weight:700;letter-spacing:6px;color:var(--primary);margin-bottom:16px">' + code + '</div>';
+    /* SECURITE : le code n'est plus affiche a l'ecran (n'importe qui pouvait
+       changer le mot de passe de n'importe quel compte, administrateur compris).
+       La reinitialisation exige le CODE DE VALIDATION de l'entreprise, connu
+       de l'administrateur. */
+    html += '<p style="font-size:13px;color:var(--gray-500);margin-bottom:12px">Pour confirmer, saisissez le <strong>code de validation de l\u2019entreprise</strong> (demandez-le \u00e0 votre administrateur).</p>';
     html += '<div class="form-group" style="text-align:left"><label>Nouveau mot de passe</label><input type="password" id="resetNewPass" placeholder="Min. 6 caract\u00e8res"></div>';
     html += '<div class="form-group" style="text-align:left"><label>Confirmer</label><input type="password" id="resetNewPass2" placeholder="R\u00e9p\u00e9tez"></div>';
-    html += '<div class="form-group" style="text-align:left"><label>Code re\u00e7u</label><input type="text" id="resetCode" placeholder="6 chiffres"></div>';
+    html += '<div class="form-group" style="text-align:left"><label>Code de validation de l\u2019entreprise</label><input type="password" id="resetCode" placeholder="Code fourni par l\u2019administrateur" autocomplete="off"></div>';
     html += '<p id="resetMsg" style="font-size:13px;display:none;margin-bottom:12px"></p>';
     html += '<button class="btn btn-primary" style="width:100%" onclick="confirmResetPassword(\'' + encodeURIComponent(email) + '\',\'' + encodeURIComponent(uid || '') + '\',\'' + encodeURIComponent(userLogin || '') + '\')">R\u00e9initialiser</button>';
     html += '</div>';
@@ -6275,20 +6278,23 @@ function confirmResetPassword(emailEnc, uidEnc, loginEnc) {
   var msgEl = document.getElementById('resetMsg');
   if (!newPass || newPass.length < 6) { msgEl.textContent = 'Mot de passe min. 6 caract\u00e8res'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
   if (newPass !== newPass2) { msgEl.textContent = 'Les mots de passe ne correspondent pas'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
-  if (!code || code.length !== 6) { msgEl.textContent = 'Code invalide (6 chiffres)'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
+  code = String(code || '').trim();
+  if (!code) { msgEl.textContent = 'Saisissez le code de validation de l\u2019entreprise'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
   var ref = firebaseDb.collection('resetCodes').doc(email.replace(/\./g, '_'));
   ref.get().then(function(doc) {
     if (!doc.exists) { msgEl.textContent = 'Code invalide'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
     var data = doc.data();
-    if (data.code !== code) { msgEl.textContent = 'Code incorrect'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
-    if (Date.now() > data.expiry) { msgEl.textContent = 'Code expir\u00e9, demandez un nouveau'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
+    if (Date.now() > data.expiry) { msgEl.textContent = 'Demande expir\u00e9e, recommencez'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
     var targetUid = uid || data.uid || '';
     var targetLogin = userLogin || data.login || '';
     if (!targetUid) { msgEl.textContent = 'Entreprise introuvable pour ce code'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return; }
-    ref.delete();
     return firebaseDb.collection('enterprises').doc(targetUid).get().then(function(entDoc) {
       if (!entDoc.exists) throw new Error('notfound');
       var d = entDoc.data();
+      var _vc = String(((d && d.mdb_entreprise) || {}).validationCode || '').trim();
+      if (!_vc) { msgEl.textContent = 'Aucun code de validation n\u2019est configur\u00e9 : demandez \u00e0 l\u2019administrateur de r\u00e9initialiser votre mot de passe (Administration \u2192 Utilisateurs).'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return 'stop'; }
+      if (code !== _vc) { msgEl.textContent = 'Code de validation incorrect'; msgEl.style.color = 'var(--danger)'; msgEl.style.display = 'block'; return 'stop'; }
+      try { ref.delete(); } catch (eDel) {}
       var users = d['mdb_users'] || [];
       var updated = false;
       for (var i = 0; i < users.length; i++) {
@@ -6303,6 +6309,7 @@ function confirmResetPassword(emailEnc, uidEnc, loginEnc) {
       if (!updated) return false;
       return firebaseDb.collection('enterprises').doc(targetUid).set({mdb_users: users}, {merge: true}).then(function() { return true; });
     }).then(function(ok) {
+      if (ok === 'stop') return;
       if (ok === false) {
         msgEl.textContent = 'Utilisateur introuvable pour cet identifiant.';
         msgEl.style.color = 'var(--warning)';
@@ -17294,6 +17301,10 @@ function saveFacture(id) {
     totalHT += mt;
     totalTVA += mt * tvaRate / 100;
   }
+  /* Montants en FCFA entiers (pas de centimes) : sinon une facture reglee
+     « en totalite » gardait 0,12 F de reste et restait partielle. */
+  totalHT = Math.round(totalHT);
+  totalTVA = Math.round(totalTVA);
   var totalTTC = totalHT + totalTVA;
   var blIds = [];
   for (var k2 = 0; k2 < formLignes.length; k2++) {
@@ -17322,6 +17333,12 @@ function saveFacture(id) {
         oldBlIds = factures[i].blIds || (factures[i].blId ? [factures[i].blId] : []);
         data.id = id;
         data.montantPaye = factures[i].montantPaye || 0;
+        /* Facture deja reglee (en tout ou partie) : le statut suit les
+           paiements et le NOUVEAU total, pas la liste deroulante. */
+        if (data.montantPaye > 0 && data.statut !== 'brouillon' && data.statut !== 'annulee' && data.statut !== 'annule') {
+          if (data.statut === 'payee' || data.statut === 'partielle') data.statut = 'validee';
+          updateFactureStatut(data);
+        }
         factures[i] = data;
         break;
       }
@@ -24289,7 +24306,9 @@ function updateFactureFromReglement(oldReg, newReg) {
 function updateFactureStatut(f) {
 /* Le reste a payer est toujours en TTC : c'est ce que le client doit. */
   var restant = ((f.totalTTC != null ? f.totalTTC : f.total) || 0) - (f.montantPaye || 0);
-  if (restant <= 0) f.statut = 'payee';
+  /* Moins d'1 F de reste = payee (centimes de TVA sur d'anciennes factures :
+     elles restaient « partielles » pour 0,12 F). */
+  if (restant < 1) f.statut = 'payee';
   else if (f.montantPaye > 0) f.statut = 'partielle';
   /* Plus aucun paiement (reglement supprime) : la facture redevient a payer.
      Avant, elle restait « payee » pour toujours. */

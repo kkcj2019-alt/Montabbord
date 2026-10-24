@@ -36,5 +36,9 @@ function run(rapport) {
     _adjustStockForBLLines([{ articleId: 'A1', designation: 'ART X1', quantite: 10 }], 1);
     var q2 = dbArr('mdb_stocks')[0].quantite;
     (q1 === -5 && q2 === 5) ? 'OK : 5 -> -5 (livraison superieure) -> 5' : 'ECHEC : ' + q1 + ' / ' + q2`);
+  cas('Facture avec centimes de TVA reglee au franc pres : payee', `
+    var f = { id: 'FT9', totalTTC: 1456.12, montantPaye: 1456, statut: 'partielle' };
+    updateFactureStatut(f);
+    f.statut === 'payee' ? 'OK : reste 0,12 F -> payee' : 'ECHEC : ' + f.statut`);
 }
 module.exports = { run: run };
