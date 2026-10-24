@@ -115,6 +115,40 @@ function run(rapport) {
     (apres2 === base + 150 && fin === base + 50)
       ? 'OK : ' + base + ' +100 +50 = ' + apres2 + ', suppression du 1er -> ' + fin
       : 'ECHEC : base=' + base + ' apres2=' + apres2 + ' fin=' + fin`);
+
+  cas("Inventaire marchandises : plusieurs lignes d'achat d'un article, total juste, suppression = retour", `
+    localStorage.setItem('mdb_entreprise', JSON.stringify({ nom: 'T', validationCode: '1234' }));
+    renderPage = function () {};
+    setStockMerch([
+      { id: 'mA', code: 'MRC1', designation: 'MARCH 1', quantite: 5, created_at: '2026-09-01' },
+      { id: 'mB', code: 'MRC1', designation: 'MARCH 1', quantite: 10, created_at: '2026-09-02' }
+    ]);
+    var items = calcInventoryItems('2026-09', '2026-09-30').filter(function (it) { return it.store === 'stockMerch' && String(it.ref).toUpperCase() === 'MRC1'; });
+    var nbLignes = items.length, theo = items.length ? items[0].theo_qte : -1;
+    items.forEach(function (it) { it.real_qte = 12; });
+    var snap = applyInventoryAsInitial('2026-09', items, { date: '2026-09-30', invId: 'INVM' });
+    var apres = _total(getStockMerch(), 'MRC1');
+    setInventories([{ id: 'INVM', month: '2026-09', type: 'all', date: '2026-09-30', items: items, _snapshot: snap, statut: 'valide' }]);
+    deleteInventory('INVM', '1234');
+    var retour = _total(getStockMerch(), 'MRC1');
+    (nbLignes === 1 && theo === 15 && apres === 12 && retour === 15)
+      ? 'OK : 1 ligne d\\'inventaire (15), reel 12 -> 12, suppression -> 15'
+      : 'ECHEC : lignes=' + nbLignes + ' theo=' + theo + ' apres=' + apres + ' retour=' + retour`);
+
+  cas("Inventaire EPI : agit sur le stock EPI reel (catalogue) et s'annule", `
+    localStorage.setItem('mdb_entreprise', JSON.stringify({ nom: 'T', validationCode: '1234' }));
+    renderPage = function () {};
+    setEpiCatalogue([{ id: 'e1', code: 'BOTTE', designation: 'BOTTES', stock: 7, seuil_minimum: 2 }]);
+    var items = calcInventoryItems('2026-09', '2026-09-30').filter(function (it) { return it.store === 'epiItems' && it.ref === 'BOTTE'; });
+    var theo = items.length ? items[0].theo_qte : -1;
+    items.forEach(function (it) { it.real_qte = 4; });
+    var snap = applyInventoryAsInitial('2026-09', items, { date: '2026-09-30', invId: 'INVE' });
+    var apres = getEpiCatalogue()[0].stock;
+    setInventories([{ id: 'INVE', month: '2026-09', type: 'all', date: '2026-09-30', items: items, _snapshot: snap, statut: 'valide' }]);
+    deleteInventory('INVE', '1234');
+    var retour = getEpiCatalogue()[0].stock;
+    (theo === 7 && apres === 4 && retour === 7) ? 'OK : theorique 7 (catalogue), reel 4 -> 4, suppression -> 7'
+      : 'ECHEC : theo=' + theo + ' apres=' + apres + ' retour=' + retour`);
 }
 
 module.exports = { run: run };

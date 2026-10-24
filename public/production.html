@@ -9694,8 +9694,36 @@ function getPresence() { return getSection('presence', []); }
 function setPresence(v) { setSection('presence', v); }
 function getDailyAttendance() { return getSection('dailyAttendance', []); }
 function setDailyAttendance(v) { setSection('dailyAttendance', v); }
-function getEpiItems() { return getSection('epiItems', []); }
-function setEpiItems(v) { setSection('epiItems', v); }
+/* EPI : le stock vivant est le CATALOGUE (achats, attributions, retours ecrivent
+   epiCatalogue.stock). L'ancienne liste epiItems n'etait plus alimentee depuis
+   la migration : l'inventaire EPI, les alertes de stock bas et la fiche de
+   stock EPI travaillaient sur des donnees mortes. On expose le catalogue sous
+   l'ancien format (quantite_stock) et on y ecrit en retour. */
+function getEpiItems() {
+  var cat = getSection('epiCatalogue', []);
+  if (!cat.length) return getSection('epiItems', []);
+  return cat.map(function (e) {
+    return { id: e.id, code: e.code || '', designation: e.designation || '', categorie: e.categorie || '', taille: e.taille || '',
+      unite: e.unite, prix_unitaire: e.prix_unitaire, seuil_minimum: parseFloat(e.seuil_minimum) || 0,
+      quantite_stock: parseFloat(e.stock) || 0, emplacement: e.emplacement || '', observation: e.observation || '' };
+  });
+}
+function setEpiItems(v) {
+  var cat = getSection('epiCatalogue', []);
+  if (!cat.length) { setSection('epiItems', v); return; }
+  var byId = {}, byCode = {};
+  (v || []).forEach(function (x) {
+    if (!x) return;
+    if (x.id !== undefined && x.id !== null) byId[String(x.id)] = x;
+    if (x.code) byCode[String(x.code).trim().toUpperCase()] = x;
+  });
+  var ch = false;
+  cat.forEach(function (e) {
+    var x = byId[String(e.id)] || byCode[String(e.code || '').trim().toUpperCase()];
+    if (x && (parseFloat(x.quantite_stock) || 0) !== (parseFloat(e.stock) || 0)) { e.stock = parseFloat(x.quantite_stock) || 0; ch = true; }
+  });
+  if (ch) setSection('epiCatalogue', cat);
+}
 function getEpiAssignments() { return getSection('epiAssignments', []); }
 function setEpiAssignments(v) { setSection('epiAssignments', v); }
 function getLeaves() { return getSection('leaves', []); }
@@ -9710,7 +9738,36 @@ function getPersonnel() { try { return lsArr('mdb_employes'); } catch(e) { retur
 
 /* ===== Données RH partagées avec l'app principale + module Paye (même localStorage) ===== */
 function getPointagePaye() { try { var p = JSON.parse(localStorage.getItem('mdb_paye') || '{}'); return (p && p.pointage) || []; } catch(e) { return []; } }
-function setPointagePaye(arr) { try { var p = lsObj('mdb_paye'); if (!p || typeof p !== 'object' || Array.isArray(p)) p = {}; p.pointage = arr; localStorage.setItem('mdb_paye', JSON.stringify(p)); } catch(e) {} }
+function setPointagePaye(arr) {
+  try {
+    var p = lsObj('mdb_paye'); if (!p || typeof p !== 'object' || Array.isArray(p)) p = {};
+    /* Pointage supprime ici : memorise (id + cle employe|jour|article) comme le
+       fait la Paie, sinon la fusion le faisait revenir depuis un autre poste. */
+    try {
+      var present = {};
+      (arr || []).forEach(function (x) { if (x && x.id !== undefined && x.id !== null) present[String(x.id)] = true; });
+      var tb = Array.isArray(p.pointage_tombstones) ? p.pointage_tombstones : [];
+      var vus = {}; tb.forEach(function (t) { vus[String(t)] = true; });
+      (Array.isArray(p.pointage) ? p.pointage : []).forEach(function (x) {
+        if (!x || x.id === undefined || x.id === null || present[String(x.id)]) return;
+        var k1 = String(x.id);
+        if (!vus[k1]) { tb.push(k1); vus[k1] = true; }
+        if (x.employee_id && x.date) {
+          var art = (x.article_code === undefined || x.article_code === null) ? '' : String(x.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+          var k2 = 'cle:pt:' + String(x.employee_id) + '|' + String(x.date) + '|' + art;
+          var reAjout = (arr || []).some(function (y) { return y && y.employee_id === x.employee_id && y.date === x.date && String(y.article_code || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '') === art; });
+          if (!reAjout && !vus[k2]) { tb.push(k2); vus[k2] = true; }
+        }
+      });
+      p.pointage_tombstones = tb;
+    } catch (eT) {}
+    p.pointage = arr;
+    localStorage.setItem('mdb_paye', JSON.stringify(p));
+    /* Envoye au cloud par Production elle-meme (avant : seulement si l'onglet
+       principal etait ouvert pour le relayer). */
+    prodPartageModifie('mdb_paye');
+  } catch(e) {}
+}
 function getRhCongesShared() { try { return lsArr('mdb_rh_conges'); } catch(e) { return []; } }
 function getRhSanctionsShared() { try { return lsArr('mdb_rh_sanctions'); } catch(e) { return []; } }
 function getServicesShared() { try { var p = JSON.parse(localStorage.getItem('mdb_paye') || '{}'); var s = (p && p.services) || []; return s.map(function(x) { return (typeof x === 'object' && x) ? (x.nom || x.name || '') : (x || ''); }).filter(function(n) { return !!n; }); } catch(e) { return []; } }
@@ -19097,11 +19154,25 @@ function calcInventoryItems(month, dateMax) {
       ctype: g.ctype || ''
     });
   });
-  stockAvecCatalogue('stock-merch', getStockMerch() || []).forEach(function(s) {
-    var _a = invArt(s);
-    if (!visible(s)) return;
-    items.push({ code: s.code || _a.code || '-', nom: s.nom || s.designation || _a.designation || '-', categorie: 'Marchandise', source: 'Marchandise', emplacement: s.emplacement || '', dimensions: '', volume: 0, theo_qte: parseFloat(s.quantite) || 0, real_qte: parseFloat(s.quantite) || 0, ref: s.code || _a.code, store: 'stockMerch', storeIdx: items.length });
-  });
+  /* Marchandises : UNE ligne par article (une ligne de stock est creee par
+     achat). Avant, chaque ligne d'achat etait inventoriee a part et
+     l'application ecrasait la meme ligne : le total apres inventaire etait faux. */
+  (function () {
+    var _gM = {}, _oM = [];
+    stockAvecCatalogue('stock-merch', getStockMerch() || []).forEach(function(s) {
+      var _a = invArt(s);
+      if (!visible(s)) return;
+      var _code = s.code || _a.code || '-';
+      var _k = String(_code).trim().toUpperCase();
+      if (!_gM[_k]) { _gM[_k] = { code: _code, nom: s.nom || s.designation || _a.designation || '-', emplacement: s.emplacement || '', q: 0 }; _oM.push(_k); }
+      _gM[_k].q += parseFloat(s.quantite) || 0;
+      if (!_gM[_k].emplacement && s.emplacement) _gM[_k].emplacement = s.emplacement;
+    });
+    _oM.forEach(function (k) {
+      var g = _gM[k];
+      items.push({ code: g.code, nom: g.nom, categorie: 'Marchandise', source: 'Marchandise', emplacement: g.emplacement, dimensions: '', volume: 0, theo_qte: g.q, real_qte: g.q, ref: g.code, store: 'stockMerch', storeIdx: items.length });
+    });
+  })();
   /* Consommables : on part du CATALOGUE, pas seulement des lignes de stock.
      Deux manques corrigés ici :
        - un produit jamais acheté n'a AUCUNE ligne de stock : il disparaissait
@@ -20087,8 +20158,18 @@ function applyInventoryAsInitial(month, items, opts) {
         })();
         break;
       case 'stockMerch':
-        idx = merchMap[it.ref];
-        if (idx !== undefined) { _snap('stockMerch', it.ref, parseFloat(merch[idx].quantite) || 0, it.real_qte); merch[idx].quantite = it.real_qte; }
+        /* Une ligne par ACHAT : l'inventaire ecrivait le reel sur une seule
+           ligne et laissait les autres -> total faux. On applique l'ECART sur
+           le total de l'article (comme semi-finis et produits finis). */
+        (function () {
+          var _kM = String(it.ref || it.code || '').trim().toUpperCase();
+          var _iM = [], _cM = 0;
+          merch.forEach(function (s, i) { if (String((s && s.code) || '').trim().toUpperCase() === _kM) { _iM.push(i); _cM += parseFloat(s.quantite) || 0; } });
+          if (!_iM.length) return;
+          _snap('stockMerch', it.ref, _cM, it.real_qte);
+          var _dM = (parseFloat(it.real_qte) || 0) - _cM;
+          if (Math.abs(_dM) > 0.0001) { merch[_iM[0]].quantite = (parseFloat(merch[_iM[0]].quantite) || 0) + _dM; merch[_iM[0]].updated_at = new Date().toISOString(); }
+        })();
         break;
 case 'stockConsum':
         /* Grand-livre propre (voir appliquerBaseInventaireConso) : le réel
@@ -25634,7 +25715,7 @@ function setEpiAttributions(v) { setSection('epiAttributions', v); }
 /* Migration: ancien epiItems → catalogue + stock */
 (function() {
   try {
-    var old = getEpiItems();
+    var old = getSection('epiItems', []);
     var cat = getEpiCatalogue();
     if (old.length && !cat.length) {
       var newCat = old.map(function(e) {
