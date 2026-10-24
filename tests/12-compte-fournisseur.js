@@ -119,6 +119,81 @@ function run(rapport) {
     var sauv = String(saveEmploye).indexOf("expatrie: f.elements['expatrie']") !== -1;
     (nat && expOui && aide && neufNon && sauv) ? 'OK : nationalite affichee, expatrie = Oui relu, aide visible pour un etranger ; nouvelle fiche = Non'
       : 'ECHEC : ' + JSON.stringify({ nat: nat, expOui: expOui, aide: aide, neufNon: neufNon, sauv: sauv })`);
+  cas('Sanctions : controles du Code du travail art. 17 (mise a pied 1-8 j, 72 h, 15 j ouvrables, 3 mois, double sanction)', `
+    DB.set('mdb_rh_demandes', [
+      { id: 'D1', numero: 'DE-2026-0001', employee_id: 'e1', date: '2026-09-01', date_reponse: '2026-09-02', statut: 'repondue' },
+      { id: 'D2', numero: 'DE-2026-0002', employee_id: 'e1', date: '2026-10-20', statut: 'attente' }
+    ]);
+    function c(sc, autres) { return rhControlerSanction(sc, autres || []).join(' | '); }
+    var ok1 = c({ id: 'a', type: 'avertissement_ecrit', date: '2026-09-10', date_faits: '2026-08-30', demande_id: 'D1' }) === '';
+    var mp9 = c({ id: 'a', type: 'mise_a_pied', duree_jours: 9, date: '2026-09-10', demande_id: 'D1' }).indexOf('1 \\u00e0 8 jours') !== -1;
+    var tard = c({ id: 'a', type: 'avertissement_ecrit', date: '2026-10-01', demande_id: 'D1' }).indexOf('15 jours ouvrables') !== -1;
+    var pres = c({ id: 'a', type: 'avertissement_ecrit', date: '2026-09-10', date_faits: '2026-05-01', demande_id: 'D1' }).indexOf('plus de 3 mois') !== -1;
+    var h72 = c({ id: 'a', type: 'avertissement_ecrit', date: '2026-10-21', demande_id: 'D2' }).indexOf('72 h') !== -1;
+    var sansDm = c({ id: 'a', type: 'licenciement', date: '2026-10-21' }).indexOf('demande d\\u2019explication') !== -1;
+    var dbl = c({ id: 'b', type: 'avertissement_ecrit', date: '2026-09-10', demande_id: 'D1' }, [{ id: 'a', demande_id: 'D1', statut: 'notifie' }]).indexOf('double sanction') !== -1;
+    var blame = c({ id: 'a', type: 'blame', date: '2026-09-10', demande_id: 'D1' }).indexOf('liste l\\u00e9gale') !== -1;
+    var verbal = c({ id: 'a', type: 'avertissement_verbal', date: '2026-09-10' }) === '';
+    var ttes = [ok1, mp9, tard, pres, h72, sansDm, dbl, blame, verbal];
+    ttes.every(Boolean) ? 'OK : conforme accepte ; mise a pied 9 j, notification tardive, faits > 3 mois, delai 72 h, sans demande, double sanction, blame hors liste signales'
+      : 'ECHEC : ' + ttes.join(',')`);
+
+  cas('RH : modifier une demande ou sanction d un employe sorti le garde (ne bascule plus sur le premier actif)', `
+    var L = getEmployes(); L.push({ id: 'SORTI1', matricule: 'S9', nom: 'PARTI', status: 'inactif', date_sortie: '2020-01-01' }); DB.set('mdb_employes', L);
+    var h = _rhEmpOptions('SORTI1');
+    var lettre = String(printDemandeLettre).indexOf('72 heures') !== -1 && String(printDemandeLettre).indexOf('rhAddDays(d.date, 3)') !== -1;
+    var simple = String(supprimerSanction).indexOf('window.confirm') === -1 && String(supprimerDemande).indexOf('window.confirm') === -1;
+    (h.indexOf('value="SORTI1" selected') !== -1 && h.indexOf('(sorti)') !== -1 && lettre && simple) ? 'OK : employe sorti conserve ; lettre : delai de 72 h ; une seule confirmation a la suppression'
+      : 'ECHEC : ' + JSON.stringify({ opt: h.slice(0, 120), lettre: lettre, simple: simple })`);
+
+  cas('Ordres de mission : numerotation qui suit (plus de doublon OM-AAAA-001)', `
+    var y = new Date().getFullYear();
+    setMissions([{ id: 'm1', numero: 'OM-' + y + '-001' }, { id: 'm2', numero: 'OM-' + y + '-007' }, { id: 'm3', numero: 'OM-2020-050' }]);
+    var n = nextMissionNum();
+    (n === 'OM-' + y + '-008') ? 'OK : apres 001 et 007 -> ' + n : 'ECHEC : ' + n`);
+
+  cas('Banque : un acompte verse par la banque est bien cree (avant : erreur) et part avec l operation supprimee', `
+    DB.set('mdb_banques', [{ id: 'BQ1', nom: 'SGBCI' }]);
+    var L = getEmployes(); L.push({ id: 'EB1', matricule: 'B1', nom: 'KOFFI' }); DB.set('mdb_employes', L);
+    function ch(id, v) { document.getElementById(id).value = v; }
+    ch('bkEnrBanqueId', 'BQ1'); ch('bkEnrSens', 'sortie'); ch('bkEnrMontant', '50000'); ch('bkEnrLibelle', 'Acompte KOFFI');
+    ch('bkEnrDate', '2026-10-15'); ch('bkEnrRef', 'VIR-1'); ch('bkEnrType', 'acompte'); ch('bkEnrEmploye', 'EB1'); ch('bkEnrDuree', '0'); ch('bkEnrMoisDed', '2026-10');
+    saveBanqueOperation();
+    var op = getBanqueOperations().filter(function (o) { return o.reference === 'VIR-1'; })[0];
+    var ap = dbArr('mdb_acomptesPrets').filter(function (a) { return op && a.banqueOpId === op.id; })[0];
+    var cree = !!(op && ap && ap.montant === 50000 && ap.moisDeduction === '2026-10' && ap.employeId === 'EB1');
+    var _oc = openConfirm; openConfirm = function (t, cb) { cb(); };
+    deleteBanqueOperation(op.id);
+    openConfirm = _oc;
+    var reste = dbArr('mdb_acomptesPrets').filter(function (a) { return a.banqueOpId === op.id; }).length;
+    var opReste = getBanqueOperations().filter(function (o) { return o.id === op.id; }).length;
+    DB.set('mdb_banqueOperations', [{ id: 'X', banqueId: 'BQ1', montant: 1, sens: 'entree', date: '2026-10-01' }]);
+    deleteBanque('BQ1');
+    var bqGarde = getBanques().length === 1;
+    (cree && reste === 0 && opReste === 0 && bqGarde) ? 'OK : acompte 50 000 cree (mois 2026-10), supprime avec l operation ; banque avec operations non supprimable'
+      : 'ECHEC : ' + JSON.stringify({ cree: cree, ap: ap, reste: reste, opReste: opReste, bqGarde: bqGarde })`);
+
+  cas('Acomptes : plus jamais effaces automatiquement quand une piece de caisse manque un instant ; lien repare', `
+    DB.set('mdb_operationsCaisse', [
+      { id: 'OP1', date: '2026-10-01', sens: 'sortie', montant: 20000, apType: 'acompte', beneficiaireId: 'E1', numeroPiece: 'KK1' },
+      { id: 'OP2', date: '2026-10-02', sens: 'sortie', montant: 30000, apType: 'acompte', beneficiaireId: 'E1', numeroPiece: 'KK2', acomptePretId: 'A2' }
+    ]);
+    DB.set('mdb_acomptesPrets', [
+      { id: 'A1', type: 'acompte', employeId: 'E1', montant: 20000, caisseOpId: 'OP1', numeroPiece: 'KK1', valide: true },
+      { id: 'A2', type: 'acompte', employeId: 'E1', montant: 30000, caisseOpId: 'OP2', numeroPiece: 'KK2', valide: true },
+      { id: 'A3', type: 'acompte', employeId: 'E1', montant: 40000, caisseOpId: 'OP_PAS_ENCORE_LA', numeroPiece: 'KK3', valide: true }
+    ]);
+    _purgeOrphanAcomptes();
+    var n1 = dbArr('mdb_acomptesPrets').length;
+    _cleanGhostAcomptes();
+    var n2 = dbArr('mdb_acomptesPrets').length;
+    var op1 = getOperationsCaisse().filter(function (o) { return o.id === 'OP1'; })[0];
+    var lien = op1 && op1.acomptePretId === 'A1';
+    var t = getTombstones(); t.mdb_acomptesPrets = { A1: Date.now(), A3: Date.now() }; localStorage.setItem('mdb_tombstones', JSON.stringify(t));
+    var vus = stripTombstoned('mdb_acomptesPrets', [{ id: 'A1', caisseOpId: 'OP1' }, { id: 'A3', caisseOpId: 'OP_PAS_ENCORE_LA' }]).map(function (x) { return x.id; }).join(',');
+    (n1 === 3 && n2 === 3 && lien && vus === 'A1') ? 'OK : 3 acomptes gardes (piece manquante = plus d effacement) ; lien OP1 -> A1 repare ; acompte supprime a tort mais dont la piece existe : visible'
+      : 'ECHEC : ' + JSON.stringify({ n1: n1, n2: n2, lien: lien, vus: vus })`);
+
 }
 
 module.exports = { run: run };

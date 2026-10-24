@@ -41,7 +41,7 @@ const EXCLUS = [
   { motif: /^supprimerNomenclature$|^supprimerArticlesSelectionnes$|^supprimerArticle$/, raison: 'helper de suppression (l\u2019appelant confirme, ou suppression group\u00e9e)' },
   { motif: /^delArticleMontage$/, raison: 'source unique : ne supprime plus, redirige vers l\u2019Index' }
 ];
-const CONFIRMER = /(window\.)?confirm2?\s*\(|confirmerInApp\s*\(/;
+const CONFIRMER = /(window\.)?confirm2?\s*\(|confirmerInApp\s*\(|openConfirm\s*\(|^function deleteCaisseOp[^{]*\{\s*deleteCaisse\(/;
 
 function corpsDe(code, start) {
   const i = code.indexOf('{', start);

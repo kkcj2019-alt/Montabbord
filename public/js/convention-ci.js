@@ -26,6 +26,7 @@
     transport: { t: 'CGECI : revalorisation de la prime de transport', u: 'https://cgeci.com/prime-de-transport-dans-le-secteur-prive-les-mesures-de-revalorisation-entree-en-vigueur/' },
     pwc: { t: 'PwC Worldwide Tax Summaries : Côte d’Ivoire', u: 'https://taxsummaries.pwc.com/ivory-coast/individual/taxes-on-personal-income' },
     cleiss: { t: 'CLEISS : cotisations en Côte d’Ivoire (SMIG au 01/01/2023)', u: 'https://www.cleiss.fr/docs/cotisations/cotedivoire.html' },
+    ctTravail: { t: 'Loi n° 2015-532 du 20 juillet 2015 portant Code du travail', u: 'https://www.economie-ivoirienne.ci/sites/default/files/sites/default/files/inline-files/Loi%20n%C2%B0%202015-532%20du%2020%20juillet%202015%20portant%20code%20du%20Travail.pdf' },
     expat: { t: 'Contrat de travail expatrié (note DGI n° 3338 du 26/12/2002, arrêtés AGEPE 2004 et 2019)', u: 'https://www.mhconsultingafrica.com/fr/actualites/contrat-de-travail-expatrie' }
   };
 
@@ -85,6 +86,8 @@
       txt: 'Les absences pour accident du travail ou maladie professionnelle, et la maladie constatée par un médecin agréé (dans la limite de 6 mois), ne sont pas déduites du congé acquis.' },
     { th: 'Congés', titre: 'Allocation de congé', ref: 'Code du travail art. 25.7, 25.9', src: 'ctConges',
       txt: 'L’allocation, versée au départ en congé, est au moins égale aux salaires et éléments de rémunération que le travailleur aurait perçus. Travailleurs à l’heure ou à la journée : 1/12 de la rémunération de la période.' },
+    { th: 'Discipline', titre: 'Sanctions disciplinaires', ref: 'Code du travail art. 17.1 à 17.5', src: 'ctTravail',
+      txt: 'Sanctions possibles : avertissement écrit ; mise à pied sans salaire de 1 à 3 jours ou de 4 à 8 jours ; licenciement. Les observations verbales ne sont pas des sanctions. Interdits : amendes et autres sanctions pécuniaires, double sanction pour la même faute. Procédure : demande d’explication, le salarié a 72 h pour répondre (par écrit ou oralement, assisté d’un à trois délégués) ; sanction notifiée dans les 15 jours ouvrables suivant les explications écrites ; copie à l’inspecteur du travail et au délégué du personnel. Aucun fait connu depuis plus de 3 mois ne peut être sanctionné.' },
     { th: 'Fin de contrat', titre: 'Préavis', ref: 'CCI art. 34, 35', src: 'ccI',
       txt: 'Mensuels catégories 1 à 5 : 1 mois jusqu’à 6 ans, 2 mois de 6 à 11 ans, 3 mois de 11 à 16 ans, 4 mois au-delà. Catégorie 6 et plus : 3 mois jusqu’à 16 ans, 4 mois au-delà. Horaires et journaliers : 8 jours (< 6 mois), 15 jours (< 1 an), puis comme les mensuels. Préavis non respecté : indemnité égale au salaire de la période restante.' },
     { th: 'Fin de contrat', titre: 'Indemnité de licenciement', ref: 'CCI art. 39', src: 'ccI',

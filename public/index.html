@@ -26,6 +26,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
+<script src="js/stockage-memoire.js"></script>
 <script>window.__APP_VERSION='2026-10-23-279';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
@@ -3446,10 +3447,30 @@ function pruneTombstones() {
 function stripTombstoned(entityKey, arr) {
   var t = getTombstones()[entityKey];
   if (!t || !Array.isArray(arr)) return arr;
+  /* Acomptes/prets : tant que leur piece de caisse existe, une suppression
+     memorisee (souvent faite automatiquement par un nettoyage qui ne voyait pas
+     encore la piece) ne doit pas les effacer. Meme regle que la Paie : sans
+     elle, la Paie les recreait et l'app principale les re-effacait (totaux
+     d'acomptes qui montent puis retombent, acomptes non deduits). */
+  var _liveOp = null, _liveAp = null;
+  if (entityKey === 'mdb_acomptesPrets') {
+    _liveOp = {}; _liveAp = {};
+    try {
+      var _opsT = dbArr('mdb_operationsCaisse');
+      for (var _oT = 0; _oT < _opsT.length; _oT++) {
+        var _opX = _opsT[_oT];
+        if (!_opX || _opX.reversed) continue;
+        if (_opX.id) _liveOp[_opX.id] = true;
+        if (_opX.acomptePretId) _liveAp[_opX.acomptePretId] = true;
+      }
+    } catch (eLv) {}
+  }
   var out = [];
   for (var i = 0; i < arr.length; i++) {
     var r = arr[i];
-    if (r && r.id && t[r.id]) continue;
+    if (r && r.id && t[r.id]) {
+      if (!(_liveOp && ((r.caisseOpId && _liveOp[r.caisseOpId]) || _liveAp[r.id]))) continue;
+    }
     out.push(r);
   }
   return out;
@@ -9264,7 +9285,12 @@ function toast(msg, type) {
 }
 
 function openConfirm(text, cb) {
-  document.getElementById('confirmText').textContent = text;
+  var _ct = document.getElementById('confirmText');
+  _ct.textContent = text;
+  try { _ct.style.whiteSpace = 'pre-line'; } catch (eWs) {}
+  /* Au-dessus d'un formulaire ouvert (meme z-index et place avant lui dans la page,
+     la confirmation restait cachee derriere le formulaire). */
+  try { document.getElementById('confirmOverlay').style.zIndex = '1100'; } catch (eZ) {}
   confirmCallback = cb;
   document.getElementById('confirmBtn').onclick = function() { var cb = confirmCallback; closeConfirm(); if (cb) cb(); };
   document.getElementById('confirmOverlay').style.display = 'flex';
@@ -20094,10 +20120,10 @@ function _purgeOrphanAcomptes(){
       }
       if (_a.caisseOpId) continue;
     }
-    // règle 1 : la pièce référencée par id n'existe plus
-    if(_a.caisseOpId && !_opsById[_a.caisseOpId]){ _toRemove.push(_a); continue; }
-    // règle 2 : la pièce référencée par numeroPiece n'existe plus
-    if(_a.numeroPiece && !_opsByPiece[_a.numeroPiece]){ _toRemove.push(_a); continue; }
+    /* PLUS DE SUPPRESSION AUTOMATIQUE (comme dans la Paie) : la piece peut
+       manquer un instant (synchro en cours, telephone au stockage plein) ; on
+       effacait alors pour toujours des acomptes bien reels. Supprimer une piece
+       de caisse supprime deja son acompte/pret. */
   }
   if(_toRemove.length){
     var _newAcs = _acs.filter(function(x){ return _toRemove.indexOf(x)===-1; });
@@ -20146,7 +20172,20 @@ function _cleanGhostAcomptes(){
            partielle) : la ligne était alors supprimée puis recréée par
            _reconcileAcomptesPretsFromCaisse au rendu suivant, en boucle
            (« N prêt(s)/acompte(s) restauré(s) depuis la caisse »). */
-        if ((_nat && _nat !== _g.type) || !_op.acomptePretId || _op.acomptePretId !== _g.id) _isGhost = true;
+        /* Lien retour absent ou different : on le REPARE au lieu d'effacer
+           l'acompte (le lien se perdait lors de fusions, l'acompte valide
+           disparaissait et revenait non valide). Seule une nature connue et
+           differente (frais, depense...) reste un fantome. */
+        if (_nat && _nat !== _g.type) _isGhost = true;
+        else if (!_op.acomptePretId) { _op.acomptePretId = _g.id; window._ghostLienRepare = true; }
+        else if (_op.acomptePretId !== _g.id) {
+          /* La piece pointe vers une AUTRE ligne : si cette ligne existe, celle-ci
+             est un doublon ; sinon c'est elle la bonne, on la rattache. */
+          var _autreExiste = false;
+          for (var _gk = 0; _gk < _ghost.length; _gk++) { if (_ghost[_gk] && _ghost[_gk].id === _op.acomptePretId) { _autreExiste = true; break; } }
+          if (_autreExiste) _isGhost = true;
+          else { _op.acomptePretId = _g.id; window._ghostLienRepare = true; }
+        }
       }
     }
     // Règle 2 : acompte dont le libellé est manifestement une pièce non-acompte (frais/encaissement/dépense).
@@ -20156,6 +20195,10 @@ function _cleanGhostAcomptes(){
     }
     if (_isGhost){ _removed++; continue; }
     _keep.push(_g);
+  }
+  if (window._ghostLienRepare) {
+    window._ghostLienRepare = false;
+    try { DB.set('mdb_operationsCaisse', _opsAll); _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (eLR) {}
   }
   if (_removed > 0){
     DB.set('mdb_acomptesPrets', _keep);
@@ -26321,8 +26364,6 @@ function saveRubrique(id) {
 }
 
 function deleteRubrique(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette rubrique ?')) return;
   openConfirm('\u00cates-vous s\u00fbr de vouloir supprimer cette rubrique ?', function() {
     var actif = getActif(); var result = [];
     for (var i = 0; i < actif.rubriques.length; i++) { if (actif.rubriques[i].id !== id) result.push(actif.rubriques[i]); }
@@ -26780,8 +26821,6 @@ function _saveBlFactLigne(key, nom, lineId) {
 }
 
 function deleteLigneForRubrique(key, lineId) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette ligne de rubrique ?')) return;
   openConfirm('Supprimer cette ligne ?', function() {
     var actif = getActif();
     for (var i = 0; i < actif.rubriques.length; i++) {
@@ -26896,8 +26935,6 @@ function saveLigneMouvementForm() {
   renderActif();
 }
 function deleteLigneMouvement(mvId) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer ce mouvement ?')) return;
   openConfirm('Supprimer ce mouvement ?', function() {
     var f = _ligneMvFind(window._lmKey, window._lmNom, window._lmLineId);
     if (!f || !f.ligne.mouvements) return;
@@ -29973,8 +30010,6 @@ function addExtraitButton(clientId) {
 }
 
 function deleteUser(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cet utilisateur ?')) return;
   openConfirm('Supprimer cet utilisateur ?', function() {
     var list = getUsers();
     var result = [];
@@ -33212,7 +33247,9 @@ function saveBanqueOperation() {
   if (!banqueId) { toast('Choisissez une banque', 'error'); return; }
   if (montant <= 0) { toast('Le montant doit \u00eatre positif', 'error'); return; }
   if (!libelle) { toast('Le libell\u00e9 est obligatoire', 'error'); return; }
+  if (!date) { toast('La date est obligatoire', 'error'); return; }
   if ((typeBk === 'acompte' || typeBk === 'pret') && !empBkId) { toast('S\u00e9lectionnez un employ\u00e9', 'error'); return; }
+  if (typeBk === 'pret' && !(dureeBk > 0)) { toast('Indiquez la dur\u00e9e du pr\u00eat (nombre de mois)', 'error'); return; }
   var ops = getBanqueOperations();
   var opId = DB.genId();
   ops.push({id:opId, banqueId:banqueId, date:date, sens:sens, montant:montant, libelle:libelle, reference:ref, typeOp: typeBk === 'libre' ? '' : typeBk, employeId: typeBk === 'libre' ? '' : empBkId, beneficiaireNom: typeBk === 'libre' ? '' : (function(){ var es = getEmployes(); for (var k = 0; k < es.length; k++) { if (es[k].id === empBkId) return es[k].nom; } return ''; })()});
@@ -33228,10 +33265,11 @@ function saveBanqueOperation() {
       id: DB.genId(), type: typeBk, employeId: empBkId, employeNom: empNomB,
       montant: montant, dureeMois: typeBk === 'pret' ? dureeBk : 0,
       montantMensuel: montantMensuelB,
-      moisDeduction: moisDedB,
+      moisDeduction: moisDedBk, /* avant : variable inexistante -> erreur, l'acompte/pret n'etait jamais cree */
       motif: libelle, notes: '', date: date, statut: 'en_cours',
       montantRembourse: 0, caisseOpId: '', numeroPiece: ref || '',
-      provenance: 'banque', moyen: 'Virement', executant: currentUser ? currentUser.nom : '', numeroTransaction: ref
+      provenance: 'banque', moyen: 'Virement', executant: currentUser ? currentUser.nom : '', numeroTransaction: ref,
+      banqueOpId: opId
     };
     apListB.push(apB);
     DB.set('mdb_acomptesPrets', apListB);
@@ -33245,9 +33283,17 @@ function saveBanqueOperation() {
   renderBanqueEnrList();
 }
 function deleteBanqueOperation(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette operation bancaire ?')) return;
-  openConfirm('\u00cates-vous s\u00fbr de supprimer cette op\u00e9ration ?', function() {
+  /* Acompte / pret cree avec cette operation : il part avec elle (sinon il
+     restait deduit du salaire alors que le versement n'existe plus). */
+  var _apLies = dbArr('mdb_acomptesPrets').filter(function (a) { return a && a.banqueOpId === id; });
+  var _dejaRemb = _apLies.some(function (a) { return (parseFloat(a.montantRembourse) || 0) > 0; });
+  var _msgDel = '\u00cates-vous s\u00fbr de supprimer cette op\u00e9ration ?' + (_apLies.length ? '\n\nL\u2019' + (_apLies[0].type === 'pret' ? 'pr\u00eat' : 'acompte') + ' cr\u00e9\u00e9 avec elle sera aussi supprim\u00e9' + (_dejaRemb ? ' (attention : une partie est d\u00e9j\u00e0 rembours\u00e9e sur les salaires)' : '') + '.' : '');
+  openConfirm(_msgDel, function() {
+    if (_apLies.length) {
+      var _ids = _apLies.map(function (a) { return a.id; });
+      DB.set('mdb_acomptesPrets', dbArr('mdb_acomptesPrets').filter(function (a) { return !a || _ids.indexOf(a.id) === -1; }));
+      try { addTombstones('mdb_acomptesPrets', _ids); } catch (eTA) {}
+    }
     var ops = getBanqueOperations();
     var deletedOp = null;
     for (var i = 0; i < ops.length; i++) { if (ops[i].id === id) { deletedOp = ops[i]; break; } }
@@ -33349,8 +33395,8 @@ function saveBanque(id) {
   renderBanqueIn(document.getElementById('tresorerieContent'));
 }
 function deleteBanque(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette banque ?')) return;
+  var _nOps = getBanqueOperations().filter(function (o) { return o.banqueId === id; }).length;
+  if (_nOps > 0) { toast('Cette banque a ' + _nOps + ' op\u00e9ration(s) : supprimez-les ou d\u00e9placez-les avant de supprimer la banque', 'error'); return; }
   openConfirm('\u00cates-vous s\u00fbr de supprimer cette banque ?', function() {
     var banques = getBanques(); var result = [];
     for (var i = 0; i < banques.length; i++) { if (banques[i].id !== id) result.push(banques[i]); }
@@ -36183,9 +36229,9 @@ function renderDemandesPage() {
 function openDemandeModal(id) {
   var d = null;
   if (id) { var dm = getRhDemandes(); for (var i = 0; i < dm.length; i++) { if (dm[i].id === id) { d = dm[i]; break; } } }
-  var body = '<div style="font-size:12px;color:var(--gray-600);margin-bottom:10px">La demande sera num\u00e9rot\u00e9e automatiquement : <strong>' + rhNextDemandeNum() + '</strong></div>';
+  var body = '<div style="font-size:12px;color:var(--gray-600);margin-bottom:10px">' + (d ? 'Demande <strong>' + escH(d.numero || '') + '</strong>' : 'La demande sera num\u00e9rot\u00e9e automatiquement : <strong>' + rhNextDemandeNum() + '</strong>') + ' \u2014 le salari\u00e9 dispose de 72 heures pour s\u2019expliquer (Code du travail art. 17.5).</div>';
   body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Employ\u00e9</label><select id="dmEmp" style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px">';
-  rhActifs().forEach(function(e) { body += '<option value="' + e.id + '"' + (d && d.employee_id === e.id ? ' selected' : '') + '>' + escH(rhEmpLabel(e)) + (e.matricule ? ' (' + escH(e.matricule) + ')' : '') + '</option>'; });
+  body += _rhEmpOptions(d ? d.employee_id : '');
   body += '</select>';
   body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Motif</label><input type="text" id="dmMotif" value="' + escH(d ? d.motif : '') + '" placeholder="Ex : absence injustifi\u00e9e du 05/09, retard r\u00e9p\u00e9t\u00e9..." style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px">';
   body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Description d\u00e9taill\u00e9e</label><textarea id="dmDesc" rows="4" placeholder="Faits constat\u00e9s, dates, t\u00e9moins..." style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;font-family:inherit">' + escH(d ? d.description : '') + '</textarea>';
@@ -36232,8 +36278,6 @@ function cloturerDemande(id) {
   });
 }
 function supprimerDemande(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette demande ?')) return;
   openConfirm('Supprimer d\u00e9finitivement cette demande ?', function() {
     setRhDemandes(getRhDemandes().filter(function(x) { return x.id !== id; }));
     toast('Demande supprim\u00e9e'); renderDemandesPage();
@@ -36254,7 +36298,7 @@ function printDemandeLettre(id) {
   body += '<div style="margin-top:16px">Objet : <strong>Demande d\u2019explication</strong></div>';
   body += '<div style="margin-top:12px;text-align:justify;line-height:1.8">Madame, Monsieur,<br/><br/>Dans le cadre du suivi du personnel, nous vous demandons de bien vouloir nous fournir des explications \u00e9crites concernant : <strong>' + escH(d.motif || '') + '</strong>.<br/><br/>';
   if (d.description) body += 'Faits concern\u00e9s : ' + escH(d.description) + '<br/><br/>';
-  body += 'Veuillez d\u00e9poser votre r\u00e9ponse aupr\u00e8s de la Direction au plus tard le <strong>' + _fmtDateLong(rhAddDays(d.date, 7)) + '</strong>.<br/><br/>';
+  body += 'Conform\u00e9ment \u00e0 l\u2019article 17.5 du Code du travail, vous disposez d\u2019un d\u00e9lai de 72 heures \u00e0 compter de la r\u00e9ception de la pr\u00e9sente pour fournir vos explications, par \u00e9crit ou oralement (vous pouvez alors vous faire assister d\u2019un \u00e0 trois d\u00e9l\u00e9gu\u00e9s du personnel), soit au plus tard le <strong>' + _fmtDateLong(rhAddDays(d.date, 3)) + '</strong>.<br/><br/>';
   body += 'Nous vous prions d\u2019agr\u00e9er, Madame, Monsieur, l\u2019expression de nos salutations distingu\u00e9es.</div>';
   body += _docFooterHTML() + '</div>';
   _rhOpenPrint('Demande d\u2019explication ' + (d.numero || ''), body, true);
@@ -36318,48 +36362,107 @@ function renderSanctionsPage() {
   html += '</tbody></table></div></div></div>';
   el.innerHTML = html;
 }
-function openSanctionModal(id) {
-  var s = null;
-  if (id) { var arr = getRhSanctions(); for (var i = 0; i < arr.length; i++) { if (arr[i].id === id) { s = arr[i]; break; } } }
-  var body = '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Employ\u00e9</label><select id="snEmp" style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px">';
-  rhActifs().forEach(function(e) { body += '<option value="' + e.id + '"' + (s && s.employee_id === e.id ? ' selected' : '') + '>' + escH(rhEmpLabel(e)) + '</option>'; });
-  body += '</select>';
-  body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Type de sanction</label><select id="snType" style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px">';
-  ['avertissement_verbal', 'avertissement_ecrit', 'blame', 'mise_a_pied', 'retrogradation', 'licenciement'].forEach(function(t) { body += '<option value="' + t + '"' + (s && s.type === t ? ' selected' : '') + '>' + escH(rhSanctionTypeLabel(t)) + '</option>'; });
-  body += '</select>';
-  body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Date de la sanction</label><input type="date" id="snDate" value="' + (s ? s.date : getToday()) + '" style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px">';
-  body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Dur\u00e9e de mise \u00e0 pied (jours) \u2014 si applicable</label><input type="number" id="snDuree" min="0" value="' + (s && s.duree_jours ? s.duree_jours : '') + '" style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px">';
-  body += '<label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px">Motif / Description</label><textarea id="snDesc" rows="3" placeholder="Faits reproch\u00e9s, r\u00e9f\u00e9rence \u00e0 la demande d\u2019explication..." style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;font-family:inherit">' + escH(s ? s.description : '') + '</textarea>';
-  body += '<div style="margin-top:10px"><label style="font-size:12px;font-weight:600;margin-right:8px">Statut</label><select id="snStatut" style="padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px">';
-  ['notifie', 'active', 'executee', 'annulee'].forEach(function(st) { body += '<option value="' + st + '"' + (s && s.statut === st ? ' selected' : '') + '>' + escH(rhSanctionStatutLabel(st)) + '</option>'; });
-  body += '</select></div>';
-  var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button><button class="btn btn-primary" onclick="saveSanction(\'' + (id || '') + '\')">' + (s ? 'Mettre \u00e0 jour' : 'Enregistrer') + '</button>';
-  openFormModal(s ? 'Modifier la sanction' : 'Nouvelle sanction', body, footer);
-}
-function saveSanction(id) {
-  var e = document.getElementById('snEmp');
-  var t = document.getElementById('snType');
-  var d = document.getElementById('snDate');
-  var du = document.getElementById('snDuree');
-  var de = document.getElementById('snDesc');
-  var st = document.getElementById('snStatut');
-  if (!e || !e.value) { toast('Choisissez l\u2019employ\u00e9', 'error'); return; }
-  if (!t || !t.value) { toast('Choisissez le type', 'error'); return; }
-  var arr = getRhSanctions();
-  var durJ = parseInt(du ? du.value : '', 10);
-  if (isNaN(durJ)) durJ = 0;
-  if (id) {
-    var found = arr.filter(function(x) { return x.id === id; })[0];
-    if (found) { found.employee_id = e.value; found.type = t.value; found.date = d ? d.value : getToday(); found.duree_jours = durJ; found.description = (de ? de.value : '').trim(); found.statut = st ? st.value : 'notifie'; }
-  } else {
-    arr.push({ id: DB.genId(), employee_id: e.value, type: t.value, date: d ? d.value : getToday(), duree_jours: durJ, description: (de ? de.value : '').trim(), statut: st ? st.value : 'notifie' });
-  }
-  setRhSanctions(arr);
-  closeModal(); toast('Sanction enregistr\u00e9e', 'success'); renderSanctionsPage();
-}
+/* Code du travail 2015, art. 17 : sanctions possibles = avertissement ecrit,
+   mise a pied sans salaire de 1 a 3 jours ou de 4 a 8 jours, licenciement
+   (art. 17.3) ; pas de sanction pecuniaire ni de double sanction (17.1) ;
+   explications du salarie sous 72 h, notification dans les 15 jours ouvrables
+   suivant les explications ecrites, fait de plus de 3 mois non sanctionnable (17.5).
+   Les observations verbales ne sont pas une sanction (17.2). */
+var RH_SANC_LEGALES = ['avertissement_ecrit', 'mise_a_pied', 'licenciement', 'avertissement_verbal'];
+function _rhEmpOptions(selId) {
+  var h = '', vu = false;
+  rhActifs().forEach(function(e) { if (e.id === selId) vu = true; h += '<option value="' + e.id + '"' + (e.id === selId ? ' selected' : '') + '>' + escH(rhEmpLabel(e)) + (e.matricule ? ' (' + escH(e.matricule) + ')' : '') + '</option>'; });
+  /* Employe sorti : on le garde dans la liste, sinon modifier la fiche le remplacait par le premier actif */
+  if (selId && !vu) { var x = rhEmpById(selId); h = '<option value="' + escH(selId) + '" selected>' + escH(rhEmpLabel(x)) + ' (sorti)</option>' + h; }
+  return h;
+}
+function _rhJoursOuvrablesApres(d1, d2) { /* jours ouvrables entre d1 (exclu) et d2 (inclus) */
+  if (!d1 || !d2 || d2 <= d1) return 0;
+  return Math.max(0, congeJoursOuvrablesEntre(rhAddDays(d1, 1), d2));
+}
+/* Controles legaux d'une sanction -> liste de messages (vide = conforme) */
+function rhControlerSanction(sc, autres) {
+  var msg = [];
+  if (sc.type === 'mise_a_pied' && !(sc.duree_jours >= 1 && sc.duree_jours <= 8)) msg.push('Mise à pied : 1 à 8 jours au plus (art. 17.3).');
+  if (sc.type === 'blame' || sc.type === 'retrogradation') msg.push('« ' + rhSanctionTypeLabel(sc.type) + ' » ne figure pas dans la liste légale (art. 17.3).');
+  if (sc.date_faits && sc.date && rhDayDiff(sc.date_faits, sc.date) > 92) msg.push('Faits connus il y a plus de 3 mois : ils ne peuvent plus être sanctionnés (art. 17.5).');
+  var dm = sc.demande_id ? getRhDemandes().filter(function(x) { return x.id === sc.demande_id; })[0] : null;
+  if (sc.type !== 'avertissement_verbal' && !dm) msg.push('Aucune demande d’explication liée : le salarié doit pouvoir s’expliquer avant la sanction (art. 17.5).');
+  if (dm && dm.date_reponse && sc.date && _rhJoursOuvrablesApres(dm.date_reponse, sc.date) > 15) msg.push('Notifiée plus de 15 jours ouvrables après les explications (' + fmtDate(dm.date_reponse) + ') (art. 17.5).');
+  if (dm && !dm.date_reponse && sc.date && rhDayDiff(dm.date, sc.date) < 3) msg.push('Le délai de 72 h laissé au salarié pour s’expliquer n’est pas écoulé (art. 17.5).');
+  if (sc.demande_id && (autres || []).some(function(o) { return o.id !== sc.id && o.demande_id === sc.demande_id && o.statut !== 'annulee'; })) msg.push('Une autre sanction existe déjà pour ces faits : double sanction interdite (art. 17.1).');
+  return msg;
+}
+function openSanctionModal(id) {
+  var s = null;
+  if (id) { var arr = getRhSanctions(); for (var i = 0; i < arr.length; i++) { if (arr[i].id === id) { s = arr[i]; break; } } }
+  var lab = 'style="display:block;font-size:12px;font-weight:600;margin-bottom:4px"', inp = 'style="width:100%;padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px;margin-bottom:10px"';
+  var body = '<label ' + lab + '>Employé</label><select id="snEmp" onchange="rhSanctionDemandesMaj()" ' + inp + '>' + _rhEmpOptions(s ? s.employee_id : '') + '</select>';
+  body += '<label ' + lab + '>Type de sanction</label><select id="snType" ' + inp + '>';
+  var types = RH_SANC_LEGALES.slice();
+  if (s && types.indexOf(s.type) === -1) types.push(s.type);
+  types.forEach(function(t) {
+    var l = t === 'avertissement_verbal' ? 'Observation verbale (pas une sanction, art. 17.2)' : t === 'mise_a_pied' ? 'Mise à pied sans salaire (1 à 8 jours)' : rhSanctionTypeLabel(t);
+    if (RH_SANC_LEGALES.indexOf(t) === -1) l += ' — hors liste légale';
+    body += '<option value="' + escH(t) + '"' + ((s ? s.type === t : t === 'avertissement_ecrit') ? ' selected' : '') + '>' + escH(l) + '</option>';
+  });
+  body += '</select>';
+  body += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label ' + lab + '>Date des faits</label><input type="date" id="snFaits" value="' + escH(s && s.date_faits ? s.date_faits : '') + '" ' + inp + '></div>';
+  body += '<div><label ' + lab + '>Date de la sanction</label><input type="date" id="snDate" value="' + (s ? s.date : getToday()) + '" ' + inp + '></div></div>';
+  body += '<label ' + lab + '>Demande d’explication liée</label><select id="snDemande" ' + inp + '></select>';
+  body += '<label ' + lab + '>Durée de mise à pied (jours, 1 à 8)</label><input type="number" id="snDuree" min="0" max="8" value="' + (s && s.duree_jours ? s.duree_jours : '') + '" ' + inp + '>';
+  body += '<label ' + lab + '>Motif / Description</label><textarea id="snDesc" rows="3" placeholder="Faits reprochés..." ' + inp.replace('margin-bottom:10px', 'margin-bottom:0;font-family:inherit') + '>' + escH(s ? (s.description || '') : '') + '</textarea>';
+  body += '<div style="margin-top:10px"><label style="font-size:12px;font-weight:600;margin-right:8px">Statut</label><select id="snStatut" style="padding:8px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:13px">';
+  ['notifie', 'active', 'executee', 'annulee'].forEach(function(st) { body += '<option value="' + st + '"' + (s && s.statut === st ? ' selected' : '') + '>' + escH(rhSanctionStatutLabel(st)) + '</option>'; });
+  body += '</select></div>';
+  body += '<div style="margin-top:10px;font-size:11px;color:var(--gray-500);line-height:1.5">Code du travail art. 17 : explications du salarié sous 72 h, notification dans les 15 jours ouvrables, pas de sanction pour des faits connus depuis plus de 3 mois, ni d’amende, ni de double sanction. Copie à l’inspecteur du travail et au délégué du personnel.</div>';
+  var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button><button class="btn btn-primary" onclick="saveSanction(\'' + (id || '') + '\')">' + (s ? 'Mettre à jour' : 'Enregistrer') + '</button>';
+  openFormModal(s ? 'Modifier la sanction' : 'Nouvelle sanction', body, footer);
+  window._snDemandeSel = s ? (s.demande_id || '') : '';
+  rhSanctionDemandesMaj();
+}
+function rhSanctionDemandesMaj() {
+  var sel = document.getElementById('snDemande'), emp = document.getElementById('snEmp');
+  if (!sel) return;
+  var eid = emp ? emp.value : '';
+  var h = '<option value="">— Aucune —</option>';
+  getRhDemandes().filter(function(d) { return d.employee_id === eid; }).sort(function(a, b) { return String(b.date || '').localeCompare(String(a.date || '')); }).forEach(function(d) {
+    h += '<option value="' + escH(d.id) + '"' + (window._snDemandeSel === d.id ? ' selected' : '') + '>' + escH((d.numero || '') + ' — ' + fmtDate(d.date) + ' — ' + (d.motif || '')) + '</option>';
+  });
+  sel.innerHTML = h;
+}
+function saveSanction(id, forcer) {
+  var e = document.getElementById('snEmp');
+  var t = document.getElementById('snType');
+  var d = document.getElementById('snDate');
+  var du = document.getElementById('snDuree');
+  var de = document.getElementById('snDesc');
+  var st = document.getElementById('snStatut');
+  var fa = document.getElementById('snFaits');
+  var dmS = document.getElementById('snDemande');
+  if (!e || !e.value) { toast('Choisissez l’employé', 'error'); return; }
+  if (!t || !t.value) { toast('Choisissez le type', 'error'); return; }
+  var arr = getRhSanctions();
+  var durJ = parseInt(du ? du.value : '', 10);
+  if (isNaN(durJ)) durJ = 0;
+  if (t.value !== 'mise_a_pied') durJ = 0;
+  var rec = { id: id || DB.genId(), employee_id: e.value, type: t.value, date: (d && d.value) ? d.value : getToday(), date_faits: fa ? fa.value : '', demande_id: dmS ? dmS.value : '', duree_jours: durJ, description: (de ? de.value : '').trim(), statut: st ? st.value : 'notifie' };
+  if (rec.type === 'mise_a_pied' && !(durJ >= 1 && durJ <= 8)) { toast('Mise à pied : indiquez une durée de 1 à 8 jours (Code du travail art. 17.3)', 'error'); return; }
+  var alertes = rec.statut === 'annulee' ? [] : rhControlerSanction(rec, arr);
+  if (alertes.length && !forcer) {
+    openConfirm('Points à vérifier :\n\n• ' + alertes.join('\n• ') + '\n\nEnregistrer quand même ?', function() { saveSanction(id, true); });
+    return;
+  }
+  if (id) {
+    var found = arr.filter(function(x) { return x.id === id; })[0];
+    if (found) { for (var k in rec) if (rec.hasOwnProperty(k)) found[k] = rec[k]; }
+  } else {
+    arr.push(rec);
+  }
+  setRhSanctions(arr);
+  closeModal(); toast('Sanction enregistrée' + (rec.type === 'mise_a_pied' ? ' — pensez à pointer les ' + durJ + ' jour(s) en absence « Mise à pied » (non payés)' : ''), 'success'); renderSanctionsPage();
+}
 function supprimerSanction(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette sanction ?')) return;
   openConfirm('Supprimer d\u00e9finitivement cette sanction ?', function() {
     setRhSanctions(getRhSanctions().filter(function(x) { return x.id !== id; }));
     toast('Sanction supprim\u00e9e'); renderSanctionsPage();
@@ -36377,7 +36480,7 @@ function printSanctionLettre(id) {
   body += '<div style="margin-top:12px">A l\u2019attention de : <strong>' + escH(rhEmpLabel(e)) + '</strong>' + (e.matricule ? ' \u2014 Matricule : ' + escH(e.matricule) : '') + '</div>';
   body += '<div style="margin-top:4px">Poste : ' + escH(deptFoncCellI(e)) + '</div>';
   body += '<div style="margin-top:16px">Objet : <strong>' + escH(rhSanctionTypeLabel(s.type)) + ' \u2014 ' + fmtDate(s.date) + '</strong></div>';
-  body += '<div style="margin-top:12px;text-align:justify;line-height:1.8">Madame, Monsieur,<br/><br/>Faisant suite aux faits constat\u00e9s et aux explications recueillies, nous vous notifions la sanction suivante : <strong>' + escH(rhSanctionTypeLabel(s.type)) + '</strong>' + (s.type === 'mise_a_pied' && s.duree_jours ? ' d\u2019une dur\u00e9e de <strong>' + s.duree_jours + ' jour(s)</strong>' : '') + '.<br/><br/>';
+  body += '<div style="margin-top:12px;text-align:justify;line-height:1.8">Madame, Monsieur,<br/><br/>Faisant suite aux faits constat\u00e9s et aux explications recueillies, nous vous notifions la sanction suivante : <strong>' + escH(rhSanctionTypeLabel(s.type)) + '</strong>' + (s.type === 'mise_a_pied' && s.duree_jours ? ' sans salaire d\u2019une dur\u00e9e de <strong>' + s.duree_jours + ' jour(s)</strong>' : '') + '.<br/><br/>';
   if (s.description) body += 'Motifs : ' + escH(s.description) + '<br/><br/>';
   body += 'Cette sanction est notifi\u00e9e sous r\u00e9serve de tous droits et voies de recours pr\u00e9vus par la loi. Veuillez signer l\u2019accus\u00e9 de r\u00e9ception de la pr\u00e9sente.<br/><br/>';
   body += 'Nous vous prions d\u2019agr\u00e9er, Madame, Monsieur, l\u2019expression de nos salutations distingu\u00e9es.</div>';
@@ -36468,7 +36571,10 @@ function missionStatutBadge(m) {
 /* ---- Fiche de mission ---- */
 function showMission(id) {
   var m = id ? getMission(id) : null;
-  var emps = (getPersonnel() || []).filter(function (p) { return p && p.en_paie !== false; });
+  var _dejaM = (m && Array.isArray(m.intervenants)) ? m.intervenants.map(String) : [];
+  /* Un intervenant sorti depuis reste dans la liste de SA mission (sinon
+     l'enregistrement le retirait sans le dire). */
+  var emps = (getPersonnel() || []).filter(function (p) { return p && (p.en_paie !== false || _dejaM.indexOf(String(p.id)) !== -1); });
   emps.sort(function (a, b) { return String(a.matricule || "").localeCompare(String(b.matricule || ""), undefined, { numeric: true }); });
   var h = "";
   h += '<div style="font-size:.8rem;color:#64748b;margin-bottom:10px">';
@@ -36492,8 +36598,8 @@ function showMission(id) {
   h += "</div>";
 
   h += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
-  h += '<div class="form-group" style="flex:1;min-width:140px"><label>Départ</label><input type="date" id="ms-depart" value="' + escH(m ? m.date_depart : getToday()) + '" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
-  h += '<div class="form-group" style="flex:1;min-width:140px"><label>Retour prévu</label><input type="date" id="ms-retour" value="' + escH(m ? m.date_retour : "") + '" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
+  h += '<div class="form-group" style="flex:1;min-width:140px"><label>Départ</label><input type="date" id="ms-depart" onchange="missionJoursAuto()" value="' + escH(m ? m.date_depart : getToday()) + '" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
+  h += '<div class="form-group" style="flex:1;min-width:140px"><label>Retour prévu</label><input type="date" id="ms-retour" onchange="missionJoursAuto()" value="' + escH(m ? m.date_retour : "") + '" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
   h += '<div class="form-group" style="flex:1;min-width:120px"><label>Nombre de jours</label><input type="number" id="ms-jours" min="0" step="1" value="' + escH(m ? m.nb_jours : 1) + '" oninput="missionRecalc()" style="width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px"></div>';
   h += "</div>";
 
@@ -36547,9 +36653,23 @@ function showMission(id) {
   missionRecalc();
 }
 function nextMissionNum() {
-  var y = new Date().getFullYear();
-  var n = getMissions().filter(function (m) { return String(m.numero || "").indexOf(String(y)) === 0; }).length + 1;
+  /* Avant : on cherchait les numeros commencant par l'annee alors qu'ils
+     commencent par « OM- » -> toujours OM-AAAA-001 (doublons). */
+  var y = String(new Date().getFullYear()), max = 0;
+  getMissions().forEach(function (m) {
+    var r = String(m.numero || "").match(/^OM-(\d{4})-(\d+)$/);
+    if (r && r[1] === y) max = Math.max(max, parseInt(r[2], 10) || 0);
+  });
+  var n = max + 1;
   return "OM-" + y + "-" + (n < 10 ? "00" : n < 100 ? "0" : "") + n;
+}
+/* Nombre de jours = du depart au retour inclus */
+function missionJoursAuto() {
+  var d = (document.getElementById("ms-depart") || {}).value, r = (document.getElementById("ms-retour") || {}).value;
+  var j = document.getElementById("ms-jours");
+  if (!j || !d || !r) return;
+  var n = rhDayDiff(d, r) + 1;
+  if (n >= 1) { j.value = n; missionRecalc(); }
 }
 function missionToutIntervenant(on) {
   var box = document.getElementById("ms-emps");
@@ -36581,6 +36701,9 @@ function saveMission(id) {
   if (!v("ms-lieu")) { toast("Le lieu est obligatoire", "error"); return; }
   var emps = missionIntervenants();
   if (!emps.length) { toast("Cochez au moins un intervenant", "error"); return; }
+  if (v("ms-depart") && v("ms-retour") && v("ms-retour") < v("ms-depart")) { toast("La date de retour est avant la date de d\u00e9part", "error"); return; }
+  var _numV = v("ms-num");
+  if (_numV && getMissions().some(function (x) { return String(x.id) !== String(id || "") && String(x.numero || "") === _numV; })) { toast("Le num\u00e9ro " + _numV + " est d\u00e9j\u00e0 utilis\u00e9 par une autre mission", "error"); return; }
   var l = getMissions();
   var m = id ? getMission(id) : null;
   var st = v("ms-statut") || (m && m.statut) || "preparee";
@@ -36619,7 +36742,9 @@ function renderMissionsList() {
   var l = getMissions().slice();
   l.sort(function (a, b) { return String(b.date_depart || '').localeCompare(String(a.date_depart || '')); });
   var filtre = (document.getElementById('ms-filtre-statut') || {}).value || '';
-  var q = String((document.getElementById('ms-recherche') || {}).value || '').toLowerCase();
+  var qBrut = String((document.getElementById('ms-recherche') || {}).value || '');
+  var q = qBrut.toLowerCase();
+  try { window._msRechFocus = !!(document.activeElement && document.activeElement.id === 'ms-recherche'); } catch (eAE) { window._msRechFocus = false; }
   var rows = l.filter(function (m) {
     if (filtre && (m.statut || 'preparee') !== filtre) return false;
     if (q) {
@@ -36631,7 +36756,7 @@ function renderMissionsList() {
   var h = '';
   h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">';
   h += '<button class="btn" onclick="showMission()" style="padding:7px 16px;background:#f97316;color:#fff;border:none;border-radius:6px;font-weight:700">+ Nouvelle mission</button>';
-  h += '<input type="text" id="ms-recherche" placeholder="Rechercher (objet, lieu, intervenant…)" value="' + escH(q) + '" oninput="renderMissionsList()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px">';
+  h += '<input type="text" id="ms-recherche" placeholder="Rechercher (objet, lieu, intervenant…)" value="' + escH(qBrut) + '" oninput="renderMissionsList()" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px">';
   h += '<select id="ms-filtre-statut" onchange="renderMissionsList()" style="padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px">';
   h += '<option value="">Tous les statuts</option><option value="preparee">Préparées</option><option value="en_cours">En cours</option><option value="terminee">Terminées</option><option value="annulee">Annulées</option>';
   h += '</select>';
@@ -36641,6 +36766,8 @@ function renderMissionsList() {
 
   if (!rows.length) {
     el.innerHTML = h + '<div style="text-align:center;padding:2rem;color:#94a3b8;border:1px dashed #e2e8f0;border-radius:8px">Aucune mission.</div>';
+    try { var fs3 = document.getElementById('ms-filtre-statut'); if (fs3 && filtre) fs3.value = filtre; } catch (eF3) {}
+    _missionRefocus(q);
     return;
   }
   h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.78rem">';
@@ -36666,6 +36793,16 @@ function renderMissionsList() {
   el.innerHTML = h;
   var fs2 = document.getElementById('ms-filtre-statut');
   if (fs2 && filtre) fs2.value = filtre;
+  _missionRefocus(q);
+}
+/* La liste est redessinee a chaque frappe : on remet le curseur dans la
+   recherche (sinon il fallait recliquer apres chaque lettre). */
+function _missionRefocus(q) {
+  try {
+    if (!window._msRechFocus) return;
+    var r = document.getElementById('ms-recherche');
+    if (r && r.focus) { r.focus(); var n = String(r.value || '').length; if (r.setSelectionRange) r.setSelectionRange(n, n); }
+  } catch (eF) {}
 }
 /* ---- Liste + suivi ---- */
 function missionNoms(m) {
@@ -36688,6 +36825,7 @@ function missionTypeLabel(v) {
 function deleteMission(id) {
   if (!confirm("Supprimer cet ordre de mission ?")) return;
   setMissions(getMissions().filter(function (m) { return String(m.id) !== String(id); }));
+  try { closePtModal(); } catch (eCM) {}
   toast("Mission supprimée", "info");
   renderMissionsList();
 }
@@ -37028,8 +37166,6 @@ function rhCongeRepriseDirect(id, input) {
   } catch (e) { toast('Enregistrement impossible', 'error'); }
 }
 function supprimerConge(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer ce conge ?')) return;
   openConfirm('Supprimer ce cong\u00e9 ?', function() {
     setRhConges(getRhConges().filter(function(x) { return x.id !== id; }));
     toast('Cong\u00e9 supprim\u00e9'); renderCongesPage();
@@ -39291,9 +39427,7 @@ function _requireAdminValidationForReversed(op) {
   return true;
 }
 
-function deleteCaisseOp(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cette operation de caisse ?')) return; deleteCaisse(id); }
+function deleteCaisseOp(id) { deleteCaisse(id); } /* deleteCaisse demande deja la confirmation */
 
 function deleteCaisse(id) {
   var ops = getOperationsCaisse();
@@ -49667,8 +49801,6 @@ function saveStock(id) {
 }
 
 function deleteStock(id) {
-  /* Suppression definitive : confirmation demandee */
-  if (!window.confirm('Supprimer cet article du stock ?')) return;
   openConfirm('Supprimer ce stock ?', function() {
     var stocks = dbArr('mdb_stocks');
     var r = [];
