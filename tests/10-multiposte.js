@@ -505,6 +505,23 @@ async function run(rapport) {
     else rapport.ko('lecture differentielle : ' + JSON.stringify({ cles: cles, x: ids(d.mdb_x), gros: (d.mdb_gros || []).length, y2: d2.mdb_y, rien: rien, echoA: echoA }));
   });
 
+  await cas('acompte recree depuis la caisse : un autre poste ne le re-efface pas', async function () {
+    const serveur = creerServeur();
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: '__split_migration_ok', data: { v: 1 }, updated_at: 'x' });
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_acomptesPrets', data: [{ id: 'B0' }], updated_at: '2026-10-24T04:00:00.000001+00:00' });
+    const A = creerPoste(serveur, { mdb_acomptesPrets: { A1: Date.now(), A9: Date.now() } });
+    A.stock.mdb_operationsCaisse = JSON.stringify([{ id: 'OP1', acomptePretId: 'A1' }, { id: 'OP2' }]);
+    await A.ecrire({ mdb_acomptesPrets: [{ id: 'B0' }] });          /* base de A */
+    /* la Paie (autre poste) recree A1 (piece OP1), A2 (piece OP2, lien perdu) et A9 (sans piece) */
+    const l = serveur.tables.enterprise_data.find(function (x) { return x.cle === 'mdb_acomptesPrets'; });
+    l.data = [{ id: 'B0' }, { id: 'A1', caisseOpId: 'OP1' }, { id: 'A2', caisseOpId: 'OP2' }, { id: 'A9', caisseOpId: 'OPX' }]; l.updated_at = '2026-10-24T04:00:00.000009+00:00';
+    const t = JSON.parse(A.stock.mdb_tombstones); t.mdb_acomptesPrets.A2 = Date.now(); A.stock.mdb_tombstones = JSON.stringify(t);
+    await A.ecrire({ mdb_acomptesPrets: [{ id: 'B0', v: 1 }] });    /* A modifie sans connaitre les recrees */
+    const r = ids(ligne(serveur, 'mdb_acomptesPrets'));
+    if (r === 'A1,A2,B0') rapport.ok('acomptes recrees depuis une piece de caisse existante gardes malgre une ancienne suppression ; sans piece : suppression respectee (' + r + ')');
+    else rapport.ko('acomptes recrees re-effaces : serveur = ' + r);
+  });
+
   await cas('journal des ecritures', async function () {
     const { A } = await deuxPostes([rec('a1')]);
     await A.ecrire({ mdb_x: [rec('a1'), rec('a2')] });

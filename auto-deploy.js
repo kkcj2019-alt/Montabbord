@@ -88,7 +88,11 @@ function runInner() {
   if (deploying) { schedule(); return; }
   var status = '';
   try { status = sh('git status --porcelain'); } catch (e) { log('ERREUR git status: ' + e.message); schedule(); return; }
-  if (!status) { log('Rien a sauvegarder.'); schedule(); return; }
+  if (!status) {
+    /* Une mise en ligne a echoue (reseau) : on la retente, meme sans nouveau changement. */
+    if (deployEnAttente) { deploying = true; deployerCloudflare(); deploying = false; lastDeployEnd = Date.now(); schedule(); return; }
+    log('Rien a sauvegarder.'); schedule(); return;
+  }
   deploying = true;
   log('Changements detectes, deploiement en cours...');
   try {
@@ -108,15 +112,34 @@ function runInner() {
     } catch (e) { log('Pull ignore: ' + e.message.split('\n')[0]); }
     sh('git push --quiet');
     log('Push GitHub OK');
-    var out = sh('npx.cmd --yes wrangler@4 pages deploy public --project-name montabbord --branch main --commit-dirty=true', { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });
-    var m = out.match(/https:\/\/[^\s]+\.pages\.dev/);
-    log('Mise en ligne Cloudflare OK' + (m ? ' -> ' + m[0] : ''));
+    deployerCloudflare();
   } catch (e) {
     log('ERREUR deploiement: ' + String(e.message).split('\n').slice(0, 4).join(' | '));
   }
   deploying = false;
   lastDeployEnd = Date.now();
   schedule();
+}
+
+/* Mise en ligne Cloudflare avec 3 essais : une coupure reseau pendant l'envoi
+   ne doit plus laisser l'ancienne version en ligne sans qu'on le sache. */
+var deployEnAttente = false;
+function deployerCloudflare() {
+  for (var essai = 1; essai <= 3; essai++) {
+    try {
+      var out = sh('npx.cmd --yes wrangler@4 pages deploy public --project-name montabbord --branch main --commit-dirty=true', { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });
+      var m = out.match(/https:\/\/[^\s]+\.pages\.dev/);
+      log('Mise en ligne Cloudflare OK' + (m ? ' -> ' + m[0] : '') + (essai > 1 ? ' (essai ' + essai + ')' : ''));
+      deployEnAttente = false;
+      return true;
+    } catch (e) {
+      log('ERREUR deploiement (essai ' + essai + '/3): ' + String(e.message).split('\n').slice(0, 4).join(' | '));
+      if (essai < 3) { var t0 = Date.now(); while (Date.now() - t0 < 20000) {} }
+    }
+  }
+  deployEnAttente = true;
+  log('Mise en ligne en attente : nouvel essai automatique dans quelques minutes.');
+  return false;
 }
 
 function schedule() {

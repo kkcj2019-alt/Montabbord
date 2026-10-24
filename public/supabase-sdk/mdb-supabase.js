@@ -266,6 +266,21 @@
         arrs.forEach(function (a) { a.forEach(function (x) { out[String(x)] = true; }); });
       }
     } catch (e2) {}
+    /* Acomptes/prets : une suppression memorisee ne vaut pas tant que la piece
+       de caisse correspondante existe (meme regle que les pages). Sans ca, une
+       ecriture de l'app principale retirait du serveur les acomptes que la Paie
+       venait de recreer depuis la caisse : le total montait puis retombait. */
+    if (cle === 'mdb_acomptesPrets') {
+      try {
+        var ops = JSON.parse(localStorage.getItem('mdb_operationsCaisse') || '[]'), vivOps = {};
+        if (Array.isArray(ops)) ops.forEach(function (o) {
+          if (!o || o.reversed) return;
+          if (o.id) vivOps[o.id] = true;
+          if (o.acomptePretId && out[o.acomptePretId]) delete out[o.acomptePretId];
+        });
+        Object.defineProperty(out, '__liveOps', { value: vivOps, enumerable: false });
+      } catch (e4) {}
+    }
     return out;
   }
   function recentReset() {
@@ -341,7 +356,7 @@
       x = fresh[i]; id = idOf(x);
       if (iM[id]) continue;
       b = bM[id];
-      if (b === undefined) { if (!tomb[id]) out.push(x); }      /* ajoute par un autre poste */
+      if (b === undefined) { if (!tomb[id] || (x && x.caisseOpId && tomb.__liveOps && tomb.__liveOps[x.caisseOpId])) out.push(x); }      /* ajoute par un autre poste */
       else if (sjson(x) !== sjson(b)) out.push(x);              /* je l'ai supprimee mais un autre l'a modifiee : on garde */
       /* sinon : je l'ai supprimee, personne d'autre n'y a touche -> supprimee */
     }
