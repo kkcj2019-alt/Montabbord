@@ -68,6 +68,14 @@ function run(rapport) {
     var e = congeAcquisLegal(12);                         /* sans fiche : inchange */
     (a === 28.4 && b === 26.4 && c === 30.4 && d === 15.2 && e === 26.4) ? 'OK : jeune 1 enfant 28,4 ; adulte 3 enfants 26,4 ; 5 enfants 30,4 ; 6 mois 15,2'
       : 'ECHEC : ' + [a, b, c, d, e].join(' / ')`);
+  cas("STC : l'impression fonctionne (avant : modele d'attestation colle par erreur, plantage)", `
+    setPayeSection('stcRecords', [{ id: 'S1', nom: 'KOFFI JEAN', matricule: 'M9', dateEntree: '2020-01-01', dateFin: '2026-10-15', motif: 'licenciement', preavis: 'effectue', moy12: 150000, items: [{ label: 'Indemnite de licenciement', ref: '30 %', amount: 300000 }, { label: 'Retenue - Acompte', ref: '', amount: -50000 }], total: 250000, statut: 'brouillon' }]);
+    var ecrit = '';
+    var _wo = window.open; window.open = function () { return { document: { write: function (x) { ecrit += x; }, close: function () {} } }; };
+    var err = '';
+    try { printSTCRecord('S1'); } catch (e) { err = e.message; }
+    window.open = _wo;
+    (!err && ecrit.indexOf('Solde de tout compte') !== -1 && ecrit.indexOf('Indemnite de licenciement') !== -1 && ecrit.indexOf('KOFFI JEAN') !== -1) ? 'OK : document STC produit (rubriques, net, signatures)' : 'ECHEC : ' + (err || ecrit.slice(0, 200))`);
   cas('Nuit : dans les 40 h = normales ; au-dela de 40 h = +75 %', `
     var emps = payeArr('mdb_employes');
     emps.push({ id: 'en', nom: 'Nuit', prenoms: 'T', matricule: 'MN01', fonction: 'Gardien', service: 'Prod', type_contrat: 'Journalier', categorie: 'A', status: 'actif', date_embauche: '2024-06-01', salaire_base: 4000 });
