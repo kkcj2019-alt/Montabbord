@@ -29,5 +29,12 @@ function run(rapport) {
     var regVisible = getReglements().filter(function (r) { return r.id === 'RG2' && !r._deleted; }).length;
     (g.montantPaye === 0 && g.statut === 'validee' && regVisible === 0) ? 'OK : facture a payer, reglement retire'
       : 'ECHEC : ' + JSON.stringify(g) + ' regVisible=' + regVisible`);
+  cas('BL : livrer plus que le stock puis annuler revient exactement au depart', `
+    DB.set('mdb_stocks', [{ id: 'S1', articleId: 'A1', articleCode: 'X1', articleNom: 'ART X1', quantite: 5 }]);
+    _adjustStockForBLLines([{ articleId: 'A1', designation: 'ART X1', quantite: 10 }], -1);
+    var q1 = dbArr('mdb_stocks')[0].quantite;
+    _adjustStockForBLLines([{ articleId: 'A1', designation: 'ART X1', quantite: 10 }], 1);
+    var q2 = dbArr('mdb_stocks')[0].quantite;
+    (q1 === -5 && q2 === 5) ? 'OK : 5 -> -5 (livraison superieure) -> 5' : 'ECHEC : ' + q1 + ' / ' + q2`);
 }
 module.exports = { run: run };
