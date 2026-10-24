@@ -30,11 +30,13 @@ function creerServeur() {
   Req.prototype.select = function (c) { if (this.op === 'select') this.cols = c; else { this.ret = true; this.cols = c; } return this; };
   Req.prototype.eq = function (c, v) { this.f.push(['eq', c, v]); return this; };
   Req.prototype.in = function (c, v) { this.f.push(['in', c, v]); return this; };
+  Req.prototype.like = function (c, v) { this.f.push(['like', c, v]); return this; };
   Req.prototype.limit = function (n) { this.lim = n; return this; };
   Req.prototype.order = function () { return this; };
   function match(l, f) {
     if (f[0] === 'eq') return String(l[f[1]]) === String(f[2]);
     if (f[0] === 'in') return f[2].map(String).indexOf(String(l[f[1]])) !== -1;
+    if (f[0] === 'like') return new RegExp('^' + String(f[2]).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*') + '$').test(String(l[f[1]]));
     return true;
   }
   function proj(rows, cols) {
@@ -471,6 +473,38 @@ async function run(rapport) {
     else rapport.ko('stress : manquants=' + manquants.join(',') + ' doublons=' + doublons.join(','));
   });
 
+  await cas('lecture differentielle : seules les rubriques changees sont retelechargees', async function () {
+    const serveur = creerServeur();
+    const gros = []; for (let i = 0; i < 500; i++) gros.push(rec('g' + i, i));
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: '__split_migration_ok', data: { v: 1 }, updated_at: 'x' });
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_gros', data: gros, updated_at: '2026-10-24T04:00:00.000001+00:00' });
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_x', data: [rec('a1')], updated_at: '2026-10-24T04:00:00.000002+00:00' });
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_y', data: [rec('y1')], updated_at: '2026-10-24T04:00:00.000003+00:00' });
+    const A = creerPoste(serveur), B = creerPoste(serveur);
+    await B.lire();                                   /* 1re lecture : complete */
+    await A.lire();
+    await A.ecrire({ mdb_x: [rec('a1'), rec('a2')] }); /* A modifie une seule rubrique */
+    const n0 = serveur.journal.selects.length;
+    const d = await B.lire();
+    const lus = serveur.journal.selects.slice(n0);
+    const avecData = lus.filter(function (q) { return q.cols.indexOf('data') !== -1; });
+    const cles = avecData.map(function (q) { const f = q.filtres.filter(function (x) { return x[0] === 'in'; })[0]; return f ? f[2].join('+') : 'TOUT'; }).join(',');
+    const ok1 = ids(d.mdb_x) === 'a1,a2' && (d.mdb_gros || []).length === 500 && ids(d.mdb_y) === 'y1' && cles === 'mdb_x';
+    /* une rubrique supprimee sur le serveur disparait aussi de la lecture */
+    serveur.tables.enterprise_data = serveur.tables.enterprise_data.filter(function (l) { return l.cle !== 'mdb_y'; });
+    serveur.tables.enterprise_data.forEach(function () {});
+    const n1 = serveur.journal.selects.length;
+    const d2 = await B.lire();
+    const rien = serveur.journal.selects.slice(n1).filter(function (q) { return q.cols.indexOf('data') !== -1; }).length;
+    /* la propre ecriture de A ne lui est pas retelechargee */
+    const n2 = serveur.journal.selects.length;
+    await A.lire();
+    const echoL = serveur.journal.selects.slice(n2).filter(function (q) { return q.cols.indexOf('data') !== -1; }); const echoA = echoL.length;
+    const ok2 = d2.mdb_y === undefined && (d2.mdb_gros || []).length === 500 && rien === 0;
+    if (ok1 && ok2 && echoA === 0) rapport.ok('lecture differentielle : apres une modif de mdb_x, seul mdb_x est retelecharge (pas le gros dossier) ; suppression vue ; sa propre ecriture non relue');
+    else rapport.ko('lecture differentielle : ' + JSON.stringify({ cles: cles, x: ids(d.mdb_x), gros: (d.mdb_gros || []).length, y2: d2.mdb_y, rien: rien, echoA: echoA }));
+  });
+
   await cas('journal des ecritures', async function () {
     const { A } = await deuxPostes([rec('a1')]);
     await A.ecrire({ mdb_x: [rec('a1'), rec('a2')] });
@@ -480,4 +514,4 @@ async function run(rapport) {
   });
 }
 
-module.exports = { run: run };
+module.exports = { run: run, creerServeur: creerServeur };

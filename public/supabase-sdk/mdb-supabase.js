@@ -213,7 +213,9 @@
           part d'une liste sans suppression volontaire (tombstones).
      ======================================================================== */
   var _rowBase = {};   /* uid|cle -> { ts, json } : ce que CE poste a ecrit en dernier */
-  var _rowsCache = {}; /* uid -> { cle: json } : copie des lignes serveur (lecture ciblee) */
+  var _rowsCache = {}; /* uid -> { cle: json } : copie des lignes serveur (lecture ciblee) */
+  var _rowsTs = {};    /* uid -> { cle: updated_at } : version serveur de chaque ligne en cache */
+  var DELTA_FULL_MS = 30 * 60 * 1000; /* relecture integrale de controle : 1 fois / 30 min */
   var _watchers = {};  /* uid -> [fonction] : rafraichir les pages apres une fusion */
   var SYNC = window.MDB_SYNC = { lastWriteOk: 0, lastWriteErr: 0, lastFetchOk: 0, errStreak: 0,
     lastError: '', conflits: 0, fusions: 0, garde: 0, enCours: 0 };
@@ -227,7 +229,10 @@
   /* Egalite EXACTE d'horodatage (Postgres = microsecondes) : 'Z' == '+00:00', zeros de fin ignores */
   function normTs(t) { return String(t || '').replace('Z', '+00:00').replace(/\.(\d*?)0+(?=[+-])/, '.$1').replace(/\.(?=[+-])/, ''); }
   function sameTs(a, b) { if (!a || !b) return false; return normTs(a) === normTs(b); }
-  function cacheSet(uid, cle, data) { (_rowsCache[uid] = _rowsCache[uid] || {})[cle] = sjson(data); }
+  function cacheSet(uid, cle, data, ts) {
+    (_rowsCache[uid] = _rowsCache[uid] || {})[cle] = sjson(data);
+    if (ts) (_rowsTs[uid] = _rowsTs[uid] || {})[cle] = ts;
+  }
 
   /* ---- Journal local des 200 dernieres ecritures (pour retrouver qui a efface quoi) ---- */
   var _jr = null, _jT = null;
@@ -420,7 +425,7 @@
          srv = ce que le serveur contient reellement apres l'ecriture. */
       var srvJ = sjson(fusionne), envJ = sjson(envoye);
       _rowBase[bk] = { ts: r.ts, json: envJ, srv: srvJ === envJ ? null : srvJ };
-      cacheSet(uid, cle, fusionne);
+      cacheSet(uid, cle, fusionne, r.ts);
       journal({ op: srvJ === envJ ? 'ecrit' : 'FUSION', cle: cle, avant: baseAvant ? countOf(JSON.parse(baseAvant.json)) : null, apres: countOf(fusionne) });
       if (srvJ !== envJ) { SYNC.fusions++; notifierFusion(uid); }
     }
@@ -579,8 +584,49 @@
     });
   }
 
+  /* Lecture DIFFERENTIELLE du dossier : on lit d'abord la liste (cle, version)
+     — quelques Ko — puis on ne telecharge QUE les rubriques modifiees depuis la
+     derniere lecture. Avant, chaque changement d'un autre poste faisait
+     retelecharger tout le dossier (plusieurs Mo) par chaque page ouverte :
+     c'est ce qui epuisait le quota de bande passante Supabase. */
+  function fetchEnterpriseDelta(uid) {
+    var c = _rowsCache[uid], tsC = _rowsTs[uid];
+    return sb.from(SPLIT_TABLE).select('cle,updated_at').eq('enterprise_id', uid).then(function(res) {
+      if (res.error) throw res.error;
+      var liste = res.data || [], vu = {}, aLire = [], aSentinelle = false;
+      for (var i = 0; i < liste.length; i++) {
+        var l = liste[i]; if (!l || typeof l.cle !== 'string') continue;
+        vu[l.cle] = true;
+        if (l.cle === SPLIT_MIGRATION_CLE) { aSentinelle = true; tsC[l.cle] = l.updated_at; if (!(l.cle in c)) c[l.cle] = sjson({ v: 1 }); continue; }
+        if (!(l.cle in c) || !tsC[l.cle] || normTs(tsC[l.cle]) !== normTs(l.updated_at)) aLire.push(l.cle);
+      }
+      if (!aSentinelle) return null; /* cas non standard : lecture complete */
+      for (var k in c) { if (c.hasOwnProperty(k) && !vu[k]) { delete c[k]; delete tsC[k]; } }
+      SYNC.deltaLus = (SYNC.deltaLus || 0) + aLire.length;
+      if (!aLire.length) { SYNC.lastFetchOk = Date.now(); return snapshotFromCache(uid); }
+      var lots = [];
+      for (var j = 0; j < aLire.length; j += 40) lots.push(aLire.slice(j, j + 40));
+      return Promise.all(lots.map(function (lot) {
+        return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', lot).then(function (r) {
+          if (r.error) throw r.error;
+          (r.data || []).forEach(function (row) { c[row.cle] = sjson(row.data); tsC[row.cle] = row.updated_at; });
+        });
+      })).then(function () { SYNC.lastFetchOk = Date.now(); return snapshotFromCache(uid); });
+    });
+  }
+
   function fetchEnterpriseSplit(uid) {
-    return sb.from(SPLIT_TABLE).select('cle,data').eq('enterprise_id', uid).then(function(res) {
+    if (_rowsCache[uid] && _rowsTs[uid] && (Date.now() - (SYNC.lastFull || 0)) < DELTA_FULL_MS) {
+      return fetchEnterpriseDelta(uid).then(function (sn) { return sn || fetchEnterpriseSplitComplet(uid); }, function (e) {
+        if (splitEstTableManquante(e)) throw e;
+        return fetchEnterpriseSplitComplet(uid);
+      });
+    }
+    return fetchEnterpriseSplitComplet(uid);
+  }
+
+  function fetchEnterpriseSplitComplet(uid) {
+    return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).then(function(res) {
       if (res.error) {
         if (splitEstTableManquante(res.error)) {
           _splitOK = false;
@@ -591,9 +637,9 @@
       _splitOK = true;
       var lignes = res.data || [];
       try {
-        var _nc = {};
-        for (var ci = 0; ci < lignes.length; ci++) { if (lignes[ci] && typeof lignes[ci].cle === 'string') _nc[lignes[ci].cle] = sjson(lignes[ci].data); }
-        _rowsCache[uid] = _nc;
+        var _nc = {}, _nt = {};
+        for (var ci = 0; ci < lignes.length; ci++) { if (lignes[ci] && typeof lignes[ci].cle === 'string') { _nc[lignes[ci].cle] = sjson(lignes[ci].data); _nt[lignes[ci].cle] = lignes[ci].updated_at; } }
+        _rowsCache[uid] = _nc; _rowsTs[uid] = _nt;
         SYNC.lastFetchOk = Date.now(); SYNC.lastFull = Date.now();
       } catch (eCache) {}
       var aSentinelle = false;
@@ -997,12 +1043,13 @@
   /* Relecture ciblee : seules les rubriques modifiees sont retelechargees */
   function fetchRowsInto(uid, cles, dels) {
     var c = _rowsCache[uid] || (_rowsCache[uid] = {});
-    for (var i = 0; i < dels.length; i++) delete c[dels[i]];
+    var t = _rowsTs[uid] || (_rowsTs[uid] = {});
+    for (var i = 0; i < dels.length; i++) { delete c[dels[i]]; delete t[dels[i]]; }
     if (!cles.length) return Promise.resolve();
-    return _tmo(sb.from(SPLIT_TABLE).select('cle,data').eq('enterprise_id', uid).in('cle', cles), 30000).then(function(res) {
+    return _tmo(sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', cles), 30000).then(function(res) {
       if (res.error) throw res.error;
       var rows = res.data || [];
-      for (var j = 0; j < rows.length; j++) c[rows[j].cle] = sjson(rows[j].data);
+      for (var j = 0; j < rows.length; j++) { c[rows[j].cle] = sjson(rows[j].data); t[rows[j].cle] = rows[j].updated_at; }
       SYNC.lastFetchOk = Date.now();
     });
   }

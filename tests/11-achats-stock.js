@@ -149,6 +149,38 @@ function run(rapport) {
     var retour = getEpiCatalogue()[0].stock;
     (theo === 7 && apres === 4 && retour === 7) ? 'OK : theorique 7 (catalogue), reel 4 -> 4, suppression -> 7'
       : 'ECHEC : theo=' + theo + ' apres=' + apres + ' retour=' + retour`);
+
+  /* Sondage Production (30 s) : ne retelecharge que les rubriques modifiees */
+  const _attenteDelta = (function () {
+    const nom = 'Production : le sondage ne retelecharge que les rubriques modifiees (quota Supabase)';
+    let h;
+    try { h = chargerApp('production.html', storeRealiste()); } catch (e) { rapport.ko(nom + ' : chargement (' + e.message + ')'); return; }
+    const srv = require('./10-multiposte.js').creerServeur();
+    const T = srv.tables.enterprise_data;
+    T.push({ enterprise_id: 'U1', cle: 'mdb_production.stockSemi', data: [{ id: 's1', code: 'A', quantite: 5 }], updated_at: 't1' });
+    T.push({ enterprise_id: 'U1', cle: 'mdb_production.achats', data: [{ id: 'a1' }], updated_at: 't1' });
+    T.push({ enterprise_id: 'U1', cle: 'mdb_operationsCaisse', data: [{ id: 'o1' }], updated_at: 't1' });
+    srv.tables.enterprises.push({ id: 'U1', identifiant: 'x', email: '', nom: 'T' });
+    h.ctx.__srvClient = srv.client();
+    vm.runInContext('_prodSB = __srvClient; _prodSplitOK = true; window._prodDelta = null;', h.ctx);
+    const lire = function () { return vm.runInContext("prodSplitLireCles('U1', ['mdb_operationsCaisse', 'mdb_caisses'], true)", h.ctx); };
+    const avecData = function (from) { return srv.journal.selects.slice(from).filter(function (q) { return q.table === 'enterprise_data' && q.cols.indexOf('data') !== -1; }); };
+    return (async function () {
+      const r1 = await lire();
+      const n1 = srv.journal.selects.length;
+      const r2 = await lire();
+      const d2 = avecData(n1).length;
+      T.forEach(function (l) { if (l.cle === 'mdb_production.achats') { l.data = [{ id: 'a1' }, { id: 'a2' }]; l.updated_at = 't2'; } });
+      const n3 = srv.journal.selects.length;
+      const r3 = await lire();
+      const q3 = avecData(n3).map(function (q) { const f = q.filtres.filter(function (x) { return x[0] === 'in'; })[0]; return f ? f[2].join('+') : 'TOUT'; }).join(',');
+      const p3 = r3.data[0].data.mdb_production || {};
+      const ok = r1.data[0].data.mdb_production.stockSemi.length === 1 && d2 === 0 && q3 === 'mdb_production.achats' && (p3.achats || []).length === 2 && (p3.stockSemi || []).length === 1 && (r3.data[0].data.mdb_operationsCaisse || []).length === 1;
+      if (ok) rapport.ok(nom + '  ->  OK : rien de change = 0 telechargement ; achats modifies = seuls les achats relus');
+      else rapport.ko(nom + '  ->  ECHEC : ' + JSON.stringify({ d2: d2, q3: q3, achats: (p3.achats || []).length, semi: (p3.stockSemi || []).length }));
+    })().catch(function (e) { rapport.ko(nom + ' : exception ' + (e && e.stack || e)); });
+  })();
+  return _attenteDelta;
 }
 
 module.exports = { run: run };

@@ -2781,7 +2781,16 @@ setTimeout(function () {
 var BACKUP_MAX_VERSIONS = 2;
 /* Copies cloud : c'est le filet anti-défaut de synchronisation. 30 versions
    = environ 5 jours avec le rythme de 4 h, largement de quoi remonter le temps. */
-var CLOUD_BACKUP_MAX = 30;
+var CLOUD_BACKUP_MAX = 20;
+/* Espacement des copies cloud AUTOMATIQUES par poste : 6 h. Avant, chaque
+   ouverture de l'application (rechargement compris) et chaque heure envoyaient
+   un instantane complet du dossier (plusieurs Mo) : la base Supabase gratuite
+   (500 Mo) se remplissait de copies et le quota etait atteint. */
+var CLOUD_BACKUP_ECART_MS = 6 * 3600 * 1000;
+function _cloudBackupTropRecent() {
+  try { return (Date.now() - (parseInt(localStorage.getItem('mdb_lastCloudBackupAt'), 10) || 0)) < CLOUD_BACKUP_ECART_MS; } catch (e) { return false; }
+}
+function _cloudBackupNoter() { try { localStorage.setItem('mdb_lastCloudBackupAt', String(Date.now())); } catch (e) {} }
 /* Garde-fou cloud : au-dela de ce poids, le push SILENCIEUX (auto) est ignore
    avec alerte (un snapshot de 300 Mo pousse toutes les heures = egress explose).
    Le push MANUEL reste possible (choix explicite, taille affichee). */
@@ -2968,7 +2977,7 @@ function createFullBackup() {
     }
     setBackupMeta(meta);
     /* Sauvegarde automatique vers le cloud (protection contre perte d'ordinateur) */
-    if (currentUser && currentUser.id && firebaseDb && Date.now() >= (_cloudSauvegardeBloqueJusqua || 0)) {
+    if (currentUser && currentUser.id && firebaseDb && Date.now() >= (_cloudSauvegardeBloqueJusqua || 0) && !_cloudBackupTropRecent()) {
       try {
         var _jsonAuto = '';
         try { _jsonAuto = JSON.stringify(backup); } catch(eJA) {}
@@ -2983,6 +2992,7 @@ function createFullBackup() {
             .then(function(r) {
               if (r && r.error) throw r.error;
               _cloudSauvegardeBloqueJusqua = 0;
+              _cloudBackupNoter();
               try { pruneCloudBackups(); } catch(ePB) {}
             })
             .catch(function(eC) {
@@ -3091,6 +3101,7 @@ function silentCloudBackup() {
     if (!currentUser || !currentUser.id || !firebaseDb) return;
     if (Date.now() < (_cloudSauvegardeBloqueJusqua || 0)) return;
     if (Date.now() - _lastSilentBackup < 55 * 60 * 1000) return;
+    if (_cloudBackupTropRecent()) return;
     _lastSilentBackup = Date.now();
     createFullBackup();
     var meta = getBackupMeta();
@@ -3120,6 +3131,8 @@ function silentCloudBackup() {
       if (r && r.error) throw r.error;
       window._lastBackupHash = _newHash;
       _cloudSauvegardeBloqueJusqua = 0;
+      _cloudBackupNoter();
+      try { pruneCloudBackups(); } catch (ePB2) {}
       console.log('[MDB] Sauvegarde silencieuse envoyee vers le cloud');
     }).catch(function(eS) {
       _cloudSauvegardeBloqueJusqua = Date.now() + 30 * 60 * 1000;

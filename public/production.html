@@ -10259,21 +10259,41 @@ function prodSplitLireCles(uid, clesExactes, avecProd) {
     if (r0.error) throw r0.error;
     var idrow = (r0.data && r0.data[0]) || null;
     var demandes = [];
+    /* Lecture DIFFERENTIELLE : on lit d'abord (cle, version) — quelques octets —
+       et on ne retelecharge que les rubriques changees depuis le dernier tirage.
+       Avant, le sondage de 30 s retelechargeait tout a chaque fois (stocks,
+       caisse, production : plusieurs Mo par poste et par minute) et epuisait le
+       quota de bande passante Supabase. Relecture complete de controle : 30 min. */
+    var D = window._prodDelta;
+    if (!D || D.uid !== uid || (Date.now() - (D.full || 0)) > 30 * 60 * 1000) D = window._prodDelta = { uid: uid, data: {}, ts: {}, full: Date.now() };
+    function lireDelta(q) {
+      return q.then(function (r) {
+        if (r.error) throw r.error;
+        var liste = r.data || [], aLire = [], cles = [];
+        liste.forEach(function (l) { if (!l || typeof l.cle !== 'string') return; cles.push(l.cle); if (!(l.cle in D.data) || String(D.ts[l.cle] || '') !== String(l.updated_at || '')) aLire.push(l.cle); });
+        var lots = [];
+        for (var j = 0; j < aLire.length; j += 40) lots.push(aLire.slice(j, j + 40));
+        return Promise.all(lots.map(function (lot) {
+          return sb.from('enterprise_data').select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', lot).then(function (r2) {
+            if (r2.error) throw r2.error;
+            (r2.data || []).forEach(function (row) { D.data[row.cle] = JSON.stringify(row.data === undefined ? null : row.data); D.ts[row.cle] = row.updated_at; });
+          });
+        })).then(function () {
+          try { window._prodDeltaLus = (window._prodDeltaLus || 0) + aLire.length; } catch (eN) {}
+          /* copie neuve a chaque tirage : les fonctions d'application peuvent modifier l'objet */
+          return cles.filter(function (k) { return k in D.data; }).map(function (k) { return { cle: k, data: JSON.parse(D.data[k]) }; });
+        });
+      });
+    }
     function lireExactes() {
       if (!clesExactes || !clesExactes.length) return Promise.resolve([]);
-      return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).in('cle', clesExactes).then(function(r) {
-        if (r.error) throw r.error;
-        return r.data || [];
-      });
+      return lireDelta(sb.from('enterprise_data').select('cle,updated_at').eq('enterprise_id', uid).in('cle', clesExactes));
     }
     function lireProd() {
       if (!avecProd) return Promise.resolve([]);
-      return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).like('cle', 'mdb_production.%').then(function(r) {
-        if (r.error) throw r.error;
-        var rows = r.data || [];
-        return sb.from('enterprise_data').select('cle,data').eq('enterprise_id', uid).eq('cle', 'mdb_production').then(function(r2) {
-          if (r2.error) throw r2.error;
-          return rows.concat(r2.data || []);
+      return lireDelta(sb.from('enterprise_data').select('cle,updated_at').eq('enterprise_id', uid).like('cle', 'mdb_production.%')).then(function(rows) {
+        return lireDelta(sb.from('enterprise_data').select('cle,updated_at').eq('enterprise_id', uid).eq('cle', 'mdb_production')).then(function(r2) {
+          return rows.concat(r2 || []);
         });
       });
     }
