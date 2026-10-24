@@ -8764,10 +8764,15 @@ r.push({
       var calc = calculatePayroll(emp, '2026-10');
       var rows = getSimpleBulletinRows(emp, '2026-10', calc);
       var L1 = rows[0], L2 = rows[1];
-      var ok1 = L1 && L1.label === 'Base horaire' && L1.taux === '28,4h' && L1.gain === 14200;
-      var ok2 = L2 && L2.label.indexOf('Heures Suppl.') === 0 && L2.taux === '1' && L2.gain === 7000 && L2.label.indexOf('75%') !== -1 && L2.label.indexOf('8h') !== -1;
+      /* Regle legale (decret 2024-898 art. 25 ; convention art. 51) choisie le
+         24/10/2026 : les heures de nuit DANS les 40 h de la semaine sont des
+         heures normales ; seule la nuit au-dela de 40 h est majoree (+75 %).
+         Semaine 1 : 5,5 + 8 (nuit) + 7,1 + 7,3 = 27,9 h ; semaine 2 : 8,5 h
+         -> 36,4 h normales, aucune heure supplementaire. */
+      var ok1 = L1 && L1.label === 'Base horaire' && L1.taux === '36,4h' && L1.gain === 18200;
+      var ok2 = !rows.some(function (r) { return r && String(r.label || '').indexOf('Heures Suppl.') === 0 && (r.gain || 0) > 0; });
       (ok1 && ok2)
-        ? 'OK : ligne 1 = 28,4h jour x 500 = 14200 (nuit 8h exclue), HS taux 1 = 7000 avec d\u00e9tail (75% : 8h), total 21200'
+        ? 'OK : 36,4h (dont 8h de nuit) x 500 = 18200, nuit comptee une seule fois et sans majoration sous 40h'
         : 'ECHEC L1=' + (L1 ? L1.taux + '/' + L1.gain : '?') + ' L2=' + (L2 ? L2.label + '/' + L2.taux + '/' + L2.gain : '?')
     `,
     attenduPrefixe: 'OK'
