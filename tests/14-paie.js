@@ -35,5 +35,17 @@ function run(rapport) {
       (it && it.retPat === Math.floor(it.base * 0.08) && it.tauxPat === '8,00') ? 'OK : retPat = base x 8 % (' + it.retPat + ')'
         : 'ECHEC : ' + JSON.stringify(it);
     }`);
+  cas('Conges : 2,2 j ouvrables/mois + majorations anciennete annee par annee (art. 25.1, 25.2)', `
+    var a = congeAcquisLegal(12), b = congeAcquisLegal(60), c = congeAcquisLegal(72), d = congeAcquisLegal(6);
+    (a === 26.4 && b === 133 && c === 160.4 && d === 13.2) ? 'OK : 1 an 26,4 j ; 5 ans 133 j ; 6 ans 160,4 j ; 6 mois 13,2 j'
+      : 'ECHEC : ' + [a, b, c, d].join(' / ')`);
+  cas('Conges pris : jours ouvrables (dimanche exclu), maladie non decomptee', `
+    var n = congeJoursOuvrablesEntre('2026-10-05', '2026-10-11'); /* lundi -> dimanche */
+    setCongesJours([
+      { id: 'c1', employee_id: 'E1', dateDepart: '2026-10-05', duree: 7, type: 'Annuel', statut: 'planifié' },
+      { id: 'c2', employee_id: 'E1', dateDepart: '2026-11-02', duree: 3, type: 'Maladie', statut: 'planifié' }
+    ]);
+    var p = congePris('E1');
+    (n === 6 && p === 6) ? 'OK : 7 jours calendaires = 6 ouvrables ; maladie ignoree' : 'ECHEC : ouvrables=' + n + ' pris=' + p`);
 }
 module.exports = { run: run };
