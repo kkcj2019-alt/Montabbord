@@ -93,6 +93,10 @@ function run(rapport) {
     var err = ''; try { _payeApReconciled = true; loadAP(); } catch (x) { err = x.message; }
     var stats = document.getElementById('ap-stats').innerHTML;
     var soldeOk = stats.indexOf('Total soldes') !== -1 && stats.indexOf('335') !== -1;
+    /* Reste a retenir : ni le solde (deja paye) ni l'acompte valide (retenu) -> seulement l'acompte non valide AA = 20 000 */
+    var iR = stats.indexOf('Reste '), vR = iR === -1 ? '' : stats.slice(stats.indexOf('class="val">', iR) + 12, stats.indexOf('</div>', stats.indexOf('class="val">', iR)));
+    var resteOk = vR.replace(/[^0-9]/g, '') === '20000';
+    soldeOk = soldeOk && resteOk;
     var reco = 0; try { _payeApReconciled = false; _payeReconcileAPFromCaisse(); reco = getAPList().filter(function (a) { return a.caisseOpId === 'OF'; }).length; } catch (x2) { err = err || x2.message; }
     (!err && ids === 'AA,AS' && soldeOk && reco === 0) ? 'OK : liste AA,AS (frais exclus) ; carte « Total soldes » 335 400 ; frais non recree depuis la caisse'
       : 'ECHEC : ' + JSON.stringify({ err: err, ids: ids, soldeOk: soldeOk, stats: stats.slice(0, 300), reco: reco })`);
