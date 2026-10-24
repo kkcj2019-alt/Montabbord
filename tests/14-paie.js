@@ -100,6 +100,26 @@ function run(rapport) {
     var reco = 0; try { _payeApReconciled = false; _payeReconcileAPFromCaisse(); reco = getAPList().filter(function (a) { return a.caisseOpId === 'OF'; }).length; } catch (x2) { err = err || x2.message; }
     (!err && ids === 'AA,AS' && soldeOk && reco === 0) ? 'OK : liste AA,AS (frais exclus) ; carte « Total soldes » 335 400 ; frais non recree depuis la caisse'
       : 'ECHEC : ' + JSON.stringify({ err: err, ids: ids, soldeOk: soldeOk, stats: stats.slice(0, 300), reco: reco })`);
+  cas('Livre de paie : solde salaire hors colonne acomptes ; net AVANT paie = net + solde ; apres paie : deja paye = solde', `
+    var e = (getPersonnelActifs() || []).filter(function (x) { return (parseFloat(x.salaire_base) || 0) > 0 && empCategorie(x) === 'titulaire'; })[0];
+    if (!e) { 'OK : (pas de titulaire dans le jeu)'; } else {
+    var mois = '2026-09';
+    localStorage.setItem('mdb_operationsCaisse', JSON.stringify([
+      { id: 'OS', code: 'SOLDE_SALAIRE', apType: 'solde', sens: 'sortie', montant: 50000, date: '2026-10-02', beneficiaireId: e.id },
+      { id: 'OA', code: 'ACOMPTE', apType: 'acompte', sens: 'sortie', montant: 10000, date: '2026-09-05', beneficiaireId: e.id }
+    ]));
+    localStorage.setItem('mdb_acomptesPrets', JSON.stringify([
+      { id: 'AS', type: 'acompte', employeId: e.id, montant: 50000, caisseOpId: 'OS', moisDeduction: mois, valide: true },
+      { id: 'AA', type: 'acompte', employeId: e.id, montant: 10000, caisseOpId: 'OA', moisDeduction: mois, valide: true }
+    ]));
+    window._payrollCache = {};
+    var ap = getAPForMonth(e.id, mois);
+    var c = calculatePayroll(e, mois);
+    var lSolde = (c.items || []).filter(function (i) { return /^Solde salaire/.test(i.label || ''); })[0];
+    var lAcc = (c.items || []).filter(function (i) { return i.label === 'Avance/Acompte'; })[0];
+    (ap.acomptes === 60000 && ap.soldes === 50000 && c.totals.soldes === 50000 && lSolde && lSolde.ret === 50000 && lAcc && lAcc.ret === 10000)
+      ? 'OK : retenues = acompte 10 000 + solde deja verse 50 000 (lignes separees), net inchange ; le livre affiche net + 50 000 avant paie'
+      : 'ECHEC : ' + JSON.stringify({ ap: ap, sol: c.totals.soldes, lS: lSolde, lA: lAcc }) }`);
   cas('Nuit : dans les 40 h = normales ; au-dela de 40 h = +75 %', `
     var emps = payeArr('mdb_employes');
     emps.push({ id: 'en', nom: 'Nuit', prenoms: 'T', matricule: 'MN01', fonction: 'Gardien', service: 'Prod', type_contrat: 'Journalier', categorie: 'A', status: 'actif', date_embauche: '2024-06-01', salaire_base: 4000 });

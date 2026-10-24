@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script>
     <script>
-      window.__APP_VERSION = "2026-10-24-296";
+      window.__APP_VERSION = "2026-10-24-297";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -10288,13 +10288,29 @@ function renderPrimeEmpMatrix() {
       function getAPForMonth(empId, mois) {
         var list = (getAPList() || []).map(normalizeAP);
         var mAcc = 0,
-          mPret = 0;
+          mPret = 0,
+          mSolde = 0;
+        /* Soldes de salaire / d'indemnite verses en caisse : retenus comme les
+           acomptes (le net reste le meme) mais isoles pour le livre de paie
+           (vue avant / apres paie) et le bulletin. */
+        var _opsSol = null;
+        function _estSolde(a) {
+          if (!a.caisseOpId) return false;
+          if (!_opsSol) {
+            _opsSol = {};
+            try { (payeArr("mdb_operationsCaisse") || []).forEach(function (o) { if (o && o.id) _opsSol[o.id] = o; }); } catch (eO) {}
+          }
+          var o = _opsSol[a.caisseOpId];
+          return !!o && apNatureCodeStricte(o) === "solde";
+        }
         list.forEach(function (a) {
           if (a.employee_id !== empId) return;
           if (a.type === "acompte") {
             var _mdAcc = apMoisPrisEnCompte(a);
-            if (a.valide === true && _mdAcc && _mdAcc === mois)
+            if (a.valide === true && _mdAcc && _mdAcc === mois) {
               mAcc += a.montant || 0;
+              if (_estSolde(a)) mSolde += a.montant || 0;
+            }
           } else if (a.type === "pret" && a.statut !== "termine") {
             var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
             if (moisDed && moisDed <= mois) {
@@ -10303,7 +10319,7 @@ function renderPrimeEmpMatrix() {
             }
           }
         });
-        return { acomptes: mAcc, prets: mPret };
+        return { acomptes: mAcc, prets: mPret, soldes: mSolde };
       }
 
       /* ==================== HELPERS ==================== */
@@ -29930,14 +29946,23 @@ if (normalHours > 173.33) {
               gain: 0,
               ret: _panVerseJ,
             });
-          if (apJ.acomptes > 0)
+          if (apJ.acomptes - (apJ.soldes || 0) > 0)
             items.push({
               n: "81",
               label: "Avance/Acompte",
               base: 0,
               taux: "",
               gain: 0,
-              ret: apJ.acomptes,
+              ret: apJ.acomptes - (apJ.soldes || 0),
+            });
+          if (apJ.soldes > 0)
+            items.push({
+              n: "81",
+              label: "Solde salaire / indemnité déjà versé",
+              base: 0,
+              taux: "payé en caisse",
+              gain: 0,
+              ret: apJ.soldes,
             });
           if (apJ.prets > 0)
             items.push({
@@ -29997,7 +30022,8 @@ if (normalHours > 173.33) {
               net: netJ,
               cnps: 0,
               its: 0,
-              acomptes: apJ.acomptes,
+              acomptes: apJ.acomptes,
+              soldes: apJ.soldes || 0,
               prets: apJ.prets,
               report: repUsedJ,
               reportLeft: repMJ - repUsedJ,
@@ -30552,8 +30578,17 @@ if (normalHours > 173.33) {
           base: 0,
           taux: "",
           gain: 0,
-          ret: ap.acomptes,
+          ret: ap.acomptes - (ap.soldes || 0),
         });
+        if (ap.soldes > 0)
+          items.push({
+            n: "81",
+            label: "Solde salaire / indemnité déjà versé",
+            base: 0,
+            taux: "payé en caisse",
+            gain: 0,
+            ret: ap.soldes,
+          });
         items.push({
           n: "82",
           label: "Prêt (s)",
@@ -30644,6 +30679,7 @@ if (normalHours > 173.33) {
             cnps: cnpsSal,
             its: itsBrut - ricf,
             acomptes: ap.acomptes,
+            soldes: ap.soldes || 0,
             prets: ap.prets,
             report: repUsed,
             reportLeft: repM - repUsed,
@@ -32206,7 +32242,7 @@ function panierVerserJour() {
           }
           if (apres)
             theadHtml +=
-              '<th style="text-align:right;color:var(--green)">D\u00e9j\u00e0 pay\u00e9</th><th style="text-align:right;color:var(--gold)">Solde \u00e0 payer</th>';
+              '<th style="text-align:right;color:var(--green)" title="Soldes salaire / indemnit\u00e9 vers\u00e9s en caisse + paiements des salaires">D\u00e9j\u00e0 pay\u00e9</th><th style="text-align:right;color:var(--gold)">Reste \u00e0 payer</th>';
           theadHtml += "</tr>";
           if (apres) cols += 2;
           html +=
@@ -32237,6 +32273,18 @@ function panierVerserJour() {
             gSolde = 0;
           personnel.forEach(function (emp) {
             var c = calculatePayroll(emp, mois);
+            /* Livre de paie : le NET A PAYER est celui d'AVANT le paiement du solde
+               (solde salaire / indemnite verse en caisse). La colonne Acomptes ne
+               contient que les vrais acomptes ; le solde verse apparait en vue
+               « apres paie » dans « Deja paye ». */
+            var _solV = (c.totals && c.totals.soldes) || 0;
+            if (_solV) {
+              var _tV = {};
+              for (var _kV in c.totals) if (Object.prototype.hasOwnProperty.call(c.totals, _kV)) _tV[_kV] = c.totals[_kV];
+              _tV.acomptes = (c.totals.acomptes || 0) - _solV;
+              _tV.net = (c.totals.net || 0) + _solV;
+              c = { items: c.items, stats: c.stats, totals: _tV };
+            }
             var cotis =
               c.totals.cnps + (parseInt(emp.assurance_mensuelle) || 0);
             var impots = c.totals.its;
@@ -32391,7 +32439,7 @@ function panierVerserJour() {
                 fmt(c.totals.net) +
                 "</td></tr>";
             }
-            var payeV = paid[emp.id] || 0;
+            var payeV = (paid[emp.id] || 0) + _solV;
             var soldeV = Math.max(0, (c.totals.net || 0) - payeV);
             tPaye += payeV;
             tSolde += soldeV;
@@ -32661,6 +32709,15 @@ function panierVerserJour() {
               c = { totals: {} };
             }
             var t = c.totals || {};
+            /* Meme regle que l'ecran : net AVANT paiement du solde, acomptes sans les soldes */
+            var _solX = t.soldes || 0;
+            if (_solX) {
+              var _tX = {};
+              for (var _kX in t) if (Object.prototype.hasOwnProperty.call(t, _kX)) _tX[_kX] = t[_kX];
+              _tX.acomptes = (t.acomptes || 0) - _solX;
+              _tX.net = (t.net || 0) + _solX;
+              t = _tX;
+            }
             /* totaux par colonne : accumulés après chaque ligne construite */
             var base = parseFloat(emp.salaire_base) || 0;
             var row = [];
@@ -32752,7 +32809,7 @@ function panierVerserJour() {
               }
             }
             if (apresLP) {
-              var payeX = paidLP[emp.id] || 0;
+              var payeX = (paidLP[emp.id] || 0) + _solX;
               var netX = typeof t.net === "number" ? t.net : 0;
               var soldeX = Math.max(0, netX - payeX);
               row.push(payeX, soldeX);
