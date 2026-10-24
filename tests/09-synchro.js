@@ -142,8 +142,8 @@ function run(rapport) {
         _purgeOrphanOpsCaisse();
         var ops = DB.getMain('mdb_operationsCaisse') || [];
         var ids = ops.map(function (o) { return o.id; }).sort().join(',');
-        var ok = ops.length === 2 && ids === 'op1,op3';
-        return ok ? 'OK : op2 (lien mort) retire, op1 lie et op3 sans lien conserves'
+        var ok = ops.length === 3 && ids === 'op1,op2,op3'; /* purge desactivee : ne supprime plus aucune piece de caisse */
+        return ok ? 'OK : purge desactivee, les 3 pieces sont conservees (op2 a lien mort comprise)'
                   : 'ECHEC ids=' + ids;
       })()
     `);

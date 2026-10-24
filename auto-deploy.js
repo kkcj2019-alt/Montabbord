@@ -1,7 +1,7 @@
 /* AUTO-DEPLOY MONTABBORD
    Surveille les modifications de fichiers du projet :
    ~90 secondes apres la derniere sauvegarde ->
-   1) commit + push GitHub   2) mise en ligne Firebase Hosting
+   1) commit + push GitHub   2) tests de securite  3) mise en ligne Cloudflare Pages
    Journal : auto-deploy.log */
 var http = require('http');
 var fs = require('fs');
@@ -92,6 +92,13 @@ function runInner() {
   deploying = true;
   log('Changements detectes, deploiement en cours...');
   try {
+    /* Garde-fou : un fichier de sauvegarde dans public/ serait publie sur Internet. */
+    var _bak = [];
+    try { _bak = fs.readdirSync(path.join(ROOT, 'public')).filter(function(f) { return /\.(bak|orig|old)(_|\.|$)/i.test(f); }); } catch (eB) {}
+    if (_bak.length) { log('ARRET : fichier(s) de sauvegarde dans public/ : ' + _bak.join(', ') + ' -> deplacez-les hors de public/'); deploying = false; schedule(); return; }
+    /* Garde-fou : on ne publie rien si les tests echouent. */
+    try { sh('node tests/run.js', { timeout: 280000, maxBuffer: 50 * 1024 * 1024 }); log('Tests OK'); }
+    catch (eT) { log('ARRET : tests en echec, rien n\'est publie. Lancez "npm test" pour le detail.'); deploying = false; lastDeployEnd = Date.now(); schedule(); return; }
     sh('git add -A');
     sh('git commit -m "auto: ' + new Date().toISOString().replace('T', ' ').slice(0, 16) + '" --quiet');
     log('Commit OK');
@@ -101,9 +108,9 @@ function runInner() {
     } catch (e) { log('Pull ignore: ' + e.message.split('\n')[0]); }
     sh('git push --quiet');
     log('Push GitHub OK');
-    var out = sh('"node_modules\\.bin\\firebase.cmd" deploy --only hosting');
-    var m = out.match(/Hosting URL:\s*(\S+)/);
-    log('Mise en ligne OK' + (m ? ' -> ' + m[1] : ''));
+    var out = sh('npx.cmd --yes wrangler@4 pages deploy public --project-name montabbord --branch main --commit-dirty=true', { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });
+    var m = out.match(/https:\/\/[^\s]+\.pages\.dev/);
+    log('Mise en ligne Cloudflare OK' + (m ? ' -> ' + m[0] : ''));
   } catch (e) {
     log('ERREUR deploiement: ' + String(e.message).split('\n').slice(0, 4).join(' | '));
   }

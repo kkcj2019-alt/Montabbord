@@ -6986,19 +6986,6 @@ function payeObj(key) {
                    suppressions restent supprimees (tombstones stries apres
                    l'union) ; si le local etait plus riche, on repousse. */
                 var _cuU2 = Array.isArray(cur) ? cur : [];
-                /* Protection fusion restaurer.html : si une fusion a eu lieu il y a moins de
-                   10 minutes, ne pas toucher à mdb_operationsCaisse ni mdb_acomptesPrets
-                   depuis le cloud — le local contient les données importées, on les monte vers le cloud. */
-                if (kX === 'mdb_operationsCaisse' || kX === 'mdb_acomptesPrets') {
-                  try {
-                    var _fpR = JSON.parse(localStorage.getItem('mdb_fusionProtection') || 'null');
-                    if (_fpR && _fpR.ts && (Date.now() - _fpR.ts) < 10 * 60 * 1000) {
-                      /* Fusion récente : garder le local tel quel, et pousser vers le cloud */
-                      try { pushPayeCloud(); } catch (eFPush) {}
-                      return; /* sort du forEach pour cette clé */
-                    }
-                  } catch (eFPR) {}
-                }
                 /* Local en premier : les saisies locales (fraiches) gagnent sur le cloud pour les memes cles */
                 var _mU2 = _payeStripTombstoned(kX, _payeUnion(_cuU2, inc));
                 /* Protection pendingSync : si le local a des changements en attente (pendingSync),
@@ -7018,7 +7005,9 @@ function payeObj(key) {
                 }
               }
             } else {
-              DB.setMain(kX, _payeUnion(inc, cu));
+              /* Fusion restaurer.html recente : le LOCAL gagne (caisses, banques, operations bancaires...).
+                 Hors fusion : comportement inchange (le cloud prime). */
+              DB.setMain(kX, _payeFusionRecente() ? _payeUnion(cu, inc) : _payeUnion(inc, cu));
             }
           } else {
             DB.setMain(kX, inc);
@@ -7640,7 +7629,7 @@ function payeObj(key) {
             : {};
         /* Écriture seulement si le cloud apporte du neuf : le pull se rejoue
            à chaque ouverture, réécrire ~1 Mo à tout coup cognait le quota. */
-        var _merged = _payeMergeObj(_cur, _inc, false);
+        var _merged = _payeMergeObj(_cur, _inc, _payeFusionRecente());
         /* Meme protection que _payeApplyRemote : le pull d'amorcage (connexion,
            actualisation) ne doit pas ecraser une saisie de moins de 2 min que le
            push n'a pas encore vue — c'etait le point efface des que l'on
@@ -7710,7 +7699,7 @@ function payeObj(key) {
         /* Fusion puis écriture SEULEMENT si le distant apporte du neuf : avant,
            on réécrivait ~1 Mo dans le localStorage à chaque écho temps réel
            (même sans nouveauté), ce qui cognait le quota et figeait la page. */
-        var _mergedPaye = _payeMergeObj(_cur, _inc, false);
+        var _mergedPaye = _payeMergeObj(_cur, _inc, _payeFusionRecente());
         var _mergedStr = "", _curStr = "";
         try { _mergedStr = JSON.stringify(_mergedPaye || {}); } catch (eMS) {}
         try { _curStr = JSON.stringify(_cur || {}); } catch (eCS) {}
@@ -7974,7 +7963,21 @@ window._payeVuTs = ts;
       }
 
       // Supprime tous les acomptes dont la pièce de caisse d'origine a disparu côté caisse (paye.html)
+      /* Fusion restaurer.html recente (< 60 min) : pendant cette fenetre, le cloud
+         ne doit RIEN ecraser ni purger de ce qui vient d'etre fusionne en local
+         (le push vers le cloud n'a pas forcement eu lieu). Marqueur pose par
+         restaurer.html (mdb_fusionProtection) en mode Fusion uniquement. */
+      function _payeFusionRecente() {
+        try {
+          var _fpR = JSON.parse(localStorage.getItem("mdb_fusionProtection") || "null");
+          return !!(_fpR && _fpR.ts && (Date.now() - _fpR.ts < 60 * 60 * 1000));
+        } catch (eFR) {
+          return false;
+        }
+      }
       function _purgeOrphanAcomptesP() {
+        /* DESACTIVE : tombstonait a vie des acomptes dont la piece de caisse manquait momentanement. */
+        return;
         var _opsP = payeArr("mdb_operationsCaisse");
         var _byIdP = {};
         for (var _oi = 0; _oi < _opsP.length; _oi++)
@@ -8022,12 +8025,8 @@ window._payeVuTs = ts;
            10 minutes (mdb_fusionProtection posé par restaurer.html), les opérations
            importées référencent peut-être d'anciens acomptes encore en transit.
            Ne pas purger pendant cette fenêtre pour éviter de détruire les données importées. */
-        try {
-          var _fp = JSON.parse(localStorage.getItem("mdb_fusionProtection") || "null");
-          if (_fp && _fp.ts && (Date.now() - _fp.ts < 10 * 60 * 1000)) {
-            return; /* purge suspendue — fusion récente (< 10 min) */
-          }
-        } catch (ePP) {}
+        /* DESACTIVE : supprimait des pieces de caisse legitimes (acompte lie absent a un instant donne). */
+        return;
         var _acsC = payeArr("mdb_acomptesPrets");
         var _acIdsC = {};
         for (var _aic = 0; _aic < _acsC.length; _aic++)
@@ -9848,6 +9847,9 @@ function renderPrimeEmpMatrix() {
             var op = ops[o];
             if (!op || op.reversed) continue;
             var t = op.apType || "";
+            /* Soldes de salaire/indemnite (apType "solde" ou vide + lien acompte) : paye les traite comme des acomptes deja verses. */
+            if (t === "solde") t = "acompte";
+            else if (!t && op.acomptePretId) t = (apNatureLigne(null, op) === "pret") ? "pret" : "acompte";
             if (t !== "pret" && t !== "acompte") continue;
             /* La pièce maîtresse « à répartir » (pendingDetail) n'est pas un prêt individuel. */
             if (op.pendingDetail) continue;
@@ -9865,7 +9867,7 @@ function renderPrimeEmpMatrix() {
               montant: parseInt(op.montant) || 0,
               dureeMois: parseInt(op.apDureeMois) || 0,
               montantMensuel: parseInt(op.apMontantMensuel) || 0,
-              moisDeduction: op.apMoisDeduction || (op.date ? String(op.date).substring(0, 7) : ""),
+              moisDeduction: op.apMoisDeduction || op.periode || (op.date ? String(op.date).substring(0, 7) : ""),
               motif: op.tiers || op.observations || op.libelle || "",
               notes: op.observations || "",
               date: op.date || "",
