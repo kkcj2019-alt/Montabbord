@@ -273,8 +273,14 @@
     if (cle === 'mdb_acomptesPrets') {
       try {
         var ops = JSON.parse(localStorage.getItem('mdb_operationsCaisse') || '[]'), vivOps = {};
+        var natAP = function (o) {
+          var t = String(o.apType || '');
+          if (t === 'acompte' || t === 'pret' || t === 'solde') return true;
+          var c = String(o.code || '').toUpperCase();
+          return /^(ACOMPTE|PRET|SOLDE)(_|-|$)/.test(c) || /_(ACOMPTE|PRET)(_|$)/.test(c);
+        };
         if (Array.isArray(ops)) ops.forEach(function (o) {
-          if (!o || o.reversed) return;
+          if (!o || o.reversed || !natAP(o)) return;
           if (o.id) vivOps[o.id] = true;
           if (o.acomptePretId && out[o.acomptePretId]) delete out[o.acomptePretId];
         });

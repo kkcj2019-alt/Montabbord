@@ -6155,6 +6155,18 @@ function _payeRealtimeReprendre() {
    'solde' si la pièce est un solde de salaire, sinon 'acompte' ou 'pret'.
    La déduction paie ne change pas (un solde déjà versé doit toujours réduire
    le net, sinon double paiement) : seule l'étiquette distingue. */
+/* Nature d'une piece de caisse SANS valeur par defaut : '' si ce n'est ni un
+   acompte, ni un pret, ni un solde (frais, achats, depenses...). */
+function apNatureCodeStricte(op) {
+  var t = (op && op.apType) || "";
+  if (t === "solde" || t === "pret" || t === "acompte") return t;
+  var c = String((op && op.code) || "").toUpperCase().trim();
+  if (!c) return "";
+  if (c === "SOLDE_SALAIRE" || c === "SOLDE_INDEMNITE" || c.indexOf("SOLDE_") === 0) return "solde";
+  if (c === "ACOMPTE" || c.indexOf("ACOMPTE_") === 0 || c.indexOf("ACOMPTE-") === 0 || /_ACOMPTE(_|$)/.test(c)) return "acompte";
+  if (/^PRET(_|-|$)/.test(c) || /_PRET(_|$)/.test(c)) return "pret";
+  return "";
+}
 function apNatureLigne(ap, op) {
   var t = (op && op.apType) || "";
   if (t === "solde" || t === "pret" || t === "acompte") return t;
@@ -6781,7 +6793,7 @@ function payeObj(key) {
             var _opsT = payeArr("mdb_operationsCaisse");
             for (var _oT = 0; _oT < _opsT.length; _oT++) {
               var _opX = _opsT[_oT];
-              if (!_opX || _opX.reversed) continue;
+              if (!_opX || _opX.reversed || !apNatureCodeStricte(_opX)) continue;
               if (_opX.id) _liveOp[_opX.id] = true;
               if (_opX.acomptePretId) _liveAp[_opX.acomptePretId] = true;
             }
@@ -9865,6 +9877,18 @@ function renderPrimeEmpMatrix() {
         for (var i = 0; i < clean.length; i++) {
           if (clean[i] && reg[String(clean[i].id)] === true) clean[i].valide = true;
         }
+        /* Ligne rattachee a une piece de caisse qui n'est PAS un acompte/pret/solde
+           (frais de communication, panier, transport...) : ancien rattachement
+           errone, ni affiche ni deduit du salaire. */
+        try {
+          var _opsN = payeArr("mdb_operationsCaisse"), _natById = {};
+          /* type perdu lors d'une fusion mais libelle explicite (« Acompte octobre ») : on garde */
+          for (var _on = 0; _on < _opsN.length; _on++) { var _ox = _opsN[_on]; if (_ox && _ox.id) _natById[_ox.id] = apNatureCodeStricte(_ox) || (/acompte|pr[e\u00ea]t|solde|avance|salaire/i.test(String(_ox.libelle || "") + " " + String(_ox.code || "")) ? "texte" : ""); }
+          clean = clean.filter(function (a) {
+            if (!a || !a.caisseOpId || !(a.caisseOpId in _natById)) return true;
+            return !!_natById[a.caisseOpId];
+          });
+        } catch (eNat) {}
         return clean;
       }
       /* Reconstitution : une pièce de caisse de type pret/acompte dont la ligne
@@ -9897,7 +9921,10 @@ function renderPrimeEmpMatrix() {
             var t = op.apType || "";
             /* Soldes de salaire/indemnite (apType "solde" ou vide + lien acompte) : paye les traite comme des acomptes deja verses. */
             if (t === "solde") t = "acompte";
-            else if (!t && op.acomptePretId) t = (apNatureLigne(null, op) === "pret") ? "pret" : "acompte";
+            /* Sans type : seule une piece dont le CODE est un acompte/pret/solde
+               compte. Avant, toute piece portant un ancien lien (ex. « Frais de
+               communication ») redevenait un acompte. */
+            else if (!t) { var _nc = apNatureCodeStricte(op); t = _nc === "solde" ? "acompte" : _nc; }
             if (t !== "pret" && t !== "acompte") continue;
             /* La pièce maîtresse « à répartir » (pendingDetail) n'est pas un prêt individuel. */
             if (op.pendingDetail) continue;
@@ -26121,12 +26148,22 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         /* Stats */
         var tAcc = 0,
+          tSolde = 0,
           tPret = 0,
           tRemb = 0,
           tRest = 0;
+        /* Solde de salaire / d'indemnite : verse comme un acompte (deduit du net)
+           mais ce n'en est pas un -> compte et colonne a part. */
+        function apEstSoldeP(a) {
+          if (!a || a.type === "pret") return false;
+          var opS = a.caisseOpId ? opsMap[a.caisseOpId] : null;
+          if (!opS) return false;
+          try { return apNatureLigne(a, opS) === "solde"; } catch (eS) { return false; }
+        }
         for (var s = 0; s < filtered.length; s++) {
           var fa = filtered[s];
-          if (fa.type === "acompte") tAcc += fa.montant || 0;
+          if (fa.type === "acompte" && apEstSoldeP(fa)) tSolde += fa.montant || 0;
+          else if (fa.type === "acompte") tAcc += fa.montant || 0;
           else tPret += fa.montant || 0;
           tRemb += fa.rembourse || 0;
           tRest += apRestP(fa);
@@ -26134,6 +26171,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         document.getElementById("ap-stats").innerHTML =
           '<div class="stat-card"><div class="lbl">Total acomptes vers\u00e9s</div><div class="val">' +
           fmtF(tAcc) +
+          "</div></div>" +
+          '<div class="stat-card" style="border-left-color:#0d9488"><div class="lbl">Total soldes vers\u00e9s (salaire / indemnit\u00e9)</div><div class="val">' +
+          fmtF(tSolde) +
           "</div></div>" +
           '<div class="stat-card" style="border-left-color:var(--gold)"><div class="lbl">Total pr\u00eats accord\u00e9s</div><div class="val">' +
           fmtF(tPret) +
@@ -26823,7 +26863,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             var keysMap = {};
             var headMap = {};
             filtered.forEach(function (a) {
-              if (!apIsCollP(a, opsMap)) return;
+              if (!apIsCollP(a, opsMap) || apEstSoldeP(a)) return;
               var k = apCollKeyP(a, caissesMap);
               keysMap[k] = 1;
               if (!headMap[k]) headMap[k] = { remettant: "", moyen: "" };
@@ -26909,17 +26949,20 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               return e.type !== "CDI" && e.type !== "CDD";
             });
             var nI = 0,
-              nP = 0;
+              nP = 0,
+              nS = 0;
             roster.concat(orphans).forEach(function (e) {
               var ci = 0,
                 cp = 0;
               (e.items || []).forEach(function (a) {
                 if (a.type === "pret") cp++;
+                else if (apEstSoldeP(a)) nS = 1;
                 else if (!apIsCollP(a, opsMap)) ci++;
               });
               if (ci > nI) nI = ci;
               if (cp > nP) nP = cp;
             });
+            var gS = 0;
             /* Individuels : UNE seule colonne, les acomptes d'un employé empilés dedans */
             var nId = nI > 0 ? 1 : 0;
             function dedP(a) {
@@ -27004,7 +27047,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               return s;
             }
             var h =
-              '<table><thead><tr><th rowspan="2" style="width:34px;vertical-align:middle"><input type="checkbox" onchange="apValToggleAll(this)" title="Tout"></th><th rowspan="2" style="vertical-align:middle">Employé</th>';
+              '<style>.ap-revue td.ap-emp,.ap-revue th.ap-emp{position:sticky;left:0;z-index:3;background:#fff;box-shadow:2px 0 0 #e2e8f0;min-width:170px;max-width:220px}.ap-revue th.ap-emp{z-index:4;background:#f1f5f9}.ap-revue tbody tr:nth-child(even) td{background-color:#fafbff}.ap-revue tbody tr:nth-child(even) td.ap-emp{background:#fafbff}.ap-revue tbody tr:hover td{background-color:#fff7ed}.ap-revue tbody tr:hover td.ap-emp{background:#fff7ed}</style>' +
+              '<table class="ap-revue"><thead><tr><th rowspan="2" style="width:34px;vertical-align:middle"><input type="checkbox" onchange="apValToggleAll(this)" title="Tout"></th><th rowspan="2" class="ap-emp" style="vertical-align:middle">Employé</th>';
             if (keys.length)
               h +=
                 '<th colspan="' +
@@ -27015,6 +27059,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 '<th rowspan="2" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;font-weight:700;vertical-align:middle">2 - ACOMPTES INDIVIDUELS</th>';
             h +=
               '<th rowspan="2" style="background:#fff7ed;color:#9a3412;border:1px solid #fed7aa;font-weight:700;vertical-align:middle">TOTAL<br>ACOMPTE</th>';
+            if (nS)
+              h +=
+                '<th rowspan="2" style="background:#f0fdfa;color:#0f766e;border:1px solid #99f6e4;font-weight:700;vertical-align:middle">SOLDES<br><span style="font-weight:500;font-size:.62rem">salaire / indemnit\u00e9</span></th>';
             if (nP)
               h +=
                 '<th colspan="' +
@@ -27096,13 +27143,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               var sC = 0,
                 sI = 0,
                 sP = 0,
+                sS = 0,
                 sR = 0;
               var secWarn = sec.label.indexOf("⚠") === 0;
               h +=
                 '<tr style="background:' +
                 (secWarn ? "#fef3c7" : "#e0e7ff") +
                 '"><td colspan="' +
-                (7 + keys.length + nId + nP) +
+                (7 + keys.length + nId + nP + nS) +
                 '" style="font-weight:800;text-align:center;color:' +
                 (secWarn ? "#92400e" : "#3730a3") +
                 ';padding:6px 8px">' +
@@ -27115,7 +27163,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 var mapC = {};
                 var tC = 0;
                 items.forEach(function (a) {
-                  if (!apIsCollP(a, opsMap)) return;
+                  if (!apIsCollP(a, opsMap) || apEstSoldeP(a)) return;
                   var k = apCollKeyP(a, caissesMap);
                   if (!mapC[k]) mapC[k] = [];
                   mapC[k].push(a);
@@ -27123,7 +27171,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 });
                 var indivs = items
                   .filter(function (a) {
-                    return a.type !== "pret" && !apIsCollP(a, opsMap);
+                    return a.type !== "pret" && !apIsCollP(a, opsMap) && !apEstSoldeP(a);
                   })
                   .sort(function (x, y) {
                     return (x.date || "").localeCompare(y.date || "");
@@ -27143,8 +27191,15 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 prets.forEach(function (a) {
                   tP += dedP(a);
                 });
+                var soldesE = items
+                  .filter(function (a) { return apEstSoldeP(a); })
+                  .sort(function (x, y) { return (x.date || "").localeCompare(y.date || ""); });
+                var tS = 0;
+                soldesE.forEach(function (a) { tS += dedP(a); });
+                gS += tS;
+                sS += tS;
                 var tA = tC + tI;
-                var tT = tA + tP;
+                var tT = tA + tS + tP;
                 var repSum = repSumE(e.id);
                 gC += tC;
                 gI += tI;
@@ -27161,7 +27216,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 h +=
                   "<tr>" +
                   '<td style="text-align:center;vertical-align:top"><input type="checkbox" onchange="apValToggleRow(this)" title="Tout cet employé"></td>' +
-                  '<td style="font-weight:700;vertical-align:top;white-space:normal;word-break:break-word">' +
+                  '<td class="ap-emp" style="font-weight:700;vertical-align:top;white-space:normal;word-break:break-word">' +
                   escH(empLbl) +
                   ' <span class="pill pill-gray">' +
                   items.length +
@@ -27199,6 +27254,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                   '<td style="text-align:center;vertical-align:top;font-weight:800;white-space:nowrap">' +
                   fmtTotP(tA) +
                   "</td>";
+                if (nS) {
+                  if (soldesE.length)
+                    h +=
+                      '<td style="vertical-align:top;min-width:110px;background:#f8fffd"><div class="ap-stack">' +
+                      soldesE.map(function (aS, ix) { return apItemCell(aS, ix + 1, "Solde"); }).join("") +
+                      "</div></td>";
+                  else h += '<td style="vertical-align:top;text-align:center;color:var(--dim)">-</td>';
+                }
                 for (var bp = 0; bp < nP; bp++) {
                   if (bp < prets.length)
                     h +=
@@ -27245,13 +27308,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
               });
               for (var _ui = 0; _ui < nId; _ui++) h += "<td></td>";
               h += '<td style="text-align:center">' + fmtTotP(sC + sI) + "</td>";
+              if (nS) h += '<td style="text-align:center;color:#0f766e">' + fmtTotP(sS) + "</td>";
               for (var _uj = 0; _uj < nP; _uj++) h += "<td></td>";
               h +=
                 '<td style="text-align:center">' +
                 fmtTotP(sP) +
                 "</td>" +
                 '<td style="text-align:center">' +
-                fmtTotP(sC + sI + sP) +
+                fmtTotP(sC + sI + sS + sP) +
                 "</td>" +
                 '<td style="text-align:center">' +
                 fmtSignP(sR) +
@@ -27269,13 +27333,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             });
             for (var _fi = 0; _fi < nId; _fi++) h += "<td></td>";
             h += '<td style="text-align:center">' + fmtTotP(gC + gI) + "</td>";
+            if (nS) h += '<td style="text-align:center;color:#0f766e">' + fmtTotP(gS) + "</td>";
             for (var _fj = 0; _fj < nP; _fj++) h += "<td></td>";
             h +=
               '<td style="text-align:center">' +
               fmtTotP(gP) +
               "</td>" +
               '<td style="text-align:center">' +
-              fmtTotP(gC + gI + gP) +
+              fmtTotP(gC + gI + gS + gP) +
               "</td>" +
               '<td style="text-align:center">' +
               fmtSignP(gR) +
@@ -27293,13 +27358,14 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             });
             for (var _ffi = 0; _ffi < nId; _ffi++) fh += "<td></td>";
             fh += '<td style="text-align:center">' + fmtTotP(gC + gI) + "</td>";
+            if (nS) fh += '<td style="text-align:center;color:#0f766e">' + fmtTotP(gS) + "</td>";
             for (var _ffj = 0; _ffj < nP; _ffj++) fh += "<td></td>";
             fh +=
               '<td style="text-align:center">' +
               fmtTotP(gP) +
               "</td>" +
               '<td style="text-align:center">' +
-              fmtTotP(gC + gI + gP) +
+              fmtTotP(gC + gI + gS + gP) +
               "</td>" +
               '<td style="text-align:center">' +
               fmtSignP(gR) +

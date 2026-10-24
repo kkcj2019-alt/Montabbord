@@ -510,7 +510,7 @@ async function run(rapport) {
     serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: '__split_migration_ok', data: { v: 1 }, updated_at: 'x' });
     serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_acomptesPrets', data: [{ id: 'B0' }], updated_at: '2026-10-24T04:00:00.000001+00:00' });
     const A = creerPoste(serveur, { mdb_acomptesPrets: { A1: Date.now(), A9: Date.now() } });
-    A.stock.mdb_operationsCaisse = JSON.stringify([{ id: 'OP1', acomptePretId: 'A1' }, { id: 'OP2' }]);
+    A.stock.mdb_operationsCaisse = JSON.stringify([{ id: 'OP1', apType: 'acompte', acomptePretId: 'A1' }, { id: 'OP2', code: 'SOLDE_SALAIRE' }, { id: 'OPF', code: 'com', acomptePretId: 'A9' }]);
     await A.ecrire({ mdb_acomptesPrets: [{ id: 'B0' }] });          /* base de A */
     /* la Paie (autre poste) recree A1 (piece OP1), A2 (piece OP2, lien perdu) et A9 (sans piece) */
     const l = serveur.tables.enterprise_data.find(function (x) { return x.cle === 'mdb_acomptesPrets'; });

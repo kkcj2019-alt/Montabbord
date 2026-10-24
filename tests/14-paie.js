@@ -76,6 +76,26 @@ function run(rapport) {
     try { printSTCRecord('S1'); } catch (e) { err = e.message; }
     window.open = _wo;
     (!err && ecrit.indexOf('Solde de tout compte') !== -1 && ecrit.indexOf('Indemnite de licenciement') !== -1 && ecrit.indexOf('KOFFI JEAN') !== -1) ? 'OK : document STC produit (rubriques, net, signatures)' : 'ECHEC : ' + (err || ecrit.slice(0, 200))`);
+  cas('Acomptes : soldes de salaire dans leur propre colonne ; frais (communication...) jamais comptes comme acompte', `
+    var emps = JSON.parse(localStorage.getItem('mdb_employes') || '[]'); var e = emps[0];
+    localStorage.setItem('mdb_operationsCaisse', JSON.stringify([
+      { id: 'OS', code: 'SOLDE_SALAIRE', apType: 'solde', sens: 'sortie', montant: 335400, date: '2026-10-02', beneficiaireId: e.id, acomptePretId: 'AS' },
+      { id: 'OA', code: 'ACOMPTE', apType: 'acompte', sens: 'sortie', montant: 20000, date: '2026-10-05', beneficiaireId: e.id, acomptePretId: 'AA' },
+      { id: 'OF', code: 'com', apType: '', sens: 'sortie', montant: 3500, date: '2026-10-22', beneficiaireId: e.id, libelle: 'Frais de communication', acomptePretId: 'AF' }
+    ]));
+    localStorage.setItem('mdb_acomptesPrets', JSON.stringify([
+      { id: 'AS', type: 'acompte', employeId: e.id, montant: 335400, caisseOpId: 'OS', moisDeduction: '2026-10', date: '2026-10-02' },
+      { id: 'AA', type: 'acompte', employeId: e.id, montant: 20000, caisseOpId: 'OA', moisDeduction: '2026-10', date: '2026-10-05' },
+      { id: 'AF', type: 'acompte', employeId: e.id, montant: 3500, caisseOpId: 'OF', moisDeduction: '2026-10', date: '2026-10-22' }
+    ]));
+    var ids = getAPList().map(function (a) { return a.id; }).sort().join(',');
+    window._apTabP = 'tous'; window._apMonthP = ''; window._apStatutP = 'tous';
+    var err = ''; try { _payeApReconciled = true; loadAP(); } catch (x) { err = x.message; }
+    var stats = document.getElementById('ap-stats').innerHTML;
+    var soldeOk = stats.indexOf('Total soldes') !== -1 && stats.indexOf('335') !== -1;
+    var reco = 0; try { _payeApReconciled = false; _payeReconcileAPFromCaisse(); reco = getAPList().filter(function (a) { return a.caisseOpId === 'OF'; }).length; } catch (x2) { err = err || x2.message; }
+    (!err && ids === 'AA,AS' && soldeOk && reco === 0) ? 'OK : liste AA,AS (frais exclus) ; carte « Total soldes » 335 400 ; frais non recree depuis la caisse'
+      : 'ECHEC : ' + JSON.stringify({ err: err, ids: ids, soldeOk: soldeOk, stats: stats.slice(0, 300), reco: reco })`);
   cas('Nuit : dans les 40 h = normales ; au-dela de 40 h = +75 %', `
     var emps = payeArr('mdb_employes');
     emps.push({ id: 'en', nom: 'Nuit', prenoms: 'T', matricule: 'MN01', fonction: 'Gardien', service: 'Prod', type_contrat: 'Journalier', categorie: 'A', status: 'actif', date_embauche: '2024-06-01', salaire_base: 4000 });
