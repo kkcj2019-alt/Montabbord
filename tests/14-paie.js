@@ -47,6 +47,27 @@ function run(rapport) {
     ]);
     var p = congePris('E1');
     (n === 6 && p === 6) ? 'OK : 7 jours calendaires = 6 ouvrables ; maladie ignoree' : 'ECHEC : ouvrables=' + n + ' pris=' + p`);
+  cas('Conges pris : un jour ferie declare pendant le conge n est pas decompte', `
+    setFeries([{ id: 'f1', date: '2026-11-01', libelle: 'Toussaint' }, { id: 'f2', date: '2026-11-15', libelle: 'Paix' }]);
+    var n1 = congeJoursOuvrablesEntre('2026-10-30', '2026-11-03'); /* ven, sam, dim(1/11 ferie+dimanche), lun, mar */
+    var n2 = congeJoursOuvrablesEntre('2026-11-13', '2026-11-17'); /* ven, sam, dim 15 (ferie), lun, mar */
+    setFeries([{ id: 'f3', date: '2026-08-07', libelle: 'Independance' }]);
+    var n3 = congeJoursOuvrablesEntre('2026-08-03', '2026-08-08'); /* lun -> sam, vendredi 7 ferie */
+    setFeries([]);
+    var n4 = congeJoursOuvrablesEntre('2026-08-03', '2026-08-08');
+    (n1 === 4 && n2 === 4 && n3 === 5 && n4 === 6) ? 'OK : 6 jours lun-sam avec le 7 aout ferie = 5 ouvrables (6 sans ferie)'
+      : 'ECHEC : ' + [n1, n2, n3, n4].join(' / ')`);
+  cas('Conges : +2 j par enfant (salarie < 21 ans) ; adulte : +2 j par enfant a partir du 4e (art. 25.2)', `
+    var jeune = { enfants: 1, date_naissance: '2006-06-01' };       /* 20 ans en 2026 */
+    var adulte3 = { enfants: 3, date_naissance: '1990-01-01' };
+    var adulte5 = { enfants: 5, date_naissance: '1990-01-01' };
+    var a = congeAcquisLegal(12, jeune, '2025-10-01');    /* 26,4 + 2 */
+    var b = congeAcquisLegal(12, adulte3, '2025-10-01');  /* 26,4 */
+    var c = congeAcquisLegal(12, adulte5, '2025-10-01');  /* 26,4 + 4 */
+    var d = congeAcquisLegal(6, adulte5, '2026-04-01');   /* 13,2 + 4 x 6/12 */
+    var e = congeAcquisLegal(12);                         /* sans fiche : inchange */
+    (a === 28.4 && b === 26.4 && c === 30.4 && d === 15.2 && e === 26.4) ? 'OK : jeune 1 enfant 28,4 ; adulte 3 enfants 26,4 ; 5 enfants 30,4 ; 6 mois 15,2'
+      : 'ECHEC : ' + [a, b, c, d, e].join(' / ')`);
   cas('Nuit : dans les 40 h = normales ; au-dela de 40 h = +75 %', `
     var emps = payeArr('mdb_employes');
     emps.push({ id: 'en', nom: 'Nuit', prenoms: 'T', matricule: 'MN01', fonction: 'Gardien', service: 'Prod', type_contrat: 'Journalier', categorie: 'A', status: 'actif', date_embauche: '2024-06-01', salaire_base: 4000 });

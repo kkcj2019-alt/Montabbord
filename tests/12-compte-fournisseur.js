@@ -105,6 +105,20 @@ function run(rapport) {
     var hist2 = (apProdGet().epiPurchases || []).filter(function (x) { return String(x.achat_id) === String(a.id); }).length;
     (s1 === 6 && hist === 1 && s2 === 0 && hist2 === 0) ? 'OK : catalogue EPI 6 -> 0, historique cree puis retire'
       : 'ECHEC : ' + [s1, hist, s2, hist2].join('/')`);
+
+  cas('Fiche personnel : champs Nationalite et Personnel expatrie presents et pre-remplis', `
+    var L = getEmployes(); L.push({ id: 'EXPT', matricule: 'EXP1', nom: 'DUPONT', nationalite: 'Française', expatrie: true }); DB.set('mdb_employes', L);
+    openEmployeModal('EXPT');
+    var h1 = document.getElementById('formModalBody').innerHTML;
+    openEmployeModal();
+    var h2 = document.getElementById('formModalBody').innerHTML;
+    var nat = h1.indexOf('name="nationalite"') !== -1 && h1.indexOf('Française') !== -1;
+    var expOui = /name="expatrie"[\\s\\S]*?<option value="oui" selected>/.test(h1);
+    var aide = h1.indexOf('expat-hint-nat" style="display:block') !== -1;
+    var neufNon = /name="expatrie"[\\s\\S]*?<option value="non" selected>/.test(h2) && h2.indexOf('expat-hint-nat" style="display:none') !== -1;
+    var sauv = String(saveEmploye).indexOf("expatrie: f.elements['expatrie']") !== -1;
+    (nat && expOui && aide && neufNon && sauv) ? 'OK : nationalite affichee, expatrie = Oui relu, aide visible pour un etranger ; nouvelle fiche = Non'
+      : 'ECHEC : ' + JSON.stringify({ nat: nat, expOui: expOui, aide: aide, neufNon: neufNon, sauv: sauv })`);
 }
 
 module.exports = { run: run };

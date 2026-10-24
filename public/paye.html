@@ -5421,11 +5421,14 @@
                 name="nationalite"
                 placeholder="Ex : Ivoirienne"
                 value="Ivoirienne"
+                oninput="majExpatHint(this)"
               />
             </div>
             <div class="form-group">
               <label title="Contribution employeur 9,2 % (personnel local : exonéré)">Personnel expatrié</label
-              ><select name="expatrie"><option value="non">Non (personnel local)</option><option value="oui">Oui (expatrié)</option></select>
+              ><select name="expatrie" onchange="majExpatHint(this)"><option value="non">Non (personnel local)</option><option value="oui">Oui (expatrié)</option></select>
+              <small class="expat-hint-nat" style="display:none;color:#b45309;font-size:.7rem;line-height:1.3;margin-top:3px">Employé étranger : choisissez « Oui » seulement s’il a un contrat expatrié visé (AGEPE) ou un poste/salaire d’expatrié. Sinon il reste personnel local.</small>
+              <small style="display:block;color:var(--text-light,#64748b);font-size:.68rem;line-height:1.3;margin-top:3px" title="Expatrié au sens de l’impôt : contrat de travail expatrié visé par l’AGEPE, ou étranger cadre / payé au-dessus des Ivoiriens du même poste (note DGI n° 3338 du 26/12/2002). Un étranger embauché sur place aux conditions locales reste « personnel local ».">ⓘ Un étranger n’est pas forcément expatrié.</small>
             </div>
             <div class="form-group">
               <label>Téléphone</label><input type="text" name="telephone" />
@@ -16188,7 +16191,7 @@ function addArticleMontageFromPt(e) {
         var epEl = f.elements["en_paie"];
         if (epEl) epEl.value = p.en_paie ? "oui" : "non";
         var exEl = f.elements["expatrie"];
-        if (exEl) exEl.value = estExpatrie(p) ? "oui" : "non";
+        if (exEl) { exEl.value = estExpatrie(p) ? "oui" : "non"; majExpatHint(exEl); }
         var rendEl = f.elements["rendement"];
         if (rendEl) rendEl.checked = p.rendement === true;
         var dhEl = f.elements["droit_hs"];
@@ -29161,6 +29164,17 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         } catch (eMig) {}
       }
       /* Personnel expatrie (contribution employeur 9,2 %) : case de la fiche */
+
+/* Aide « expatrie » : un etranger n'est pas forcement expatrie (note DGI 3338/2002) */
+function majExpatHint(inp) {
+  try {
+    var f = inp && inp.form; if (!f) return;
+    var h = f.querySelector('.expat-hint-nat'); if (!h) return;
+    var nat = String((f.elements['nationalite'] || {}).value || '').trim().toLowerCase();
+    var etr = nat && nat.indexOf('ivoir') === -1;
+    h.style.display = etr ? 'block' : 'none';
+  } catch (e) {}
+}
       function estExpatrie(emp) { return !!(emp && (emp.expatrie === true || emp.expatrie === "1" || emp.expatrie === "oui")); }
       function saveTaxRates() {
         var t = {};
@@ -34519,27 +34533,80 @@ var CONGE_JOURS_PAR_MOIS = 2.2; /* art. 25.1 Code du travail : jours ouvrables *
    art. 25.1 : 2,2 jours OUVRABLES par mois de service effectif (26,4 j/an) ;
    art. 25.2 : majoration selon l'anciennete dans l'entreprise : +1 j apres 5 ans,
    +2 apres 10, +3 apres 15, +5 apres 20, +7 apres 25, +8 apres 30 (par an).
-   Jours ouvrables = tous les jours sauf le dimanche (jours feries non deduits ici).
+   art. 25.2 (enfants) : +2 j ouvrables par enfant a charge si le salarie a moins
+   de 21 ans en fin de periode ; a partir du 4e enfant s'il a plus de 18 ans.
+   Jours ouvrables = tous les jours sauf le dimanche et les jours feries declares
+   (liste « Jours feries » de la Paie : un ferie pendant le conge n'est pas decompte).
    Avant : 2,5 jours par mois et jours pris comptes en calendaire (dimanches). */
 function congeMajorationAnciennete(annees) {
   if (annees >= 30) return 8; if (annees >= 25) return 7; if (annees >= 20) return 5;
   if (annees >= 15) return 3; if (annees >= 10) return 2; if (annees >= 5) return 1;
   return 0;
 }
-function congeAcquisLegal(mois) {
+/* Date AAAA-MM-JJ + n mois (pour situer la fin de chaque periode de reference) */
+function _congePlusMois(dateStr, n) {
+  try {
+    var d = new Date(String(dateStr).slice(0, 10) + 'T12:00:00');
+    if (isNaN(d.getTime())) return '';
+    d.setMonth(d.getMonth() + n);
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  } catch (e) { return ''; }
+}
+/* Art. 25.2 : majoration pour enfants a charge (champ « Enfants » de la fiche).
+   Age du salarie au dernier jour de la periode : < 21 ans -> 2 j par enfant ;
+   sinon 2 j par enfant a partir du 4e. Sans date de naissance : regle adulte. */
+function congeMajorationEnfants(emp, finPeriode) {
+  var n = emp ? (parseInt(emp.enfants, 10) || parseInt(emp.nombre_enfants, 10) || 0) : 0;
+  if (n <= 0) return 0;
+  var age = 99;
+  try {
+    if (emp.date_naissance && finPeriode) {
+      var b = new Date(String(emp.date_naissance).slice(0, 10) + 'T12:00:00'), f = new Date(String(finPeriode).slice(0, 10) + 'T12:00:00');
+      if (!isNaN(b.getTime()) && !isNaN(f.getTime())) {
+        age = f.getFullYear() - b.getFullYear();
+        if (f.getMonth() < b.getMonth() || (f.getMonth() === b.getMonth() && f.getDate() < b.getDate())) age--;
+      }
+    }
+  } catch (e) {}
+  if (age < 21) return 2 * n;
+  return 2 * Math.max(0, n - 3);
+}
+/* mois de service -> jours acquis. emp/dateEntree facultatifs : s'ils sont
+   donnes, la majoration pour enfants est ajoutee periode par periode. */
+function congeAcquisLegal(mois, emp, dateEntree) {
   mois = Math.max(0, Math.floor(parseFloat(mois) || 0));
   var Y = Math.floor(mois / 12), tot = 2.2 * mois;
-  for (var y = 1; y <= Y; y++) tot += congeMajorationAnciennete(y);
-  tot += congeMajorationAnciennete(Y + 1) * (mois % 12) / 12;
+  var avecEnf = !!(emp && dateEntree);
+  for (var y = 1; y <= Y; y++) {
+    tot += congeMajorationAnciennete(y);
+    if (avecEnf) tot += congeMajorationEnfants(emp, _congePlusMois(dateEntree, 12 * y));
+  }
+  var maj = congeMajorationAnciennete(Y + 1);
+  if (avecEnf) maj += congeMajorationEnfants(emp, _congePlusMois(dateEntree, 12 * (Y + 1)));
+  tot += maj * (mois % 12) / 12;
   return Math.round(tot * 10) / 10;
 }
-/* Jours ouvrables (hors dimanches) entre deux dates incluses (AAAA-MM-JJ) */
+/* Jours feries declares (AAAA-MM-JJ -> true) */
+function _congeFeriesSet() {
+  var l = [];
+  try { if (typeof getFeries === 'function') l = getFeries(); else if (typeof dbArr === 'function') l = dbArr('mdb_feries'); } catch (e) { l = []; }
+  if (!Array.isArray(l) || !l.length) { try { l = JSON.parse(localStorage.getItem('mdb_feries') || '[]'); } catch (e2) { l = []; } }
+  var s = {};
+  (Array.isArray(l) ? l : []).forEach(function (f) { if (f && f.date) s[String(f.date).slice(0, 10)] = true; });
+  return s;
+}
+/* Jours ouvrables (hors dimanches et jours feries declares) entre deux dates incluses (AAAA-MM-JJ) */
 function congeJoursOuvrablesEntre(d1, d2) {
   try {
     var a = new Date(String(d1).slice(0, 10) + 'T12:00:00'), b = new Date(String(d2).slice(0, 10) + 'T12:00:00');
     if (isNaN(a.getTime()) || isNaN(b.getTime()) || b < a) return 0;
-    var n = 0;
-    for (var d = new Date(a); d <= b && n < 400; d.setDate(d.getDate() + 1)) { if (d.getDay() !== 0) n++; }
+    var n = 0, fer = _congeFeriesSet(), k = 0;
+    for (var d = new Date(a); d <= b && k < 800; d.setDate(d.getDate() + 1), k++) {
+      if (d.getDay() === 0) continue;
+      var dk = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+      if (fer[dk]) continue;
+      n++;
+    }
     return n;
   } catch (e) { return 0; }
 }
@@ -34579,7 +34646,7 @@ function congeMoisService(emp, refDate) {
 
 /* Jours acquis au total (toutes periodes confondues) */
 function congeAcquis(emp, refDate) {
-  return congeAcquisLegal(congeMoisService(emp, refDate));
+  return congeAcquisLegal(congeMoisService(emp, refDate), emp, datePremiereEntree(emp));
 }
 
 /* Jours deja pris (planifies non annules) */
@@ -36945,11 +37012,11 @@ function printCongeIndividuel(empId) {
         if (annees <= 16) return 3;
         return 4;
       }
-      function _stcJoursCongesAcquis(moisServ, annees) {
+      function _stcJoursCongesAcquis(moisServ, annees, emp) {
         /* Art. 25.1 : 2,2 j ouvrables/mois ; art. 25.2 : majoration annee par
            annee selon l'anciennete atteinte (avant : la majoration actuelle
            etait appliquee a toute la carriere -> jours surestimes). */
-        return congeAcquisLegal(moisServ);
+        return congeAcquisLegal(moisServ, emp, emp ? datePremiereEntree(emp) : '');
       }
       function _requireUniversalCode(action) {
         var code = (payeObj("mdb_entreprise")).validationCode || "";
@@ -37274,7 +37341,7 @@ function printCongeIndividuel(empId) {
           }
         }
         /* 3. Indemnité compensatrice de congés payés — art. 25.1/25.2/25.9 */
-        var joursAcquis = _stcJoursCongesAcquis(moisServ, annees);
+        var joursAcquis = _stcJoursCongesAcquis(moisServ, annees, emp);
         var joursNonPris = Math.max(0, joursAcquis - joursPris);
         add(
           "Indemnité compensatrice de congés payés (" +

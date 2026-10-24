@@ -25,7 +25,8 @@
     fdfp: { t: 'FDFP : taxes de formation', u: 'https://fdfp.ci/presentation-du-fdfp/' },
     transport: { t: 'CGECI : revalorisation de la prime de transport', u: 'https://cgeci.com/prime-de-transport-dans-le-secteur-prive-les-mesures-de-revalorisation-entree-en-vigueur/' },
     pwc: { t: 'PwC Worldwide Tax Summaries : Côte d’Ivoire', u: 'https://taxsummaries.pwc.com/ivory-coast/individual/taxes-on-personal-income' },
-    cleiss: { t: 'CLEISS : cotisations en Côte d’Ivoire (SMIG au 01/01/2023)', u: 'https://www.cleiss.fr/docs/cotisations/cotedivoire.html' }
+    cleiss: { t: 'CLEISS : cotisations en Côte d’Ivoire (SMIG au 01/01/2023)', u: 'https://www.cleiss.fr/docs/cotisations/cotedivoire.html' },
+    expat: { t: 'Contrat de travail expatrié (note DGI n° 3338 du 26/12/2002, arrêtés AGEPE 2004 et 2019)', u: 'https://www.mhconsultingafrica.com/fr/actualites/contrat-de-travail-expatrie' }
   };
 
   /* Valeurs chiffrees utilisables par les calculs */
@@ -79,7 +80,7 @@
     { th: 'Congés', titre: 'Acquisition des congés payés', ref: 'Code du travail art. 25.1', src: 'ctConges',
       txt: '2,2 jours ouvrables par mois de service effectif, soit 26,4 jours ouvrables par an. Jours ouvrables = tous les jours sauf le dimanche (et les jours fériés).' },
     { th: 'Congés', titre: 'Majorations des congés', ref: 'Code du travail art. 25.2', src: 'ctConges',
-      txt: 'Selon l’ancienneté dans l’entreprise : +1 jour après 5 ans, +2 après 10, +3 après 15, +5 après 20, +7 après 25, +8 après 30. Plus 2 jours par enfant à charge de moins de 21 ans ; 1 jour pour la médaille d’honneur du travail.' },
+      txt: 'Selon l’ancienneté dans l’entreprise : +1 jour après 5 ans, +2 après 10, +3 après 15, +5 après 20, +7 après 25, +8 après 30. Enfants dont le salarié a la garde : +2 jours par enfant si le salarié a moins de 21 ans en fin de période ; s’il a plus de 18 ans, +2 jours par enfant à partir du 4e. +1 jour pour la médaille d’honneur du travail.' },
     { th: 'Congés', titre: 'Absences qui ne réduisent pas le congé', ref: 'Code du travail art. 25.3', src: 'ctConges',
       txt: 'Les absences pour accident du travail ou maladie professionnelle, et la maladie constatée par un médecin agréé (dans la limite de 6 mois), ne sont pas déduites du congé acquis.' },
     { th: 'Congés', titre: 'Allocation de congé', ref: 'Code du travail art. 25.7, 25.9', src: 'ctConges',
@@ -95,7 +96,9 @@
     { th: 'Cotisations', titre: 'ITS (impôt sur salaire)', ref: 'CGI, réforme 2024', src: 'dgi',
       txt: 'Barème mensuel : 0 % jusqu’à 75 000 F ; 16 % jusqu’à 240 000 ; 21 % jusqu’à 800 000 ; 24 % jusqu’à 2 400 000 ; 28 % jusqu’à 8 000 000 ; 32 % au-delà. Réduction pour charges de famille : 5 500 F par demi-part au-delà de la première part, 44 000 F au plus (5 parts).' },
     { th: 'Cotisations', titre: 'Taxes patronales sur salaires', ref: 'CGI art. 146 ; FDFP', src: 'dgi',
-      txt: 'Contribution nationale 1,2 % (locaux et expatriés) ; taxe d’apprentissage 0,4 % ; taxe additionnelle à la formation professionnelle continue 1,2 %. Contribution employeur : 9,2 % pour le personnel expatrié, personnel local exonéré.' },
+      txt: 'Contribution nationale 1,2 % (locaux et expatriés) ; taxe d’apprentissage 0,4 % ; taxe additionnelle à la formation professionnelle continue 1,2 %. Contribution employeur : 9,2 % pour le personnel expatrié, personnel local exonéré.' },
+    { th: 'Cotisations', titre: 'Qui est « personnel expatrié » ?', ref: 'Note DGI n° 3338/MEMEF/DGI-DLC du 26/12/2002', src: 'expat',
+      txt: 'Être étranger ne suffit pas. Est expatrié au sens de l’impôt : (1) tout salarié, quelle que soit sa nationalité, titulaire d’un contrat de travail expatrié visé par l’AGEPE ; (2) un salarié étranger sans contrat visé qui occupe de hautes fonctions (cadre, chef de chantier…) ou dont la rémunération, avantages compris, dépasse celle habituellement versée aux Ivoiriens. Un étranger embauché sur place aux conditions locales reste personnel local. Tout travailleur étranger doit avoir un contrat visé par le ministère de l’Emploi et une carte de travail.' },
     { th: 'Absences', titre: 'Congé de maternité', ref: 'Code du travail', src: 'ctConges',
       txt: '14 semaines (6 avant et 8 après l’accouchement), indemnisées par la CNPS.' }
   ];
@@ -174,7 +177,10 @@
       }
       if (t !== 'externe') {
         if (!e.date_entree && !e.date_embauche) add('alerte', e, 'Date d’entrée absente', 'Ancienneté, congés, préavis et indemnités de départ ne peuvent pas être calculés.', 'Code du travail art. 25 ; CCI art. 39, 55');
-        if (!e.num_cnps && !e.cnps) add('info', e, 'N° CNPS absent', 'Le numéro d’immatriculation CNPS est nécessaire aux déclarations.', 'CNPS');
+        if (!e.num_cnps && !e.cnps) add('info', e, 'N° CNPS absent', 'Le numéro d’immatriculation CNPS est nécessaire aux déclarations.', 'CNPS');
+        var nat = String(e.nationalite || '').trim().toLowerCase();
+        var expa = e.expatrie === true || e.expatrie === 'oui' || e.expatrie === '1';
+        if (nat && nat.indexOf('ivoir') === -1 && !expa) add('info', e, 'Étranger traité en personnel local', 'Nationalité « ' + e.nationalite + ' ». Correct s’il est embauché aux conditions locales ; à passer en « expatrié » s’il a un contrat expatrié visé ou un poste/salaire d’expatrié. Vérifier aussi le contrat visé et la carte de travail.', 'Note DGI 3338/2002');
       }
       Object.keys(hSem).forEach(function (k) {
         var parts = k.split('|');

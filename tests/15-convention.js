@@ -27,7 +27,9 @@ function run(rapport) {
       { id: 'c', matricule: 'C1', nom: 'CONFORME', salaire_base: 150000, categorie_id: '6B', date_entree: '2020-01-01', num_cnps: '1' },
       { id: 'd', matricule: 'D1', nom: 'INCOMPLET', salaire_base: 120000 },
       { id: 'e', matricule: 'E1', nom: 'JOURNALIER', type_contrat: 'Journalier', salaire_base: 3000, date_entree: '2025-01-01', num_cnps: '1' },
-      { id: 'f', matricule: 'F1', nom: 'SORTI', salaire_base: 10000, date_sortie: '2025-12-31' }
+      { id: 'f', matricule: 'F1', nom: 'SORTI', salaire_base: 10000, date_sortie: '2025-12-31' },
+      { id: 'g', matricule: 'G1', nom: 'ETRANGER LOCAL', nationalite: 'Burkinabè', salaire_base: 120000, categorie_id: '6B', date_entree: '2024-01-01', num_cnps: '1' },
+      { id: 'h', matricule: 'H1', nom: 'EXPATRIE', nationalite: 'Française', expatrie: true, salaire_base: 900000, categorie_id: '6B', date_entree: '2024-01-01', num_cnps: '1' }
     ]),
     mdb_paye: JSON.stringify({
       categories: [{ code: '1 MO', salaire_min: 75000 }, { code: '6B', salaire_min: 99200 }],
@@ -61,16 +63,20 @@ function run(rapport) {
     entree: a('D1', 'Date d’entrée absente'),
     sansCat: a('D1', 'Catégorie non renseignée'),
     journalier: a('E1', 'Taux journalier sous le SMIG'),
-    sortiIgnore: !l.some(x => x.employe.indexOf('F1') === 0)
+    sortiIgnore: !l.some(x => x.employe.indexOf('F1') === 0),
+    etrangerLocal: a('G1', 'Étranger traité en personnel local'),
+    expatOk: !l.some(x => x.employe.indexOf('H1') === 0)
   };
   const ko = Object.keys(checks).filter(k => !checks[k]);
-  if (!ko.length) rapport.ok('conformite : SMIG, minimum de categorie, > 15 h sup/semaine, fiche incomplete, journalier sous SMIG detectes ; employe sorti ignore');
+  if (!ko.length) rapport.ok('conformite : SMIG, minimum de categorie, > 15 h sup/semaine, fiche incomplete, journalier sous SMIG, etranger en personnel local signale ; sorti et expatrie declare sans remarque');
   else rapport.ko('conformite : controles manquants ' + ko.join(', ') + ' -> ' + JSON.stringify(l.map(x => x.employe + ':' + x.sujet)));
 
   const h = C.render(r.el);
   if (h.indexOf('Convention collective') !== -1 && h.indexOf('Prime d’ancienneté') !== -1 && h.indexOf('CCI art. 55') !== -1)
     rapport.ok('affichage : fiches consultables avec article (ex. prime d’anciennete, CCI art. 55)');
   else rapport.ko('affichage incomplet');
+  if (h.indexOf('Qui est « personnel expatrié »') !== -1 && h.indexOf('3338') !== -1) rapport.ok('fiche « Qui est personnel expatrie ? » (note DGI 3338/2002) presente');
+  else rapport.ko('fiche expatrie absente');
   C._q('préavis');
   if (r.el.innerHTML.indexOf('Préavis') !== -1 && r.el.innerHTML.indexOf('Prime d’ancienneté') === -1) rapport.ok('recherche : « préavis » ne garde que les fiches concernees');
   else rapport.ko('recherche inefficace');
