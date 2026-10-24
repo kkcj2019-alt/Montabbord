@@ -17336,7 +17336,17 @@ function updateBLFactureLinks(oldBlIds, newBlIds, facId) {
 
 function deleteFacture(id) {
   if (!window.confirm('Supprimer cette facture ?')) return;
-  openConfirm('\u00cates-vous s\u00fbr de vouloir supprimer cette facture ?', function() {
+  /* Paiements deja recus sur cette facture : on le dit avant de supprimer
+     (ils restent enregistres, comme une avance du client). */
+  var _msgF = '\u00cates-vous s\u00fbr de vouloir supprimer cette facture ?';
+  try {
+    var _regsF = getReglements().filter(function (r) { return r && !r._deleted && r.factureId === id; });
+    if (_regsF.length) {
+      var _totR = 0; _regsF.forEach(function (r) { _totR += parseFloat(r.montant) || 0; });
+      _msgF += '\n\nATTENTION : ' + _regsF.length + ' r\u00e8glement(s) d\u00e9j\u00e0 encaiss\u00e9(s) sur cette facture (' + fmtMoney(_totR) + '). Ils resteront enregistr\u00e9s (avance du client) : supprimez-les d\u2019abord si besoin.';
+    }
+  } catch (eRF) {}
+  openConfirm(_msgF, function() {
     var factures = getFactures(); var blIds = []; var result = [];
     for (var i = 0; i < factures.length; i++) {
       if (factures[i].id === id) blIds = factures[i].blIds || (factures[i].blId ? [factures[i].blId] : []);
@@ -24264,6 +24274,9 @@ function updateFactureStatut(f) {
   var restant = ((f.totalTTC != null ? f.totalTTC : f.total) || 0) - (f.montantPaye || 0);
   if (restant <= 0) f.statut = 'payee';
   else if (f.montantPaye > 0) f.statut = 'partielle';
+  /* Plus aucun paiement (reglement supprime) : la facture redevient a payer.
+     Avant, elle restait « payee » pour toujours. */
+  else if (f.statut === 'payee' || f.statut === 'partielle') f.statut = 'validee';
 }
 
 /* Apres modifier/supprimer depuis un releve client, on y revient au lieu
@@ -33187,9 +33200,15 @@ function deleteBanqueOperation(id) {
     DB.set('mdb_banqueOperations', result);
     /* Si l'op supprimée était liée à un règlement, tombstoner ce règlement */
     if (deletedOp && deletedOp.reglementId) {
-      var regs = dbArr('mdb_reglements');
-      for (var ri = 0; ri < regs.length; ri++) { if (regs[ri].id === deletedOp.reglementId) { regs[ri]._deleted = true; regs[ri].deletedAt = getToday(); break; } }
+      var regs = dbArr('mdb_reglements'), _regSup = null;
+      for (var ri = 0; ri < regs.length; ri++) { if (regs[ri].id === deletedOp.reglementId) { if (!regs[ri]._deleted) _regSup = JSON.parse(JSON.stringify(regs[ri])); regs[ri]._deleted = true; regs[ri].deletedAt = getToday(); break; } }
       DB.set('mdb_reglements', regs);
+      /* Le paiement n'existe plus : la facture n'est plus payee de ce montant
+         (avant, elle restait « payee ») et le reglement ne revient pas. */
+      if (_regSup) {
+        try { updateFactureFromReglement(_regSup, null); } catch (eUF) {}
+        try { addTombstones('mdb_reglements', [_regSup.id]); } catch (eTB) {}
+      }
     }
     toast('Op\u00e9ration supprim\u00e9e');
     renderBanqueEnrList();
