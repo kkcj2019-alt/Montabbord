@@ -240,6 +240,7 @@
       if (!_jT) _jT = setTimeout(function () { _jT = null; try { localStorage.setItem('mdb_sync_journal', JSON.stringify(_jr)); } catch (x2) {} }, 1500);
     } catch (e2) {}
   }
+  window.mdbSyncJournalAjout = function (e) { journal(e || {}); };
   window.mdbSyncJournal = function () { try { if (!_jr) _jr = JSON.parse(localStorage.getItem('mdb_sync_journal') || '[]'); } catch (e) { _jr = []; } return (_jr || []).slice(); };
 
   /* ---- Suppressions volontaires connues (tombstones) pour une rubrique ---- */

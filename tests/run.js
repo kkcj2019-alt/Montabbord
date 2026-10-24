@@ -26,7 +26,9 @@ const ETAPES = [
   { cle: '07', nom: 'pf-source', charger: () => require('./07-pf-source.js') },
   { cle: '08', nom: 'securite', charger: () => require('./08-securite.js') },
   { cle: '09', nom: 'synchro', charger: () => require('./09-synchro.js') },
-  { cle: '10', nom: 'multiposte', charger: () => require('./10-multiposte.js') }
+  { cle: '10', nom: 'multiposte', charger: () => require('./10-multiposte.js') },
+  { cle: '11', nom: 'achats-stock', charger: () => require('./11-achats-stock.js') },
+  { cle: '12', nom: 'compte-fournisseur', charger: () => require('./12-compte-fournisseur.js') }
 ];
 
 const rapport = new Rapport('MONTABBORD — CONTROLE QUALITE DES APPLICATIONS');

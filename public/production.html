@@ -2811,9 +2811,59 @@ function acApplyCaisseCloud(arr) {
     try { pending = JSON.parse(localStorage.getItem("mdb_pendingSync") || "{}"); } catch(e) {}
     if (pending && pending[key]) { return false; }
     if (localStorage.getItem(key) === txt) return false;
-    localStorage.setItem(key, txt);
+    /* FUSION au lieu de remplacement : l'ancien code remplacait la liste locale
+       par la copie du cloud (toutes les 30 s). Une saisie de caisse pas encore
+       montee, ou une copie cloud en retard, faisait disparaitre des operations
+       (puis l'onglet principal renvoyait la liste amputee). Desormais : union
+       par id (version cloud pour un meme id), suppressions memorisees exclues. */
+    var local = [];
+    try { local = JSON.parse(localStorage.getItem(key) || '[]'); } catch (eL) { local = []; }
+    if (!Array.isArray(local)) local = [];
+    var merged = prodUnionSansSupprimes(key, local, arr);
+    var mtxt = JSON.stringify(merged);
+    if (localStorage.getItem(key) === mtxt) return false;
+    localStorage.setItem(key, mtxt);
     return true;
   } catch (e) { return false; }
+}
+/* Suppressions memorisees (memes registres que l'app principale) */
+function prodIdsSupprimes(key) {
+  var out = {};
+  try {
+    var t = JSON.parse(localStorage.getItem('mdb_tombstones') || '{}');
+    var m = t && t[key];
+    if (m && typeof m === 'object') for (var k in m) if (k !== '__resetAt') out[k] = true;
+  } catch (e) {}
+  try {
+    var reg = { mdb_operationsCaisse: 'mdb_deletedOps', mdb_stocks: 'mdb_deletedStocks', mdb_bl: 'mdb_deletedBLs' }[key];
+    if (reg) {
+      var d = JSON.parse(localStorage.getItem(reg) || '[]');
+      if (Array.isArray(d)) d.forEach(function (x) { if (x && x.id !== undefined) out[String(x.id)] = true; else if (typeof x === 'string') out[x] = true; });
+    }
+  } catch (e2) {}
+  return out;
+}
+/* Union local + cloud par id (le cloud gagne pour un meme id), sans ressusciter un supprime */
+function prodUnionSansSupprimes(key, local, cloud) {
+  var sup = prodIdsSupprimes(key);
+  var out = [], pos = {}, i, x, id;
+  for (i = 0; i < (local || []).length; i++) {
+    x = local[i]; if (!x) continue;
+    id = (x.id !== undefined && x.id !== null && x.id !== '') ? String(x.id) : null;
+    if (id && sup[id]) continue;
+    if (id) { if (pos[id] !== undefined) continue; pos[id] = out.length; }
+    out.push(x);
+  }
+  for (i = 0; i < (cloud || []).length; i++) {
+    x = cloud[i]; if (!x) continue;
+    id = (x.id !== undefined && x.id !== null && x.id !== '') ? String(x.id) : null;
+    if (id && sup[id]) continue;
+    if (id && pos[id] !== undefined) { out[pos[id]] = x; continue; }
+    if (!id) { var sj = JSON.stringify(x), dup = false; for (var j = 0; j < out.length; j++) { if (JSON.stringify(out[j]) === sj) { dup = true; break; } } if (dup) continue; }
+    if (id) pos[id] = out.length;
+    out.push(x);
+  }
+  return out;
 }
 
 /* ---------- rendu ---------- */
@@ -10039,6 +10089,31 @@ function prodShouldRender() {
     return true;
   } catch(e) { return true; }
 }
+/* ===== Donnees PARTAGEES ecrites par Production (dettes, stocks, BL, qualite) =====
+   Avant, ces cles etaient modifiees ici mais jamais envoyees au cloud (sauf si
+   l'onglet principal etait ouvert) : les autres postes ne voyaient rien, puis
+   la copie du cloud faisait revenir ce qui avait ete supprime. */
+window._prodPartageSale = window._prodPartageSale || {};
+function prodPartageModifie(key) {
+  try { window._prodPartageSale[key] = true; scheduleProdPush(); } catch (e) {}
+}
+/* Suppression faite par l'utilisateur : memorisee (ne ressuscite jamais, sur aucun poste) */
+function prodMemoriserSuppressions(key, avant, apres) {
+  try {
+    var present = {}, ids = [];
+    (apres || []).forEach(function (x) { if (x && x.id !== undefined && x.id !== null && x.id !== '') present[String(x.id)] = true; });
+    (avant || []).forEach(function (x) { if (x && x.id !== undefined && x.id !== null && x.id !== '' && !present[String(x.id)]) ids.push(String(x.id)); });
+    if (!ids.length) return 0;
+    var t = {};
+    try { t = JSON.parse(localStorage.getItem('mdb_tombstones') || '{}') || {}; } catch (eT) { t = {}; }
+    if (!t[key] || typeof t[key] !== 'object') t[key] = {};
+    var now = Date.now();
+    ids.forEach(function (id) { t[key][id] = now; });
+    localStorage.setItem('mdb_tombstones', JSON.stringify(t));
+    prodPartageModifie('mdb_tombstones');
+    return ids.length;
+  } catch (e) { return 0; }
+}
 function scheduleProdPush() {
   _prodDirty = true;
   prodSyncStatus('● synchro…', '#b45309');
@@ -10446,8 +10521,9 @@ function prodPushNow() {
       try { localDettes = lsArr('mdb_dettesFournisseurs'); } catch(e) { localDettes = []; }
       var cloudDettes = Array.isArray(cloudData.mdb_dettesFournisseurs) ? cloudData.mdb_dettesFournisseurs : [];
       var seenD = {}, mergedD = [], newD = false;
+      var _supP = prodIdsSupprimes('mdb_dettesFournisseurs');
       for (var di = 0; di < localDettes.length; di++) { mergedD.push(localDettes[di]); var id1 = localDettes[di] && localDettes[di].id; if (id1) seenD[id1] = true; }
-      for (var dj = 0; dj < cloudDettes.length; dj++) { var itD = cloudDettes[dj]; var id2 = itD && itD.id; if (!id2 || !seenD[id2]) { mergedD.push(itD); if (id2) seenD[id2] = true; newD = true; } }
+      for (var dj = 0; dj < cloudDettes.length; dj++) { var itD = cloudDettes[dj]; var id2 = itD && itD.id; if (id2 && _supP[String(id2)]) continue; if (!id2 || !seenD[id2]) { mergedD.push(itD); if (id2) seenD[id2] = true; newD = true; } }
       if (localDettes.length > 0 || cloudDettes.length > 0) payload.mdb_dettesFournisseurs = mergedD;
       if (newD) { try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(mergedD)); } catch(e) {} }
     } catch(e) {}
@@ -10480,6 +10556,22 @@ function prodPushNow() {
       docPartiel = { mdb_production: sectionPayload }; /* sections sales seules */
       try { window._prodSectionsEnvoyees = null; window._prodSectionsPartielles = sectionPayload; } catch (eSP) {}
     }
+    /* Cles partagees modifiees ici (dettes, stocks, BL, qualite, suppressions) :
+       elles partent avec cet envoi (ecriture protegee, fusion cote serveur). */
+    try {
+      var _psK = Object.keys(window._prodPartageSale || {});
+      if (_psK.length) {
+        window._prodPartageEnVol = window._prodPartageSale; window._prodPartageSale = {};
+        if (docPartiel === payload) docPartiel = Object.assign({}, payload);
+        _psK.forEach(function (k) {
+          var v = null;
+          try { v = JSON.parse(localStorage.getItem(k) || 'null'); } catch (eP) { v = null; }
+          if (v === null || v === undefined) return;
+          if (Array.isArray(v)) { var sup = prodIdsSupprimes(k); v = v.filter(function (x) { return !(x && x.id !== undefined && sup[String(x.id)]); }); }
+          docPartiel[k] = v;
+        });
+      }
+    } catch (ePS) {}
     return prodSplitEcrire(uid, docPartiel, identity).catch(function(eSplit) {
       if (!(eSplit && eSplit.__splitManquant)) throw eSplit;
       if (_prodMergedRpc === false || !sectionPayload || _nomEnAttente) {
@@ -10508,6 +10600,7 @@ function prodPushNow() {
     } catch (eBM) {}
     _prodFail = 0;
     _prodPushing = false;
+    window._prodPartageEnVol = null;
     prodSyncStatus('● synchro OK', '#16a34a');
     /* Saisies faites PENDANT le vol : leurs drapeaux ont survecu au reset
        (pose des l'envoi) — si un timer a ete avale par _prodPushing, on
@@ -10518,6 +10611,8 @@ function prodPushNow() {
   }).catch(function(err) {
     _prodPushing = false;
     _prodFail++;
+    /* Cles partagees non parties : remises en file */
+    try { var _pv = window._prodPartageEnVol; if (_pv) { for (var _pk in _pv) if (_pv.hasOwnProperty(_pk)) window._prodPartageSale[_pk] = true; window._prodPartageEnVol = null; } } catch (ePV) {}
     /* Echec d'ecriture : les sections envoyees etaient deja reinitialisees
        (reset a l'envoi) — on les remet en file, sans ecraser les marquages
        plus recents faits pendant le vol. */
@@ -10573,9 +10668,11 @@ function prodApplyDettes(cloudDettes) {
   var local = [];
   try { local = lsArr('mdb_dettesFournisseurs'); } catch(e) { local = []; }
   var seen = {}, added = false;
+  var _supD = prodIdsSupprimes('mdb_dettesFournisseurs');
   for (var i = 0; i < local.length; i++) { var id1 = local[i] && local[i].id; if (id1) seen[id1] = true; }
   for (var j = 0; j < cloudDettes.length; j++) {
     var it = cloudDettes[j], id2 = it && it.id;
+    if (id2 && _supD[String(id2)]) continue; /* dette supprimee ici (achat supprime) : ne revient pas */
     if (!id2 || !seen[id2]) { local.push(it); if (id2) seen[id2] = true; added = true; }
   }
   if (!added) return false;
@@ -10800,6 +10897,26 @@ function prodApplyNomenclature(cloudNom) {
   try { syncProduitsFinisFromIndex(); } catch (eR) {}
   return true;
 }
+/* Qualite : fusion par section (le cloud gagne pour un meme id), suppressions memorisees exclues */
+function prodApplyQualite(cq) {
+  if (!cq || typeof cq !== 'object' || Array.isArray(cq)) return false;
+  var raw = null, l = null;
+  try { raw = localStorage.getItem('mdb_qualite'); l = raw ? JSON.parse(raw) : null; } catch (e) { l = null; }
+  var out = {}, k;
+  if (!l || typeof l !== 'object' || Array.isArray(l)) out = JSON.parse(JSON.stringify(cq));
+  else {
+    for (k in cq) if (cq.hasOwnProperty(k)) out[k] = cq[k];
+    for (k in l) {
+      if (!l.hasOwnProperty(k)) continue;
+      if (Array.isArray(l[k]) && Array.isArray(cq[k])) out[k] = prodUnionSansSupprimes('mdb_qualite.' + k, l[k], cq[k]);
+      else out[k] = l[k];
+    }
+  }
+  var txt = JSON.stringify(out);
+  if (txt === raw) return false;
+  try { localStorage.setItem('mdb_qualite', txt); } catch (eS) { return false; }
+  return true;
+}
 function prodPullNow(silent) {
   var uid = _prodUid || prodEnterpriseUid();
   if (!uid) { if (!silent) prodSyncStatus('○ non connecté', 'var(--dim)'); return; }
@@ -10809,7 +10926,7 @@ function prodPullNow(silent) {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   /* Tirage cible : mdb_production (sections) + cles caisse/dettes/nomenclature,
      sans le SELECT * du dossier entier qui timeoutait. */
-  prodSplitLireCles(uid, ['mdb_nomenclature', 'mdb_dettesFournisseurs', 'mdb_operationsCaisse', 'mdb_codesCaisse', 'mdb_caisses'], true).then(function(res) {
+  prodSplitLireCles(uid, ['mdb_nomenclature', 'mdb_dettesFournisseurs', 'mdb_operationsCaisse', 'mdb_codesCaisse', 'mdb_caisses', 'mdb_qualite'], true).then(function(res) {
     if (res.error) throw res.error;
     var row = (res.data && res.data[0]) || {};
     if (!row.data) return;
@@ -10819,7 +10936,8 @@ function prodPullNow(silent) {
     var r3 = Array.isArray(row.data.mdb_operationsCaisse) ? acApplyCaisseCloud(row.data.mdb_operationsCaisse, 'mdb_operationsCaisse') : false;
     var r4 = Array.isArray(row.data.mdb_codesCaisse) ? acApplyCaisseCloud(row.data.mdb_codesCaisse, 'mdb_codesCaisse') : false;
     var r5 = Array.isArray(row.data.mdb_caisses) ? acApplyCaisseCloud(row.data.mdb_caisses, 'mdb_caisses') : false;
-    if ((rN || r1 || r2 || r3 || r4 || r5) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
+    var r6 = row.data.mdb_qualite ? prodApplyQualite(row.data.mdb_qualite) : false;
+    if ((rN || r1 || r2 || r3 || r4 || r5 || r6) && prodShouldRender()) { try { prodAutoRefresh(); } catch(e) {} }
   }).catch(function(err) {
     /* Catch muet : une panne de lecture restait invisible (statut trompeur
        « synchro OK » d'un push precedent, aucun log). On trace et on montre
@@ -13336,7 +13454,7 @@ function updateStockArticle(articleId, qty, type, ref, numero, motifOverride) {
         categorie: cat
       });
     }
-    localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks));
+    localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks)); prodPartageModifie('mdb_stocks');
   } catch(e) {}
 
   var movements = getMovements();
@@ -14202,7 +14320,7 @@ function syncMirrorFinished(articleId) {
     } else {
       ms.push({ id: 'prod_' + genId(), code: code || articleId, designation: a.designation || '', articleCode: code, articleNom: a.designation || '', article_id: articleId, qte: q, quantite: q, prixUnitaire: a.prix_vente || a.prix_revient || 0, date: today(), categorie: 'finished' });
     }
-    localStorage.setItem('mdb_stocks', JSON.stringify(ms));
+    localStorage.setItem('mdb_stocks', JSON.stringify(ms)); prodPartageModifie('mdb_stocks');
   } catch (e) {}
 }
 /* Miroir COMPLET des produits finis vers l'app principale (mdb_stocks) :
@@ -14260,7 +14378,7 @@ function syncMirrorFinishedAll(silencieux) {
       });
       ecrireMiroir(code, des, '', q2, pu2);
     });
-    localStorage.setItem('mdb_stocks', JSON.stringify(ms));
+    localStorage.setItem('mdb_stocks', JSON.stringify(ms)); prodPartageModifie('mdb_stocks');
     if (!silencieux) toast(n + ' produit(s) fini(s) synchronisé(s) vers Index', 'success');
     return n;
   } catch (e) { return 0; }
@@ -14314,7 +14432,7 @@ function backfillMirrorFields() {
       if (s.qte == null && s.quantite != null) { s.qte = s.quantite; changed = true; }
     }
   });
-  if (changed) localStorage.setItem('mdb_stocks', JSON.stringify(ms));
+  if (changed) { localStorage.setItem('mdb_stocks', JSON.stringify(ms)); prodPartageModifie('mdb_stocks'); }
 }
 /* Remise à zéro des produits finis/palettes : quand le stock affiche des
    quantités SANS aucun mouvement (vieille saisie, import), on les ramène à 0
@@ -16341,7 +16459,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
   /* Entree de stock d'un achat consommable : on CUMULE dans la fiche du
      produit au lieu d'en creer une nouvelle a chaque achat. C'etait l'origine
      des fiches en double (le meme code en avait plusieurs). */
-  function _saveAchatConsumStock(items, fournisseur, dateAchat, ref) {
+  function _saveAchatConsumStock(items, fournisseur, dateAchat, ref, achatId) {
     var _dAchat = dateAchat || today();
     /* Trace l'entree d'achat dans la fiche de stock : la reference du BL,
        reprise dans motif/obs, est affichee par le registre (buildConsoMovements)
@@ -16364,6 +16482,8 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
         if (_ci._invBase || _ci._invClos || _ci._ajustInv) continue;
         if ((parseFloat(_ci.quantite) || 0) < 0) continue;
         if (_ci.fournisseur && String(_ci.fournisseur || '').trim()) continue;
+        /* Ligne appartenant a un AUTRE achat : jamais de cumul dedans (sa suppression emporterait ma quantite) */
+        if ((_ci._achatId !== undefined && _ci._achatId !== null && _ci._achatId !== '') || (_ci.achat_id !== undefined && _ci.achat_id !== null && _ci.achat_id !== '')) continue;
         if (String(_ci.code || '').trim().toUpperCase() === key) { pos = i; break; }
       }
       if (pos === -1) {
@@ -16382,6 +16502,7 @@ function _reporterEcartAchatConso(anciennes, nouvelles, ref, date, fournisseur) 
           prix_unitaire: it.unit_price,
           motif: _obsAchat,
           obs: _obsAchat,
+          _achatId: (achatId !== undefined && achatId !== null) ? achatId : undefined,
           created_at: _dAchat
         });
         return;
@@ -18248,7 +18369,7 @@ function addStockItem(key) {
         categorie: key.replace('stock-', '')
       });
     }
-    localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks));
+    localStorage.setItem('mdb_stocks', JSON.stringify(mainStocks)); prodPartageModifie('mdb_stocks');
   } catch(e) {}
 
   document.getElementById('modalOverlay').remove();
@@ -28514,9 +28635,97 @@ function syncProdAchatDette(a) {
     } else {
       dettes.push({ id: genId(), prodAchatId: a.id, fournisseurId: _resolveFid(a.fournisseur), fournisseur: a.fournisseur || '', description: 'Achat production ' + (a.reference || ''), date: a.date || '', montant: montant });
     }
-    try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(dettes)); } catch(e) { return false; }
+    try { localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(dettes)); prodPartageModifie('mdb_dettesFournisseurs'); } catch(e) { return false; }
     return true;
   } catch(e) { return false; }
+}
+/* Modification d'un achat (semi-finis, produits finis, marchandises, EPI) :
+   l'ECART par code (nouvelle quantite - ancienne) est reporte au stock.
+   Positif : ligne d'entree etiquetee ; negatif : retire d'abord des lignes de
+   CET achat, puis des autres lignes du meme code. */
+function _reporterEcartAchatSimple(cat, achatId, anciennes, nouvelles, ref, date, fournisseur, acheteur) {
+  function k(it) { return String((it && it.code) || '').trim().toLowerCase(); }
+  function somme(l) {
+    var q = {}, info = {};
+    (l || []).forEach(function (it) { if (!it || typeof it !== 'object') return; var c = k(it); if (!c) return; q[c] = (q[c] || 0) + (parseFloat(it.quantity) || 0); info[c] = it; });
+    return { q: q, info: info };
+  }
+  var A = somme(anciennes), N = somme(nouvelles), codes = {}, c;
+  for (c in A.q) codes[c] = 1;
+  for (c in N.q) codes[c] = 1;
+  var dateM = date || today();
+  if (cat === 'epi') {
+    var ecat = getEpiCatalogue(), chg = false;
+    for (c in codes) {
+      var dE = (N.q[c] || 0) - (A.q[c] || 0);
+      if (Math.abs(dE) < 1e-9) continue;
+      var itE = N.info[c] || A.info[c], e = null;
+      for (var ei = 0; ei < ecat.length; ei++) {
+        if (String(ecat[ei].code || '').trim().toLowerCase() === c || (itE.designation && String(ecat[ei].designation || '').trim().toLowerCase() === String(itE.designation).trim().toLowerCase())) { e = ecat[ei]; break; }
+      }
+      if (!e) {
+        if (dE < 0) continue;
+        e = { id: genId(), code: itE.code || '', designation: itE.designation || 'EPI', categorie: '', taille: '', unite: 'pièce', prix_unitaire: itE.unit_price || 0, seuil_minimum: 0, stock: 0 };
+        ecat.push(e);
+      }
+      e.stock = Math.max(0, (parseFloat(e.stock) || 0) + dE);
+      chg = true;
+    }
+    if (chg) setEpiCatalogue(ecat);
+    /* L'achat EPI enregistre (historique) reprend les nouvelles lignes */
+    try {
+      var pur = getEpiPurchases(), refT = String(ref || '').trim();
+      for (var pi = 0; pi < pur.length; pi++) {
+        var x = pur[pi];
+        var lie = (x.achat_id !== undefined && x.achat_id !== null && x.achat_id !== '') ? String(x.achat_id) === String(achatId) : (refT && x.reference === ref);
+        if (!lie) continue;
+        x.date = dateM; x.fournisseur = fournisseur; x.reference = ref; if (acheteur) x.acheteur = acheteur;
+        x.achat_id = achatId;
+        x.lignes = (nouvelles || []).filter(function (it) { return it && typeof it === 'object'; }).map(function (it) {
+          return { epi_id: '', article: ((it.code || '') + ' — ' + (it.designation || '')).trim().replace(/^—\s*/, ''), quantite: parseFloat(it.quantity) || 0, prix_unitaire: parseFloat(it.unit_price) || 0 };
+        });
+        break;
+      }
+      setEpiPurchases(pur);
+    } catch (eP) {}
+    return;
+  }
+  var get = cat === 'semi' ? getStockSemi : (cat === 'finished' ? getStockFinished : getStockMerch);
+  var set = cat === 'semi' ? setStockSemi : (cat === 'finished' ? setStockFinished : setStockMerch);
+  var arr = get();
+  var movs = cat === 'finished' ? getMovements() : null;
+  var arts = cat === 'finished' ? getArticles() : null;
+  var touche = false;
+  for (c in codes) {
+    var d = (N.q[c] || 0) - (A.q[c] || 0);
+    if (Math.abs(d) < 1e-9) continue;
+    var it = N.info[c] || A.info[c];
+    if (d > 0) {
+      arr.unshift({ id: Date.now() + Math.random(), code: it.code, designation: it.designation, fournisseur: fournisseur,
+        quantite: d, prix_unitaire: it.unit_price, achat_id: achatId, motif: 'Modification ' + (ref || ''), created_at: dateM });
+    } else {
+      var reste = -d;
+      [true, false].forEach(function (siLie) {
+        for (var j = 0; j < arr.length && reste > 1e-9; j++) {
+          var l = arr[j];
+          if (!l || k(l) !== c) continue;
+          var estLie = l.achat_id !== undefined && l.achat_id !== null && String(l.achat_id) === String(achatId);
+          if (siLie !== estLie) continue;
+          var dq = Math.min(reste, Math.max(0, parseFloat(l.quantite) || 0));
+          l.quantite = (parseFloat(l.quantite) || 0) - dq; reste -= dq;
+          if ((parseFloat(l.quantite) || 0) <= 0) { arr.splice(j, 1); j--; }
+        }
+      });
+    }
+    touche = true;
+    if (movs) {
+      var art = null;
+      for (var ai = 0; ai < arts.length; ai++) { if (String(arts[ai].code || '').trim().toLowerCase() === c) { art = arts[ai]; break; } }
+      movs.push({ id: genId(), achat_id: achatId, date: dateM, type: d > 0 ? 'entree' : 'sortie', article_id: (art && art.id) || '',
+        quantite: Math.abs(d), reference: ref, motif: 'Achat ' + (ref || '') + ' (modification)', created_at: new Date().toISOString() });
+    }
+  }
+  if (touche) { set(arr); if (movs) setMovements(movs); }
 }
 function saveAchatByCategory(e, category) {
   e.preventDefault();
@@ -28576,6 +28785,9 @@ function saveAchatByCategory(e, category) {
 
   setAchats(achats);
   window._editingAchatId = null;
+  /* Etiquette de l'achat sur les lignes de stock / mouvements qu'il cree :
+     la suppression ou la modification retrouve EXACTEMENT ses lignes. */
+  var _achIdCourant = (existing || achats[0] || {}).id;
   try { syncProdAchatDette(existing || achats[0]); } catch(e) {}
 
   /* Mise à jour du stock selon la catégorie : toute la chaîne est protégée —
@@ -28594,6 +28806,7 @@ function saveAchatByCategory(e, category) {
         essence: it.essence,
         type: it.type,
         fournisseur: fournisseur,
+        achat_id: _achIdCourant,
         longueur: it.length,
         largeur: it.width,
         epaisseur: it.thickness,
@@ -28623,6 +28836,7 @@ function saveAchatByCategory(e, category) {
         fournisseur: fournisseur,
         quantite: it.quantity,
         prix_unitaire: it.unit_price,
+        achat_id: _achIdCourant,
         created_at: (typeof date !== 'undefined' && date) ? date : today()
       });
     });
@@ -28637,6 +28851,7 @@ function saveAchatByCategory(e, category) {
         fournisseur: fournisseur,
         quantite: it.quantity,
         prix_unitaire: it.unit_price,
+        achat_id: _achIdCourant,
         created_at: (typeof date !== 'undefined' && date) ? date : today()
       });
     });
@@ -28647,7 +28862,7 @@ function saveAchatByCategory(e, category) {
       var _movs = getMovements();
       _tempAchatItems.forEach(function(it) {
         var _a = _arts.find(function(x) { return (x.code || '').trim().toLowerCase() === String(it.code || '').trim().toLowerCase(); }) || {};
-        _movs.push({ id: genId(), date: date, type: 'entree', article_id: _a.id || '', quantite: parseFloat(it.quantity) || 0, reference: ref, motif: 'Achat ' + ref, created_at: new Date().toISOString() });
+        _movs.push({ id: genId(), date: date, type: 'entree', article_id: _a.id || '', quantite: parseFloat(it.quantity) || 0, reference: ref, motif: 'Achat ' + ref, achat_id: _achIdCourant, created_at: new Date().toISOString() });
       });
       setMovements(_movs);
     } catch (e) {}
@@ -28661,19 +28876,20 @@ function saveAchatByCategory(e, category) {
         fournisseur: fournisseur,
         quantite: it.quantity,
         prix_unitaire: it.unit_price,
+        achat_id: _achIdCourant,
         created_at: (typeof date !== 'undefined' && date) ? date : today()
       });
     });
     setStockMerch(merchStock);
   } else if (category === 'consumables' && !existing) {
-    _saveAchatConsumStock(_tempAchatItems, fournisseur, (typeof date !== 'undefined' && date) ? date : today(), ref);
+    _saveAchatConsumStock(_tempAchatItems, fournisseur, (typeof date !== 'undefined' && date) ? date : today(), ref, _achIdCourant);
     /* Journal des mouvements : entrées achats consommables (POINTE, etc.)
        pour la page Mouvements de Stock. Pas d'article_id (hors table
        articles) : on porte le code + la designation sur l'entrée. */
     try {
       var _conmovs = getMovements();
       _tempAchatItems.forEach(function(it) {
-        if ((parseFloat(it.quantity) || 0) > 0) _conmovs.push({ id: genId(), date: date, type: 'entree', article_id: '', code: it.code || '', designation: it.designation || '', quantite: parseFloat(it.quantity) || 0, reference: ref, motif: 'Achat ' + ref, created_at: new Date().toISOString() });
+        if ((parseFloat(it.quantity) || 0) > 0) _conmovs.push({ id: genId(), achat_id: _achIdCourant, date: date, type: 'entree', article_id: '', code: it.code || '', designation: it.designation || '', quantite: parseFloat(it.quantity) || 0, reference: ref, motif: 'Achat ' + ref, created_at: new Date().toISOString() });
       });
       setMovements(_conmovs);
     } catch (eCon) {}
@@ -28703,8 +28919,12 @@ function saveAchatByCategory(e, category) {
       lignesEpi.push({ epi_id: e.id, article: (e.code + ' — ' + e.designation).trim().replace(/^—\s*/, ''), quantite: parseFloat(it.quantity) || 0, prix_unitaire: parseFloat(it.unit_price) || 0 });
     });
     setEpiCatalogue(epiCat);
-    epiPurchases.push({ id: genId(), date: date, fournisseur: fournisseur, acheteur: acheteur, reference: ref, lignes: lignesEpi });
+    epiPurchases.push({ id: genId(), achat_id: _achIdCourant, date: date, fournisseur: fournisseur, acheteur: acheteur, reference: ref, lignes: lignesEpi });
     setEpiPurchases(epiPurchases);
+  } else if (existing && (category === 'semi' || category === 'finished' || category === 'merchandises' || category === 'epi')) {
+    /* Modification : avant, le stock de ces categories ne bougeait pas du tout
+       (quantite corrigee sur le bon, mais pas sur la fiche de stock). */
+    _reporterEcartAchatSimple(category, _achIdCourant, _anciennesLignes, _tempAchatItems, ref, date, fournisseur, acheteur);
   }
   } catch (eStock) {
     _stockOk = false;
@@ -29182,14 +29402,18 @@ var _rev = reverseAchatStock(a);
        BL-70006 ») : c'est elle qui identifie l'achat. La date et le montant
        pouvant avoir ete corriges depuis, les exiger a l'identique laissait
        l'ecetre dredit au compte du fournisseur pour un achat supprime. */
-    localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(_dfs.filter(function(d) {
+    var _dfsGarde = _dfs.filter(function(d) {
       if (d.prodAchatId !== undefined && d.prodAchatId !== null && String(d.prodAchatId) === String(a.id)) return false;
       var desc = String(d.description || '');
       if (_refN && desc.toUpperCase().indexOf(_refN) !== -1 && desc.toLowerCase().indexOf('achat production') !== -1) return false;
       /* Filet legacy : dettes creees avant le lien prodAchatId */
       if (!d.prodAchatId && desc === _ref && (d.date || '') === (a.date || '') && Math.round((parseFloat(d.montant) || 0) * 100) / 100 === _mt) return false;
       return true;
-    })));
+    });
+    localStorage.setItem('mdb_dettesFournisseurs', JSON.stringify(_dfsGarde));
+    /* Achat supprime : sa dette fournisseur ne doit revenir sur AUCUN poste */
+    prodMemoriserSuppressions('mdb_dettesFournisseurs', _dfs, _dfsGarde);
+    prodPartageModifie('mdb_dettesFournisseurs');
   } catch(e) {}
   setAchats(achats.filter(function(x) { return String(x.id) !== String(id); }));
   /* Le message dit ce qui a VRAIMENT ete retire du stock, et signale ce qui
@@ -29279,22 +29503,52 @@ function reverseAchatStock(a) {
     function pull(get, set, match, qtyOf, volOf) {
       var arr = get();
       var changed = false;
-      for (var i = 0; i < a.items.length; i++) {
-        var it = a.items[i];
-        var q = qtyOf(it);
-        var v = volOf ? volOf(it) : 0;
-        if (q <= 0 && v <= 0) continue;
-        for (var j = 0; j < arr.length; j++) {
-          if (match(arr[j], it)) {
-            arr[j].quantite = Math.max(0, (parseFloat(arr[j].quantite) || 0) - q);
-            if (volOf && arr[j].volume !== undefined) arr[j].volume = Math.max(0, (parseFloat(arr[j].volume) || 0) - v);
-            if ((parseFloat(arr[j].quantite) || 0) <= 0 && (!volOf || (parseFloat(arr[j].volume) || 0) <= 0)) { arr.splice(j, 1); j--; }
-            changed = true;
-            break;
+      var _aid = (a.id !== undefined && a.id !== null && a.id !== '') ? String(a.id) : '';
+      function _cle(x) { return String((x && (x.code || x.colis_number)) || '').trim().toLowerCase(); }
+      /* 1) Lignes creees par CET achat (etiquetees achat_id) : retirees telles
+            quelles (leur quantite actuelle = ce qui reste de cet achat). */
+      var _couverts = {};
+      if (_aid) {
+        for (var t0 = arr.length - 1; t0 >= 0; t0--) {
+          if (arr[t0] && arr[t0].achat_id !== undefined && arr[t0].achat_id !== null && String(arr[t0].achat_id) === _aid) {
+            _couverts[_cle(arr[t0])] = true;
+            arr.splice(t0, 1); changed = true;
           }
         }
       }
+      /* 2) Lignes anciennes (sans etiquette) : la quantite est retranchee sur
+            TOUTES les lignes du meme code, pas seulement la premiere (avant, le
+            reliquat restait au stock quand la premiere ligne ne suffisait pas). */
+      for (var i = 0; i < a.items.length; i++) {
+        var it = a.items[i];
+        if (_couverts[_cle(it)]) continue;
+        var q = qtyOf(it);
+        var v = volOf ? volOf(it) : 0;
+        if (q <= 0 && v <= 0) continue;
+        for (var j = 0; j < arr.length && (q > 1e-9 || v > 1e-9); j++) {
+          var _l = arr[j];
+          if (!_l || (_l.achat_id !== undefined && _l.achat_id !== null && _l.achat_id !== '')) continue;
+          if (!match(_l, it)) continue;
+          var dq = Math.min(q, Math.max(0, parseFloat(_l.quantite) || 0));
+          _l.quantite = (parseFloat(_l.quantite) || 0) - dq; q -= dq;
+          if (volOf && _l.volume !== undefined) { var dv = Math.min(v, Math.max(0, parseFloat(_l.volume) || 0)); _l.volume = (parseFloat(_l.volume) || 0) - dv; v -= dv; }
+          else if (volOf) v = 0;
+          changed = true;
+          if ((parseFloat(_l.quantite) || 0) <= 0 && (!volOf || (parseFloat(_l.volume) || 0) <= 0)) { arr.splice(j, 1); j--; }
+        }
+      }
       if (changed) set(arr);
+    }
+    /* Mouvement / achat EPI rattache a CET achat : par etiquette, sinon par
+       reference NON VIDE (avant, un achat sans reference effacait les
+       mouvements de tous les autres achats sans reference). */
+    function _deCetAchat(m, exigeMotifAchat) {
+      if (!m) return false;
+      if (m.achat_id !== undefined && m.achat_id !== null && m.achat_id !== '') return String(m.achat_id) === String(a.id);
+      var r = String(a.reference || '').trim();
+      if (!r || m.reference !== a.reference) return false;
+      if (exigeMotifAchat && String(m.motif || '').indexOf('Achat') !== 0) return false;
+      return true;
     }
     function norm(x) { return String(x || '').trim().toLowerCase(); }
     function codeMatch(s, it) { return norm(s.code || s.colis_number) === norm(it.code || it.colis_number); }
@@ -29310,7 +29564,7 @@ function reverseAchatStock(a) {
       pull(getStockFinished, setStockFinished, codeMatch, qtyIt, null);
       try {
         var movs = getMovements();
-        movs = movs.filter(function(m) { return !(m && m.type === 'entree' && m.reference === a.reference); });
+        movs = movs.filter(function(m) { return !(m && (m.achat_id !== undefined && m.achat_id !== null && m.achat_id !== '' ? _deCetAchat(m, false) : (m.type === 'entree' && _deCetAchat(m, true)))); });
         setMovements(movs);
       } catch(e) {}
     } else if (cat === 'merchandises') {
@@ -29342,18 +29596,24 @@ function reverseAchatStock(a) {
       _items.forEach(function(it) {
         var _q = qtyIt(it);
         if (_q <= 0) return;
+        /* Deja retire via les lignes etiquetees de cet achat : rien de plus */
+        if (_retire[_csKey(it)]) return;
         var _trouve = false;
-        for (var _j = 0; _j < _cs.length; _j++) {
+        for (var _j = 0; _j < _cs.length && _q > 1e-9; _j++) {
           if (_tagDe(_cs[_j]) !== '') continue;
+          if (_cs[_j]._invBase || _cs[_j]._invClos || _cs[_j]._ajustInv) continue;
+          if ((parseFloat(_cs[_j].quantite) || 0) <= 0) continue;
           if (codeMatch(_cs[_j], it)) {
-            _cs[_j].quantite = Math.max(0, (parseFloat(_cs[_j].quantite) || 0) - _q);
-            _retire[_csKey(it)] = (_retire[_csKey(it)] || 0) + _q;
+            var _dq = Math.min(_q, parseFloat(_cs[_j].quantite) || 0);
+            _cs[_j].quantite = (parseFloat(_cs[_j].quantite) || 0) - _dq;
+            _q -= _dq;
+            _retire[_csKey(it)] = (_retire[_csKey(it)] || 0) + _dq;
             _trouve = true;
-            if ((parseFloat(_cs[_j].quantite) || 0) <= 0) { _cs.splice(_j, 1); }
-            break;
+            if ((parseFloat(_cs[_j].quantite) || 0) <= 0) { _cs.splice(_j, 1); _j--; }
           }
         }
         if (!_trouve) _introuvable.push(_csKey(it) + ' (' + fmt(_q) + ')');
+        else if (_q > 1e-9) _introuvable.push(_csKey(it) + ' (reste ' + fmt(_q) + ')');
       });
       setStockConsum(_cs);
       _revRapport.consoRetire = _retire;
@@ -29362,7 +29622,7 @@ function reverseAchatStock(a) {
          l'achat supprime reste affiche dans Mouvements de Stock. */
       try {
         var _mc = getMovements();
-        _mc = _mc.filter(function(m) { return !(m && m.type === 'entree' && m.reference === a.reference && (m.motif || '').indexOf('Achat') === 0); });
+        _mc = _mc.filter(function(m) { return !(m && (m.achat_id !== undefined && m.achat_id !== null && m.achat_id !== '' ? _deCetAchat(m, false) : (m.type === 'entree' && _deCetAchat(m, true)))); });
         setMovements(_mc);
       } catch(e2) {}
     } else if (cat === 'epi') {
@@ -29381,7 +29641,7 @@ function reverseAchatStock(a) {
       }
       if (_changed) setEpiCatalogue(_ecat);
       try {
-        setEpiPurchases(getEpiPurchases().filter(function(x) { return x.reference !== a.reference; }));
+        setEpiPurchases(getEpiPurchases().filter(function(x) { return !_deCetAchat(x, false); }));
       } catch(e) {}
     }
   } catch(e) {}
@@ -29439,7 +29699,7 @@ function prodClientNames() {
 function getMainBLs() {
   try { return lsArr('mdb_bl'); } catch (e) { return []; }
 }
-function setMainBLs(v) { try { localStorage.setItem('mdb_bl', JSON.stringify(v)); } catch (e) {} }
+function setMainBLs(v) { try { localStorage.setItem('mdb_bl', JSON.stringify(v)); prodPartageModifie('mdb_bl'); } catch (e) {} }
 function nextBLExploitationNumero() {
   var maxNum = 0;
   function scan(arr) {
@@ -30038,7 +30298,14 @@ function getQualiteData() {
 
 function saveQualiteData(data) {
   try {
+    try {
+      var _qAv = JSON.parse(localStorage.getItem('mdb_qualite') || '{}') || {};
+      ['reclamations', 'enquetes', 'actions', 'controles'].forEach(function (sec) {
+        if (Array.isArray(_qAv[sec]) && Array.isArray(data && data[sec])) prodMemoriserSuppressions('mdb_qualite.' + sec, _qAv[sec], data[sec]);
+      });
+    } catch (eQS) {}
     localStorage.setItem('mdb_qualite', JSON.stringify(data));
+    prodPartageModifie('mdb_qualite');
     if (typeof persistPendingSync === 'function') persistPendingSync();
   } catch(e) {}
 }
