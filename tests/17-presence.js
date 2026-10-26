@@ -100,6 +100,25 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Caisse : transfert approuve par celui qui recoit  ->  ' + res); else rapport.ko('Approbation transfert  ->  ' + res);
 
+  try {
+    const hb = chargerApp('index.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      window.currentUser = currentUser = { id:'u1', nom:'Admin', isAdmin:true, caisseCentralisee:true };
+      if (!getBanques().length) DB.set('mdb_banques', [{ id:'b1', nom:'BANQUE TEST' }]);
+      if (!getCaisses().length) DB.set('mdb_caisses', [{ id:'c1', nom:'CAISSE TEST' }]);
+      var n0 = getOperationsCaisse().length, b0 = getBanqueOperations().length;
+      showApproBanque(); var set = function(i, v){ var e = document.getElementById(i); if (e) e.value = v; };
+      set('abq-banque', getBanques()[0].id); set('abq-caisse', getCaisses()[0].id); set('abq-montant', '150000'); set('abq-date', '2026-10-26');
+      saveApproBanque();
+      var o = getOperationsCaisse().filter(function(x){ return x.typeOp === 'approBanque'; })[0];
+      var b = o && getBanqueOperations().filter(function(x){ return x.caisseOpId === o.id; })[0];
+      window.confirm = function(){ return true; }; try { deleteCaisse(o.id); } catch (eD) {}
+      var reste = getBanqueOperations().filter(function(x){ return x.caisseOpId === o.id; }).length;
+      return (o && b && o.sens === 'entree' && b.sens === 'sortie' && b.montant === 150000 && reste === 0) ? 'OK : caisse +150 000 (entree), banque -150 000 (sortie), suppression liee' : 'ECHEC ' + JSON.stringify({o:!!o, b:!!b, reste:reste});
+    })()`, hb.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Caisse : appro depuis la banque  ->  ' + res); else rapport.ko('Appro banque  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');

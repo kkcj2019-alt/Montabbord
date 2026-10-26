@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script>
-<script>window.__APP_VERSION='2026-10-26-288';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-26-289';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -30915,8 +30915,24 @@ function switchTresorerieTab(tab) {
   applySubPermissions('tresorerie');
   saveAppState();
 }
+/* Appro depuis banque modifiee en caisse (montant, date) : le retrait banque
+   lie suit (la piece de caisse fait foi). */
+function _syncApproBanque() {
+  var ops = getOperationsCaisse() || [], bops = null, chg = false;
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i]; if (!o || !o.banqueOpId) continue;
+    if (!bops) bops = getBanqueOperations() || [];
+    for (var j = 0; j < bops.length; j++) {
+      var b = bops[j];
+      if (b.id !== o.banqueOpId) continue;
+      if (Number(b.montant) !== Number(o.montant) || b.date !== o.date) { b.montant = Number(o.montant) || 0; b.date = o.date; chg = true; }
+    }
+  }
+  if (chg) { DB.set('mdb_banqueOperations', bops); try { markDirty('mdb_banqueOperations'); } catch (e) {} }
+}
 function renderTresorerie() {
   window._csModalMode = false;
+  try { _syncApproBanque(); } catch (eSAB) {}
   /* Mois des pièces remis sur période avant affichage (silencieux). */
   try { _corrigerMoisPieces(); } catch (eCM) {}
   if (_tresorerieContext === 'banque' && !canAccessSection('tresorerie', 'banque')) {
@@ -32293,6 +32309,7 @@ function renderCaisseIn(el) {
   ];
   html += '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:8px;padding:5px 8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px">';
   html += '<span style="font-size:11px;color:#64748b;font-weight:700">⚡ Types rapides :</span>';
+  html += '<button type="button" class="btn btn-xs" onclick="showApproBanque()" title="Approvisionner la caisse par un retrait en banque (la banque diminue, la caisse augmente)" style="border:1.5px solid #0f766e;color:#0f766e;background:#ecfdf5;font-weight:800;font-size:11px;padding:2px 10px;border-radius:12px;line-height:1.2">🏦 Appro depuis banque</button>';
   var showedPinned = false;
   for (var tb = 0; tb < typeBtns.length; tb++) {
     var bt = typeBtns[tb];
@@ -33535,6 +33552,15 @@ function deleteBanqueOperation(id) {
     var result = [];
     for (var i = 0; i < ops.length; i++) { if (ops[i].id !== id) result.push(ops[i]); }
     DB.set('mdb_banqueOperations', result);
+    /* Retrait pour appro caisse : la piece de caisse liee part avec lui */
+    if (deletedOp && deletedOp.caisseOpId) {
+      var _csAll = getOperationsCaisse() || [];
+      var _csGarde = _csAll.filter(function (o) { return String(o.id) !== String(deletedOp.caisseOpId); });
+      if (_csGarde.length !== _csAll.length) {
+        try { rememberDeletedOperations(_csAll.filter(function (o) { return String(o.id) === String(deletedOp.caisseOpId); })); } catch (eRD) {}
+        DB.set('mdb_operationsCaisse', _csGarde); try { markDirty('mdb_operationsCaisse'); } catch (eMC) {}
+      }
+    }
     /* Si l'op supprimée était liée à un règlement, tombstoner ce règlement */
     if (deletedOp && deletedOp.reglementId) {
       var regs = dbArr('mdb_reglements'), _regSup = null;
@@ -39914,6 +39940,71 @@ function _requireAdminValidationForReversed(op) {
   return true;
 }
 
+/* ===== APPRO CAISSE DEPUIS LA BANQUE =====
+   Retrait en banque pour alimenter une caisse : UNE saisie cree les deux
+   ecritures liees — sortie banque (le solde banque diminue) et entree caisse
+   « Approvisionnement caisse » (le solde caisse augmente). Supprimer l'une
+   supprime l'autre. L'appro libre habituelle (bouton APPRO) reste disponible. */
+function showApproBanque() {
+  var banques = getBanques() || [];
+  if (!banques.length) { toast('Aucune banque enregistr\u00e9e (Tr\u00e9sorerie > Banque)', 'error'); return; }
+  var caisses = (typeof getAccessibleCaisses === 'function' ? getAccessibleCaisses() : getCaisses()) || [];
+  if (!caisses.length) { toast('Aucune caisse accessible', 'error'); return; }
+  var caisseCour = (document.getElementById('csCaisseId') || {}).value || (currentUser && currentUser.caisseId) || (caisses[0] && caisses[0].id) || '';
+  var st = 'width:100%;padding:7px 9px;border:1px solid #cbd5e1;border-radius:6px';
+  var h = '<h3 style="margin:0 0 4px">🏦 Approvisionner la caisse depuis la banque</h3>';
+  h += '<div style="font-size:.78rem;color:#64748b;margin-bottom:10px">Retrait en banque : la <b>banque diminue</b>, la <b>caisse augmente</b> du m\u00eame montant. Les deux \u00e9critures sont li\u00e9es.</div>';
+  h += '<div style="display:flex;gap:10px;flex-wrap:wrap">';
+  h += '<div class="form-group" style="flex:1;min-width:200px"><label>Banque *</label><select id="abq-banque" style="' + st + '">' + banques.map(function (b) { return '<option value="' + escH(b.id) + '">' + escH(b.nom || '') + '</option>'; }).join('') + '</select></div>';
+  h += '<div class="form-group" style="flex:1;min-width:200px"><label>Caisse approvisionn\u00e9e *</label><select id="abq-caisse" style="' + st + '">' + caisses.map(function (c) { return '<option value="' + escH(c.id) + '"' + (String(c.id) === String(caisseCour) ? ' selected' : '') + '>' + escH(c.nom || '') + '</option>'; }).join('') + '</select></div>';
+  h += '</div><div style="display:flex;gap:10px;flex-wrap:wrap">';
+  h += '<div class="form-group" style="flex:1;min-width:140px"><label>Montant *</label><input type="number" id="abq-montant" min="0" style="' + st + '"></div>';
+  h += '<div class="form-group" style="flex:1;min-width:140px"><label>Date *</label><input type="date" id="abq-date" value="' + getToday() + '" style="' + st + '"></div>';
+  h += '<div class="form-group" style="flex:1;min-width:110px"><label>Heure</label><input type="time" id="abq-heure" style="' + st + '"></div>';
+  h += '</div><div style="display:flex;gap:10px;flex-wrap:wrap">';
+  h += '<div class="form-group" style="flex:1;min-width:160px"><label>Mode de retrait</label><select id="abq-mode" style="' + st + '"><option value="retrait">Retrait au guichet / esp\u00e8ces</option><option value="cheque">Ch\u00e8que de retrait</option><option value="carte">Carte bancaire / GAB</option><option value="virement">Virement vers mobile money</option></select></div>';
+  h += '<div class="form-group" style="flex:1;min-width:160px"><label>N\u00b0 ch\u00e8que / r\u00e9f\u00e9rence</label><input type="text" id="abq-ref" style="' + st + '"></div>';
+  h += '<div class="form-group" style="flex:1;min-width:160px"><label>Retir\u00e9 par</label><input type="text" id="abq-remettant" value="' + escH((currentUser && (currentUser.nom || currentUser.login)) || '') + '" style="' + st + '"></div>';
+  h += '</div><div class="form-group"><label>Observations</label><input type="text" id="abq-obs" style="' + st + '"></div>';
+  h += '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-outline" onclick="closePtModal()">Annuler</button><button class="btn" style="background:#0f766e;color:#fff;border:none;font-weight:800" onclick="saveApproBanque()">Enregistrer l\u2019appro</button></div>';
+  openPtModal(h, false);
+}
+function saveApproBanque() {
+  var g = function (i) { return String((document.getElementById(i) || {}).value || '').trim(); };
+  var banqueId = g('abq-banque'), caisseId = g('abq-caisse'), montant = parseFloat(g('abq-montant')) || 0, date = g('abq-date');
+  if (!banqueId || !caisseId) { toast('Choisissez la banque et la caisse', 'error'); return; }
+  if (montant <= 0) { toast('Montant obligatoire', 'error'); return; }
+  if (!date) { toast('Date obligatoire', 'error'); return; }
+  var bq = (getBanques() || []).filter(function (b) { return String(b.id) === banqueId; })[0] || {};
+  var cs = (getCaisses() || []).filter(function (c) { return String(c.id) === caisseId; })[0] || {};
+  var mode = g('abq-mode'), ref = g('abq-ref'), heure = g('abq-heure'), obs = g('abq-obs'), rem = g('abq-remettant');
+  var code = null;
+  try { var cc = getCodesCaisse() || []; for (var i = 0; i < cc.length; i++) { if (String(cc[i].code || '').toUpperCase() === 'APPRO') { code = cc[i]; break; } } } catch (eC) {}
+  var csOpId = DB.genId(), bqOpId = DB.genId();
+  var modeLib = { retrait: 'Retrait guichet', cheque: 'Ch\u00e8que', carte: 'Carte / GAB', virement: 'Virement' }[mode] || 'Retrait';
+  var opCaisse = {
+    id: csOpId, numeroPiece: generatePieceNumber(caisseId, date), date: date, heure: heure,
+    codeId: code ? code.id : '', code: 'APPRO', libelle: 'Approvisionnement caisse \u2014 retrait ' + (bq.nom || 'banque'),
+    montant: montant, sens: 'entree', moyenPaiement: 'Esp\u00e8ce', numeroTransaction: ref,
+    beneficiaireType: 'banque', beneficiaireId: banqueId, beneficiaireNom: bq.nom || '',
+    tiers: '', observations: obs || (modeLib + (ref ? ' n\u00b0' + ref : '')), remettant: rem, executant: '',
+    imprime: false, montantCharge: 0, frais: 0, caisseId: caisseId, reversed: false, brouillon: false,
+    typeOp: 'approBanque', banqueOpId: bqOpId
+  };
+  var opBanque = {
+    id: bqOpId, date: date, heure: heure, sens: 'sortie', libelle: 'Retrait \u2014 appro ' + (cs.nom || 'caisse'),
+    montant: montant, banqueId: banqueId, reference: ref ? (modeLib + ' n\u00b0' + ref) : modeLib,
+    chequeNum: mode === 'cheque' ? ref : '', moyenPaiement: mode, observations: obs,
+    beneficiaireType: 'caisse', beneficiaireId: caisseId, beneficiaireNom: cs.nom || '', caisseOpId: csOpId
+  };
+  var ops = getOperationsCaisse() || []; ops.push(opCaisse);
+  DB.set('mdb_operationsCaisse', ops); try { markDirty('mdb_operationsCaisse'); } catch (e1) {}
+  var bops = getBanqueOperations() || []; bops.push(opBanque);
+  DB.set('mdb_banqueOperations', bops); try { markDirty('mdb_banqueOperations'); } catch (e2) {}
+  closePtModal();
+  toast('Appro enregistr\u00e9e : ' + fmtF(montant) + ' F \u2014 ' + (bq.nom || 'banque') + ' \u2192 ' + (cs.nom || 'caisse'), 'success');
+  try { renderTresorerie(); } catch (e3) {}
+}
 function deleteCaisseOp(id) { deleteCaisse(id); } /* deleteCaisse demande deja la confirmation */
 
 function deleteCaisse(id) {
@@ -39982,6 +40073,14 @@ function deleteCaisse(id) {
   }
   if (deletedItems.length) rememberDeletedOperations(deletedItems);
   DB.set('mdb_operationsCaisse', r); try{ _dirtyKeys['mdb_operationsCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){}
+  /* Appro depuis la banque : le retrait banque lie part avec la piece de caisse */
+  try {
+    var _bqLies = deletedItems.map(function (x) { return x && x.banqueOpId; }).filter(Boolean);
+    if (_bqLies.length) {
+      DB.set('mdb_banqueOperations', getBanqueOperations().filter(function (b) { return _bqLies.indexOf(b.id) === -1; }));
+      try { markDirty('mdb_banqueOperations'); } catch (eMB) {}
+    }
+  } catch (eBQ) {}
   toast(deletedItems.length ? ('Op\u00e9ration supprim\u00e9e (' + deletedItems.length + ')') : 'Op\u00e9ration introuvable (rien n\u2019a \u00e9t\u00e9 supprim\u00e9)');
   renderTresorerie();
 }
