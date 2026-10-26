@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script>
     <script>
-      window.__APP_VERSION = "2026-10-26-298";
+      window.__APP_VERSION = "2026-10-26-299";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -7148,7 +7148,7 @@ function payeObj(key) {
           try {
             var _dm = 20000;
             try { _dm = _payeDelaiMini(); } catch (eDM) {}
-            if (!_dm || _dm < 2000) _dm = 2000;
+            if (!_dm || _dm < 800) _dm = 800;
             if (!force && (Date.now() - (window._payeDernierPushReel || 0)) < _dm) {
               try { if (pushPayeCloud._trail) clearTimeout(pushPayeCloud._trail); } catch (eTR) {}
               var _att = _dm - (Date.now() - (window._payeDernierPushReel || 0)) + 500;
@@ -7157,7 +7157,7 @@ function payeObj(key) {
             }
           } catch (eMI) {}
           _payePushCloudRun();
-        }, force ? 300 : 2500);
+        }, force ? 300 : 700); /* temps reel : envoi 0,7 s apres la derniere saisie */
       }
       function _payeStrHash(s) {
         var h = 0;
@@ -7181,10 +7181,12 @@ function payeObj(key) {
       function _payeDelaiMini() {
         try {
           var ko = window._payeDerniereChargeKo || 0;
-          if (ko > 0 && ko < 150) return 2000;
-          if (ko > 0 && ko < 600) return 5000;
+          /* Envoi par rubriques modifiees seulement : les paquets sont petits,
+             on peut envoyer souvent (temps reel entre postes). */
+          if (ko > 0 && ko < 150) return 800;
+          if (ko > 0 && ko < 600) return 2000;
         } catch (eD) {}
-        return 12000;
+        return 4000;
       }
       /* Garde-fou pousse-a-vide : un local VIDE ne doit jamais ecraser un cloud
          PLEIN. Sans ca, un appareil au stockage vide/reinitialise peut envoyer du
@@ -24460,6 +24462,132 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         return { sections: sections, deptStats: deptStats };
       }
 
+      /* ===== Rapport de presence du jour pour la Direction =====
+         Une page A4 lisible en 10 secondes : effectif, presents, absents,
+         non pointes, taux de presence / d'absence, detail par poste, liste
+         des absents (avec motif) et tendance des 7 derniers jours. */
+      function fpjStatutEmp(e, ptMap, montMap) {
+        var rec = ptMap[e.id];
+        var h = rec ? (parseHeure(rec.h_j_manual || "") + parseHeure(rec.h_n_manual || "")) : 0;
+        if (rec && (rec.present === true || h > 0 || (montMap && montMap[e.id]) || rec.faute_societe === true || rec.absent_paye === true)) return "pres";
+        if (rec && rec.present === false) return "abs";
+        return "np";
+      }
+      function fpjDonneesJour(dateStr) {
+        var mois = String(dateStr).slice(0, 7);
+        var emps = getPersonnel().filter(function (p) {
+          if (p.en_paie === false) return false;
+          try { if (typeof empVisibleMois === "function" && !empVisibleMois(p, mois)) return false; } catch (eV) {}
+          if (p.date_sortie && String(p.date_sortie).slice(0, 10) < dateStr) return false;
+          if (p.date_entree && String(p.date_entree).slice(0, 10) > dateStr) return false;
+          return true;
+        });
+        var ptMap = {};
+        getPointageData().forEach(function (p) { if (p && p.date === dateStr && p.employee_id) ptMap[p.employee_id] = p; });
+        var montMap = {};
+        try { (getPointageMontage() || []).forEach(function (m) { if (m && m.date === dateStr && (m.quantite || 0) > 0) montMap[m.employee_id] = 1; }); } catch (eM) {}
+        var tot = { eff: emps.length, pres: 0, abs: 0, np: 0 }, postes = {}, absents = [], nonPointes = [];
+        emps.forEach(function (e) {
+          var st = fpjStatutEmp(e, ptMap, montMap);
+          var k = fpjGroupKey(e);
+          if (!postes[k]) postes[k] = { nom: k, eff: 0, pres: 0, abs: 0, np: 0 };
+          postes[k].eff++; postes[k][st]++; tot[st]++;
+          if (st === "abs") absents.push({ e: e, motif: (ptMap[e.id] && (ptMap[e.id].motif || ptMap[e.id].obs)) || "" });
+          if (st === "np") nonPointes.push(e);
+        });
+        return { emps: emps, tot: tot, postes: postes, absents: absents, nonPointes: nonPointes };
+      }
+      function printRapportPresenceDirection(dateStr) {
+        dateStr = dateStr || new Date().toISOString().slice(0, 10);
+        var D = fpjDonneesJour(dateStr), T = D.tot;
+        var pc = function (n, d) { return d > 0 ? Math.round((n / d) * 1000) / 10 : 0; };
+        var tauxP = pc(T.pres, T.eff), tauxA = pc(T.abs, T.eff), tauxNp = pc(T.np, T.eff);
+        var tauxPPointes = pc(T.pres, T.pres + T.abs);
+        var soc = payeObj("mdb_entreprise") || {};
+        var dFr = new Date(dateStr + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+        var nomE = function (e) { return ((e.nom || "") + " " + (e.prenoms || "")).trim(); };
+        var couleur = function (t) { return t >= 90 ? "#15803d" : (t >= 75 ? "#b45309" : "#b91c1c"); };
+        /* 7 derniers jours (hors dimanches) */
+        var tendance = [], dd = new Date(dateStr + "T12:00:00");
+        for (var i = 0; tendance.length < 7 && i < 14; i++) {
+          var x = new Date(dd); x.setDate(dd.getDate() - i);
+          if (x.getDay() === 0) continue;
+          var ds = x.getFullYear() + "-" + ("0" + (x.getMonth() + 1)).slice(-2) + "-" + ("0" + x.getDate()).slice(-2);
+          var Dx = (ds === dateStr) ? D : fpjDonneesJour(ds);
+          tendance.unshift({ d: ds, t: pc(Dx.tot.pres, Dx.tot.eff), pointes: Dx.tot.pres + Dx.tot.abs, eff: Dx.tot.eff });
+        }
+        var postes = Object.keys(D.postes).map(function (k) { return D.postes[k]; }).sort(function (a, b) { return b.eff - a.eff || a.nom.localeCompare(b.nom); });
+        var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Présence du ' + dateStr + '</title><style>' +
+          '@page{size:A4 portrait;margin:12mm 11mm}' +
+          'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#0f172a;margin:0;padding:14px;font-size:11px}' +
+          '.hdr{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #0f172a;padding-bottom:8px;margin-bottom:14px}' +
+          '.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}' +
+          '.k{border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px}' +
+          '.k .l{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#64748b}' +
+          '.k .v{font-size:26px;font-weight:900;margin-top:2px;line-height:1.1}' +
+          '.k .s{font-size:10px;color:#64748b;margin-top:2px}' +
+          '.taux{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}' +
+          '.t{border-radius:10px;padding:12px 14px;color:#fff}' +
+          '.t .v{font-size:34px;font-weight:900;line-height:1}' +
+          '.t .l{font-size:11px;font-weight:700;opacity:.95;margin-top:3px}' +
+          '.barre{display:flex;height:14px;border-radius:7px;overflow:hidden;margin:2px 0 16px;border:1px solid #cbd5e1}' +
+          'h2{font-size:12.5px;text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px;color:#0f172a}' +
+          'table{width:100%;border-collapse:collapse;font-size:10.5px}' +
+          'th{background:#0f172a;color:#fff;text-align:left;padding:5px 7px;font-size:9.5px;text-transform:uppercase}' +
+          'td{padding:5px 7px;border-bottom:1px solid #e2e8f0}' +
+          'td.n,th.n{text-align:right}' +
+          '.mini{display:inline-block;height:8px;border-radius:4px;vertical-align:middle;margin-right:6px}' +
+          '.trend{display:flex;gap:6px;align-items:flex-end;height:70px;margin-top:4px}' +
+          '.trend div{flex:1;text-align:center;font-size:9px;color:#475569}' +
+          '.trend b{display:block;border-radius:4px 4px 0 0;margin:0 auto 3px;width:70%}' +
+          '@media print{.no-print{display:none!important}}' +
+          '</style></head><body>' +
+          '<div class="no-print" style="text-align:right;margin-bottom:8px"><button onclick="window.print()" style="padding:8px 18px;background:#0f172a;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer">🖨️ Imprimer / PDF</button></div>' +
+          '<div class="hdr"><div style="display:flex;align-items:center;gap:10px">' + (soc.logo ? '<img src="' + soc.logo + '" style="max-height:44px">' : '') +
+          '<div><div style="font-size:16px;font-weight:900;text-transform:uppercase">' + escH(soc.nom || "") + '</div><div style="font-size:12px;font-weight:700;color:#475569">RAPPORT DE PRÉSENCE DU JOUR</div></div></div>' +
+          '<div style="text-align:right"><div style="font-size:15px;font-weight:900;text-transform:capitalize">' + escH(dFr) + '</div><div style="font-size:9.5px;color:#64748b">Édité le ' + escH(new Date().toLocaleString("fr-FR")) + '</div></div></div>' +
+          '<div class="kpis">' +
+            '<div class="k"><div class="l">Effectif</div><div class="v">' + T.eff + '</div><div class="s">employés attendus</div></div>' +
+            '<div class="k" style="border-color:#86efac;background:#f0fdf4"><div class="l">Présents</div><div class="v" style="color:#15803d">' + T.pres + '</div><div class="s">' + tauxP + ' % de l’effectif</div></div>' +
+            '<div class="k" style="border-color:#fca5a5;background:#fef2f2"><div class="l">Absents</div><div class="v" style="color:#b91c1c">' + T.abs + '</div><div class="s">' + tauxA + ' % de l’effectif</div></div>' +
+            '<div class="k" style="border-color:#fcd34d;background:#fffbeb"><div class="l">Non pointés</div><div class="v" style="color:#b45309">' + T.np + '</div><div class="s">' + tauxNp + ' % — appel pas encore fait</div></div>' +
+          '</div>' +
+          '<div class="taux">' +
+            '<div class="t" style="background:' + couleur(tauxP) + '"><div class="v">' + tauxP + ' %</div><div class="l">TAUX DE PRÉSENCE' + (T.np ? ' (sur l’effectif — ' + tauxPPointes + ' % parmi les pointés)' : '') + '</div></div>' +
+            '<div class="t" style="background:' + (tauxA <= 5 ? "#15803d" : (tauxA <= 15 ? "#b45309" : "#b91c1c")) + '"><div class="v">' + tauxA + ' %</div><div class="l">TAUX D’ABSENCE</div></div>' +
+          '</div>' +
+          '<div class="barre"><div style="width:' + tauxP + '%;background:#16a34a"></div><div style="width:' + tauxA + '%;background:#dc2626"></div><div style="width:' + tauxNp + '%;background:#fbbf24"></div></div>' +
+          '<h2>Effectif par poste (' + (fpjGroupMode === "departement" ? "département" : "fonction / atelier") + ')</h2>' +
+          '<table><thead><tr><th>Poste</th><th class="n">Effectif</th><th class="n">Présents</th><th class="n">Absents</th><th class="n">Non pointés</th><th style="width:34%">Taux de présence</th></tr></thead><tbody>';
+        postes.forEach(function (p) {
+          var t = pc(p.pres, p.eff);
+          h += '<tr><td style="font-weight:700">' + escH(p.nom) + '</td><td class="n">' + p.eff + '</td><td class="n" style="color:#15803d;font-weight:700">' + p.pres + '</td><td class="n" style="color:#b91c1c;font-weight:700">' + (p.abs || '–') + '</td><td class="n" style="color:#b45309">' + (p.np || '–') + '</td>' +
+            '<td><span class="mini" style="width:' + Math.max(2, t * 0.8) + 'px;background:' + couleur(t) + '"></span><b style="color:' + couleur(t) + '">' + t + ' %</b></td></tr>';
+        });
+        h += '<tr style="background:#f1f5f9;font-weight:900"><td>TOTAL</td><td class="n">' + T.eff + '</td><td class="n">' + T.pres + '</td><td class="n">' + T.abs + '</td><td class="n">' + T.np + '</td><td>' + tauxP + ' %</td></tr></tbody></table>';
+        h += '<h2>Absents du jour (' + D.absents.length + ')</h2>';
+        if (D.absents.length) {
+          h += '<table><thead><tr><th>Matricule</th><th>Nom</th><th>Poste</th><th>Motif</th></tr></thead><tbody>';
+          D.absents.forEach(function (a) { h += '<tr><td>' + escH(a.e.matricule || '') + '</td><td style="font-weight:700">' + escH(nomE(a.e)) + '</td><td>' + escH(fpjGroupKey(a.e)) + '</td><td>' + escH(a.motif || 'Non précisé') + '</td></tr>'; });
+          h += '</tbody></table>';
+        } else h += '<div style="color:#15803d;font-weight:700">Aucun absent.</div>';
+        if (D.nonPointes.length) {
+          h += '<h2>Non pointés (' + D.nonPointes.length + ')</h2><div style="font-size:10.5px;line-height:1.6;color:#475569">' +
+            D.nonPointes.map(function (e) { return escH((e.matricule ? e.matricule + ' ' : '') + nomE(e)); }).join(' · ') + '</div>';
+        }
+        h += '<h2>Tendance — 7 derniers jours ouvrés</h2><div class="trend">';
+        tendance.forEach(function (t) {
+          var lbl = t.d.slice(8, 10) + '/' + t.d.slice(5, 7);
+          h += '<div><b style="height:' + Math.max(2, Math.round(t.t * 0.5)) + 'px;background:' + (t.pointes ? couleur(t.t) : '#e2e8f0') + '"></b>' + (t.pointes ? t.t + ' %' : '–') + '<br>' + lbl + '</div>';
+        });
+        h += '</div><div style="margin-top:16px;font-size:9px;color:#94a3b8">Présent = appel « Présent », heures pointées, montage ou absence payée (faute entreprise). Taux calculés sur l’effectif attendu du jour.</div>';
+        h += '</body></html>';
+        var w = window.open("", "_blank");
+        if (!w) return toast("Popup bloquée — autorisez les popups", "error");
+        w.document.write(h); w.document.close();
+        return h;
+      }
+
       function showModalFichePresenceJour(dateTarget) {
         var today = dateTarget || (new Date().toISOString().slice(0, 10));
         var allEmps = getPersonnel().filter(function(p){ return p.en_paie !== false; });
@@ -24573,6 +24701,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '</div>' +
             '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
               '<button class="btn fpj-btn" onclick="fpjSetGroupPresence(\'\', true)" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer" title="Marquer toute l\'entreprise présente en 1 clic">⚡ Tout le monde Présent</button>' +
+              '<button class="btn fpj-btn" onclick="printRapportPresenceDirection(\'' + today + '\')" style="background:#0f172a;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer" title="Une page claire pour la Direction : effectif, taux de pr\u00e9sence et d\u2019absence, d\u00e9tail par poste, absents">📊 Rapport Direction (PDF)</button>' +
               '<button class="btn fpj-btn" onclick="printFichePresenceJour(\'' + today + '\', false)" style="background:#16a34a;color:#fff;padding:6px 14px;font-size:.76rem;font-weight:800;border:none;border-radius:6px;cursor:pointer">🖨️ Imprimer la Fiche du jour</button>' +
               '<button class="btn btn-sec fpj-btn" onclick="printFichePresenceJour(\'' + today + '\', true)" style="padding:6px 12px;font-size:.76rem;background:#fff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer">📄 Émargement vierge</button>' +
             '</div>' +
@@ -24595,7 +24724,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '<div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:7px 14px;font-size:.8rem;color:#166534"><strong>📊 Taux Présence :</strong> <span id="fpj-rate-badge" style="font-size:1.1rem;font-weight:900;color:#15803d">' + globRate + '%</span></div>' +
             '<div style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:7px 12px;font-size:.78rem"><strong>Total effectif :</strong> <span id="fpj-total-badge" style="font-weight:800">' + globTotal + '</span></div>' +
             '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#166534"><strong>Présents :</strong> <span id="fpj-pres-badge" style="font-weight:800">' + globPres + '</span></div>' +
-            '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#991b1b"><strong>Absents :</strong> <span id="fpj-abs-badge" style="font-weight:800">' + globAbs + '</span></div>' +
+            '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#991b1b"><strong>Absents :</strong> <span id="fpj-abs-badge" style="font-weight:800">' + globAbs + '</span></div>' +
+            '<div style="background:#fef2f2;border:1.5px solid #fca5a5;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#991b1b"><strong>Taux absence :</strong> <span style="font-weight:900">' + (globTotal > 0 ? ((globAbs / globTotal) * 100).toFixed(1) : '0.0') + '%</span></div>' +
             '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:7px 12px;font-size:.78rem;color:#92400e"><strong>Non pointés :</strong> <span id="fpj-np-badge" style="font-weight:800">' + globNp + '</span></div>' +
             /* Vue : la liste diminue au fur et à mesure du pointage */
             '<div style="display:flex;gap:4px;align-items:center;margin-left:auto;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:4px 8px">' +

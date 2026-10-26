@@ -9328,7 +9328,7 @@ r.push({
       _payePushCloudRun = _origRun;
       setTimeout = _ost; clearTimeout = _oct;
       try { pushPayeCloud._t = null; } catch (eCT) {}
-      (timers === 1 && delai >= 2000 && n === 1)
+      (timers === 1 && delai >= 500 && delai <= 1000 && n === 1)
         ? 'OK : 3 appels coalesc\u00e9s en 1 timer (' + delai + ' ms), 1 ex\u00e9cution au d\u00e9clenchement'
         : 'ECHEC timers=' + timers + ' delai=' + delai + ' n=' + n
     `,
@@ -11332,7 +11332,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       window._payeDerniereChargeKo = 1554;
       var dGros = _payeDelaiMini();
       window._payeDerniereChargeKo = 0;
-      (d0 === 12000 && dPetit === 2000 && dMoyen === 5000 && dGros === 12000)
+      (d0 === 4000 && dPetit === 800 && dMoyen === 2000 && dGros === 4000)
         ? 'OK : inconnu=12s, 50Ko=2s, 400Ko=5s, 1554Ko=12s'
         : 'ECHEC defaut=' + d0 + ' petit=' + dPetit + ' moyen=' + dMoyen + ' gros=' + dGros
     `,

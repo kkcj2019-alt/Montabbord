@@ -1048,6 +1048,7 @@
            saisies des autres postes qu'au prochain rechargement manuel. */
         if (status === 'SUBSCRIBED') window.__MDB_RT__ = true;
         else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED' || status === 'CHANNEL_CLOSED') window.__MDB_RT__ = false;
+        try { majVoyantDirect(); } catch (eV) {}
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           if (onError) onError(new Error('Realtime: ' + status));
         }
@@ -1061,6 +1062,29 @@
     };
   }
 
+  /* Voyant visible dans l'en-tete des 3 applis :
+     vert « En direct » = les saisies des autres postes arrivent tout de suite ;
+     orange « Relais » = temps reel coupe, verification automatique toutes les quelques secondes. */
+  function majVoyantDirect() {
+    if (typeof document === 'undefined' || !document.getElementById) return;
+    var ok = window.__MDB_RT__ === true;
+    var v = document.getElementById('mdbVoyantDirect');
+    if (!v) {
+      var ancre = document.getElementById('syncIndicator') || document.getElementById('prodSyncStatus') || document.getElementById('payeSyncBadge');
+      if (!ancre || !ancre.parentNode) return;
+      v = document.createElement('span');
+      v.id = 'mdbVoyantDirect';
+      v.style.cssText = 'display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;margin-right:8px;white-space:nowrap;padding:2px 8px;border-radius:999px';
+      ancre.parentNode.insertBefore(v, ancre);
+    }
+    v.title = ok ? 'Synchronisation en temps reel active : les saisies des autres postes s\u2019affichent immediatement'
+                 : 'Temps reel indisponible : verification automatique toutes les quelques secondes';
+    v.style.background = ok ? '#dcfce7' : '#fef3c7';
+    v.style.color = ok ? '#166534' : '#92400e';
+    v.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:' + (ok ? '#16a34a' : '#f59e0b') + '"></span>' + (ok ? 'En direct' : 'Relais');
+  }
+  try { setInterval(function () { try { majVoyantDirect(); } catch (e) {} }, 5000); } catch (eI) {}
+
   /* Relecture ciblee : seules les rubriques modifiees sont retelechargees */
   function fetchRowsInto(uid, cles, dels) {
     var c = _rowsCache[uid] || (_rowsCache[uid] = {});

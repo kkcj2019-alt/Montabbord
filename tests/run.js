@@ -32,7 +32,8 @@ const ETAPES = [
   { cle: '13', nom: 'ventes', charger: () => require('./13-ventes.js') },
   { cle: '14', nom: 'paie', charger: () => require('./14-paie.js') },
   { cle: '15', nom: 'convention', charger: () => require('./15-convention.js') },
-  { cle: '16', nom: 'stockage-plein', charger: () => require('./16-stockage-plein.js') }
+  { cle: '16', nom: 'stockage-plein', charger: () => require('./16-stockage-plein.js') },
+  { cle: '17', nom: 'presence', charger: () => require('./17-presence.js') }
 ];
 
 const rapport = new Rapport('MONTABBORD — CONTROLE QUALITE DES APPLICATIONS');
