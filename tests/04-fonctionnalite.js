@@ -5225,8 +5225,8 @@ attenduPrefixe: 'OK'
       var refsCarte = (h.match(/TOTAL \\((\\d+) r/) || [])[1] || '';
       var lignesCarte = (h.match(/class="pf-row"/g) || []).length;
       var f = render_stock_finished();
-      var paires = [], re = /font-weight:800;color:#0f172a;line-height:1\\.1">([^<]+)<\\/div><div style="font-size:\\.62rem[^>]*>([^<]+)</g, mm;
-      while ((mm = re.exec(f)) !== null) paires.push(mm[2] + '=' + mm[1].replace(/[^0-9]/g, ''));
+      var paires = [], re = /text-transform:uppercase">\\S+ ([^<]+)<\\/div><div style="font-size:1\\.22rem;font-weight:900;color:#0f172a;[^"]*">([^<]+)</g, mm;
+      while ((mm = re.exec(f)) !== null) paires.push(mm[1].replace('Références', 'References') + '=' + mm[2].replace(/[^0-9]/g, ''));
       var totalFiche = ((paires.filter(function (x) { return x.indexOf('Stock total=') === 0; })[0] || '').split('=')[1]) || '';
       var refsFiche = ((paires.filter(function (x) { return x.indexOf('References=') === 0; })[0] || '').split('=')[1]) || '';
       (totalCarte === '150' && refsCarte === '2' && lignesCarte === 2 && totalFiche === '150' && refsFiche === '2')
