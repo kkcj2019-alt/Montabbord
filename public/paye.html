@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script>
     <script>
-      window.__APP_VERSION = "2026-10-26-310";
+      window.__APP_VERSION = "2026-10-26-311";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -8338,9 +8338,21 @@ window._payeVuTs = ts;
         var ts = {};
         for (i = 0; i < tomb.length; i++) ts[String(tomb[i])] = true;
         var added = false;
+        var _supprJ = [];
         for (i = 0; i < raw.length; i++) {
           var rid = raw[i] && raw[i].id ? String(raw[i].id) : "";
-          if (rid && !newIds[rid] && !ts[rid]) { tomb.push(rid); ts[rid] = true; added = true; }
+          if (rid && !newIds[rid] && !ts[rid]) { tomb.push(rid); ts[rid] = true; added = true; _supprJ.push(raw[i]); }
+        }
+        /* Journal : chaque ligne de pointage supprimée est notée (qui l'a
+           retirée, quand, quelle ligne) pour pouvoir expliquer et réparer. */
+        if (_supprJ.length) {
+          try {
+            var jl = JSON.parse(localStorage.getItem("mdb_pt_journal_suppr") || "[]");
+            var pile = ""; try { pile = String(new Error().stack || "").split("\n").slice(2, 5).map(function (x) { return x.trim().replace(/\(.*\)/, "").slice(0, 60); }).join(" < "); } catch (eS) {}
+            jl.push({ t: new Date().toISOString(), n: _supprJ.length, src: pile, lignes: _supprJ.slice(0, 8).map(function (x) { return { id: x.id, emp: x.employee_id, d: x.date, p: x.present, m: x.motif || "", h: x.h_j_manual || "" }; }) });
+            while (jl.length > 60) jl.shift();
+            localStorage.setItem("mdb_pt_journal_suppr", JSON.stringify(jl));
+          } catch (eJ) {}
         }
         var obj = getPayeData();
         obj.pointage = arr;
@@ -19178,9 +19190,9 @@ html +=
          là). Reprise réelle après la reprise prévue : les jours entre les
          deux sont des absences injustifiées (comme pour les congés). */
       function ptAccidentsPlages(m) {
-        var out = { arret: {}, retard: {}, num: {} };
+        var out = { arret: {}, retard: {}, num: {}, charge: false };
         var L = [];
-        try { L = payeArr("mdb_rh_accidents"); } catch (eA) {}
+        try { var _raw = DB.getMain("mdb_rh_accidents"); out.charge = Array.isArray(_raw); L = Array.isArray(_raw) ? _raw : []; } catch (eA) {}
         if (!Array.isArray(L) || !/^\d{4}-\d{2}$/.test(m)) return out;
         var y = parseInt(m.slice(0, 4), 10), mi = parseInt(m.slice(5, 7), 10), nd = new Date(y, mi, 0).getDate();
         var jourOuvre = function (d) { var w = new Date(y, mi - 1, d).getDay(); return w !== 0 && w !== 6; };
@@ -19255,6 +19267,8 @@ html +=
           if (r && r.at_auto === true) {
             if (String(r.date || "").indexOf(m) !== 0) { garde.push(r); return; }
             if (_atP.arret[r.employee_id + "|" + r.date]) { garde.push(r); return; }
+            /* registre des accidents absent sur ce poste : on ne touche à rien */
+            if (!_atP.charge) { garde.push(r); return; }
             if (r.at_retouche !== true) { suppr++; return; }
             delete r.at_auto; garde.push(r); return;
           }
@@ -19263,6 +19277,8 @@ html +=
           if (String(r.date || "").indexOf(m) !== 0) { garde.push(r); return; }
           var estRetard = r.retard_reprise_auto === true;
           var attendu = estRetard ? retardVoulu[cle] : voulu[cle];
+          /* liste des congés pas encore reçue sur ce poste : on ne retire rien */
+          if (!attendu) { var _cgRaw = null; try { _cgRaw = DB.getMain("mdb_rh_conges"); } catch (eCg0) {} if (!Array.isArray(_cgRaw)) { garde.push(r); return; } }
           if (!attendu) {
             /* Le congé a été raccourci/déplacé (ou la reprise corrigée) :
                on retire la ligne auto, SAUF si quelqu'un l'a retouchée à
@@ -20867,7 +20883,10 @@ function peTogglePst() {
         rec.absent_paye = absPaye;
         /* Transport malgré la faute : choix explicite (déplacé sur site).
            Sinon la faute ne paie ni transport ni salissure. */
-        rec.transport_faute = gc("pe-transport-faute");
+        rec.transport_faute = gc("pe-transport-faute");
+        /* jour retouché à la main : la ligne n'est plus jamais retirée automatiquement */
+        if (rec.at_auto) rec.at_retouche = true;
+        if (rec.conge_auto) delete rec.conge_auto;
         /* L'observation libre du bloc faute entreprise est conservée à
            part : c'est elle qui est imprimée sur la fiche. */
         if (pst) {
