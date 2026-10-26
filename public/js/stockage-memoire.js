@@ -252,6 +252,10 @@
   /* aide pour les autres scripts (evenement « storage ») */
   window.mdbLireStockage = function (k) { try { return ls.getItem(k); } catch (e) { return null; } };
   window.mdbEstCompresse = estCompresse;
+  /* taille REELLE occupee (rubriques compressees comptees compressees) */
+  window.mdbTailleStockage = function () { var n = 0; try { for (var i = 0; i < ls.length; i++) { var k = ls.key(i) || ''; n += k.length + String(oGet.call(ls, k) || '').length; } } catch (e) {} return n; };
+  /* compression immediate de toutes les grosses rubriques (bouton « Nettoyer ») */
+  window.mdbCompresserStockage = function () { try { return compresserAutres('', null); } catch (e) { return false; } };
   S.removeItem = function (k) {
     if (this === ls && cacheLZ.hasOwnProperty(String(k))) delete cacheLZ[String(k)];
     if (this === ls && memo.hasOwnProperty(String(k))) delete memo[String(k)];
