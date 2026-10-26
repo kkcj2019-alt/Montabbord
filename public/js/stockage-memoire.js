@@ -50,6 +50,8 @@
     try {
       var r = oSet.call(this, k, v);
       if (memo.hasOwnProperty(k)) delete memo[k];
+      /* ecriture reussie : les autres fenetres oublient leur valeur en memoire */
+      if (memoAilleurs(k) !== null || (Date.now() - (etat.vuPlein || 0)) < 3600000) effacerAilleurs(k);
       return r;
     } catch (e) {
       if (!estQuota(e)) throw e;
@@ -60,15 +62,55 @@
       }
       if (!estCopie) {
         memo[k] = String(v);
-        etat.plein = Date.now();
-        /* l'ancienne copie perimee ne doit plus etre relue ni prendre de place */
-        try { oRem.call(this, k); } catch (eR) {}
+        etat.plein = Date.now(); etat.vuPlein = etat.plein;
+        /* IMPORTANT : on NE supprime PAS l'ancienne copie. Les autres fenetres
+           (module Paye dans son cadre, onglet Exploitation) et le prochain
+           rechargement la reliraient sinon VIDE, et repartiraient d'une Paie
+           vierge (pointage disparu). Une copie un peu ancienne est fusionnee
+           avec le cloud ; une copie absente est prise pour « rien ». */
+        partager(k, memo[k]);
       }
       throw e;
     }
   };
+  /* Les fenetres de la meme appli (page principale, module Paye dans son
+     cadre, onglets) partagent la valeur a jour gardee en memoire. */
+  function memoAilleurs(k) {
+    var w = [];
+    try { if (window.parent && window.parent !== window) w.push(window.parent); } catch (e1) {}
+    try { if (window.top && window.top !== window && w.indexOf(window.top) === -1) w.push(window.top); } catch (e2) {}
+    try { if (window.opener) w.push(window.opener); } catch (e3) {}
+    for (var i = 0; i < w.length; i++) {
+      try { var m = w[i].__mdbStockageMemoire; if (m && m.cles && m.cles.hasOwnProperty(k)) return m.cles[k]; } catch (e4) {}
+    }
+    return null;
+  }
+  var canal = null;
+  try { if (window.BroadcastChannel) canal = new BroadcastChannel('mdb_stockage_memoire'); } catch (eC) {}
+  function partager(k, v) { try { if (canal) canal.postMessage({ k: k, v: v }); } catch (e) {} }
+  function effacerAilleurs(k) {
+    var w = [];
+    try { if (window.parent && window.parent !== window) w.push(window.parent); } catch (e1) {}
+    try { if (window.top && window.top !== window) w.push(window.top); } catch (e2) {}
+    try { if (window.opener) w.push(window.opener); } catch (e3) {}
+    for (var i = 0; i < w.length; i++) { try { var m = w[i].__mdbStockageMemoire; if (m && m.cles && m.cles.hasOwnProperty(k)) delete m.cles[k]; } catch (e4) {} }
+    partager(k, null);
+  }
+  if (canal) canal.onmessage = function (ev) {
+    try {
+      var d = ev && ev.data; if (!d || !d.k) return;
+      if (d.v === null) { if (memo.hasOwnProperty(d.k)) delete memo[d.k]; return; }
+      memo[d.k] = String(d.v);
+      etat.vuPlein = Date.now();
+    } catch (e) {}
+  };
   S.getItem = function (k) {
-    if (this === ls && memo.hasOwnProperty(String(k))) return memo[String(k)];
+    if (this === ls) {
+      k = String(k);
+      if (memo.hasOwnProperty(k)) return memo[k];
+      var a = memoAilleurs(k);
+      if (a !== null) return a;
+    }
     return oGet.apply(this, arguments);
   };
   S.removeItem = function (k) {

@@ -37,6 +37,23 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Fiche de presence : seuls les employes en poste ce jour-la  ->  ' + res); else rapport.ko('Employes sortis dans la fiche du jour  ->  ' + res);
 
+  try {
+    const hi = chargerApp('index.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      var cur = { societe:{nom:'X'}, pointage:[{id:'p3',date:'2026-10-26'}], categories:[{code:'1A'}], pointage_tombstones:['p2'] };
+      var bak = { societe:{nom:'Y',ncc:'1'}, pointage:[{id:'p1'},{id:'p2'},{id:'p3',date:'ancien'}], categories:[{code:'A',id:'c1'},{code:'B',id:'c2'}], services:[{id:'s1'}] };
+      var r = _fusionPaieRecuperation(cur, bak).paye;
+      var ids = r.pointage.map(function(x){return x.id;}).sort().join();
+      var p3 = r.pointage.filter(function(x){return x.id==='p3';})[0].date;
+      var sus1 = _snapshotSuspect({ mdb_employes:[1,2,3,4,5,6], mdb_paye:{ pointage:[] } });
+      var sus2 = _snapshotSuspect({ mdb_employes:[1,2,3,4,5,6], mdb_paye:{ pointage:[{id:1}] } });
+      return (ids === 'p1,p3' && p3 === '2026-10-26' && r.societe.nom === 'X' && r.societe.ncc === '1' && r.categories.length === 2 && r.services.length === 1 && sus1 && !sus2)
+        ? 'OK : manquants ajoutes (p1), actuel garde (p3 du jour), supprime volontaire non ressuscite (p2), sauvegarde a Paie vide bloquee'
+        : 'ECHEC ' + JSON.stringify({ids:ids,p3:p3,soc:r.societe,cat:r.categories.length,sus1:sus1,sus2:sus2});
+    })()`, hi.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Recuperation de la Paie depuis une sauvegarde (fusion sans effacement)  ->  ' + res); else rapport.ko('Recuperation Paie  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');

@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script>
-<script>window.__APP_VERSION='2026-10-26-284';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-26-285';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2927,6 +2927,22 @@ function restaurerAutosave() {
   toast('Copie locale restaurée — synchronisation en cours');
 }
 window.addEventListener('pagehide', function () { try { sauvegardeAutoLocale(); } catch (e) {} });
+/* Sauvegarde SUSPECTE : la Paie est quasi vide (pas de pointage) alors que
+   l'entreprise a du personnel. C'est la signature d'un poste dont la copie
+   locale a ete perdue : envoyer cette copie au cloud ferait sortir, au fil des
+   rotations, les bonnes sauvegardes. On ne l'envoie donc pas. */
+function _snapshotSuspect(backup) {
+  try {
+    var emps = backup && backup.mdb_employes;
+    if (typeof emps === 'string') emps = JSON.parse(emps);
+    if (!Array.isArray(emps) || emps.length < 5) return false;
+    var py = backup.mdb_paye;
+    if (typeof py === 'string') py = JSON.parse(py);
+    if (!py || typeof py !== 'object') return true;
+    if (!Array.isArray(py.pointage) || py.pointage.length === 0) return true;
+    return false;
+  } catch (e) { return false; }
+}
 function createFullBackup() {
   try {
     /* Refroidissement : quand le stockage est plein, la sauvegarde locale et
@@ -2984,7 +3000,8 @@ function createFullBackup() {
     }
     setBackupMeta(meta);
     /* Sauvegarde automatique vers le cloud (protection contre perte d'ordinateur) */
-    if (currentUser && currentUser.id && firebaseDb && Date.now() >= (_cloudSauvegardeBloqueJusqua || 0) && !_cloudBackupTropRecent()) {
+    if (_snapshotSuspect(backup)) { try { console.warn('[MDB] Sauvegarde cloud NON envoyee : Paie vide sur ce poste (copie locale incomplete).'); } catch (eSS) {} }
+    else if (currentUser && currentUser.id && firebaseDb && Date.now() >= (_cloudSauvegardeBloqueJusqua || 0) && !_cloudBackupTropRecent()) {
       try {
         var _jsonAuto = '';
         try { _jsonAuto = JSON.stringify(backup); } catch(eJA) {}
@@ -3127,6 +3144,7 @@ function silentCloudBackup() {
       console.warn('[MDB] Push cloud silencieux ignore : snapshot de ' + Math.round(_jsonBackup.length / 1048576) + ' Mo > ' + Math.round(CLOUD_PUSH_MAX_BYTES / 1048576) + ' Mo.');
       return;
     }
+    if (_snapshotSuspect(backup)) { console.warn('[MDB] Sauvegarde cloud silencieuse NON envoyee : Paie vide sur ce poste.'); return; }
     var _newHash = _jsonBackup.length + '|' + (newest.ts||0);
     if (window._lastBackupHash && window._lastBackupHash === _newHash) return;
     var tsX = newest.ts;
@@ -3276,6 +3294,100 @@ function restaurerSauvegardeCloud(ts) {
     try { var ov = document.getElementById('cloudBakOverlay'); if (ov) ov.remove(); } catch (e2) {}
   }).catch(function (e) { toast('Restauration impossible : ' + ((e && e.message) || e), 'error'); });
 }
+/* ---------- RECUPERATION DE LA PAIE (pointage...) DEPUIS UNE SAUVEGARDE ----------
+   FUSION, jamais remplacement : tout ce qui existe aujourd'hui est garde ; on
+   AJOUTE seulement ce que la sauvegarde contient et qui manque (lignes de
+   pointage, montage, categories, primes...). Les suppressions volontaires
+   (pointage_tombstones) restent respectees. Les autres rubriques (caisse,
+   acomptes, factures...) ne sont pas touchees. */
+function _fusionPaieRecuperation(cur, bak) {
+  cur = (cur && typeof cur === 'object' && !Array.isArray(cur)) ? cur : {};
+  bak = (bak && typeof bak === 'object' && !Array.isArray(bak)) ? bak : {};
+  var out = {}, k, ajouts = 0;
+  var estVide = function (v) { return v === null || v === undefined || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length); };
+  var cleLigne = function (x) {
+    if (x && typeof x === 'object') {
+      if (x.id !== undefined && x.id !== null) return 'id:' + x.id;
+      if (x.code !== undefined && x.code !== null && x.code !== '') return 'code:' + x.code;
+    }
+    return 'js:' + JSON.stringify(x);
+  };
+  for (k in cur) if (Object.prototype.hasOwnProperty.call(cur, k)) out[k] = cur[k];
+  for (k in bak) {
+    if (!Object.prototype.hasOwnProperty.call(bak, k)) continue;
+    var b = bak[k], c = out[k];
+    if (estVide(c)) { if (!estVide(b)) { out[k] = b; ajouts += Array.isArray(b) ? b.length : 1; } continue; }
+    /* liste « par defaut » recreee sur un poste vierge (ex. categories sans
+       identifiant) : la sauvegarde, plus complete, la remplace */
+    if (Array.isArray(c) && Array.isArray(b) && b.length > c.length && c.every(function (x) { return !x || typeof x !== 'object' || x.id === undefined; }) && b.length) {
+      out[k] = b; ajouts += b.length - c.length; continue;
+    }
+    if (Array.isArray(c) && Array.isArray(b)) {
+      var vu = {}, res = c.slice();
+      c.forEach(function (x) { vu[cleLigne(x)] = 1; });
+      b.forEach(function (x) { var q = cleLigne(x); if (!vu[q]) { vu[q] = 1; res.push(x); ajouts++; } });
+      out[k] = res;
+    } else if (c && b && typeof c === 'object' && typeof b === 'object' && !Array.isArray(c) && !Array.isArray(b)) {
+      var o = {}, kk;
+      for (kk in b) if (Object.prototype.hasOwnProperty.call(b, kk)) o[kk] = b[kk];
+      for (kk in c) if (Object.prototype.hasOwnProperty.call(c, kk)) o[kk] = c[kk];
+      for (kk in b) if (Object.prototype.hasOwnProperty.call(b, kk) && !Object.prototype.hasOwnProperty.call(c, kk)) ajouts++;
+      out[k] = o;
+    }
+  }
+  /* suppressions volontaires respectees */
+  var tomb = {};
+  [].concat(Array.isArray(cur.pointage_tombstones) ? cur.pointage_tombstones : [], Array.isArray(bak.pointage_tombstones) ? bak.pointage_tombstones : []).forEach(function (t) { tomb[String(t)] = 1; });
+  if (Object.keys(tomb).length) {
+    out.pointage_tombstones = Object.keys(tomb);
+    if (Array.isArray(out.pointage)) out.pointage = out.pointage.filter(function (x) { return !(x && x.id !== undefined && tomb[String(x.id)]); });
+  }
+  return { paye: out, ajouts: ajouts };
+}
+function _nbPointageDe(data) {
+  try { var py = data && data.mdb_paye; if (typeof py === 'string') py = JSON.parse(py); return (py && Array.isArray(py.pointage)) ? py.pointage.length : 0; } catch (e) { return 0; }
+}
+function recupererPaieDepuisSauvegarde(ts) {
+  if (!currentUser || !currentUser.id || !window.SB_CLIENT) { toast('Sauvegarde cloud indisponible', 'error'); return; }
+  var uid = currentUser.id;
+  window.SB_CLIENT.from('backups').select('data').eq('enterprise_id', uid).eq('ts', Number(ts)).limit(1).then(function (res) {
+    var row = res && res.data && res.data[0];
+    if (!row || !row.data) { toast('Sauvegarde introuvable', 'error'); return; }
+    var bak = row.data.mdb_paye; if (typeof bak === 'string') { try { bak = JSON.parse(bak); } catch (e) { bak = null; } }
+    if (!bak || typeof bak !== 'object') { toast('Cette sauvegarde ne contient pas de Paie', 'error'); return; }
+    var cur = DB.get('mdb_paye') || {};
+    var avant = Array.isArray(cur.pointage) ? cur.pointage.length : 0;
+    var r = _fusionPaieRecuperation(cur, bak);
+    var apres = Array.isArray(r.paye.pointage) ? r.paye.pointage.length : 0;
+    var d = new Date(Number(ts));
+    if (!r.ajouts) { toast('Rien a recuperer : tout est deja present', 'success'); return; }
+    if (!confirm2('Recuperer la Paie de la sauvegarde du ' + d.toLocaleString('fr-FR') + ' ?\n\nPointage : ' + avant + ' -> ' + apres + ' lignes.\nRien d\'actuel n\'est efface : on ajoute seulement ce qui manque.\nLes autres rubriques ne sont pas touchees.')) return;
+    DB.set('mdb_paye', r.paye);
+    try { markDirty('mdb_paye'); } catch (e2) {}
+    try { if (typeof pushToCloud === 'function') pushToCloud(); } catch (e3) {}
+    toast('Paie recuperee : ' + (apres - avant) + ' ligne(s) de pointage remises — envoi aux autres postes', 'success');
+    try { var ov = document.getElementById('cloudBakOverlay'); if (ov) ov.remove(); } catch (e4) {}
+  }).catch(function (e) { toast('Recuperation impossible : ' + ((e && e.message) || e), 'error'); });
+}
+/* Cherche la sauvegarde la plus recente qui contient du pointage */
+function recupererPointageAuto() {
+  if (!currentUser || !currentUser.id || !window.SB_CLIENT) { toast('Sauvegarde cloud indisponible', 'error'); return; }
+  var uid = currentUser.id;
+  toast('Recherche de la derniere sauvegarde avec pointage…');
+  listerSauvegardesCloud().then(function (rows) {
+    var i = 0;
+    var suivant = function () {
+      if (i >= rows.length) { toast('Aucune sauvegarde cloud ne contient de pointage', 'error'); return; }
+      var ts = Number(rows[i++].ts);
+      window.SB_CLIENT.from('backups').select('data').eq('enterprise_id', uid).eq('ts', ts).limit(1).then(function (res) {
+        var row = res && res.data && res.data[0];
+        if (row && row.data && _nbPointageDe(row.data) > 0) recupererPaieDepuisSauvegarde(ts);
+        else suivant();
+      }, suivant);
+    };
+    suivant();
+  });
+}
 function afficherSauvegardesCloud() {
   var ov = document.getElementById('cloudBakOverlay');
   if (ov) ov.remove();
@@ -3291,12 +3403,13 @@ function afficherSauvegardesCloud() {
     if (!box) return;
     if (!rows.length) { box.innerHTML = '<h3>Sauvegardes dans le cloud</h3><p style="font-size:.82rem;color:var(--dim)">Aucune sauvegarde pour le moment. Elles se créent automatiquement toutes les 4 h.</p><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button>'; return; }
     var h = '<h3>Sauvegardes dans le cloud</h3>'
-      + '<p style="font-size:.8rem;color:var(--dim);margin:0 0 .6rem">' + rows.length + ' version(s) conservée(s). Choisissez-en une pour la remettre en place.</p>'
+      + '<p style="font-size:.8rem;color:var(--dim);margin:0 0 .6rem">' + rows.length + ' version(s) conservée(s). « Récupérer la Paie » AJOUTE ce qui manque (pointage…) sans rien effacer ; « Restaurer » remet TOUT à ce moment-là.</p>'
+      + '<div style="margin:0 0 .6rem"><button class="btn btn-sm" style="background:#16a34a;color:#fff;border:none" onclick="recupererPointageAuto()">🔎 Récupérer le pointage (dernière sauvegarde qui en contient)</button></div>'
       + '<div style="max-height:360px;overflow:auto"><table style="width:100%;font-size:.8rem"><thead><tr style="background:#f1f5f9"><th>Date</th><th></th></tr></thead><tbody>';
     rows.forEach(function (r) {
       var dd = new Date(Number(r.ts));
       h += '<tr><td>' + (isNaN(dd.getTime()) ? r.ts : dd.toLocaleString('fr-FR')) + '</td>'
-        + '<td style="text-align:right"><button class="btn btn-sm" onclick="restaurerSauvegardeCloud(' + Number(r.ts) + ')">Restaurer</button></td></tr>';
+        + '<td style="text-align:right;white-space:nowrap"><button class="btn btn-sm" style="background:#16a34a;color:#fff;border:none" onclick="recupererPaieDepuisSauvegarde(' + Number(r.ts) + ')">Récupérer la Paie</button> <button class="btn btn-sm btn-outline" onclick="restaurerSauvegardeCloud(' + Number(r.ts) + ')">Restaurer tout</button></td></tr>';
     });
     h += '</tbody></table></div><div style="margin-top:.6rem"><button class="btn" onclick="document.getElementById(\'cloudBakOverlay\').remove()">Fermer</button></div>';
     box.innerHTML = h;
