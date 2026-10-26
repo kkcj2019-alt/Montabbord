@@ -748,16 +748,15 @@ attenduPrefixe: 'OK'
   });
 
   r.push({
-    nom: 'Exploitation : le pointage est le module Paie (iframe + blocs lecture Congés/Sanctions)',
+    nom: 'Exploitation : le pointage est le module Paie (iframe seule, sans congés/sanctions dessous)',
     app: 'production.html', store: storeRealiste,
     code: `
       CURRENT_PAGE = 'presence'; setSection('presenceSubTab', 'pointage'); renderPage();
       var h = document.getElementById('content').innerHTML || '';
       var okFrame = h.indexOf('ptPayeIframe') !== -1;
-      /* Les onglets doublons « Congés (lecture) » / « Sanctions (lecture) » ont été
-         retirés : il reste les deux blocs « Lecture seule » sous l'iframe. */
+      /* Congés et sanctions ont leurs propres onglets : rien sous le pointage. */
       var nbLecture = (h.split('Lecture seule').length - 1);
-      var okLecture = nbLecture >= 2;
+      var okLecture = nbLecture === 0;
       (okFrame && okLecture) ? 'OK' : 'ECHEC frame=' + okFrame + ' lecture=' + nbLecture
     `,
     attendu: 'OK'
