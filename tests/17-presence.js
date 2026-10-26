@@ -25,6 +25,18 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Rapport Direction : comptes coherents  ->  ' + res); else rapport.ko('Rapport Direction  ->  ' + res);
 
+  try {
+    res = String(vm.runInContext(`(function(){
+      var a = { id:'a', status:'inactif', date_entree:'2024-01-02', date_sortie:'2026-09-04' };
+      var b = { id:'b', status:'inactif', date_entree:'2026-09-01' };
+      var c = { id:'c', status:'actif', date_entree:'2026-01-01' };
+      var d = { id:'d', status:'actif', date_entree:'2026-11-01' };
+      var r = [empActifLeJour(a,'2026-10-26'), empActifLeJour(a,'2026-09-04'), empActifLeJour(b,'2026-10-26'), empActifLeJour(c,'2026-10-26'), empActifLeJour(d,'2026-10-26')];
+      return (r.join() === 'false,true,false,true,false') ? 'OK : sorti le 04/09 invisible le 26/10 (visible le 04/09), inactif sans date invisible, futur entrant invisible' : 'ECHEC ' + r.join();
+    })()`, h.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Fiche de presence : seuls les employes en poste ce jour-la  ->  ' + res); else rapport.ko('Employes sortis dans la fiche du jour  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');
