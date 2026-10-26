@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script>
-<script>window.__APP_VERSION='2026-10-26-298';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-26-299';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -1924,20 +1924,14 @@ function mergeObjetPartage(cloud, local) {
       if (Array.isArray(cloud[_bySec[_secM]])) _tomArr = _tomArr.concat(cloud[_bySec[_secM]]);
       if (Array.isArray(local[_bySec[_secM]])) _tomArr = _tomArr.concat(local[_bySec[_secM]]);
       if (!_tomArr.length) break;
-      _tomSet = {};
-      _tomArr.forEach(function (t) { try { _tomSet[String(t)] = true; } catch (eT) {} });
+      _tomSet = _mdbTombPtSet(_tomArr);
       break;
     }
   } catch (eTom) { _tomSet = null; }
   var _filtrerTom = function (r) {
     if (!r || typeof r !== 'object') return true;
     if (!_tomSet) return true;
-    if (r.id !== undefined && r.id !== null && _tomSet[String(r.id)]) return false;
-    if (r.employee_id && r.date) {
-      var _art = (r.article_code === undefined || r.article_code === null) ? '' : String(r.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (_tomSet['cle:pt:' + String(r.employee_id) + '|' + String(r.date) + '|' + _art]) return false;
-    }
-    return true;
+    return !_mdbTombPtSupprime(_tomSet, r);
   };
   out[k] = ordre.map(function (id) {
     return (id && typeof id === 'object' && id.__sansId !== undefined) ? id.__sansId : byId[id];
@@ -2188,6 +2182,41 @@ function _syncCle(x) {
   if (x.id !== undefined && x.id !== null && String(x.id) !== "") return "ID|" + String(x.id);
   return "S|" + _syncSig(x);
 }
+/* Tombstones du pointage (Paie) : « cle:<employe|jour|article>@<heure> ».
+   La suppression ne vise que les versions ANTERIEURES a elle : une saisie
+   refaite apres reste (avant, la cle etait permanente et toute ressaisie du
+   meme employe / jour / article etait effacee a la synchro suivante).
+   Ancien format sans heure : ne retire que les lignes sans horodatage. */
+function _mdbTombPtSet(arr) {
+  var set = {};
+  try {
+    (Array.isArray(arr) ? arr : []).forEach(function (t) {
+      var s = String(t);
+      if (s.indexOf('cle:') === 0) {
+        var at = s.lastIndexOf('@'), k = s, ts = 0;
+        if (at > 4) { k = s.slice(0, at); ts = parseFloat(s.slice(at + 1)) || 0; }
+        if (!Object.prototype.hasOwnProperty.call(set, k) || ts > set[k]) set[k] = ts;
+      } else set[s] = true;
+    });
+  } catch (e) {}
+  return set;
+}
+function _mdbTombPtSupprime(set, r) {
+  try {
+    if (!set || !r || typeof r !== 'object') return false;
+    if (r.id !== undefined && r.id !== null && set[String(r.id)] === true) return true;
+    if (r.employee_id && r.date) {
+      var art = (r.article_code === undefined || r.article_code === null) ? '' : String(r.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      var k = 'cle:pt:' + String(r.employee_id) + '|' + String(r.date) + '|' + art;
+      if (Object.prototype.hasOwnProperty.call(set, k)) {
+        var u = r.updatedAt, t = typeof u === 'number' ? u : Date.parse(u);
+        if (!isFinite(t)) t = 0;
+        return t <= (parseFloat(set[k]) || 0);
+      }
+    }
+  } catch (e) {}
+  return false;
+}
 function syncUnionTableaux(localArr, cloudArr, cloudDabord) {
   var out = [], vus = {}, i, x, k;
   var premier = cloudDabord ? cloudArr : localArr;
@@ -2265,34 +2294,13 @@ function mergePayeRecu(_lpP, _npP) {
     }
   }
   (function () {
-    function _setDe(arr) { var s = {}; try { (arr || []).forEach(function (t) { s[String(t)] = true; }); } catch (e) {} return s; }
     if (Array.isArray(_lpP.pointage)) {
-      var _tsP = _setDe(_lpP.pointage_tombstones);
-      _lpP.pointage = _lpP.pointage.filter(function (p) {
-        if (!p || typeof p !== 'object') return true;
-        if (p.id && _tsP[String(p.id)]) return false;
-        try {
-          if (p.employee_id && p.date) {
-            var _art = (p.article_code === undefined || p.article_code === null) ? '' : String(p.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-            if (_tsP['cle:pt:' + String(p.employee_id) + '|' + String(p.date) + '|' + _art]) return false;
-          }
-        } catch (eC) {}
-        return true;
-      });
+      var _tsP = _mdbTombPtSet(_lpP.pointage_tombstones);
+      _lpP.pointage = _lpP.pointage.filter(function (p) { return !_mdbTombPtSupprime(_tsP, p); });
     }
     if (Array.isArray(_lpP.pointageMontage)) {
-      var _tsM = _setDe(_lpP.pointageMontage_tombstones);
-      _lpP.pointageMontage = _lpP.pointageMontage.filter(function (p) {
-        if (!p || typeof p !== 'object') return true;
-        if (p.id && _tsM[String(p.id)]) return false;
-        try {
-          if (p.employee_id && p.date) {
-            var _artM = (p.article_code === undefined || p.article_code === null) ? '' : String(p.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
-            if (_tsM['cle:pt:' + String(p.employee_id) + '|' + String(p.date) + '|' + _artM]) return false;
-          }
-        } catch (eCM) {}
-        return true;
-      });
+      var _tsM = _mdbTombPtSet(_lpP.pointageMontage_tombstones);
+      _lpP.pointageMontage = _lpP.pointageMontage.filter(function (p) { return !_mdbTombPtSupprime(_tsM, p); });
     }
     if (Array.isArray(_lpP.primesSpec) && Array.isArray(_lpP.primesSpec_tombstones) && _lpP.primesSpec_tombstones.length) {
       var _tsS = _setDe(_lpP.primesSpec_tombstones);
@@ -2422,7 +2430,7 @@ function pushToCloud() {
               if (Array.isArray(_sa) && _sa.length) {
                 if (_secs[_si] === 'pointage') {
                   var _ptb = {};
-                  try { ((lv && lv.pointage_tombstones) || []).concat(cloud[k].pointage_tombstones || []).forEach(function (t) { _ptb[String(t)] = true; }); } catch (ePT) {}
+                  try { _ptb = _mdbTombPtSet(((lv && lv.pointage_tombstones) || []).concat(cloud[k].pointage_tombstones || [])); } catch (ePT) {}
                   for (var _li = 0; _li < _sa.length; _li++) {
                     var _lr = _sa[_li];
                     var _lid = (_lr && _lr.id !== undefined && _lr.id !== null) ? String(_lr.id) : '';
@@ -2433,7 +2441,7 @@ function pushToCloud() {
                         _lcle = 'cle:pt:' + String(_lr.employee_id) + '|' + String(_lr.date) + '|' + _la;
                       }
                     } catch (eLC) {}
-                    if ((!_lid || !_ptb[_lid]) && (!_lcle || !_ptb[_lcle])) { _delib = false; break; }
+                    if ((!_lid || _ptb[_lid] !== true) && (!_lcle || !Object.prototype.hasOwnProperty.call(_ptb, _lcle))) { _delib = false; break; }
                   }
                 } else {
                   var _tbS = getTombstones()[k + '.' + _secs[_si]] || getTombstones()[k] || {};

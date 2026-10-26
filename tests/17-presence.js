@@ -139,6 +139,21 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Montage : saisie refaite apres suppression conservee  ->  ' + res); else rapport.ko('Montage resaisie effacee  ->  ' + res);
 
+  /* Index : meme regle (sinon l'appli principale effacait la ressaisie et la renvoyait au cloud) */
+  try {
+    const hi2 = chargerApp('index.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      var neu = { id:'m_new', employee_id:'e1', date:'2026-10-03', article_code:'E2', quantite:27, updatedAt: Date.now() };
+      var vieux = { id:'m_old', employee_id:'e1', date:'2026-10-03', article_code:'E2', quantite:4 };
+      var setLeg = _mdbTombPtSet(['cle:pt:e1|2026-10-03|e2', 'm_old']);
+      var setDat = _mdbTombPtSet(['cle:pt:e1|2026-10-03|e2@' + (Date.now() - 60000)]);
+      var setApres = _mdbTombPtSet(['cle:pt:e1|2026-10-03|e2@' + (Date.now() + 60000)]);
+      var ok = !_mdbTombPtSupprime(setLeg, neu) && _mdbTombPtSupprime(setLeg, vieux) && !_mdbTombPtSupprime(setDat, neu) && _mdbTombPtSupprime(setApres, neu);
+      return ok ? 'OK : ressaisie gardee, ancienne ligne et suppression posterieure respectees' : 'ECHEC';
+    })()`, hi2.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Index : tombstones pointage dates  ->  ' + res); else rapport.ko('Index tombstones  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');
