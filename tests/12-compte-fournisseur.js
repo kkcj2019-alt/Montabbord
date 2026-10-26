@@ -194,6 +194,20 @@ function run(rapport) {
     (n1 === 3 && n2 === 3 && lien && vus === 'A1') ? 'OK : 3 acomptes gardes (piece manquante = plus d effacement) ; lien OP1 -> A1 repare ; acompte supprime a tort mais dont la piece existe : visible'
       : 'ECHEC : ' + JSON.stringify({ n1: n1, n2: n2, lien: lien, vus: vus })`);
 
+  cas('Acomptes : afficher la page filtree (un employe / un mois) ne supprime plus les autres lignes', `
+    DB.set('mdb_acomptesPrets', [
+      { id: 'P1', type: 'pret', employeId: 'e1', montant: 120000, dureeMois: 6, montantMensuel: 20000, moisDeduction: '2026-09', date: '2026-09-01', statut: 'en_cours' },
+      { id: 'X1', type: 'acompte', employeId: 'e2', montant: 10000, moisDeduction: '2026-08', date: '2026-08-05' },
+      { id: 'X2', type: 'acompte', employeId: 'e3', montant: 15000, moisDeduction: '2026-07', date: '2026-07-05' }
+    ]);
+    window._apFilterEmployeId = 'e1'; window._apFilterMonth = '2026-09';
+    try { renderAcomptesPrets(); } catch (x) {}
+    window._apFilterEmployeId = ''; window._apFilterMonth = '';
+    var ids = dbArr('mdb_acomptesPrets').map(function (a) { return a.id; }).sort().join(',');
+    var p1 = dbArr('mdb_acomptesPrets').filter(function (a) { return a.id === 'P1'; })[0] || {};
+    (ids.indexOf('X1') !== -1 && ids.indexOf('X2') !== -1 && (p1.echeances || []).length > 0) ? 'OK : lignes des autres employes conservees (' + ids + '), echeancier du pret enregistre'
+      : 'ECHEC : ' + ids + ' echeances=' + (p1.echeances || []).length`);
+
 }
 
 module.exports = { run: run };
