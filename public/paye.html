@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script>
     <script>
-      window.__APP_VERSION = "2026-10-26-304";
+      window.__APP_VERSION = "2026-10-26-305";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -19163,6 +19163,42 @@ html +=
         });
         return map;
       }
+      /* ACCIDENTS DU TRAVAIL (registre RH, mdb_rh_accidents) : chaque jour
+         ouvré de l'arrêt est pointé automatiquement « Accident de travail »,
+         8 h PAYÉES, mais SANS rien de ce qui dépend de la présence réelle
+         (transport, salissure, déplacement, tenue, panier… : il n'était pas
+         là). Reprise réelle après la reprise prévue : les jours entre les
+         deux sont des absences injustifiées (comme pour les congés). */
+      function ptAccidentsPlages(m) {
+        var out = { arret: {}, retard: {}, num: {} };
+        var L = [];
+        try { L = payeArr("mdb_rh_accidents"); } catch (eA) {}
+        if (!Array.isArray(L) || !/^\d{4}-\d{2}$/.test(m)) return out;
+        var y = parseInt(m.slice(0, 4), 10), mi = parseInt(m.slice(5, 7), 10), nd = new Date(y, mi, 0).getDate();
+        var jourOuvre = function (d) { var w = new Date(y, mi - 1, d).getDay(); return w !== 0 && w !== 6; };
+        L.forEach(function (a) {
+          if (!a || !a.employee_id || a._deleted) return;
+          var d1 = String(a.arret_du || "").slice(0, 10), d2 = String(a.arret_au || "").slice(0, 10);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(d1)) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(d2) || d2 < d1) d2 = d1;
+            for (var d = 1; d <= nd; d++) {
+              var dk = m + "-" + (d < 10 ? "0" : "") + d;
+              if (dk < d1 || dk > d2 || !jourOuvre(d)) continue;
+              out.arret[a.employee_id + "|" + dk] = true;
+              out.num[a.employee_id + "|" + dk] = a.numero || "";
+            }
+          }
+          var prev = String(a.date_reprise || "").slice(0, 10), reel = String(a.date_reprise_reelle || "").slice(0, 10);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(prev) && /^\d{4}-\d{2}-\d{2}$/.test(reel) && reel > prev) {
+            for (var d3 = 1; d3 <= nd; d3++) {
+              var dk3 = m + "-" + (d3 < 10 ? "0" : "") + d3;
+              if (dk3 < prev || dk3 >= reel || !jourOuvre(d3)) continue;
+              out.retard[a.employee_id + "|" + dk3] = true;
+            }
+          }
+        });
+        return out;
+      }
       function ptCongePointageAuto(mois) {
         var m = String(mois || "");
         if (!/^\d{4}-\d{2}$/.test(m)) return 0;
@@ -19201,10 +19237,19 @@ html +=
             }
           }
         });
+        var _atP = ptAccidentsPlages(m);
+        Object.keys(_atP.retard).forEach(function (k) { retardVoulu[k] = true; });
         var pts = getPointageData();
         var cree = 0, suppr = 0, maj = 0;
         var garde = [];
         pts.forEach(function (r) {
+          /* ligne auto « accident du travail » : gardée tant que l'arrêt la couvre */
+          if (r && r.at_auto === true) {
+            if (String(r.date || "").indexOf(m) !== 0) { garde.push(r); return; }
+            if (_atP.arret[r.employee_id + "|" + r.date]) { garde.push(r); return; }
+            if (r.at_retouche !== true) { suppr++; return; }
+            delete r.at_auto; garde.push(r); return;
+          }
           if (!r || (r.conge_auto !== true && r.retard_reprise_auto !== true)) { garde.push(r); return; }
           var cle = r.employee_id + "|" + r.date;
           if (String(r.date || "").indexOf(m) !== 0) { garde.push(r); return; }
@@ -19235,6 +19280,20 @@ html +=
             id: DB.id(), employee_id: p[0], date: p[1],
             present: false, motif: motifsVoulus[cle] || "Congé",
             conge_auto: true, conge_id: "",
+          });
+          cree++;
+        });
+        Object.keys(_atP.arret).forEach(function (cle) {
+          var deja = garde.some(function (r) { return r && (r.employee_id + "|" + r.date) === cle; });
+          if (deja) return;
+          var p = cle.split("|");
+          garde.push({
+            id: DB.id(), employee_id: p[0], date: p[1],
+            present: false, motif: "Accident de travail",
+            absent_paye: true, h_j_manual: "8", h_n_manual: "", h_libres: 8,
+            transport_paid: false, transport_faute: false, faute_societe: false, rendement: false,
+            obs: "Accident du travail " + (_atP.num[cle] || "") + " — 8 h payées, sans transport ni primes de présence",
+            at_auto: true,
           });
           cree++;
         });

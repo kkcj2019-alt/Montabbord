@@ -69,6 +69,37 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('RH : registre des accidents du travail  ->  ' + res); else rapport.ko('Accidents du travail  ->  ' + res);
 
+  try {
+    const hp = chargerApp('paye.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      var emp = (getPersonnel()[0] || {}).id;
+      localStorage.setItem('mdb_rh_accidents', JSON.stringify([{ id:'at1', numero:'AT-2026-001', employee_id: emp, date:'2026-10-05', arret_du:'2026-10-06', arret_au:'2026-10-09', date_reprise:'2026-10-12', date_reprise_reelle:'2026-10-14' }]));
+      ptCongePointageAuto('2026-10');
+      var pts = getPointageData().filter(function(r){ return r.employee_id === emp; });
+      var at = pts.filter(function(r){ return r.at_auto; }).map(function(r){ return r.date; }).sort();
+      var ret = pts.filter(function(r){ return r.retard_reprise_auto; }).map(function(r){ return r.date; }).sort();
+      var r0 = pts.filter(function(r){ return r.at_auto; })[0] || {};
+      ptCongePointageAuto('2026-10');
+      var n2 = getPointageData().filter(function(r){ return r.employee_id === emp && r.at_auto; }).length;
+      return (at.join() === '2026-10-06,2026-10-07,2026-10-08,2026-10-09' && ret.join() === '2026-10-12,2026-10-13' && r0.absent_paye === true && r0.h_j_manual === '8' && r0.transport_paid === false && n2 === 4)
+        ? 'OK : 4 jours d’arret pointes 8 h payees sans transport, 12-13/10 absents (reprise reelle le 14), pas de doublon'
+        : 'ECHEC ' + JSON.stringify({at:at, ret:ret, r0:r0, n2:n2});
+    })()`, hp.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Accident du travail -> pointage automatique  ->  ' + res); else rapport.ko('AT pointage auto  ->  ' + res);
+  try {
+    const hc = chargerApp('index.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      window.currentUser = currentUser = { id:'u1', subUserId:'uK', caisseId:'cK', nom:'K' };
+      var sortie = { typeOp:'transfert', sens:'sortie', caisseId:'cK', caisseDestId:'cA' };
+      var entreeChezA = { typeOp:'transfert', sens:'entree', caisseId:'cA', caisseSourceId:'cK', caisseDestId:'cA' };
+      var entreeChezK = { typeOp:'transfert', sens:'entree', caisseId:'cK', caisseSourceId:'cA', caisseDestId:'cK' };
+      var r = [canValidateTransfert(sortie), canValidateTransfert(entreeChezA), canValidateTransfert(entreeChezK)];
+      return r.join() === 'false,false,true' ? 'OK : l’envoyeur ne voit pas Approuver ; seul le destinataire approuve' : 'ECHEC ' + r.join();
+    })()`, hc.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Caisse : transfert approuve par celui qui recoit  ->  ' + res); else rapport.ko('Approbation transfert  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');
