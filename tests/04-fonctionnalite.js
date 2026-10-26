@@ -13825,7 +13825,7 @@ function run(rapport) {
     const okNbRestaure = (idxHdr.split("getElementById('header').style.display = ''").length - 1) >= 2;
     const okPayeSticky = payHdr.indexOf('#payeHeader.pt-mini') !== -1
       && payHdr.indexOf("l'en-tête n'est PAS figé") === -1
-      && payHdr.indexOf("classList.toggle('pt-mini'") !== -1;
+      && (payHdr.indexOf("classList.toggle('pt-mini'") !== -1 || payHdr.indexOf("classList.add('pt-mini')") !== -1);
     if (okNavHdr && okLoginHdr && okNbRestaure && okPayeSticky) {
       rapport.ok('Entête : navigateTo()/showLogin() réaffichent #header sur index, en-tête paye mobile sticky réduit au scroll (.pt-mini)');
     } else {

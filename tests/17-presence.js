@@ -36,7 +36,7 @@ function run(rapport) {
   const vals = [m1 && +m1[1], m2 && +m2[1], m3 && +m3[1]];
   if (vals.every(v => v && v <= 1000)) rapport.ok('Envoi vers les autres postes en moins d\'1 s (index ' + vals[0] + ' ms, production ' + vals[1] + ' ms, paye ' + vals[2] + ' ms)');
   else rapport.ko('Delais d\'envoi trop longs : ' + vals.join('/'));
-  if (/mdbVoyantDirect/.test(sdk) && /En direct/.test(sdk)) rapport.ok('Voyant « En direct / Relais » present dans l\'en-tete');
+  if (/ouvertJusqua/.test(sdk) && /En direct/.test(sdk) && /width = '12px'/.test(sdk)) rapport.ok('Voyant de synchro discret (petit point, detail a l\'appui, texte seulement en cas d\'alerte)');
   else rapport.ko('Voyant temps reel absent');
 }
 module.exports = { run };

@@ -213,8 +213,10 @@
           part d'une liste sans suppression volontaire (tombstones).
      ======================================================================== */
   var _rowBase = {};   /* uid|cle -> { ts, json } : ce que CE poste a ecrit en dernier */
-  var _rowsCache = {}; /* uid -> { cle: json } : copie des lignes serveur (lecture ciblee) */
-  var _rowsTs = {};    /* uid -> { cle: updated_at } : version serveur de chaque ligne en cache */
+  var _rowsCache = {}; /* uid -> { cle: json } : copie des lignes serveur (lecture ciblee) */
+
+  var _rowsTs = {};    /* uid -> { cle: updated_at } : version serveur de chaque ligne en cache */
+
   var DELTA_FULL_MS = 30 * 60 * 1000; /* relecture integrale de controle : 1 fois / 30 min */
   var _watchers = {};  /* uid -> [fonction] : rafraichir les pages apres une fusion */
   var SYNC = window.MDB_SYNC = { lastWriteOk: 0, lastWriteErr: 0, lastFetchOk: 0, errStreak: 0,
@@ -229,9 +231,12 @@
   /* Egalite EXACTE d'horodatage (Postgres = microsecondes) : 'Z' == '+00:00', zeros de fin ignores */
   function normTs(t) { return String(t || '').replace('Z', '+00:00').replace(/\.(\d*?)0+(?=[+-])/, '.$1').replace(/\.(?=[+-])/, ''); }
   function sameTs(a, b) { if (!a || !b) return false; return normTs(a) === normTs(b); }
-  function cacheSet(uid, cle, data, ts) {
-    (_rowsCache[uid] = _rowsCache[uid] || {})[cle] = sjson(data);
-    if (ts) (_rowsTs[uid] = _rowsTs[uid] || {})[cle] = ts;
+  function cacheSet(uid, cle, data, ts) {
+
+    (_rowsCache[uid] = _rowsCache[uid] || {})[cle] = sjson(data);
+
+    if (ts) (_rowsTs[uid] = _rowsTs[uid] || {})[cle] = ts;
+
   }
 
   /* ---- Journal local des 200 dernieres ecritures (pour retrouver qui a efface quoi) ---- */
@@ -1062,29 +1067,19 @@
     };
   }
 
-  /* Voyant visible dans l'en-tete des 3 applis :
-     vert « En direct » = les saisies des autres postes arrivent tout de suite ;
-     orange « Relais » = temps reel coupe, verification automatique toutes les quelques secondes. */
-  function majVoyantDirect() {
-    if (typeof document === 'undefined' || !document.getElementById) return;
-    var ok = window.__MDB_RT__ === true;
-    var v = document.getElementById('mdbVoyantDirect');
-    if (!v) {
-      var ancre = document.getElementById('syncIndicator') || document.getElementById('prodSyncStatus') || document.getElementById('payeSyncBadge');
-      if (!ancre || !ancre.parentNode) return;
-      v = document.createElement('span');
-      v.id = 'mdbVoyantDirect';
-      v.style.cssText = 'display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;margin-right:8px;white-space:nowrap;padding:2px 8px;border-radius:999px';
-      ancre.parentNode.insertBefore(v, ancre);
-    }
-    v.title = ok ? 'Synchronisation en temps reel active : les saisies des autres postes s\u2019affichent immediatement'
-                 : 'Temps reel indisponible : verification automatique toutes les quelques secondes';
-    v.style.background = ok ? '#dcfce7' : '#fef3c7';
-    v.style.color = ok ? '#166534' : '#92400e';
-    v.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:' + (ok ? '#16a34a' : '#f59e0b') + '"></span>' + (ok ? 'En direct' : 'Relais');
-  }
-  try { setInterval(function () { try { majVoyantDirect(); } catch (e) {} }, 5000); } catch (eI) {}
-
+  /* Voyant visible dans l'en-tete des 3 applis :
+
+     vert « En direct » = les saisies des autres postes arrivent tout de suite ;
+
+     orange « Relais » = temps reel coupe, verification automatique toutes les quelques secondes. */
+
+  /* L'etat temps reel est montre par le petit voyant de synchro (en bas a gauche) */
+  function majVoyantDirect() {
+    try { var v = document.getElementById('mdbVoyantDirect'); if (v && v.parentNode) v.parentNode.removeChild(v); } catch (e) {}
+  }
+
+
+
   /* Relecture ciblee : seules les rubriques modifiees sont retelechargees */
   function fetchRowsInto(uid, cles, dels) {
     var c = _rowsCache[uid] || (_rowsCache[uid] = {});
@@ -1255,13 +1250,19 @@
   (function () {
     try {
       if (window.top !== window) return;
-      var el = null;
+      var el = null, ouvertJusqua = 0;
       function creer() {
         if (el || !document.body) return;
         el = document.createElement('div');
         el.id = 'mdbSyncBadge';
-        el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483000;font:600 11px/1.2 system-ui,Segoe UI,Arial,sans-serif;padding:4px 9px;border-radius:12px;color:#fff;background:#16a34a;opacity:.88;cursor:pointer;user-select:none;box-shadow:0 1px 4px rgba(0,0,0,.3)';
-        el.onclick = function () { try { console.table(window.mdbSyncJournal().slice(-40)); } catch (e) {} };
+        /* Petit voyant discret (point de couleur). Un appui affiche le detail
+           quelques secondes, puis il redevient un simple point. */
+        el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483000;font:600 11px/1.2 system-ui,Segoe UI,Arial,sans-serif;border-radius:999px;color:#fff;background:#16a34a;cursor:pointer;user-select:none;box-shadow:0 0 0 2px rgba(255,255,255,.9),0 1px 3px rgba(0,0,0,.3);transition:all .2s';
+        el.onclick = function () {
+          ouvertJusqua = Date.now() + 4000; maj();
+          setTimeout(maj, 4100);
+          try { console.table(window.mdbSyncJournal().slice(-40)); } catch (e) {}
+        };
         var st = document.createElement('style');
         st.textContent = '@media print{#mdbSyncBadge{display:none!important}}';
         document.head.appendChild(st);
@@ -1275,10 +1276,16 @@
         if (typeof navigator !== 'undefined' && navigator.onLine === false) { txt = '⚠ Hors ligne — saisies gardees sur ce poste'; bg = '#dc2626'; }
         else if ((S.errStreak || 0) >= 2) { txt = '⚠ Synchro en attente (' + S.errStreak + ' echecs) — reessai auto'; bg = '#ea580c'; }
         else if ((S.enCours || 0) > 0) { txt = '↻ Envoi en cours…'; bg = '#2563eb'; }
-        else if (window.__MDB_RT__ === false) { txt = '● Temps reel coupe — actualisation automatique'; bg = '#ca8a04'; }
-        else if (dern) { var sec = Math.round((now - dern) / 1000); txt = '✓ Synchro OK' + (sec < 90 ? '' : ' · ' + Math.round(sec / 60) + ' min'); bg = '#16a34a'; }
-        else { txt = '● Synchro…'; bg = '#64748b'; }
-        el.textContent = txt; el.style.background = bg;
+        else if (window.__MDB_RT__ === false) { txt = 'Relais : temps reel coupe — verification automatique'; bg = '#f59e0b'; }
+        else if (dern) { var sec = Math.round((now - dern) / 1000); txt = 'En direct · synchro OK' + (sec < 90 ? '' : ' (' + Math.round(sec / 60) + ' min)'); bg = '#16a34a'; }
+        else { txt = 'Connexion…'; bg = '#94a3b8'; }
+        /* Point seul, sauf alerte (hors ligne / echecs) ou appui de l'utilisateur */
+        var alerte = bg === '#dc2626' || bg === '#ea580c';
+        var deplie = alerte || now < ouvertJusqua;
+        el.style.background = bg;
+        if (deplie) { el.textContent = txt; el.style.width = 'auto'; el.style.height = 'auto'; el.style.padding = '4px 9px'; el.style.opacity = '.92'; }
+        else { el.textContent = ''; el.style.width = '12px'; el.style.height = '12px'; el.style.padding = '0'; el.style.opacity = '1'; }
+        el.setAttribute('aria-label', txt);
         el.title = 'Conflits fusionnes : ' + (S.fusions || 0) + ' | Garde-fous : ' + (S.garde || 0) + (S.lastError ? ' | Derniere erreur : ' + S.lastError : '') + ' | Cliquer = journal dans la console (F12)';
       }
       setInterval(maj, 4000);
