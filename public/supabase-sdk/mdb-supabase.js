@@ -349,7 +349,13 @@
     if (mx > 0) o.__resetAt = mx;
     return o;
   }
-  function merge3Array(inc, base, fresh, tomb) {
+  /* Listes de l'appli principale dont chaque VRAIE suppression laisse une
+     pierre tombale (DB.set) : une ligne absente de MA copie mais sans pierre
+     tombale n'est PAS une suppression — c'est une copie perimee (autre onglet,
+     autre fenetre). Avant, la ligne etait retiree du serveur : un fournisseur
+     cree disparaissait tout seul. */
+  var LISTES_A_SUPPRESSION_EXPLICITE = { mdb_fournisseurs: 1, mdb_clients: 1 };
+  function merge3Array(inc, base, fresh, tomb, cle) {
     var bM = {}, fM = {}, iM = {}, out = [], i, x, id, b, f;
     base.forEach(function (r) { bM[idOf(r)] = r; });
     fresh.forEach(function (r) { fM[idOf(r)] = r; });
@@ -369,6 +375,7 @@
       b = bM[id];
       if (b === undefined) { if (!tomb[id] || (x && x.caisseOpId && tomb.__liveOps && tomb.__liveOps[x.caisseOpId])) out.push(x); }      /* ajoute par un autre poste */
       else if (sjson(x) !== sjson(b)) out.push(x);              /* je l'ai supprimee mais un autre l'a modifiee : on garde */
+      else if (LISTES_A_SUPPRESSION_EXPLICITE[cle] && !tomb[id]) out.push(x); /* absente sans suppression volontaire : on garde */
       /* sinon : je l'ai supprimee, personne d'autre n'y a touche -> supprimee */
     }
     return out;
@@ -377,7 +384,7 @@
     if (/tombstone/i.test(name || '')) return mergeTomb(inc, fresh);
     if (Array.isArray(inc) && Array.isArray(fresh)) {
       var b = Array.isArray(base) ? base : [];
-      if (allIdArr(inc) && allIdArr(fresh) && allIdArr(b) && (inc.length || fresh.length || b.length)) return merge3Array(inc, b, fresh, tomb);
+      if (allIdArr(inc) && allIdArr(fresh) && allIdArr(b) && (inc.length || fresh.length || b.length)) return merge3Array(inc, b, fresh, tomb, name);
       return inc;
     }
     if (isPlain(inc) && isPlain(fresh) && (depth || 0) < 4) {
@@ -445,7 +452,20 @@
   function ecrireLigneSure(uid, ligne, lignes, pre) {
     var cle = ligne.cle, bk = bkey(uid, cle), tomb = tombSet(uid, cle, lignes);
     var baseAvant = _rowBase[bk];
-    var inc = baseAvant ? guardMass(cle, ligne.data, baseAvant.json, tomb) : ligne.data;
+    var inc = baseAvant ? guardMass(cle, ligne.data, baseAvant.json, tomb) : ligne.data;
+    /* Listes a suppression explicite : une ligne que j'avais deja envoyee et
+       qui manque maintenant SANS pierre tombale vient d'une copie perimee
+       (autre onglet) -> on la renvoie au lieu de l'effacer du serveur. */
+    if (baseAvant && LISTES_A_SUPPRESSION_EXPLICITE[cle] && Array.isArray(inc)) {
+      try {
+        var bA = JSON.parse(baseAvant.json);
+        if (Array.isArray(bA) && allIdArr(bA) && allIdArr(inc)) {
+          var vu = {}; inc.forEach(function (x) { vu[idOf(x)] = 1; });
+          var manq = bA.filter(function (x) { var i = idOf(x); return !vu[i] && !tomb[i]; });
+          if (manq.length) { inc = inc.concat(manq); journal({ op: 'GARDE-LISTE', cle: cle, remis: manq.length }); }
+        }
+      } catch (eGL) {}
+    }
     function reussi(r, envoye, fusionne) {
       /* json = ce que CE poste voulait (base de la prochaine fusion) ;
          srv = ce que le serveur contient reellement apres l'ecriture. */

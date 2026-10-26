@@ -245,6 +245,25 @@ async function run(rapport) {
     else rapport.ko('tombstone : serveur = ' + r);
   });
 
+  await cas('fournisseur : copie perimee sans suppression volontaire', async function () {
+    /* A cree F3 ; A recoit ensuite une copie perimee (autre fenetre) sans F3 et
+       la renvoie : sans pierre tombale, F3 ne doit PAS disparaitre du serveur. */
+    const serveur = creerServeur();
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_fournisseurs', data: [rec('f1'), rec('f2')], updated_at: '2026-10-24T04:00:00.000000+00:00' });
+    serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: '__split_migration_ok', data: { v: 1 }, updated_at: 'x' });
+    const A = creerPoste(serveur);
+    await A.ecrire({ mdb_fournisseurs: [rec('f1'), rec('f2')] });
+    await A.ecrire({ mdb_fournisseurs: [rec('f1'), rec('f2'), rec('f3')] });
+    await A.ecrire({ mdb_fournisseurs: [rec('f1'), rec('f2')] });
+    const r1 = ids(ligne(serveur, 'mdb_fournisseurs'));
+    const B = creerPoste(serveur, { mdb_fournisseurs: { f2: Date.now() } });
+    await B.ecrire({ mdb_fournisseurs: [rec('f1'), rec('f2'), rec('f3')] });
+    await B.ecrire({ mdb_fournisseurs: [rec('f1'), rec('f3')] });
+    const r2 = ids(ligne(serveur, 'mdb_fournisseurs'));
+    if (r1 === 'f1,f2,f3' && r2 === 'f1,f3') rapport.ok('fournisseur cree : une copie perimee ne l\'efface plus (' + r1 + '), une vraie suppression passe (' + r2 + ')');
+    else rapport.ko('fournisseurs : apres copie perimee = ' + r1 + ' ; apres suppression = ' + r2);
+  });
+
   await cas('poste neuf (sans base) n\'efface pas le serveur', async function () {
     const serveur = creerServeur();
     serveur.tables.enterprise_data.push({ enterprise_id: 'E1', cle: 'mdb_x', data: [rec('s1'), rec('s2'), rec('s3')], updated_at: '2026-10-24T04:00:00.000000+00:00' });
