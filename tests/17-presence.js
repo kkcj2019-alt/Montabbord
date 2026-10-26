@@ -119,6 +119,26 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Caisse : appro depuis la banque  ->  ' + res); else rapport.ko('Appro banque  ->  ' + res);
 
+  /* Montage : une saisie refaite APRES une suppression ne doit plus etre effacee a la synchro */
+  try {
+    const hm = chargerApp('paye.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      var day = '2026-10-02', e = 'e1';
+      var old = { id:'m_old', employee_id:e, date:day, article_code:'E2', quantite:4 };
+      var cloud = { pointageMontage:[old], pointageMontage_tombstones:[] };
+      var tb = []; _payeAjouterTombCle(tb, old); tb.push('m_old');
+      var t0 = Date.now(); while (Date.now() - t0 < 3) {}
+      var neu = { id:'m_new', employee_id:e, date:day, article_code:'E2', quantite:9, updatedAt: Date.now() + 5 };
+      var local = { pointageMontage:[neu], pointageMontage_tombstones: tb };
+      var a = _payeMergeObj(JSON.parse(JSON.stringify(local)), JSON.parse(JSON.stringify(cloud)), false).pointageMontage;
+      var b = _payeMergeObj(JSON.parse(JSON.stringify(cloud)), JSON.parse(JSON.stringify(local)), true).pointageMontage;
+      var leg = _payeMergeObj({ pointageMontage:[neu], pointageMontage_tombstones:['cle:pt:e1|2026-10-02|e2'] }, { pointageMontage:[{ employee_id:e, date:day, article_code:'E2', quantite:4, id:'x' }] }, false).pointageMontage;
+      var ok = a.length === 1 && a[0].quantite === 9 && b.length === 1 && b[0].quantite === 9 && leg.length === 1 && leg[0].quantite === 9;
+      return ok ? 'OK : nouvelle saisie gardee (9), ancienne version effacee' : 'ECHEC ' + JSON.stringify({a:a, b:b, leg:leg});
+    })()`, hm.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Montage : saisie refaite apres suppression conservee  ->  ' + res); else rapport.ko('Montage resaisie effacee  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');

@@ -10254,7 +10254,7 @@ r.push({
       );
       var tb = getPayeSection('pointage_tombstones', []);
       var aId = tb.indexOf('d1') !== -1;
-      var aCle = tb.indexOf('cle:pt:e1|2026-10-03|') !== -1;
+      var aCle = tb.some(function (t) { return /^cle:pt:e1\|2026-10-03\|@\d+$/.test(String(t)); });
       var corb = false;
       for (var i = 0; i < localStorage.length; i++) {
         if ((localStorage.key(i) || '').indexOf('mdb_corbeille_pointage_') === 0) corb = true;

@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script>
     <script>
-      window.__APP_VERSION = "2026-10-26-311";
+      window.__APP_VERSION = "2026-10-26-312";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6532,12 +6532,45 @@ function payeObj(key) {
       }
       /* Une ligne est supprimee si son id OU sa cle metier est tombstonee.
          setTomb : objet {valeur: true} construit depuis le tableau tombstones. */
+      /* Tombstone « clé métier » DATÉ : "cle:<clé>@<horodatage>". Avant, la clé
+         était permanente : après avoir effacé (ou modifié) une journée, toute
+         NOUVELLE saisie du même employé / jour / article était effacée à la
+         synchro suivante — « je pointe, puis tout disparaît ». Désormais la
+         suppression ne vise que les versions ANTÉRIEURES à elle ; une saisie
+         faite après reste. Ancien format sans date : ne retire que les lignes
+         sans horodatage (anciennes copies), jamais une saisie récente. */
+      function _payeTombCleSet(arr) {
+        var set = {};
+        (Array.isArray(arr) ? arr : []).forEach(function (t) {
+          var s = String(t);
+          if (s.indexOf("cle:") === 0) {
+            var at = s.lastIndexOf("@"), k = s, ts = 0;
+            if (at > 4) { k = s.slice(0, at); ts = parseFloat(s.slice(at + 1)) || 0; }
+            if (!set.hasOwnProperty(k) || ts > set[k]) set[k] = ts;
+          } else set[s] = true;
+        });
+        return set;
+      }
+      function _payeAjouterTombCle(tb, ligne) {
+        var c = _payeCleMetierPointage(ligne);
+        if (!c || !Array.isArray(tb)) return;
+        var k = "cle:" + c;
+        for (var i = tb.length - 1; i >= 0; i--) {
+          var s = String(tb[i]);
+          if (s === k || s.indexOf(k + "@") === 0) tb.splice(i, 1);
+        }
+        tb.push(k + "@" + Date.now());
+      }
       function _payeEstSupprimePointage(setTomb, ligne) {
         try {
           if (!setTomb || !ligne || typeof ligne !== "object") return false;
-          if (ligne.id && setTomb[String(ligne.id)]) return true;
+          if (ligne.id && setTomb[String(ligne.id)] === true) return true;
           var c = _payeCleMetierPointage(ligne);
-          if (c && setTomb["cle:" + c]) return true;
+          if (c && setTomb.hasOwnProperty("cle:" + c)) {
+            var tsT = setTomb["cle:" + c];
+            if (tsT === true) tsT = 0;
+            return _payeEmpTime(ligne) <= (parseFloat(tsT) || 0);
+          }
         } catch (e) {}
         return false;
       }
@@ -6953,13 +6986,14 @@ function payeObj(key) {
         var _pTombC = Array.isArray(cur.pointage_tombstones) ? cur.pointage_tombstones : [];
         var _pTombI = Array.isArray(inc.pointage_tombstones) ? inc.pointage_tombstones : [];
         if (_pTombC.length || _pTombI.length) {
-          var _pT = {};
+          var _pTV = {};
           var _pTAll = [];
           var _pTArr = _pTombC.concat(_pTombI);
           for (var _pi = 0; _pi < _pTArr.length; _pi++) {
             var _pk = String(_pTArr[_pi]);
-            if (!_pT[_pk]) { _pT[_pk] = true; _pTAll.push(_pk); }
+            if (!_pTV[_pk]) { _pTV[_pk] = true; _pTAll.push(_pk); }
           }
+          var _pT = _payeTombCleSet(_pTAll);
           if (Array.isArray(merged.pointage)) {
             /* Id OU cle metier : une journee effacee ne revient pas, meme si un
                poste l'a reconstruite avec un nouvel id entre-temps. */
@@ -6974,13 +7008,14 @@ function payeObj(key) {
         var _pmTombC = Array.isArray(cur.pointageMontage_tombstones) ? cur.pointageMontage_tombstones : [];
         var _pmTombI = Array.isArray(inc.pointageMontage_tombstones) ? inc.pointageMontage_tombstones : [];
         if (_pmTombC.length || _pmTombI.length) {
-          var _pmT = {};
+          var _pmV = {};
           var _pmAll = [];
           var _pmArr = _pmTombC.concat(_pmTombI);
           for (var _pmi = 0; _pmi < _pmArr.length; _pmi++) {
             var _pmk = String(_pmArr[_pmi]);
-            if (!_pmT[_pmk]) { _pmT[_pmk] = true; _pmAll.push(_pmk); }
+            if (!_pmV[_pmk]) { _pmV[_pmk] = true; _pmAll.push(_pmk); }
           }
+          var _pmT = _payeTombCleSet(_pmAll);
           if (Array.isArray(merged.pointageMontage)) {
             merged.pointageMontage = merged.pointageMontage.filter(function (p) {
               return !_payeEstSupprimePointage(_pmT, p);
@@ -21516,8 +21551,7 @@ function peTogglePst() {
             tb.forEach(function (t) { set[String(t)] = true; });
             supprimees.forEach(function (l) {
               if (l && l.id && !set[String(l.id)]) { tb.push(String(l.id)); set[String(l.id)] = true; }
-              var c = _payeCleMetierPointage(l);
-              if (c && !set["cle:" + c]) { tb.push("cle:" + c); set["cle:" + c] = true; }
+              _payeAjouterTombCle(tb, l);
             });
             while (tb.length > 2000) tb.shift();
             setPayeSection("pointage_tombstones", tb);
@@ -22961,8 +22995,7 @@ function ptMontFilterArts(q) {
           tb.forEach(function (x) { set[String(x)] = true; });
           supprimees.forEach(function (l) {
             if (l && l.id && !set[String(l.id)]) { tb.push(String(l.id)); set[String(l.id)] = true; }
-            var c = _payeCleMetierPointage(l);
-            if (c && !set["cle:" + c]) { tb.push("cle:" + c); set["cle:" + c] = true; }
+            _payeAjouterTombCle(tb, l);
           });
           while (tb.length > 2000) tb.shift();
           setPayeSection("pointageMontage_tombstones", tb);
@@ -25826,8 +25859,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             tb.forEach(function (x) { set[String(x)] = true; });
             tombstoned.forEach(function (l) {
               if (l && l.id && !set[String(l.id)]) { tb.push(String(l.id)); set[String(l.id)] = true; }
-              var c = _payeCleMetierPointage(l);
-              if (c && !set["cle:" + c]) { tb.push("cle:" + c); set["cle:" + c] = true; }
+              _payeAjouterTombCle(tb, l);
             });
             while (tb.length > 2000) tb.shift();
             setPayeSection("pointageMontage_tombstones", tb);
