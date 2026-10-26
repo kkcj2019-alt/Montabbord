@@ -54,6 +54,21 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Recuperation de la Paie depuis une sauvegarde (fusion sans effacement)  ->  ' + res); else rapport.ko('Recuperation Paie  ->  ' + res);
 
+  try {
+    const ha = chargerApp('index.html', storeRealiste());
+    vm.runInContext("window.currentUser = window.__currentUser = {id:'u1',login:'admin',nom:'Admin',isAdmin:true,isSuperAdmin:true,sections:{}};", ha.ctx);
+    res = String(vm.runInContext(`(function(){
+      navigateTo('accidents'); var ok1 = /Accidents du travail/.test(document.getElementById('content').innerHTML);
+      showAccident(); var emp = (getEmployes()[0] || {}).id || 'e1';
+      var set = function(i, v){ var e = document.getElementById(i); if (e) e.value = v; };
+      set('at-emp', emp); set('at-date', '2026-10-20'); set('at-prise', 'entreprise'); set('at-frais-ent', '25000'); set('at-jours', '3');
+      saveAccident(''); var l = getAccidents(); var a = l[l.length - 1];
+      var x = ''; window.open = function(){ return { document: { write: function(s){ x += s; }, close: function(){} } }; }; printAccident(a.id);
+      return (ok1 && a && a.numero === 'AT-2026-001' && a.frais_entreprise === 25000 && atRetardCNPS(a) && /FICHE D/.test(x)) ? 'OK : page, enregistrement AT-2026-001, alerte CNPS > 48 h, fiche imprimable' : 'ECHEC ' + JSON.stringify({ok1:ok1, a:a});
+    })()`, ha.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('RH : registre des accidents du travail  ->  ' + res); else rapport.ko('Accidents du travail  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');

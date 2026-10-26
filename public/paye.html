@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script>
     <script>
-      window.__APP_VERSION = "2026-10-26-303";
+      window.__APP_VERSION = "2026-10-26-304";
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -25461,145 +25461,100 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         if (resteTxt) resteTxt.textContent = scopeNp;
       }
 
+      /* Fiche de présence (modèle papier de l'atelier) : UNE page A4, la
+         semaine du lundi au dimanche, une ligne par personne, cases PRÉSENT /
+         ABSENT par jour, cochées d'un X selon le pointage. Groupes :
+         MACHINISTES, MONTEURS, MANUTENTIONNAIRES, puis AUTRES (tout le reste).
+         isVierge = cases vides, pour remplir à la main. */
+      function fpjGroupeAtelier(e) {
+        var f = String((e && e.fonction) || "").toLowerCase();
+        if (f.indexOf("machin") !== -1) return "MACHINISTES";
+        if (f.indexOf("monteur") !== -1) return "MONTEURS";
+        if (f.indexOf("manuten") !== -1) return "MANUTENTIONNAIRES";
+        return "AUTRES";
+      }
       function printFichePresenceJour(dateTarget, isVierge) {
-        var dateStr = dateTarget || new Date().toISOString().slice(0, 10);
+        var dateStr = String(dateTarget || _payeAujourdhui()).slice(0, 10);
         var selFct = ((document.getElementById("fpj-fonction-select") || {}).value || "").trim();
-
-        var emps = getPersonnel().filter(function(p){
-          if (p.en_paie === false) return false;
-          if (selFct) {
-            return fpjGroupKey(p) === selFct;
-          }
-          return true;
+        var d0 = new Date(dateStr + "T12:00:00");
+        var lun = new Date(d0); lun.setDate(d0.getDate() - ((d0.getDay() + 6) % 7));
+        var jours = [], noms = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"];
+        for (var i = 0; i < 7; i++) {
+          var dj = new Date(lun); dj.setDate(lun.getDate() + i);
+          jours.push({ iso: dj.getFullYear() + "-" + String(dj.getMonth() + 1).padStart(2, "0") + "-" + String(dj.getDate()).padStart(2, "0"), nom: noms[i], num: dj.getDate() });
+        }
+        var fmtC = function (iso) { var p = iso.split("-"); return p[2] + "/" + p[1] + "/" + p[0].slice(2); };
+        /* personnel en poste au moins un jour de la semaine */
+        var emps = getPersonnel().filter(function (p) {
+          if (selFct && fpjGroupKey(p) !== selFct) return false;
+          for (var j = 0; j < 7; j++) if (empActifLeJour(p, jours[j].iso)) return true;
+          return false;
         });
-
-        var pts = getPointageData().filter(function(p){ return p && p.date === dateStr; });
-        var ptMap = {};
-        pts.forEach(function(p){ if(p && p.employee_id) ptMap[p.employee_id] = p; });
-        var montMap = {};
-        try {
-          (getPointageMontage() || []).forEach(function(m){
-            if (m && m.date === dateStr && (m.quantite || 0) > 0) montMap[m.employee_id] = (m.quantite || 0);
+        var ptMap = {}, montMap = {};
+        var setJ = {}; jours.forEach(function (j) { setJ[j.iso] = 1; });
+        getPointageData().forEach(function (p) { if (p && setJ[p.date] && p.employee_id) ptMap[p.employee_id + "|" + p.date] = p; });
+        try { (getPointageMontage() || []).forEach(function (m) { if (m && setJ[m.date] && (m.quantite || 0) > 0) montMap[m.employee_id + "|" + m.date] = 1; }); } catch (eM) {}
+        var statut = function (e, iso) {
+          if (isVierge || !empActifLeJour(e, iso)) return "";
+          var mm = {}; if (montMap[e.id + "|" + iso]) mm[e.id] = 1;
+          var pm = {}; if (ptMap[e.id + "|" + iso]) pm[e.id] = ptMap[e.id + "|" + iso];
+          var st = fpjStatutEmp(e, pm, mm);
+          return st === "np" ? "" : st;
+        };
+        var ordre = ["MACHINISTES", "MONTEURS", "MANUTENTIONNAIRES", "AUTRES"], grp = {};
+        ordre.forEach(function (g) { grp[g] = []; });
+        emps.forEach(function (e) { grp[fpjGroupeAtelier(e)].push(e); });
+        ordre.forEach(function (g) { grp[g].sort(function (a, b) { return ((a.nom || "") + " " + (a.prenoms || "")).localeCompare((b.nom || "") + " " + (b.prenoms || "")); }); });
+        var groupes = ordre.filter(function (g) { return grp[g].length; });
+        /* Tout sur UNE page : la hauteur de ligne s'adapte au nombre de personnes */
+        var nbLignes = emps.length + groupes.length + 3;
+        var hDispo = 297 - 16 - 30;               /* mm : page - marges - titre/pied */
+        var hL = Math.max(3.6, Math.min(7, hDispo / nbLignes));
+        var fs = Math.max(6, Math.min(10, hL * 1.45)); /* pt */
+        /* résumé du jour choisi */
+        var nP = 0, nA = 0, nEff = 0;
+        if (!isVierge) emps.forEach(function (e) { if (!empActifLeJour(e, dateStr)) return; nEff++; var s2 = statut(e, dateStr); if (s2 === "pres") nP++; else if (s2 === "abs") nA++; });
+        var soc = {}; try { soc = (typeof getSocieteP === "function" ? getSocieteP() : getPayeSection("societe", {})) || {}; } catch (eSo) {}
+        var X = function (on, coul) { return on ? '<b style="color:' + coul + ';font-size:' + (fs + 2) + 'pt">X</b>' : ""; };
+        var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche de présence ' + fmtC(jours[0].iso) + '</title><style>' +
+          '@page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#000;margin:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+          '.t{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:2mm}.t h1{font-size:15pt;margin:0;letter-spacing:.5px}' +
+          '.t .s{font-size:12pt;font-weight:700}.r{font-size:9pt;margin-bottom:2mm;padding:1.5mm 3mm;border:1px solid #000;display:flex;gap:6mm;font-weight:700}' +
+          'table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #000;padding:0 1.5mm;height:' + hL.toFixed(2) + 'mm;font-size:' + fs.toFixed(1) + 'pt;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}' +
+          'th{font-size:' + Math.max(5, fs - 2).toFixed(1) + 'pt;text-align:center;background:#f1f5f9;padding:0;white-space:normal;text-overflow:clip}td.c{text-align:center;padding:0}' +
+          'tr.g td{text-align:center;font-weight:800;background:#e2e8f0;letter-spacing:.5px}.auj{background:#fef9c3 !important}' +
+          '.pied{display:flex;justify-content:space-between;margin-top:3mm;font-size:8pt}@media print{.np{display:none}}</style></head><body>' +
+          '<div class="np" style="padding:8px;text-align:center"><button onclick="window.print()" style="padding:8px 18px;font-weight:700;background:#0f172a;color:#fff;border:none;border-radius:6px;cursor:pointer">🖨️ Imprimer / PDF</button></div>' +
+          '<div class="t"><h1>FICHE DE PRÉSENCE</h1><div class="s">SEMAINE DU : ' + fmtC(jours[0].iso) + ' &nbsp; AU ' + fmtC(jours[6].iso) + '</div><div style="font-size:9pt;font-weight:700">' + escH(soc.nom || "") + '</div></div>';
+        if (!isVierge)
+          h += '<div class="r"><span>Jour : ' + escH(fmtDate(dateStr)) + '</span><span>Effectif : ' + nEff + '</span><span style="color:#15803d">Présents : ' + nP + (nEff ? ' (' + Math.round(nP / nEff * 100) + ' %)' : '') + '</span><span style="color:#b91c1c">Absents : ' + nA + (nEff ? ' (' + Math.round(nA / nEff * 100) + ' %)' : '') + '</span>' + (nEff - nP - nA > 0 ? '<span>Non pointés : ' + (nEff - nP - nA) + '</span>' : '') + '</div>';
+        h += '<table><colgroup><col style="width:27%">';
+        for (var c = 0; c < 14; c++) h += '<col>';
+        h += '</colgroup><thead><tr><th rowspan="2" style="text-align:left">NOM ET PRÉNOMS</th>';
+        jours.forEach(function (j) { h += '<th colspan="2" class="' + (j.iso === dateStr && !isVierge ? 'auj' : '') + '">' + j.nom + ' ' + j.num + '</th>'; });
+        h += '</tr><tr>';
+        jours.forEach(function (j) { var cl = (j.iso === dateStr && !isVierge) ? ' class="auj"' : ''; h += '<th' + cl + '>PRÉSENT</th><th' + cl + '>ABSENT</th>'; });
+        h += '</tr></thead><tbody>';
+        groupes.forEach(function (g) {
+          h += '<tr class="g"><td colspan="15">' + g + ' (' + grp[g].length + ')</td></tr>';
+          grp[g].forEach(function (e) {
+            h += '<tr><td>' + escH(((e.nom || "") + " " + (e.prenoms || "")).trim().toUpperCase()) + '</td>';
+            jours.forEach(function (j) {
+              var st = statut(e, j.iso), cl = (j.iso === dateStr && !isVierge) ? ' auj' : '';
+              var horsPoste = !empActifLeJour(e, j.iso);
+              var bg = horsPoste ? ' style="background:#cbd5e1"' : '';
+              h += '<td class="c' + cl + '"' + bg + '>' + X(st === "pres", "#15803d") + '</td><td class="c' + cl + '"' + bg + '>' + X(st === "abs", "#b91c1c") + '</td>';
+            });
+            h += '</tr>';
           });
-        } catch(eM){}
-
-        /* Regroupement : par Fonction, ou par Département PUIS Fonction */
-        var hierP = fpjBuildSections(emps, ptMap, montMap);
-        var sectionsP = hierP.sections;
-        var deptStatsP = hierP.deptStats;
-
-        var presCount = 0, absCount = 0;
-        emps.forEach(function(e){
-          var rec = ptMap[e.id];
-          var h = rec ? (parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"")) : 0;
-          if (rec && (rec.present === true || h > 0 || montMap[e.id] || rec.faute_societe === true || rec.absent_paye === true)) presCount++;
-          else if (rec && rec.present === false) absCount++;
         });
-        var rateP = emps.length > 0 ? ((presCount / emps.length) * 100).toFixed(1) : "0.0";
-
-        var soc = payeObj("mdb_entreprise");
-        var dFr = new Date(dateStr).toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-
+        h += '<tr><td style="font-weight:700">VISA RESPONSABLE</td>';
+        for (var v = 0; v < 7; v++) h += '<td colspan="2"></td>';
+        h += '</tr></tbody></table>' +
+          '<div class="pied"><span>Éditée le ' + new Date().toLocaleString("fr-FR") + '</span><span>Gris = pas en poste ce jour-là</span></div>' +
+          '<script>window.onload=function(){try{setTimeout(function(){window.print();},300);}catch(e){}}<\/script></body></html>';
         var w = window.open("", "_blank");
-        if (!w) return toast("Popup bloquée — autorisez les popups", "error");
-
-        var h = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche de Présence — ' + dateStr + '</title>' +
-          '<style>' +
-          '@page { size: A4 landscape; margin: 8mm 6mm; }' +
-          'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; padding: 10px; color: #0f172a; font-size: 10px; }' +
-          '.hdr { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 10px; }' +
-          '.stats-bar { display: flex; gap: 14px; font-size: 10px; font-weight: 700; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 12px; margin-bottom: 10px; }' +
-          'table { width: 100%; border-collapse: collapse; font-size: 8.5px; }' +
-          'th, td { border: 1px solid #334155; padding: 4px 6px; }' +
-          'th { background: #0f172a; color: #fff; text-transform: uppercase; font-size: 8px; }' +
-          '.emarg { width: 110px; height: 18px; }' +
-          '@media print { .no-print { display: none !important; } }' +
-          '</style></head><body>' +
-          '<div class="no-print" style="margin-bottom:10px;text-align:right">' +
-            '<button onclick="window.print()" style="padding:8px 18px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer">🖨️ Imprimer la fiche</button>' +
-          '</div>' +
-          '<div class="hdr">' +
-            '<div style="display:flex;align-items:center;gap:12px">' +
-              (soc.logo ? '<img src="' + soc.logo + '" style="max-height:48px">' : '') +
-              '<div><div style="font-size:16px;font-weight:800;text-transform:uppercase">' + escH(soc.nom || 'ACSER') + '</div>' +
-              '<div style="font-size:11px;color:#475569;font-weight:600">FICHE DE PRÉSENCE JOURNALIÈRE & ÉMARGEMENT ' + (fpjGroupMode === "departement" ? "PAR DÉPARTEMENT \u203a FONCTION" : "PAR FONCTION") + '</div></div>' +
-            '</div>' +
-            '<div style="text-align:right">' +
-              '<div style="font-size:13px;font-weight:800;text-transform:capitalize">' + escH(dFr) + '</div>' +
-              '<div style="font-size:10px;color:#64748b">Date : ' + dateStr + (selFct ? ' · ' + escH(selFct) : '') + '</div>' +
-            '</div>' +
-          '</div>' +
-          (!isVierge ? ('<div class="stats-bar">' +
-            '<div>Effectif : <b>' + emps.length + '</b></div>' +
-            '<div style="color:#16a34a">Présents : <b>' + presCount + '</b></div>' +
-            '<div style="color:#dc2626">Absents : <b>' + absCount + '</b></div>' +
-            '<div style="color:#2563eb">Taux de présence : <b>' + rateP + '%</b></div>' +
-          '</div>') : '') +
-          '<table>' +
-            '<thead><tr>' +
-              '<th style="width:24px;text-align:center">N°</th>' +
-              '<th style="width:55px;text-align:left">Matricule</th>' +
-              '<th style="text-align:left">Nom & Prénoms</th>' +
-              '<th style="text-align:left">Département / Poste</th>' +
-              '<th style="width:70px;text-align:center">Statut</th>' +
-              '<th style="width:65px;text-align:center">Arrivée</th>' +
-              '<th style="width:65px;text-align:center">Départ</th>' +
-              '<th style="width:50px;text-align:right">Heures</th>' +
-              '<th style="width:120px;text-align:center">Émargement / Signature</th>' +
-            '</tr></thead><tbody>';
-
-        var pGlobalIx = 0;
-        var pLastDept = null;
-        sectionsP.forEach(function(sec){
-          var list = sec.list;
-          var fPres = sec.stats.pres, fAbs = sec.stats.abs, fRate = sec.stats.taux;
-
-          /* Bandeau département (mode Département → Fonction) */
-          if (fpjGroupMode === "departement" && sec.dept !== pLastDept) {
-            pLastDept = sec.dept;
-            var dsP = (deptStatsP[sec.dept] && deptStatsP[sec.dept].stats) || { total: 0, pres: 0, abs: 0, taux: "0" };
-            h += '<tr style="background:#0f172a;color:#fff;font-weight:800"><td colspan="9" style="padding:6px 8px;font-size:11px;letter-spacing:0.8px;border-top:2px solid #000">' +
-              '🏢 DÉPARTEMENT : ' + escH(sec.dept.toUpperCase()) +
-              ' — Effectif : ' + dsP.total + ' | Présents : ' + dsP.pres + ' | Absents : ' + dsP.abs + ' | Taux : ' + dsP.taux + '%' +
-            '</td></tr>';
-          }
-
-          /* Ligne d'en-tête de fonction dans l'impression */
-          h += '<tr style="background:#1e293b;color:#fff;font-weight:800"><td colspan="9" style="padding:5px 8px' + (fpjGroupMode === "departement" ? ' 5px 8px 5px 22px' : '') + ';font-size:9.5px;letter-spacing:0.5px">' +
-            (fpjGroupMode === "departement" ? '↳ 🏷️ FONCTION : ' : '🏷️ FONCTION : ') + escH(sec.fct.toUpperCase()) +
-            ' — Effectif : ' + list.length + ' | Présents : ' + fPres + ' | Absents : ' + fAbs + ' (Taux : ' + fRate + '%)' +
-          '</td></tr>';
-
-          list.forEach(function(e){
-            pGlobalIx++;
-            var rec = ptMap[e.id];
-            var arr = (!isVierge && rec && rec.j_arrivee) ? rec.j_arrivee : '';
-            var dep = (!isVierge && rec && rec.j_fin) ? rec.j_fin : '';
-            var hJ = (!isVierge && rec) ? (parseHeure(rec.h_j_manual||"") + parseHeure(rec.h_n_manual||"")) : 0;
-            var isMont = !!montMap[e.id];
-            var st = isVierge ? '' : (rec ? (rec.faute_societe ? 'Faute soc.' : rec.absent_paye ? 'Abs. payé' : rec.present === false ? ('Absent' + (rec.motif ? ' (' + rec.motif + ')' : '')) : isMont ? 'Montage' : 'Présent') : 'Non pointé');
-            var bg = isVierge ? '#fff' : (rec && rec.present === false ? '#fef2f2' : '#fff');
-
-            h += '<tr style="background:' + bg + '">' +
-              '<td style="text-align:center;color:#64748b">' + pGlobalIx + '</td>' +
-              '<td style="font-weight:700">' + escH(e.matricule || '—') + '</td>' +
-              '<td style="font-weight:700">' + escH(empNameLine(e)) + '</td>' +
-              '<td>' + escH(e.service || sec.fct || '—') + '</td>' +
-              '<td style="text-align:center;font-weight:700;' + (rec && rec.present === false ? 'color:#dc2626' : (rec && rec.present === true ? 'color:#16a34a' : '')) + '">' + escH(st) + '</td>' +
-              '<td style="text-align:center">' + escH(arr) + '</td>' +
-              '<td style="text-align:center">' + escH(dep) + '</td>' +
-              '<td style="text-align:right;font-weight:700">' + (hJ > 0 ? ptFmtDec(hJ) + 'h' : '') + '</td>' +
-              '<td class="emarg"></td>' +
-            '</tr>';
-          });
-        });
-
-        h += '</tbody></table>' +
-          '<div style="display:flex;justify-content:space-between;margin-top:16px;font-size:10px">' +
-            '<div>Éditée le ' + new Date().toLocaleString("fr-FR") + '</div>' +
-            '<div style="text-align:center;border-top:1px solid #0f172a;width:200px;padding-top:4px">Visa & Signature Direction / RH</div>' +
-          '</div>' +
-          '<script>window.onload=function(){try{window.print();}catch(e){}}<\/script></body></html>';
+        if (!w) { toast("Autorisez les fenêtres pour imprimer", "error"); return; }
         w.document.write(h);
         w.document.close();
       }
