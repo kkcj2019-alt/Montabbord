@@ -21,7 +21,7 @@ function navigateur(quota) {
   Object.defineProperty(Storage.prototype, 'length', { get: function () { return Object.keys(this._d).length; } });
   const ls = new Storage();
   const win = { Storage: Storage, localStorage: ls };
-  vm.runInNewContext(fs.readFileSync(MODULE, 'utf8'), { window: win, String: String, Date: Date, Object: Object });
+  vm.runInNewContext(fs.readFileSync(MODULE, 'utf8'), { window: win, String: String, Date: Date, Object: Object, Math: Math, console: { warn: function () {}, log: function () {} } });
   return win;
 }
 
@@ -51,5 +51,22 @@ function run(rapport) {
   const ok4 = !!e4 && ls.getItem('mdb_backup_2') === null;
   if (ok1 && ok2 && ok3 && ok4) rapport.ok('stockage plein : vieilles copies de securite purgees d\'abord ; sinon valeur gardee en memoire et relue a jour (plus de solde/total perime) ; retour a la normale quand la place revient');
   else rapport.ko('stockage plein : ' + JSON.stringify({ ok1: ok1, ok2: ok2, ok3: ok3, ok4: ok4, e1: erreur1 && erreur1.message }));
+  /* 5. Donnees reelles plus grosses que la place : compression automatique */
+  const { storeRealiste } = require('./lib/sandbox.js');
+  const base = storeRealiste();
+  const gros = {};
+  /* rubriques volumineuses fabriquees (pointage, caisse) : ~1,5 M caracteres */
+  const pt = []; for (let i = 0; i < 4000; i++) pt.push({ id: 'p' + i, date: '2026-10-' + String(1 + i % 28).padStart(2, '0'), employee_id: 'e' + (i % 45), present: i % 7 !== 0, h_j_manual: '8', j_arrivee: '08:00', j_fin: '17:00', obs: '' });
+  gros.mdb_paye = JSON.stringify({ pointage: pt, societe: { nom: 'ACSER' } });
+  const ops = []; for (let i = 0; i < 2500; i++) ops.push({ id: 'o' + i, date: '2026-09-' + String(1 + i % 28).padStart(2, '0'), libelle: 'Achat consommable atelier ' + i, montant: 1000 + i, sens: i % 2 ? 'sortie' : 'entree', caisseId: 'c' + (i % 5) });
+  gros.mdb_operationsCaisse = JSON.stringify(ops);
+  const total = Object.keys(gros).reduce((a, k) => a + gros[k].length, 0);
+  const w5 = navigateur(Math.round(total * 0.6));
+  let err5 = null;
+  try { for (const k in base) w5.localStorage.setItem(k, base[k]); for (const k in gros) w5.localStorage.setItem(k, gros[k]); } catch (e) { err5 = e; }
+  const tous = Object.keys(gros).every(k => w5.localStorage.getItem(k) === gros[k]);
+  const occupe = Object.keys(w5.localStorage._d).reduce((a, k) => a + k.length + w5.localStorage._d[k].length, 0);
+  if (!err5 && tous && occupe < total) rapport.ok('stockage plein : les grosses rubriques sont compressees automatiquement (' + total + ' -> ' + occupe + ' caracteres) et relues a l\'identique');
+  else rapport.ko('compression : ' + JSON.stringify({ err: err5 && err5.message, tous: tous, occupe: occupe, total: total }));
 }
 module.exports = { run: run };
