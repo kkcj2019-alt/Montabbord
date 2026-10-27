@@ -671,8 +671,34 @@
     return fetchEnterpriseSplitComplet(uid);
   }
 
+  /* Lecture COMPLETE par petits lots : d'abord la liste des rubriques (quelques
+     Ko), puis leurs donnees par paquets. Avant, un seul SELECT ramenait tout le
+     dossier (plusieurs Mo) : avec la croissance des donnees, il depassait le
+     delai du serveur (57014 « statement timeout ») et l'appli basculait en
+     « Mode hors-ligne — cloud injoignable » alors que le cloud allait bien. */
+  function lireToutParLots(uid) {
+    return avecReessai(function () {
+      return sb.from(SPLIT_TABLE).select('cle').eq('enterprise_id', uid).then(function (r) { if (r.error) throw r.error; return r.data || []; });
+    }, 2).then(function (liste) {
+      var cles = [];
+      liste.forEach(function (l) { if (l && typeof l.cle === 'string') cles.push(l.cle); });
+      var lots = [];
+      for (var j = 0; j < cles.length; j += 12) lots.push(cles.slice(j, j + 12));
+      var lignes = [], idx = 0, erreur = null;
+      function suivant() {
+        if (erreur || idx >= lots.length) return Promise.resolve();
+        var lot = lots[idx++];
+        return avecReessai(function () {
+          return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', lot).then(function (r) { if (r.error) throw r.error; return r.data || []; });
+        }, 2).then(function (rows) { lignes = lignes.concat(rows); return suivant(); });
+      }
+      var fils = [];
+      for (var f = 0; f < Math.min(4, lots.length); f++) fils.push(suivant());
+      return Promise.all(fils).then(function () { return { data: lignes, error: null }; });
+    }, function (e) { return { data: null, error: e }; });
+  }
   function fetchEnterpriseSplitComplet(uid) {
-    return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).then(function(res) {
+    return lireToutParLots(uid).then(function(res) {
       if (res.error) {
         if (splitEstTableManquante(res.error)) {
           _splitOK = false;
