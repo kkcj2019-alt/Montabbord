@@ -154,6 +154,18 @@ function run(rapport) {
   } catch (e) { res = 'ECHEC exception ' + e.message; }
   if (res.indexOf('OK') === 0) rapport.ok('Index : tombstones pointage dates  ->  ' + res); else rapport.ko('Index tombstones  ->  ' + res);
 
+  /* Prime de production : couvercles et palettes « hors prime » exclus des barres */
+  try {
+    const hp = chargerApp('paye.html', storeRealiste());
+    res = String(vm.runInContext(`(function(){
+      setArticlesMontage([{code:'PAL114',designation:'PALETTES 114',prix:150,compte_prime:true},{code:'COUV114',designation:'COUVERCLES 114',prix:150,compte_prime:true},{code:'BBAG',designation:'BIG BAG',prix:150,compte_prime:false}]);
+      setPointageMontage([{id:'a',employee_id:'e1',date:'2026-10-02',article_code:'PAL114',quantite:100},{id:'b',employee_id:'e1',date:'2026-10-02',article_code:'COUV114',quantite:40},{id:'c',employee_id:'e1',date:'2026-10-03',article_code:'BBAG',quantite:7}]);
+      var q = ptPrimeProdQuantites('e1','2026-10');
+      return (q.total === 100 && !q.parArt.COUV114 && !q.parArt.BBAG) ? 'OK : 100 palettes comptées (40 couvercles et 7 hors prime exclus)' : 'ECHEC ' + JSON.stringify(q);
+    })()`, hp.ctx, { timeout: 30000 }));
+  } catch (e) { res = 'ECHEC exception ' + e.message; }
+  if (res.indexOf('OK') === 0) rapport.ok('Prime production : seules les palettes qui comptent  ->  ' + res); else rapport.ko('Prime production couvercles  ->  ' + res);
+
   const pub = path.join(__dirname, '..', 'public');
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');
