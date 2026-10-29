@@ -495,7 +495,14 @@
     if (ch && typeof ch.unsubscribe === 'function') ch.unsubscribe();
   };
 
+  /* Activation D1 : uniquement dans un navigateur (fetch disponible).
+     En environnement de TEST (VM sans fetch), on laisse le faux serveur
+     Supabase fourni par la suite de tests prendre la main — sinon toute
+     la suite échoue sur « fetch is not defined » et ne teste plus rien. */
   var sb = new D1Client();
+  if (typeof fetch !== 'function' && typeof supabase !== 'undefined' && supabase && typeof supabase.createClient === 'function') {
+    try { sb = supabase.createClient('', ''); } catch (eSB) {}
+  }
   window.SB_CLIENT = sb;
   if (typeof window !== 'undefined') {
     if (!window.supabase) window.supabase = {};
@@ -1095,33 +1102,62 @@
     }
     try { console.log('[mdb] push cible : ' + aEcrire.length + ' rubrique(s) modifiee(s) sur ' + lignes.length); } catch (eL) {}
     SYNC.enCours++;
-    var nowTs = Date.now().toString();
-
-    return sb.from(SPLIT_TABLE).upsert(aEcrire, { onConflict: 'enterprise_id,cle' })
-      .then(function() {
-        for (var i = 0; i < aEcrire.length; i++) {
-          var l = aEcrire[i];
-          _rowBase[bkey(uid, l.cle)] = { ts: nowTs, json: sjson(l.data), srv: null };
-          cacheSet(uid, l.cle, l.data, nowTs);
-        }
-        idbCachePersister(uid);
-        return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' }).catch(function() {});
-      })
-      .then(function() {
-        SYNC.enCours = Math.max(0, SYNC.enCours - 1);
-        SYNC.lastWriteOk = Date.now();
-        SYNC.errStreak = 0;
-        SYNC.lastError = '';
-        journal({ op: 'ecrit_lot', n: aEcrire.length });
-      })
-      .catch(function(e) {
-        SYNC.enCours = Math.max(0, SYNC.enCours - 1);
-        SYNC.lastWriteErr = Date.now();
-        SYNC.errStreak++;
-        SYNC.lastError = String((e && e.message) || e);
-        journal({ op: 'ERREUR', message: SYNC.lastError });
-        throw e;
-      });
+    var idx = 0, pre = {}, ecrites = 0;
+    /* Rubriques jamais ecrites par ce poste : une seule lecture groupee */
+    var sansBase = aEcrire.filter(function (l) { return !_rowBase[bkey(uid, l.cle)]; }).map(function (l) { return l.cle; });
+    function prelire() {
+      if (!sansBase.length) return Promise.resolve();
+      return avecReessai(function () {
+        return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', sansBase)
+          .then(function (r) {
+            if (r.error) throw r.error;
+            sansBase.forEach(function (c) { pre[c] = null; });
+            (r.data || []).forEach(function (row) { pre[row.cle] = row; });
+          });
+      }, 2).catch(function () { pre = {}; });
+    }
+    function suivante() {
+      if (idx >= aEcrire.length) return Promise.resolve();
+      var l = aEcrire[idx++];
+      var avant = _rowBase[bkey(uid, l.cle)];
+      return ecrireLigneSure(uid, l, lignes, pre).catch(function (e) {
+        /* Filet de securite : refus inattendu de l'ecriture conditionnelle (droits,
+           colonne, version du serveur) -> ancien envoi simple plutot que blocage. */
+        if (passager(e) || /Conflit de synchro/.test(String((e && e.message) || ''))) throw e;
+        journal({ op: 'SECOURS', cle: l.cle, message: String((e && e.message) || e) });
+        try { console.warn('[mdb] ecriture protegee refusee, envoi simple pour ' + l.cle + ' :', (e && e.message) || e); } catch (eW) {}
+        delete _rowBase[bkey(uid, l.cle)];
+        return avecReessai(function () {
+          return sb.from(SPLIT_TABLE).upsert([{ enterprise_id: uid, cle: l.cle, data: l.data, updated_at: isoNow() }], { onConflict: 'enterprise_id,cle' })
+            .then(function (r) { if (r.error) throw r.error; });
+        }, 2);
+      }).then(function () {
+        var apres = _rowBase[bkey(uid, l.cle)];
+        if (!avant || !apres || apres.ts !== avant.ts) ecrites++;
+      }).then(suivante);
+    }
+    /* Chaque rubrique est ecrite SEPARATEMENT et de facon CONDITIONNELLE :
+       jamais d'upsert en aveugle de la liste entiere (un autre poste qui
+       vient d'ajouter une ligne la perdrait). Voir tests/10-multiposte. */
+    return prelire().then(suivante).then(function () {
+      if (!ecrites) return;
+      return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' })
+        .then(function (r2) { if (r2 && r2.error) throw r2.error; });
+    }).then(function () {
+      if (!ecrites || _sentinelleOk[uid]) return;
+      return sb.from(SPLIT_TABLE).upsert(
+        [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
+        { onConflict: 'enterprise_id,cle' })
+        .then(function (r3) { if (r3 && r3.error) throw r3.error; _sentinelleOk[uid] = true; });
+    }).then(function () {
+      SYNC.enCours = Math.max(0, SYNC.enCours - 1);
+      SYNC.lastWriteOk = Date.now(); SYNC.errStreak = 0; SYNC.lastError = '';
+    }, function (e) {
+      SYNC.enCours = Math.max(0, SYNC.enCours - 1);
+      SYNC.lastWriteErr = Date.now(); SYNC.errStreak++; SYNC.lastError = String((e && e.message) || e);
+      journal({ op: 'ERREUR', message: SYNC.lastError });
+      throw e;
+    });
   }
 
   /* Ancien chemin (table enterprise_data absente) : conserve tel quel. */
@@ -1315,19 +1351,39 @@
         idbCachePersister(uid);
       } catch (eCache) {}
 
-      if (lignes.length > 0) {
+      var aSentinelle = false;
+      for (var si = 0; si < lignes.length; si++) {
+        if (lignes[si] && lignes[si].cle === SPLIT_MIGRATION_CLE) { aSentinelle = true; break; }
+      }
+      if (aSentinelle) {
         var snap = new DocSnapshot(uid, true, splitAssemble(lignes));
         snap._split = true;
         return snap;
       }
 
-      /* Base D1 encore vide pour cette entreprise : on verifie si le poste local
-         a deja les donnees dans le localStorage pour les synchroniser vers D1 automatiquement */
-      return seedD1FromLocalStorageIfEmpty(uid).then(function(seeded) {
-        if (seeded) return fetchEnterpriseSplitComplet(uid);
-        var vide = new DocSnapshot(uid, false, null);
-        vide._split = true;
-        return vide;
+      /* Pas de sentinelle : base en cours de migration (ou vide). On verifie
+         l'existence du document, puis le legacy fait foi le temps que la
+         migration tourne en arriere-plan. */
+      return sb.from('enterprises').select('id').eq('id', uid).limit(1).then(function(rId) {
+        if (rId.error) throw rId.error;
+        var identExiste = !!(rId.data && rId.data.length > 0);
+        if (!lignes.length && !identExiste) {
+          /* Base D1 encore vide pour cette entreprise : on verifie si le poste
+             local a deja les donnees dans le localStorage pour les synchroniser
+             vers D1 automatiquement */
+          return seedD1FromLocalStorageIfEmpty(uid).then(function(seeded) {
+            if (seeded) return fetchEnterpriseSplitComplet(uid);
+            var vide = new DocSnapshot(uid, false, null);
+            vide._split = true;
+            return vide;
+          });
+        }
+        return fetchEnterpriseLegacy(uid).then(function(snapLegacy) {
+          try {
+            migrerLegacyVersSplit(uid, snapLegacy.exists ? snapLegacy.data() : null, lignes);
+          } catch (eM) {}
+          return snapLegacy;
+        });
       });
     });
   }

@@ -104,6 +104,15 @@ function creerFauxSupabase(tables, options) {
     try { return Promise.resolve(this.executer()).then(res, rej); }
     catch (e) { return Promise.reject(e).then(res, rej); }
   };
+  /* Comme le vrai client (et le builder D1) : upsert(...).catch(...) */
+  Requete.prototype.catch = function (rej) {
+    try { return Promise.resolve(this.executer()).then(undefined, rej); }
+    catch (e) { return Promise.reject(e).then(undefined, rej); }
+  };
+  Requete.prototype.finally = function (fn) {
+    try { return Promise.resolve(this.executer()).finally(fn); }
+    catch (e) { return Promise.reject(e).finally(fn); }
+  };
 
   const client = {
     from: function (table) {

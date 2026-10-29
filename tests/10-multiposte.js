@@ -95,6 +95,13 @@ function creerServeur() {
   Req.prototype.then = function (a, b) {
     try { return Promise.resolve(this.run()).then(a, b); } catch (e) { return Promise.reject(e).then(a, b); }
   };
+  /* Comme le vrai client (et le builder D1) : upsert(...).catch(...) */
+  Req.prototype.catch = function (b) {
+    try { return Promise.resolve(this.run()).then(undefined, b); } catch (e) { return Promise.reject(e).then(undefined, b); }
+  };
+  Req.prototype.finally = function (fn) {
+    try { return Promise.resolve(this.run()).finally(fn); } catch (e) { return Promise.reject(e).finally(fn); }
+  };
   function diffuser(table, type, ligne) {
     canaux.forEach(function (c) {
       if (c.cfg && c.cfg.table === table) c.cb({ eventType: type, new: clone(ligne), old: {} });
