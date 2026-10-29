@@ -24,7 +24,7 @@ export async function onRequest(context) {
 
     const url = new URL(request.url);
 
-    // GET /api/sync?uid=...[&since=...]
+    // GET /api/sync?uid=...[&since=...][&cle=...][&cles=...][&prefix=...]
     if (request.method === 'GET') {
       const uid = url.searchParams.get('uid');
       if (!uid) {
@@ -32,16 +32,36 @@ export async function onRequest(context) {
       }
 
       const since = url.searchParams.get('since') || '0';
-      let rows;
-      if (since && since !== '0') {
-        const stmt = db.prepare('SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id = ? AND updated_at > ?');
-        const res = await stmt.bind(uid, since).all();
-        rows = res.results || [];
-      } else {
-        const stmt = db.prepare('SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id = ?');
-        const res = await stmt.bind(uid).all();
-        rows = res.results || [];
+      const cle = url.searchParams.get('cle');
+      const cles = url.searchParams.get('cles');
+      const prefix = url.searchParams.get('prefix');
+
+      let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id = ?';
+      const params = [uid];
+
+      if (cle) {
+        sql += ' AND cle = ?';
+        params.push(cle);
+      } else if (cles) {
+        const keyList = cles.split(',').map(k => k.trim()).filter(Boolean);
+        if (keyList.length > 0) {
+          const placeholders = keyList.map(() => '?').join(',');
+          sql += ` AND cle IN (${placeholders})`;
+          params.push(...keyList);
+        }
+      } else if (prefix) {
+        sql += ' AND cle LIKE ?';
+        params.push(prefix + '%');
       }
+
+      if (since && since !== '0') {
+        sql += ' AND updated_at > ?';
+        params.push(since);
+      }
+
+      const stmt = db.prepare(sql);
+      const res = await stmt.bind(...params).all();
+      const rows = res.results || [];
 
       const data = {};
       const tsMap = {};

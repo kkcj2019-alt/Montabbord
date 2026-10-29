@@ -146,7 +146,13 @@
         var cleLike = self._getLike('cle');
         var since = self._getEq('updated_at');
 
-        return d1GetSyncCached('/api/sync?uid=' + encodeURIComponent(uid) + (since ? '&since=' + encodeURIComponent(since) : ''))
+        var queryUrl = '/api/sync?uid=' + encodeURIComponent(uid);
+        if (cleEq) queryUrl += '&cle=' + encodeURIComponent(cleEq);
+        else if (cleIn && cleIn.length > 0) queryUrl += '&cles=' + encodeURIComponent(cleIn.join(','));
+        else if (cleLike) queryUrl += '&prefix=' + encodeURIComponent(cleLike.replace(/%/g, ''));
+        if (since) queryUrl += '&since=' + encodeURIComponent(since);
+
+        return d1GetSyncCached(queryUrl)
           .then(function (res) {
             var rows = [];
             var dataObj = (res && res.data) || {};
