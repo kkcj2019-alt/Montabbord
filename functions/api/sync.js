@@ -26,18 +26,19 @@ export async function onRequest(context) {
 
     // GET /api/sync?uid=...[&since=...][&cle=...][&cles=...][&prefix=...]
     if (request.method === 'GET') {
-      const uid = url.searchParams.get('uid');
-      if (!uid) {
+      const rawUid = url.searchParams.get('uid');
+      if (!rawUid) {
         return new Response(JSON.stringify({ error: 'Missing uid' }), { status: 400, headers: corsHeaders });
       }
+      const uid = rawUid.replace(/^["']+|["']+$/g, '').trim();
 
       const since = url.searchParams.get('since') || '0';
       const cle = url.searchParams.get('cle');
       const cles = url.searchParams.get('cles');
       const prefix = url.searchParams.get('prefix');
 
-      let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id = ?';
-      const params = [uid];
+      let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE (enterprise_id = ? OR enterprise_id = ?)';
+      const params = [uid, '"' + uid + '"'];
 
       if (cle) {
         sql += ' AND cle = ?';
@@ -92,7 +93,8 @@ export async function onRequest(context) {
     // POST /api/sync { uid: '...', updates: { [cle]: val } } OR { uid: '...', rows: [ { cle, data, updated_at } ] }
     if (request.method === 'POST') {
       const body = await request.json();
-      const uid = body.uid;
+      const rawUid = body.uid;
+      const uid = (rawUid || '').replace(/^["']+|["']+$/g, '').trim();
       let updates = body.updates || {};
 
       if (Array.isArray(body.rows)) {

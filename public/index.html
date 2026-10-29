@@ -1586,7 +1586,7 @@ try{(function(){var b=document.createElement('button');b.id='hdrFiltersToggle';b
 </div>
 </div>
 
-<script src="supabase-sdk/mdb-supabase.js?v=20261029-d7"></script>
+<script src="supabase-sdk/mdb-supabase.js?v=20261029-d8"></script>
 <script src="vendor/xlsx.full.min.js" defer></script>
 <script src="vendor/pdf.min.js" defer></script>
 <script src="vendor/mammoth.browser.min.js" defer></script>
@@ -7907,7 +7907,7 @@ function confirmImportMerge() {
             var ifp = (io.date || '') + '|' + (io.libelle || '').toLowerCase() + '|' + (io.montant || 0) + '|' + (io.sens || '') + '|' + ((io.beneficiaireNom || io.beneficiaire || '') + '').toLowerCase();
             if (fpMap[ifp]) { stats.skipped++; } else {
               io.id = DB.genId();
-              if (io.numeroPiece) io.numeroPiece = ''; /* Will be regenerated */
+              if (!io.numeroPiece) io.numeroPiece = (typeof generatePieceNumber === 'function' && io.caisseId) ? generatePieceNumber(io.caisseId, io.date) : '';
               existing.push(io); stats.added++; fpMap[ifp] = true;
             }
           }
@@ -10256,6 +10256,92 @@ function migrateTransfertStatuts() {
     try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (eD) {}
   }
   return changed;
+}
+/* Réparation automatique des pièces sans numéro : garantit qu'aucune écriture de caisse
+   ne reste avec un tiret (-) ou un numéro de pièce vide. */
+function migrateMissingPieceNumbers() {
+  var ops = (typeof getOperationsCaisse === 'function') ? (getOperationsCaisse() || []) : [];
+  var aps = (typeof dbArr === 'function') ? (dbArr('mdb_acomptesPrets') || []) : [];
+  var changed = false;
+  var changedAps = false;
+  var hasMissing = false;
+  for (var i = 0; i < ops.length; i++) {
+    if (!ops[i].numeroPiece) { hasMissing = true; break; }
+  }
+  for (var j = 0; j < aps.length; j++) {
+    if (!aps[j].numeroPiece) { hasMissing = true; break; }
+  }
+  if (!hasMissing) return false;
+
+  var apMap = {};
+  for (var a = 0; a < aps.length; a++) apMap[aps[a].id] = aps[a];
+  var opMap = {};
+  for (var b = 0; b < ops.length; b++) opMap[ops[b].id] = ops[b];
+
+  for (var o1 = 0; o1 < ops.length; o1++) {
+    var op = ops[o1];
+    if (!op.numeroPiece && op.acomptePretId && apMap[op.acomptePretId] && apMap[op.acomptePretId].numeroPiece) {
+      op.numeroPiece = apMap[op.acomptePretId].numeroPiece;
+      changed = true;
+    }
+  }
+
+  var grpMap = {};
+  for (var g1 = 0; g1 < ops.length; g1++) {
+    if (ops[g1].groupeId && ops[g1].numeroPiece) grpMap[ops[g1].groupeId] = ops[g1].numeroPiece;
+  }
+  for (var g2 = 0; g2 < aps.length; g2++) {
+    if (aps[g2].groupeId && aps[g2].numeroPiece && !grpMap[aps[g2].groupeId]) grpMap[aps[g2].groupeId] = aps[g2].numeroPiece;
+  }
+  for (var o2 = 0; o2 < ops.length; o2++) {
+    if (!ops[o2].numeroPiece && ops[o2].groupeId && grpMap[ops[o2].groupeId]) {
+      ops[o2].numeroPiece = grpMap[ops[o2].groupeId];
+      changed = true;
+    }
+  }
+
+  if (typeof generatePieceNumber === 'function') {
+    var caisses = (typeof getCaisses === 'function') ? getCaisses() : [];
+    var defCaisseId = (caisses.length > 0) ? caisses[0].id : '';
+    for (var o3 = 0; o3 < ops.length; o3++) {
+      if (!ops[o3].numeroPiece) {
+        var cid = ops[o3].caisseId || defCaisseId;
+        var np = generatePieceNumber(cid, ops[o3].date);
+        ops[o3].numeroPiece = np;
+        if (ops[o3].groupeId && !grpMap[ops[o3].groupeId]) grpMap[ops[o3].groupeId] = np;
+        if (ops[o3].acomptePretId && apMap[ops[o3].acomptePretId] && !apMap[ops[o3].acomptePretId].numeroPiece) {
+          apMap[ops[o3].acomptePretId].numeroPiece = np;
+          changedAps = true;
+        }
+        changed = true;
+      }
+    }
+    for (var a2 = 0; a2 < aps.length; a2++) {
+      if (!aps[a2].numeroPiece) {
+        if (aps[a2].caisseOpId && opMap[aps[a2].caisseOpId] && opMap[aps[a2].caisseOpId].numeroPiece) {
+          aps[a2].numeroPiece = opMap[aps[a2].caisseOpId].numeroPiece;
+          changedAps = true;
+        } else if (aps[a2].groupeId && grpMap[aps[a2].groupeId]) {
+          aps[a2].numeroPiece = grpMap[aps[a2].groupeId];
+          changedAps = true;
+        } else {
+          var cid2 = aps[a2].caisseId || defCaisseId;
+          aps[a2].numeroPiece = generatePieceNumber(cid2, aps[a2].date);
+          changedAps = true;
+        }
+      }
+    }
+  }
+
+  if (changed) {
+    try { DB.set('mdb_operationsCaisse', ops); } catch(e) {}
+    try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch(eD) {}
+  }
+  if (changedAps) {
+    try { DB.set('mdb_acomptesPrets', aps); } catch(e) {}
+    try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch(eD) {}
+  }
+  return changed || changedAps;
 }
 /* Tout utilisateur authentifie ayant acces aux caisses peut approuver/refuser un transfert recu (le code de connexion est toujours requis pour confirmer). */
 /* Approuver / refuser un transfert = rôle de CELUI QUI REÇOIT :
@@ -27737,8 +27823,10 @@ function createReglementCaisseOp(reg) {
   }
   if (!caisseId && caisses.length > 0) caisseId = caisses[0].id;
   var ops = getOperationsCaisse() || [];
+  var npReg = (typeof generatePieceNumber === 'function' && caisseId) ? generatePieceNumber(caisseId, reg.date) : '';
   ops.push({
     id: DB.genId(),
+    numeroPiece: npReg,
     reglementId: reg.id,
     caisseId: caisseId,
     date: reg.date,
@@ -32254,6 +32342,10 @@ function viewCaisseDetail(caisseId) {
         }
       }
       soldeAffiche = fmtMoney(tmpRunHist);
+    } else if (!isTransfertApprouve(o)) {
+      soldeAffiche = '<span class="badge" style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;font-size:10px;padding:2px 8px;border-radius:999px" title="Transfert en attente de validation : n\’impacte pas le solde tant qu\’il n\’est pas validé">En attente</span>';
+    } else if (o.brouillon) {
+      soldeAffiche = '<span class="badge" style="background:#f1f5f9;color:#64748b;font-size:10px;padding:2px 6px;border-radius:4px" title="Brouillon : non comptabilisé">Brouillon</span>';
     }
 
     var rowSearch = (escH(o.date || '') + ' ' + (o.heure || '') + ' ' + (o.numeroPiece || '') + ' ' + codeLabel + ' ' + (o.libelle || '') + ' ' + csBenefDisplay(o) + ' ' + (o.moyenPaiement || '') + ' ' + (o.montant || 0)).toLowerCase();
@@ -32589,6 +32681,10 @@ function renderCaisseIn(el) {
   if (!window._csTransfertStatutDone) {
     window._csTransfertStatutDone = true;
     if (migrateTransfertStatuts()) { allOps = getOperationsCaisse(); }
+  }
+  if (!window._csPieceNumberFixDone) {
+    window._csPieceNumberFixDone = true;
+    if (typeof migrateMissingPieceNumbers === 'function' && migrateMissingPieceNumbers()) { allOps = getOperationsCaisse(); }
   }
   // Gestion vue caisse : centralisé peut choisir Ma caisse / Toutes / Générale
   if (window._csViewCaisseId === undefined) window._csViewCaisseId = '';
