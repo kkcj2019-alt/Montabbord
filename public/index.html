@@ -35054,22 +35054,56 @@ function setDefaultBanque(id) {
   renderBanqueIn(document.getElementById('tresorerieContent'));
 }
 function getBanqueOperations() {
-  var raw = dbArr('mdb_banqueOperations');
+  var raw = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_banqueOperations', dbArr('mdb_banqueOperations')) : dbArr('mdb_banqueOperations');
   if (!raw || !raw.length) return [];
-  var seenIds = {}, seenRegs = {}, clean = [], hasDupes = false;
+  var seenIds = {}, seenRegs = {}, seenSignatures = {}, clean = [], hasDupes = false;
+  var removedOpIds = [], removedRegIds = [];
   for (var i = 0; i < raw.length; i++) {
     var o = raw[i];
     if (!o || !o.id) continue;
-    if (seenIds[o.id]) { hasDupes = true; continue; }
+    if (seenIds[o.id]) { hasDupes = true; removedOpIds.push(o.id); continue; }
     seenIds[o.id] = true;
     if (o.reglementId) {
-      if (seenRegs[o.reglementId]) { hasDupes = true; continue; }
+      if (seenRegs[o.reglementId]) { hasDupes = true; removedOpIds.push(o.id); continue; }
       seenRegs[o.reglementId] = true;
     }
+    /* Déduplication par signature métier : même banque, même sens, même montant, et même numéro de référence/chèque */
+    var refDigits = String(o.reference || '').replace(/\D/g, '');
+    var mntInt = Math.round((parseFloat(o.montant) || 0) * 100);
+    var bId = String(o.banqueId || '');
+    var sens = String(o.sens || '');
+    var dt = String(o.date || '').slice(0, 10);
+    var sig = '';
+    if (refDigits.length >= 4 && mntInt > 0) {
+      sig = 'ref:' + bId + '|' + sens + '|' + mntInt + '|' + refDigits;
+    } else if (mntInt > 0 && o.libelle) {
+      var normLib = String(o.libelle).toLowerCase().replace(/[^a-z0-9]/g, '');
+      sig = 'lib:' + bId + '|' + sens + '|' + mntInt + '|' + dt + '|' + normLib;
+    }
+    if (sig && seenSignatures[sig]) {
+      hasDupes = true;
+      removedOpIds.push(o.id);
+      if (o.reglementId) removedRegIds.push(o.reglementId);
+      continue;
+    }
+    if (sig) seenSignatures[sig] = true;
     clean.push(o);
   }
   if (hasDupes) {
-    try { DB.set('mdb_banqueOperations', clean); markDirty('mdb_banqueOperations'); } catch(e){}
+    try {
+      DB.set('mdb_banqueOperations', clean);
+      if (typeof addTombstones === 'function' && removedOpIds.length > 0) addTombstones('mdb_banqueOperations', removedOpIds);
+      if (removedRegIds.length > 0) {
+        var regs = dbArr('mdb_reglements');
+        var cleanRegs = regs.filter(function(r) { return !r || removedRegIds.indexOf(r.id) === -1; });
+        if (cleanRegs.length !== regs.length) {
+          DB.set('mdb_reglements', cleanRegs);
+          try { markDirty('mdb_reglements'); } catch(eMR) {}
+        }
+        if (typeof addTombstones === 'function') addTombstones('mdb_reglements', removedRegIds);
+      }
+      try { markDirty('mdb_banqueOperations'); } catch(eMO) {}
+    } catch(e){}
   }
   return clean;
 }
@@ -35263,6 +35297,8 @@ function deleteBanqueOperation(id) {
     var result = [];
     for (var i = 0; i < ops.length; i++) { if (ops[i].id !== id) result.push(ops[i]); }
     DB.set('mdb_banqueOperations', result);
+    try { addTombstones('mdb_banqueOperations', [id]); } catch (eTO) {}
+    try { markDirty('mdb_banqueOperations'); } catch (eMD) {}
     /* Retrait pour appro caisse : la piece de caisse liee part avec lui */
     if (deletedOp && deletedOp.caisseOpId) {
       var _csAll = getOperationsCaisse() || [];
