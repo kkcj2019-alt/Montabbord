@@ -9665,6 +9665,9 @@ function openConfirm(text, cb) {
   /* Au-dessus d'un formulaire ouvert (meme z-index et place avant lui dans la page,
      la confirmation restait cachee derriere le formulaire). */
   try { document.getElementById('confirmOverlay').style.zIndex = '1100'; } catch (eZ) {}
+  /* Libelle du bouton : les cas particuliers (ex. doublon de numero BL)
+     le re-titre juste apres l'appel ; on remet toujours « Confirmer ». */
+  try { document.getElementById('confirmBtn').textContent = 'Confirmer'; } catch (eLbl) {}
   confirmCallback = cb;
   document.getElementById('confirmBtn').onclick = function() { var cb = confirmCallback; closeConfirm(); if (cb) cb(); };
   document.getElementById('confirmOverlay').style.display = 'flex';
@@ -13272,6 +13275,11 @@ function onFacBLChange() {
   var bls = getBLs();
   for (var i = 0; i < bls.length; i++) {
     if (bls[i].id === blId && bls[i].lignes) {
+      if (!bls[i].bcId) {
+        refusFactureBLSansBC(bls[i]);
+        try { document.getElementById('facBL').value = ''; } catch (eRst) {}
+        return;
+      }
       formLignes = [];
       for (var j = 0; j < bls[i].lignes.length; j++) {
         var line = bls[i].lignes[j];
@@ -13334,6 +13342,12 @@ function onFacLineBLChange(idx, blId) {
     for (var i = 0; i < bls.length; i++) {
       if (bls[i].id === blId && bls[i].lignes && bls[i].lignes.length > 0) {
         var bl = bls[i];
+        if (!bl.bcId) {
+          formLignes[idx].blId = '';
+          refusFactureBLSansBC(bl);
+          renderFormLignes();
+          return;
+        }
         var existingArticles = [];
         for (var j = 0; j < formLignes.length; j++) {
           if (formLignes[j].blId === blId && formLignes[j].articleId) existingArticles.push(formLignes[j].articleId);
@@ -16713,11 +16727,18 @@ function onBLListSelectChange() {
   }
 }
 
+/* Un BL s'enregistre librement SANS bon de commande (le client a livr\u00e9),
+   mais il ne peut pas \u00eatre FACTURE tant qu'aucun BC n'y est li\u00e9 : il faut
+   d'abord mettre le BL \u00e0 jour en ajoutant son bon de commande. */
+function refusFactureBLSansBC(bl) {
+  toast('BL ' + (bl && bl.numero ? bl.numero : '') + ' : BC manquant — modifiez ce BL pour ajouter son bon de commande avant de le facturer', 'error');
+}
 function factureFromBL(blId) {
   var bls = getBLs();
   var bl = null;
   for (var i = 0; i < bls.length; i++) { if (bls[i].id === blId) { bl = bls[i]; break; } }
   if (!bl) { toast('BL introuvable', 'error'); return; }
+  if (!bl.bcId) { refusFactureBLSansBC(bl); return; }
   var lignes = [];
   if (bl.lignes) {
     for (var k = 0; k < bl.lignes.length; k++) {
@@ -16747,6 +16768,14 @@ function factureFromBLList() {
   var selectedBLs = [];
   for (var j = 0; j < ids.length; j++) {
     for (var m = 0; m < bls.length; m++) { if (bls[m].id === ids[j]) { selectedBLs.push(bls[m]); break; } }
+  }
+  var sansBCnums = [];
+  for (var sbI = 0; sbI < selectedBLs.length; sbI++) {
+    if (!selectedBLs[sbI].bcId) sansBCnums.push(selectedBLs[sbI].numero || '?');
+  }
+  if (sansBCnums.length) {
+    toast('BL sans bon de commande : ' + sansBCnums.join(', ') + ' — modifiez chaque BL pour ajouter son BC avant de le facturer', 'error');
+    return;
   }
   var clientId = keys[0];
   var firstBC = selectedBLs.length > 0 ? selectedBLs[0].bcId || '' : '';
@@ -16821,7 +16850,7 @@ function openBLModal(id) {
   html += '<div class="form-group"><label>N° Camion</label><input type="text" id="blImmatriculation" value="' + escH(b ? (b.immatriculation || b.camion || '') : '') + '" placeholder="Immatriculation / Camion"></div>';
   html += '</div>';
   html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Bon de commande li\u00e9</label><select id="blBC" onchange="onBLBCChange()"><option value="">-- Aucun BC --</option></select></div>';
+  html += '<div class="form-group"><label>Bon de commande li\u00e9 <small style="color:var(--gray-500)">(libre \u00e0 la livraison ; obligatoire pour facturer)</small></label><select id="blBC" onchange="onBLBCChange()"><option value="">-- Aucun BC --</option></select></div>';
   html += '</div>';
   html += '<div class="form-group"><label>Lignes</label><div id="lignesContainer"></div></div>';
   html += '<div class="form-group"><label>Raison non factur\u00e9</label><input type="text" id="blRaisonNonFacture" value="' + escH(b ? (b.raisonNonFacture || '') : '') + '" placeholder="Si non factur\u00e9, indiquer la raison"></div>';
@@ -16950,7 +16979,47 @@ function _adjustStockForBLLines(lignes, multiplier) {
   }
 }
 
+/* Controle des numeros de BL deja utilises : un numero double est bloque et
+   signale (facture ou pas) — l'utilisateur decide si c'est une erreur ou
+   s'il veut vraiment enregistrer malgre tout. */
+function blDoublonExistant(id, numero) {
+  var num = String(numero || '').trim().toLowerCase();
+  if (!num) return null;
+  var bls = getBLs();
+  for (var i = 0; i < bls.length; i++) {
+    if (bls[i].id === id) continue;
+    if (String(bls[i].numero || '').trim().toLowerCase() === num) return bls[i];
+  }
+  return null;
+}
 function saveBL(id, requireChauffeur) {
+  var clientId = document.getElementById('blClient').value;
+  if (!clientId) { toast('Veuillez sélectionner un client', 'error'); return; }
+  if (!formLignes || formLignes.length === 0) { toast('Un BL doit avoir au moins un article', 'error'); return; }
+  var chauffeur = (document.getElementById('blChauffeur') || {}).value || '';
+  if (requireChauffeur !== false && !chauffeur.trim()) { toast('Le nom du chauffeur est obligatoire', 'error'); return; }
+  var blNumCheck = ((document.getElementById('blNumero') || {}).value || '').trim();
+  var doublon = blDoublonExistant(id, blNumCheck);
+  if (doublon) {
+    var cliD = doublon.clientId ? getClientById(doublon.clientId) : null;
+    var facD = null;
+    if (doublon.factureId) {
+      var facsD = getFactures();
+      for (var fd = 0; fd < facsD.length; fd++) { if (facsD[fd].id === doublon.factureId) { facD = facsD[fd]; break; } }
+    }
+    var msgD = 'Le num\u00e9ro de BL \u00ab ' + (doublon.numero || blNumCheck) + ' \u00bb existe D\u00c9J\u00c0 dans la base de donn\u00e9es.';
+    msgD += '\n\n\u2022 Client : ' + (cliD && cliD.nom ? cliD.nom : (doublon.clientId || 'inconnu'));
+    msgD += '\n\u2022 Date de livraison : ' + (doublon.dateLivraison || '\u2014');
+    msgD += '\n\u2022 Pi\u00e8ce : ' + (facD ? ('D\u00c9J\u00c0 FACTUR\u00c9E (facture ' + (facD.numero || '?') + ')') : 'pas encore factur\u00e9e');
+    msgD += '\n\n\u2022 Si c\u2019est une ERREUR : annulez et corrigez le num\u00e9ro du BL en cours.';
+    msgD += '\n\u2022 Si ce n\u2019est PAS une erreur et que vous voulez vraiment enregistrer ce BL avec le m\u00eame num\u00e9ro : confirmez.';
+    openConfirm(msgD, function() { saveBLEnregistrer(id, requireChauffeur); });
+    try { document.getElementById('confirmBtn').textContent = '\u26a0 Enregistrer quand m\u00eame'; } catch (eCB) {}
+    return;
+  }
+  saveBLEnregistrer(id, requireChauffeur);
+}
+function saveBLEnregistrer(id, requireChauffeur) {
   var clientId = document.getElementById('blClient').value;
   if (!clientId) { toast('Veuillez sélectionner un client', 'error'); return; }
   if (!formLignes || formLignes.length === 0) { toast('Un BL doit avoir au moins un article', 'error'); return; }
@@ -18009,6 +18078,20 @@ function saveFacture(id) {
   var blIds = [];
   for (var k2 = 0; k2 < formLignes.length; k2++) {
     if (formLignes[k2].blId && blIds.indexOf(formLignes[k2].blId) === -1) blIds.push(formLignes[k2].blId);
+  }
+  /* Garde-fou : aucun BL sans bon de commande ne peut figurer sur une
+     facture — il faut d'abord mettre le BL a jour (ajouter le BC). */
+  if (blIds.length) {
+    var blsGate = getBLs(), sansBCg = [];
+    for (var gb = 0; gb < blsGate.length; gb++) {
+      if (blsGate[gb].bcId) continue;
+      if (blIds.indexOf(blsGate[gb].id) === -1) continue;
+      sansBCg.push(blsGate[gb].numero || '?');
+    }
+    if (sansBCg.length) {
+      toast('Impossible : BL ' + sansBCg.join(', ') + ' sans bon de commande — modifiez ce(s) BL pour ajouter leur BC puis refaites la facture', 'error');
+      return;
+    }
   }
   var bcIds = [];
   for (var k3 = 0; k3 < formLignes.length; k3++) {
@@ -32606,6 +32689,14 @@ function factureFromSelectedBLs() {
   var selectedBLs = [];
   for (var j = 0; j < ids.length; j++) {
     for (var m = 0; m < bls.length; m++) { if (bls[m].id === ids[j]) { selectedBLs.push(bls[m]); break; } }
+  }
+  var sansBCnums2 = [];
+  for (var sbI2 = 0; sbI2 < selectedBLs.length; sbI2++) {
+    if (!selectedBLs[sbI2].bcId) sansBCnums2.push(selectedBLs[sbI2].numero || '?');
+  }
+  if (sansBCnums2.length) {
+    toast('BL sans bon de commande : ' + sansBCnums2.join(', ') + ' — modifiez chaque BL pour ajouter son BC avant de le facturer', 'error');
+    return;
   }
   var clientId = keys[0];
   var firstBC = selectedBLs[0] ? (selectedBLs[0].bcId || '') : '';
