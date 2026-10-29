@@ -77,7 +77,7 @@
     <script src="vendor/pdf.min.js"></script>
     <script src="vendor/jspdf.umd.min.js"></script>
     <script src="vendor/jspdf.plugin.autotable.min.js"></script>
-        <script src="supabase-sdk/mdb-supabase.js?v=20261029-d3"></script>
+        <script src="supabase-sdk/mdb-supabase.js?v=20261029-d5"></script>
     <script src="vendor/face-api.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
@@ -10395,7 +10395,7 @@ function renderPrimeEmpMatrix() {
           employee_id: a.employeId || a.employee_id || "",
           type: a.type === "pret" ? "pret" : "acompte",
           montant: parseFloat(a.montant) || 0,
-          mensualite: parseFloat(a.montantMensuel || a.mensualite) || 0,
+          mensualite: parseFloat(a.montantMensuel || a.mensualite) || (parseInt(a.dureeMois) > 0 ? Math.round((parseFloat(a.montant) || 0) / parseInt(a.dureeMois)) : 0),
           dureeMois: parseInt(a.dureeMois) || 0,
           moisDeduction: a.moisDeduction || "",
           rembourse: parseFloat(a.montantRembourse) || 0,
@@ -26770,10 +26770,13 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           var a = list[i];
           if (activeTab === "acompte" && a.type !== "acompte") continue;
           if (activeTab === "pret" && a.type !== "pret") continue;
-          if (month && !apInMonthP(a, month)) continue;
+          if (month && !search && !apInMonthP(a, month)) continue;
           if (statutFilter === "actif" && apRestP(a) <= 0) continue;
           if (search) {
-            if (empName(a.employee_id).toLowerCase().indexOf(search) === -1)
+            var _pMat = (empById[a.employee_id] && empById[a.employee_id].matricule) || "";
+            var _pNom = empName(a.employee_id);
+            var _fullSearchTarget = (_pMat + " " + _pNom).toLowerCase();
+            if (_fullSearchTarget.indexOf(search) === -1)
               continue;
           }
           filtered.push(a);
@@ -26840,7 +26843,10 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           { k: "pret", l: "Pr\u00eats" },
           { k: "cumul", l: "Cumul par employ\u00e9" },
         ];
-        var tabsHtml = '<div class="apl-tabs">';
+        var apSearch = window._apSearch || "";
+        var tabsHtml = '<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;width:100%">' +
+          '<input type="text" id="ap-inline-search" value="' + escH(apSearch) + '" placeholder="🔍 Rechercher employé (nom, matricule)..." oninput="window._apSearch=this.value; var topS = document.getElementById(\'ap-search\'); if(topS) topS.value=this.value; loadAP(); var cur = document.getElementById(\'ap-inline-search\'); if(cur){ cur.focus(); cur.setSelectionRange(cur.value.length, cur.value.length); }" style="flex:1;max-width:360px;padding:7px 12px;border:1px solid var(--border);border-radius:8px;font-size:12px;outline:none;background:#fff">' +
+          '</div><div class="apl-tabs">';
         for (var tb = 0; tb < tabs.length; tb++)
           tabsHtml +=
             '<div class="t' +
@@ -29712,12 +29718,13 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           '<div class="form-group"><label>Montant (FCFA)</label><input type="number" value="' +
           (parseFloat(a.montant) || 0) +
           '" readonly style="background:var(--bg-soft);font-size:1.35rem;font-weight:800;color:#0f172a;padding:.7rem .9rem"></div>';
+        var _montantVal = (parseFloat(a.montant) || 0);
         html +=
           '<div class="form-group" id="apedit-duree-group" style="display:' +
           (a.type === "pret" ? "" : "none") +
           '"><label>Dur\u00e9e (mois) - pr\u00eats</label><input type="number" id="apedit-duree" min="1" value="' +
           (duree || "") +
-          '" placeholder="Ex: 6"></div>';
+          '" placeholder="Ex: 6" oninput="var d=parseInt(this.value)||0; if(d>0){ document.getElementById(\'apedit-mens\').value = Math.round(' + _montantVal + '/d); }"></div>';
         html +=
           '<div class="form-group"><label>Mensualit\u00e9 (FCFA)</label><input type="number" id="apedit-mens" min="0" value="' +
           (mens || "") +
@@ -29768,8 +29775,11 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           ? document.getElementById("apedit-mois").value
           : "";
         if (a.type === "pret") {
+          var dureeChanged = (duree > 0 && duree !== (parseInt(a.dureeMois) || 0));
           a.dureeMois = duree;
-          if (mens > 0) {
+          if (dureeChanged) {
+            a.montantMensuel = Math.round((parseFloat(a.montant) || 0) / duree);
+          } else if (mens > 0) {
             a.montantMensuel = Math.round(mens);
           } else if (duree > 0 && (parseFloat(a.montant) || 0) > 0) {
             a.montantMensuel = Math.round((parseFloat(a.montant) || 0) / duree);
@@ -29777,17 +29787,21 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         }
         if (moisDed) a.moisDeduction = moisDed;
         setAPList(list);
-        /* Re-sync l'éventuelle pièce de caisse liée (mois de déduction) */
+        /* Re-sync l'éventuelle pièce de caisse liée (mois de déduction, durée, mensualité) */
         try {
           var ops = payeArr("mdb_operationsCaisse");
           var changed = false;
+          var targetEmpId = a.employee_id || a.employeId || "";
           for (var oi = 0; oi < ops.length; oi++) {
             var o = ops[oi];
             var linked =
               (a.caisseOpId && o.id === a.caisseOpId) ||
-              (a.groupeId && o.groupeId === a.groupeId);
-            if (linked && moisDed) {
-              o.apMoisDeduction = moisDed;
+              (a.groupeId && o.groupeId === a.groupeId && (!targetEmpId || o.beneficiaireId === targetEmpId)) ||
+              (a.numeroPiece && o.numeroPiece === a.numeroPiece && (!targetEmpId || o.beneficiaireId === targetEmpId));
+            if (linked) {
+              if (moisDed) o.apMoisDeduction = moisDed;
+              if (duree > 0) o.apDureeMois = duree;
+              if (a.montantMensuel > 0) o.apMontantMensuel = a.montantMensuel;
               changed = true;
             }
           }
