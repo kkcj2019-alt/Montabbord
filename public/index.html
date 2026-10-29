@@ -1586,7 +1586,7 @@ try{(function(){var b=document.createElement('button');b.id='hdrFiltersToggle';b
 </div>
 </div>
 
-<script src="supabase-sdk/mdb-supabase.js?v=20261029-d5"></script>
+<script src="supabase-sdk/mdb-supabase.js?v=20261029-d7"></script>
 <script src="vendor/xlsx.full.min.js" defer></script>
 <script src="vendor/pdf.min.js" defer></script>
 <script src="vendor/mammoth.browser.min.js" defer></script>
@@ -13303,7 +13303,7 @@ function onHdrPeriodChange() {  var fEl = document.getElementById('hdrDateFrom')
   if (currentPage === 'dashboard') renderDashboard();
   else if (currentPage === 'tresorerie' && typeof renderTresorerieActiveTab === 'function') renderTresorerieActiveTab();
 }
-function resetHdrPeriod() { DB.set('mdb_dashRange', {}); if (currentPage === 'dashboard') renderDashboard(); else if (currentPage === 'tresorerie' && typeof renderTresorerieActiveTab === 'function') renderTresorerieActiveTab(); else { var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo'); if (fEl) fEl.value = ''; if (tEl) tEl.value = ''; } }
+function resetHdrPeriod() { DB.set('mdb_dashRange', {}); var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo'); if (fEl) fEl.value = ''; if (tEl) tEl.value = ''; if (currentPage === 'dashboard') renderDashboard(); else if (currentPage === 'tresorerie' && typeof renderTresorerieActiveTab === 'function') renderTresorerieActiveTab(); }
 function onHeaderPeriodeChange() { if (currentPage === 'dashboard') renderDashboard(); }
 // Boutons "+ Saisie caisse" du tableau de bord : ouvrent directement une fenêtre avec le même
 // formulaire "Saisie rapide" du module Trésorerie (types libre/acompte/pret/fournisseur/client...),
@@ -32146,102 +32146,175 @@ function viewCaisseDetail(caisseId) {
   var c = null;
   for (var i = 0; i < caisses.length; i++) { if (caisses[i].id === caisseId) { c = caisses[i]; break; } }
   var caisseNom = c ? c.nom : '';
+  var agentNom = c ? (c.agentNom || '') : '';
   var soldeAncre = c ? (c.soldeInitial || 0) : 0;
   var dateAncre  = c ? (c.soldeInitialDate || '') : '';
   var ops = getOperationsCaisse();
-  var html = '<div style="max-width:1100px">'
-  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">';
-  html += '<h2>' + escH(caisseNom) + '</h2>';
-  html += '<button class="btn btn-outline" onclick="renderCaissesIn(document.getElementById(\'tresorerieContent\'))">Retour</button>';
-  html += '</div>';
-  /* ── Bloc solde ancre ── */
-  if (dateAncre) {
-    html += '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 16px;margin-bottom:14px;display:flex;gap:24px;align-items:center">';
-    html += '<span style="font-size:13px;color:#0369a1">⚓ <strong>Solde de départ</strong> au ' + fmtDate(dateAncre) + ' :';
-    html += ' <strong style="font-size:15px">' + fmtMoney(soldeAncre) + ' FCFA</strong></span>';
-    html += '<span style="font-size:12px;color:#64748b">Les opérations antérieures ou égales à cette date sont incluses dans ce solde et apparaissent en grisé.</span>';
-    html += '</div>';
-  }
-  /* ── Tableau ── */
-  html += '<div class="table-wrap"><div class="table-responsive"><table><thead><tr>';
-  html += '<th>Date</th><th>Heure</th><th>Code</th><th>Libellé</th>';
-  html += '<th style="text-align:right">Recettes</th><th style="text-align:right">Dépenses</th><th style="text-align:right">Frais</th>';
-  html += '<th>Moyen</th><th>Bénéficiaire</th><th>Statut</th><th style="text-align:right;white-space:nowrap">Solde progressif</th>';
-  html += '</tr></thead><tbody>';
+  
   var caisseOps = [];
   for (var j = 0; j < ops.length; j++) { if (ops[j].caisseId === caisseId) caisseOps.push(ops[j]); }
   caisseOps.sort(function(a, b) { var da = (a.date || '') + ' ' + (a.heure || '00:00'); var db = (b.date || '') + ' ' + (b.heure || '00:00'); return da.localeCompare(db); });
-  if (caisseOps.length === 0) html += '<tr><td colspan="11" class="text-center text-muted">Aucune opération</td></tr>';
-  /* Calcul du solde progressif : commence à soldeAncre, on ignore les ops <= dateAncre */
-  var running = soldeAncre;
-  /* Pré-calcul : accumuler toutes les ops <= dateAncre pour avoir le solde historique à afficher en grisé */
-  var soldeHistorique = 0; /* Solde AVANT l'ancre (pour affichage grisé sans double-comptage) */
-  if (dateAncre) {
-    for (var bi = 0; bi < caisseOps.length; bi++) {
-      var bop = caisseOps[bi];
-      if (!bop.brouillon && isTransfertApprouve(bop) && (bop.date || '') <= dateAncre) {
-        if (bop.sens === 'entree') soldeHistorique += bop.montant || 0;
-        else soldeHistorique -= (bop.montant || 0) + (bop.frais || 0);
-      }
-    }
+
+  /* Totaux */
+  var totRecettes = 0, totDepenses = 0, totFrais = 0;
+  for (var ti = 0; ti < caisseOps.length; ti++) {
+    var top = caisseOps[ti];
+    if (top.brouillon || !isTransfertApprouve(top)) continue;
+    if (dateAncre && (top.date || '') <= dateAncre) continue;
+    if (top.sens === 'entree') totRecettes += (top.montant || 0);
+    else { totDepenses += (top.montant || 0); totFrais += (top.frais || 0); }
   }
-  var ancreShown = !dateAncre; /* Si pas d'ancre, on commence directement */
+  var soldeFin = soldeAncre + totRecettes - totDepenses - totFrais;
+
+  var html = '<div style="width:100%;max-width:100%;padding:4px 0">';
+  /* Header & boutons actions */
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">';
+  html += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+  html += '<h2 style="margin:0;font-size:1.35rem;font-weight:800;color:#0f172a">&#x1F3E2; ' + escH(caisseNom) + '</h2>';
+  if (agentNom) html += '<span class="badge" style="font-size:11px;background:#e0f2fe;color:#0369a1;padding:4px 10px;border-radius:999px;font-weight:700">&#x1F464; ' + escH(agentNom) + '</span>';
+  html += '<span style="font-size:12px;color:var(--gray-500)">(' + caisseOps.length + ' opération(s) au total)</span>';
+  html += '</div>';
+  html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+  html += '<button class="btn btn-outline btn-sm" onclick="printCaisseDetail(\'' + caisseId + '\')" style="padding:6px 12px;font-weight:700">&#x1F5A8;&#xFE0F; Imprimer</button>';
+  html += '<button class="btn btn-outline btn-sm" onclick="exportCaisseDetailExcel(\'' + caisseId + '\')" style="padding:6px 12px;font-weight:700;color:#15803d;border-color:#86efac;background:#f0fdf4">&#x1F4CA; Excel</button>';
+  html += '<button class="btn btn-outline btn-sm" onclick="renderCaissesIn(document.getElementById(\'tresorerieContent\'))" style="padding:6px 14px;font-weight:700">&#x21A9; Retour aux caisses</button>';
+  html += '</div></div>';
+
+  /* Cartes de statistiques harmonieuses */
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:16px">';
+  html += '<div style="background:#fff;border:1px solid #cbd5e1;border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;color:var(--gray-400);font-weight:700">⚓ Solde de départ ' + (dateAncre ? 'au ' + fmtDate(dateAncre) : '') + '</span><span style="font-size:16px;font-weight:800;color:#0369a1">' + fmtMoney(soldeAncre) + '</span></div>';
+  html += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;color:#15803d;font-weight:700">↑ Total Recettes</span><span style="font-size:16px;font-weight:800;color:#16a34a">+ ' + fmtMoney(totRecettes) + '</span></div>';
+  html += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;color:#b91c1c;font-weight:700">↓ Total Dépenses</span><span style="font-size:16px;font-weight:800;color:#dc2626">- ' + fmtMoney(totDepenses) + '</span></div>';
+  html += '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;color:#92400e;font-weight:700">⚡ Total Frais</span><span style="font-size:16px;font-weight:800;color:#d97706">' + fmtMoney(totFrais) + '</span></div>';
+  html += '<div style="background:#eff6ff;border:2px solid #3b82f6;border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:2px"><span style="font-size:10px;text-transform:uppercase;color:#1d4ed8;font-weight:800">💼 Solde Actuel</span><span style="font-size:17px;font-weight:900;color:' + (soldeFin >= 0 ? '#1e3a8a' : '#dc2626') + '">' + fmtMoney(soldeFin) + '</span></div>';
+  html += '</div>';
+
+  /* Barre de recherche instantanée locale */
+  html += '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;background:#f8fafc;padding:8px 12px;border-radius:8px;border:1px solid #e2e8f0">';
+  html += '<input type="text" id="csDetailSearch" placeholder="🔍 Rechercher dans cette caisse (date, pièce, code, libellé, bénéficiaire, moyen, montant)..." oninput="filterCaisseDetailTable()" style="flex:1;max-width:420px;padding:7px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;outline:none;background:#fff">';
+  html += '<span id="csDetailCount" style="font-size:12px;color:var(--gray-500);font-weight:600;margin-left:auto">' + caisseOps.length + ' opérations</span>';
+  html += '</div>';
+
+  /* ── Tableau Moderne ── */
+  html += '<div class="table-wrap" style="border:1px solid #cbd5e1;border-radius:10px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.03)"><div class="table-responsive" style="max-height:65vh;overflow-y:auto">';
+  html += '<table id="csDetailTable" style="width:100%;font-size:12px;border-collapse:collapse;background:#fff"><thead>';
+  html += '<tr style="background:#0f172a;color:#ffffff;position:sticky;top:0;z-index:2">';
+  html += '<th style="padding:10px 12px;width:95px;white-space:nowrap;border-right:1px solid #334155">Date</th>';
+  html += '<th style="padding:10px 8px;width:55px;white-space:nowrap;border-right:1px solid #334155">Heure</th>';
+  html += '<th style="padding:10px 8px;width:75px;white-space:nowrap;border-right:1px solid #334155">Code</th>';
+  html += '<th style="padding:10px 12px;min-width:200px;border-right:1px solid #334155">Libellé</th>';
+  html += '<th style="padding:10px 10px;width:100px;text-align:right;color:#bbf7d0;white-space:nowrap;border-right:1px solid #334155">Recettes</th>';
+  html += '<th style="padding:10px 10px;width:100px;text-align:right;color:#fecaca;white-space:nowrap;border-right:1px solid #334155">Dépenses</th>';
+  html += '<th style="padding:10px 8px;width:75px;text-align:right;color:#fde68a;white-space:nowrap;border-right:1px solid #334155">Frais</th>';
+  html += '<th style="padding:10px 10px;width:85px;white-space:nowrap;border-right:1px solid #334155">Moyen</th>';
+  html += '<th style="padding:10px 12px;width:160px;border-right:1px solid #334155">Bénéficiaire</th>';
+  html += '<th style="padding:10px 8px;width:95px;text-align:center;white-space:nowrap;border-right:1px solid #334155">Statut</th>';
+  html += '<th style="padding:10px 12px;width:130px;text-align:right;color:#bfdbfe;white-space:nowrap">Solde progressif</th>';
+  html += '</tr></thead><tbody id="csDetailTableBody">';
+
+  if (caisseOps.length === 0) {
+    html += '<tr><td colspan="11" class="text-center text-muted" style="padding:30px">Aucune opération enregistrée pour cette caisse.</td></tr>';
+  }
+
+  var running = soldeAncre;
+  var ancreShown = !dateAncre;
+  var codesAll = getCodesCaisse();
+
   for (var k = 0; k < caisseOps.length; k++) {
     var o = caisseOps[k];
     var codeLabel = o.code || '-';
-    var codesAll = getCodesCaisse();
     for (var ck = 0; ck < codesAll.length; ck++) { if (codesAll[ck].id === o.codeId) { codeLabel = codesAll[ck].code; break; } }
-    var statusBadge = o.reversed ? '<span class="badge badge-success">Reversé</span>' : '<span style="color:var(--gray-400)">En attente</span>';
+    var statusBadge = o.brouillon
+      ? '<span class="badge" style="background:#fef3c7;color:#b45309;border:1px solid #fde68a;font-size:10px;padding:2px 8px;border-radius:999px;font-weight:700">Brouillon</span>'
+      : (o.reversed
+        ? '<span class="badge" style="background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;font-size:10px;padding:2px 8px;border-radius:999px;font-weight:700">Reversé</span>'
+        : '<span class="badge" style="background:#f1f5f9;color:#64748b;border:1px solid #cbd5e1;font-size:10px;padding:2px 8px;border-radius:999px;font-weight:600">En attente</span>');
     var fraisDisplay = (o.frais && o.frais > 0) ? fmtMoney(o.frais) : '-';
     var isBeforeAncre = dateAncre && (o.date || '') <= dateAncre;
-    /* Insérer la ligne ancre juste avant la 1ère op POSTÉRIEURE à dateAncre */
+
+    /* Ligne ancre insérée chronologiquement */
     if (dateAncre && !ancreShown && !isBeforeAncre) {
       ancreShown = true;
-      html += '<tr style="background:#e0f2fe"><td colspan="10" style="padding:6px 12px;font-size:12px;color:#0369a1;font-weight:700">⚓ Solde de départ au ' + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA (les opérations ci-dessus sont incluses dans ce montant)</td>';
-      html += '<td style="text-align:right;font-weight:700;color:#0369a1;white-space:nowrap">' + fmtMoney(soldeAncre) + '</td></tr>';
+      html += '<tr style="background:#e0f2fe;border-top:2px solid #0284c7;border-bottom:2px solid #0284c7"><td colspan="10" style="padding:9px 14px;font-size:12px;color:#0369a1;font-weight:800">⚓ Solde de départ au ' + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA (les opérations ci-dessus sont incluses dans ce solde)</td>';
+      html += '<td style="text-align:right;font-weight:800;color:#0369a1;padding:9px 12px;white-space:nowrap;font-variant-numeric:tabular-nums">' + fmtMoney(soldeAncre) + '</td></tr>';
     }
-    /* Mise à jour du running balance */
+
     var soldeAffiche = '';
     if (!isBeforeAncre && !o.brouillon && isTransfertApprouve(o)) {
-      if (o.sens === 'entree') running += o.montant || 0;
-      else running -= (o.montant || 0) + (o.frais || 0);
+      if (o.sens === 'entree') running += (o.montant || 0);
+      else running -= ((o.montant || 0) + (o.frais || 0));
       soldeAffiche = fmtMoney(running);
     } else if (isBeforeAncre && !o.brouillon && isTransfertApprouve(o)) {
-      /* Pour les ops avant ancre : afficher le solde cumulé historique */
       var tmpRunHist = 0;
       for (var bj = 0; bj <= k; bj++) {
         var bop2 = caisseOps[bj];
-        if (!bop2.brouillon && isTransfertApprouve(bop2) && (bop2.date||'') <= dateAncre) {
-          if (bop2.sens==='entree') tmpRunHist += bop2.montant||0;
-          else tmpRunHist -= (bop2.montant||0)+(bop2.frais||0);
+        if (!bop2.brouillon && isTransfertApprouve(bop2) && (bop2.date || '') <= dateAncre) {
+          if (bop2.sens === 'entree') tmpRunHist += (bop2.montant || 0);
+          else tmpRunHist -= ((bop2.montant || 0) + (bop2.frais || 0));
         }
       }
       soldeAffiche = fmtMoney(tmpRunHist);
     }
-    var rowStyle = isBeforeAncre ? 'opacity:0.55;background:#f8fafc;' : '';
-    html += '<tr style="' + rowStyle + '">';
-    html += '<td>' + fmtDate(o.date) + '</td>';
-    html += '<td class="fw-600">' + escH(o.heure || '-') + '</td>';
-    html += '<td>' + escH(codeLabel) + '</td>';
-    html += '<td>' + escH(o.libelle || '-') + '</td>';
-    html += '<td class="text-right" style="color:var(--success);font-weight:600">' + (o.sens === 'entree' ? fmtMoney(o.montant) : '') + '</td>';
-    html += '<td class="text-right" style="color:var(--danger);font-weight:600">' + (o.sens === 'sortie' ? fmtMoney(o.montant) : '') + '</td>';
-    html += '<td class="text-right" style="color:var(--warning);font-weight:600">' + fraisDisplay + '</td>';
-    html += '<td>' + escH(o.moyenPaiement || '-') + '</td>';
-    html += '<td>' + escH(csBenefDisplay(o) || '-') + '</td>';
-    html += '<td>' + statusBadge + '</td>';
-    html += '<td style="text-align:right;font-weight:700;color:' + (running >= 0 ? 'var(--gray-900)' : 'var(--danger)') + ';white-space:nowrap">' + soldeAffiche + '</td>';
+
+    var rowSearch = (escH(o.date || '') + ' ' + (o.heure || '') + ' ' + (o.numeroPiece || '') + ' ' + codeLabel + ' ' + (o.libelle || '') + ' ' + csBenefDisplay(o) + ' ' + (o.moyenPaiement || '') + ' ' + (o.montant || 0)).toLowerCase();
+    var rowBg = isBeforeAncre ? 'opacity:0.55;background:#f8fafc;' : (k % 2 === 1 ? 'background:#fcfdfd;' : 'background:#fff;');
+
+    html += '<tr data-search="' + escH(rowSearch) + '" style="' + rowBg + 'border-bottom:1px solid #e2e8f0">';
+    html += '<td style="padding:8px 12px;white-space:nowrap;font-weight:600;color:#334155">' + fmtDateShort(o.date) + '</td>';
+    html += '<td style="padding:8px 8px;white-space:nowrap;color:#64748b;font-size:11px">' + escH(o.heure || '-') + '</td>';
+    html += '<td style="padding:8px 8px;font-weight:700;color:#1e293b;font-size:11px">' + escH(codeLabel) + '</td>';
+    html += '<td style="padding:8px 12px;color:#0f172a;font-weight:600">' + escH(o.libelle || '-') + (o.numeroPiece ? ' <small style="color:#94a3b8;font-size:10px">(' + escH(o.numeroPiece) + ')</small>' : '') + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;font-weight:700;color:#16a34a;white-space:nowrap;font-variant-numeric:tabular-nums">' + (o.sens === 'entree' ? '+ ' + fmtMoneyNoDevise(o.montant) : '') + '</td>';
+    html += '<td style="padding:8px 10px;text-align:right;font-weight:700;color:#dc2626;white-space:nowrap;font-variant-numeric:tabular-nums">' + (o.sens === 'sortie' ? '- ' + fmtMoneyNoDevise(o.montant) : '') + '</td>';
+    html += '<td style="padding:8px 8px;text-align:right;font-weight:600;color:#d97706;white-space:nowrap;font-variant-numeric:tabular-nums">' + fraisDisplay + '</td>';
+    html += '<td style="padding:8px 10px;white-space:nowrap;color:#475569;font-size:11px">' + escH(o.moyenPaiement || '-') + '</td>';
+    html += '<td style="padding:8px 12px;color:#1e293b;font-size:11px">' + escH(csBenefDisplay(o) || '-') + '</td>';
+    html += '<td style="padding:8px 8px;text-align:center">' + statusBadge + '</td>';
+    html += '<td style="padding:8px 12px;text-align:right;font-weight:800;color:' + (running >= 0 ? '#0f172a' : '#dc2626') + ';white-space:nowrap;font-variant-numeric:tabular-nums">' + soldeAffiche + '</td>';
     html += '</tr>';
   }
-  /* Si aucune op postérieure à dateAncre, montrer la ligne ancre à la fin */
+
   if (dateAncre && !ancreShown) {
-    html += '<tr style="background:#e0f2fe"><td colspan="10" style="padding:6px 12px;font-size:12px;color:#0369a1;font-weight:700">⚓ Solde de départ au ' + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA</td>';
-    html += '<td style="text-align:right;font-weight:700;color:#0369a1;white-space:nowrap">' + fmtMoney(soldeAncre) + '</td></tr>';
+    html += '<tr style="background:#e0f2fe;border-top:2px solid #0284c7"><td colspan="10" style="padding:9px 14px;font-size:12px;color:#0369a1;font-weight:800">⚓ Solde de départ au ' + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA</td>';
+    html += '<td style="text-align:right;font-weight:800;color:#0369a1;padding:9px 12px;white-space:nowrap;font-variant-numeric:tabular-nums">' + fmtMoney(soldeAncre) + '</td></tr>';
   }
+
   html += '</tbody></table></div></div></div>';
   html += renderCaisseInventairesHtml(caisseId);
   document.getElementById('tresorerieContent').innerHTML = html;
 }
+
+window.filterCaisseDetailTable = function() {
+  var q = (document.getElementById('csDetailSearch') ? document.getElementById('csDetailSearch').value : '').toLowerCase().trim();
+  var tbody = document.getElementById('csDetailTableBody');
+  if (!tbody) return;
+  var rows = tbody.querySelectorAll('tr[data-search]');
+  var count = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var s = rows[i].getAttribute('data-search') || '';
+    var show = !q || s.indexOf(q) !== -1;
+    rows[i].style.display = show ? '' : 'none';
+    if (show) count++;
+  }
+  var cntEl = document.getElementById('csDetailCount');
+  if (cntEl) cntEl.textContent = q ? (count + ' / ' + rows.length + ' opération(s)') : (rows.length + ' opérations');
+};
+
+window.printCaisseDetail = function(caisseId) {
+  var el = document.getElementById('csDetailTable');
+  if (!el) return;
+  var w = window.open('', '_blank');
+  w.document.write('<html><head><title>Détail Caisse</title><style>table{width:100%;border-collapse:collapse;font-size:11px;font-family:Arial}th,td{border:1px solid #ccc;padding:5px 7px}th{background:#f1f5f9}</style></head><body>' + el.outerHTML + '</body></html>');
+  w.document.close();
+  w.print();
+};
+
+window.exportCaisseDetailExcel = function(caisseId) {
+  var el = document.getElementById('csDetailTable');
+  if (!el || typeof XLSX === 'undefined') { toast('Module Excel non disponible', 'error'); return; }
+  var wb = XLSX.utils.table_to_book(el, {sheet:'Détail Caisse'});
+  XLSX.writeFile(wb, 'detail-caisse-' + getToday() + '.xlsx');
+};
 
 function reverserCaisse(caisseId) {
   if (!window.confirm('Reverser toutes les op\u00e9rations non revers\u00e9es de cette caisse dans la caisse g\u00e9n\u00e9rale ?')) return;
@@ -32488,8 +32561,10 @@ function renderCaisseIn(el) {
   if (!window._csSortKey) window._csSortKey = 'date';
   if (!window._csSortDir) window._csSortDir = 'desc';
   var allCaisses = getCaisses() || [];
+  var gM = document.getElementById('gPeriodMonth');
+  var isAllPeriodsGlobal = (window._csAllPeriods === true || (gM && gM.value === 'all'));
   var brouMode = !!window._csBrouillonMode;
-  var allPeriods = brouMode;
+  var allPeriods = (isAllPeriodsGlobal || brouMode);
   // Migration : réparer les opérations ORPHELINES sans caisseId uniquement
   // NE PAS déplacer une opération qui a déjà une caisse — l'utilisateur l'a intentionnellement placée là
   (function(){
@@ -32530,9 +32605,16 @@ function renderCaisseIn(el) {
   var caisseAgentNom = '';
   var _viewCaisseId = caisseTargetId || myCaisseId;
   for (var csi = 0; csi < allCaisses.length; csi++) { if (allCaisses[csi].id === _viewCaisseId) { caisseSoldeInitial = allCaisses[csi].soldeInitial || 0; caisseSoldeInitialDate = allCaisses[csi].soldeInitialDate || ''; caisseNom = allCaisses[csi].nom; caisseAgentNom = allCaisses[csi].agentNom || ''; break; } }
-  // Si vue = Toutes, garder le nom de ma caisse pour l'en-tête, sinon afficher la caisse vue
+  // Si vue = Toutes, cumuler les soldes initiaux des caisses accessibles et garder le nom
   if (window._seeAllCaisses) {
-    for (var _csi2=0; _csi2<allCaisses.length; _csi2++){ if(allCaisses[_csi2].id===myCaisseId){ caisseNom=allCaisses[_csi2].nom; break; } }
+    caisseSoldeInitial = 0;
+    for (var _csi2=0; _csi2<allCaisses.length; _csi2++){
+      var _cRow = allCaisses[_csi2];
+      if (canSeeAll || canUserAccessCaisse(currentUser, _cRow.id)) {
+        caisseSoldeInitial += (_cRow.soldeInitial || 0);
+      }
+      if (_cRow.id === myCaisseId) caisseNom = _cRow.nom;
+    }
   }
   var html = '<div data-sub="tresorerie.enregistrement">';
   var _modalOnly = !!window._csModalMode;
@@ -32583,25 +32665,25 @@ function renderCaisseIn(el) {
   if (canSeeAll) {
     html += '<select id="csCaisseView" onchange="onCaisseViewChange()" style="margin-left:4px;font-size:12px;padding:4px 8px;border:1px solid var(--gray-300);border-radius:var(--radius);background:#fff">';
     html += '<option value="'+myCaisseId+'"'+((window._csViewCaisseId===myCaisseId || (!window._csViewCaisseId && !window._seeAllCaisses))?' selected':'')+'>Ma caisse'+(caisseNom?' ('+escH(caisseNom)+')':'')+'</option>';
-    html += '<option value="all"'+(window._seeAllCaisses?' selected':'')+'>Toutes caisses</option>';
+    html += '<option value="all"'+(window._seeAllCaisses?' selected':'')+'>Toutes les caisses (vue globale — '+allCaisses.length+')</option>';
     var _gen=null; for(var _gi=0; _gi<allCaisses.length; _gi++){ if(allCaisses[_gi].type==='generale'){ _gen=allCaisses[_gi]; break; } }
     if(_gen) html += '<option value="'+_gen.id+'"'+(window._csViewCaisseId===_gen.id?' selected':'')+'>Caisse G\u00e9n\u00e9rale'+(_gen.nom?' ('+escH(_gen.nom)+')':'')+' (reversements)</option>';
     for(var _oi=0; _oi<allCaisses.length; _oi++){ var _c=allCaisses[_oi]; if(_c.id===myCaisseId || (_gen && _c.id===_gen.id)) continue; html += '<option value="'+_c.id+'"'+(window._csViewCaisseId===_c.id?' selected':'')+'>'+escH(_c.nom)+'</option>'; }
     html += '</select>';
   } else if (multiCaisse) {
-    var _curCV = caisseTargetId || myCaisseId;
-    var _cvOK = false;
+    var _isAllCV = (window._csViewCaisseId === 'all' || window._seeAllCaisses);
+    var _curCV = _isAllCV ? 'all' : (caisseTargetId || myCaisseId);
+    var _cvOK = _isAllCV;
     for (var _cvk = 0; _cvk < accessibleCaisses.length; _cvk++) { if (accessibleCaisses[_cvk].id === _curCV) { _cvOK = true; break; } }
     if (!_cvOK && accessibleCaisses.length > 0) { _curCV = accessibleCaisses[0].id; if (window._csViewCaisseId && window._csViewCaisseId !== 'all') window._csViewCaisseId = _curCV; }
     html += '<select id="csCaisseView" onchange="onCaisseViewChange()" style="margin-left:4px;font-size:12px;padding:4px 8px;border:1px solid var(--gray-300);border-radius:var(--radius);background:#fff">';
+    html += '<option value="all"' + (_isAllCV ? ' selected' : '') + '>Toutes mes caisses (' + accessibleCaisses.length + ')</option>';
     for (var _cv = 0; _cv < accessibleCaisses.length; _cv++) {
       var _cvC = accessibleCaisses[_cv];
-      var _cvSel = (_cvC.id === _curCV) ? ' selected' : '';
-      html += '<option value="' + _cvC.id + '"' + _cvSel + '>' + escH(_cvC.nom) + ' (' + escH(_cvC.agentNom || '') + ')</option>';
+      var _cvSel = (!_isAllCV && _cvC.id === _curCV) ? ' selected' : '';
+      html += '<option value="' + _cvC.id + '"' + _cvSel + '>' + escH(_cvC.nom) + (_cvC.agentNom ? ' (' + escH(_cvC.agentNom) + ')' : '') + '</option>';
     }
     html += '</select>';
-    if (window._csViewCaisseId && window._csViewCaisseId !== 'all' && window._csViewCaisseId !== _curCV) window._csViewCaisseId = _curCV;
-    if (!window._csViewCaisseId && window._seeAllCaisses) { window._seeAllCaisses = false; }
   } else if (allCaisses.length > 1) {
     html += '<button id="csSeeAllBtn" class="btn btn-outline btn-sm" onclick="toggleSeeAllCaisses()" style="margin-left:4px;color:' + (window._seeAllCaisses ? 'var(--success)' : 'var(--warning)') + ';border-color:' + (window._seeAllCaisses ? 'var(--success)' : 'var(--warning)') + '" title="' + (window._seeAllCaisses ? 'Voir uniquement ma caisse' : 'Voir les op\u00e9rations de toutes les caisses') + '">' + (window._seeAllCaisses ? '&#x2713; Ma caisse' : '&#x1F50D; Toutes caisses') + '</button>';
   }
@@ -32641,7 +32723,14 @@ function renderCaisseIn(el) {
     var caisseMatch = window._seeAllCaisses ? true : (caisseTargetId ? (ocId2 === caisseTargetId) : true);
     if (!canSeeAll && !canUserAccessCaisse(currentUser, ocId2)) { continue; }
     if (!caisseMatch) continue;
-    if (allPeriods) { ops.push(allOps[fi]); continue; }
+    if (allPeriods) {
+      if (rangeActive && !isAllPeriodsGlobal && ((rangeFrom && opDate < rangeFrom) || (rangeTo && opDate > rangeTo))) {
+        if (rangeFrom && opDate < rangeFrom && !allOps[fi].brouillon) opsBefore.push(allOps[fi]);
+        continue;
+      }
+      ops.push(allOps[fi]);
+      continue;
+    }
     if (opDate.indexOf(prefix) === 0) {
       if (rangeActive && ((rangeFrom && opDate < rangeFrom) || (rangeTo && opDate > rangeTo))) {
         /* Avant la plage : compte dans le solde début (cohérence du solde fin) ; après : exclu */
@@ -32919,7 +33008,11 @@ function renderCaisseIn(el) {
     runningSolde += (so.sens === 'entree' ? (so.montant || 0) : -(so.montant || 0) - (so.frais || 0));
     soldeMap[so.id] = runningSolde;
   }
-  if (ops.length === 0) html += '<tr><td colspan="17" class="text-center text-muted">' + (allPeriods ? 'Aucune op\u00e9ration' : 'Aucune op\u00e9ration pour ' + months[parseInt(window._csSelMonth) - 1] + ' ' + window._csSelYear) + '</td></tr>';
+  if (ops.length === 0) {
+    var _emptyMsg = allPeriods ? 'Aucune op\u00e9ration' : 'Aucune op\u00e9ration pour ' + months[parseInt(window._csSelMonth) - 1] + ' ' + window._csSelYear;
+    var _btnShowAll = (!window._seeAllCaisses || !allPeriods) ? ' <button class="btn btn-sm btn-outline" onclick="csSearchAllCaissesAndPeriods()" style="margin-left:8px;font-size:11px">&#x1F50E; Afficher toutes les caisses et toutes les p\u00e9riodes</button>' : '';
+    html += '<tr><td colspan="17" class="text-center text-muted" style="padding:24px">' + _emptyMsg + _btnShowAll + '</td></tr>';
+  }
   for (var oi = ops.length - 1; oi >= 0; oi--) {
     var o = ops[oi];
     if (o.linkedOpId && o.libelle && o.libelle.indexOf('Frais') === 0) continue;
@@ -32934,7 +33027,9 @@ function renderCaisseIn(el) {
     if (o.typeOp === 'transfert' && o.caisseDestNom) transfertLabel = o.sens === 'sortie' ? ' \u2192 ' + escH(o.caisseDestNom) : ' \u2190 ' + escH(o.caisseSourceNom || '');
     var _trStatut = csTransfertStatutLabel(o);
     var transfertBadge = isTransfertOp(o) ? '<br><span class="badge ' + _trStatut.cls + '" style="font-size:9px;margin-top:2px">' + _trStatut.txt + '</span>' : '';
-    var searchStr = ((o.numeroPiece||'') + ' ' + (o.date||'') + ' ' + codeLabel + ' ' + (o.libelle||'') + ' ' + (o.beneficiaireNom||'') + ' ' + (o.executant||'') + ' ' + (o.remettant||'') + ' ' + (o.observations||'') + ' ' + (o.moyenPaiement||'') + ' ' + (o.numeroTransaction||'') + ' ' + (o.montant || 0) + ' ' + (o.montantCharge || 0)).toLowerCase();
+    var _cNom = '';
+    for (var _ck = 0; _ck < allCaisses.length; _ck++) { if (allCaisses[_ck].id === o.caisseId) { _cNom = allCaisses[_ck].nom || ''; break; } }
+    var searchStr = ((o.numeroPiece||'') + ' ' + (o.date||'') + ' ' + codeLabel + ' ' + (o.libelle||'') + ' ' + (o.beneficiaireNom||'') + ' ' + (o.executant||'') + ' ' + (o.remettant||'') + ' ' + (o.observations||'') + ' ' + (o.moyenPaiement||'') + ' ' + (o.numeroTransaction||'') + ' ' + (o.montant || 0) + ' ' + (o.montantCharge || 0) + ' ' + _cNom).toLowerCase();
     var chargeType = '';
     if (o.montantCharge && o.montantCharge > 0 && o.montant && o.montant > 0) chargeType = 'avec_paiement';
     else if (o.montantCharge && o.montantCharge > 0) chargeType = 'charge_seule';
@@ -32946,7 +33041,8 @@ function renderCaisseIn(el) {
     html += '<td>' + fmtDateShort(o.date) + '</td>';
     html += '<td style="color:var(--gray-500);white-space:nowrap;font-size:10px">' + escH(o.numeroPiece || '-') + '</td>';
     html += '<td class="fw-600" style="font-size:10px">' + escH(codeLabel) + '</td>';
-    html += '<td style="min-width:160px">' + escH(o.libelle || '-') + (o.typeOp === 'transfert' ? '<div style="margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.3px;color:#fff;background:' + (o.sens === 'entree' ? '#16a34a' : '#ea580c') + '">' + (o.sens === 'entree' ? '\u2193 REÇU' : '\u2191 ENVOYÉ') + '</span><span style="font-size:10px;font-weight:700;color:' + (o.sens === 'entree' ? '#15803d' : '#c2410c') + '">' + transfertLabel + '</span></div>' : (_rowCls === 'cs-appro-recu' ? '<div style="margin-top:3px"><span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.3px;color:#fff;background:#2563eb">\uD83D\uDCE5 APPRO REÇU</span></div>' : '')) + transfertBadge + '</td>';
+    var _csBadge = (window._seeAllCaisses && _cNom) ? ('<span class="badge" style="font-size:9px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;margin-right:5px;display:inline-block;vertical-align:middle" title="Caisse : ' + escH(_cNom) + '">&#x1F3E2; ' + escH(_cNom) + '</span> ') : '';
+    html += '<td style="min-width:160px">' + _csBadge + escH(o.libelle || '-') + (o.typeOp === 'transfert' ? '<div style="margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.3px;color:#fff;background:' + (o.sens === 'entree' ? '#16a34a' : '#ea580c') + '">' + (o.sens === 'entree' ? '\u2193 REÇU' : '\u2191 ENVOYÉ') + '</span><span style="font-size:10px;font-weight:700;color:' + (o.sens === 'entree' ? '#15803d' : '#c2410c') + '">' + transfertLabel + '</span></div>' : (_rowCls === 'cs-appro-recu' ? '<div style="margin-top:3px"><span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.3px;color:#fff;background:#2563eb">\uD83D\uDCE5 APPRO REÇU</span></div>' : '')) + transfertBadge + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--success);white-space:nowrap">' + (entreeVal > 0 ? '+ ' + fmtMoneyNoDevise(entreeVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--danger);white-space:nowrap">' + (sortieVal > 0 ? '- ' + fmtMoneyNoDevise(sortieVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoneyNoDevise(o.montantCharge) : '') + '</td>';
@@ -33185,9 +33281,16 @@ function autoDetectBenefType(label) {
 function refreshCaisseFilters() {
   var m = document.getElementById('csSelMonth');
   var y = document.getElementById('csSelYear');
-  if (m && m.value !== 'all') { window._csSelMonth = m.value; DB.set('mdb_caisseMonth', m.value); }
+  if (m) {
+    if (m.value === 'all') {
+      window._csAllPeriods = true;
+    } else {
+      window._csAllPeriods = false;
+      window._csSelMonth = m.value;
+      DB.set('mdb_caisseMonth', m.value);
+    }
+  }
   if (y) { window._csSelYear = y.value; DB.set('mdb_caisseYear', y.value); }
-  window._csBrouillonMode = (m && m.value === 'all') ? true : false;
   saveAppState();
   syncGlobalPeriodUI();
   renderTresorerieActiveTab();
@@ -33208,7 +33311,7 @@ function renderTresorerieActiveTab() {
 function syncGlobalPeriodUI() {
   try {
     var m = document.getElementById('gPeriodMonth'), y = document.getElementById('gPeriodYear');
-    if (m) m.value = (window._csBrouillonMode ? 'all' : (window._csSelMonth || ''));
+    if (m) m.value = (window._csAllPeriods ? 'all' : (window._csSelMonth || ''));
     if (y) y.value = window._csSelYear || '';
   } catch(eS) {}
 }
@@ -33217,9 +33320,22 @@ function onGlobalPeriodChange() {
   try {
     if (typeof currentUser === 'undefined' || !currentUser || !currentUser.id) return;
     var m = document.getElementById('gPeriodMonth'), y = document.getElementById('gPeriodYear');
-    if (m && m.value !== 'all') { window._csSelMonth = m.value; try { DB.set('mdb_caisseMonth', m.value); } catch(e1) {} }
+    if (m) {
+      if (m.value === 'all') {
+        window._csAllPeriods = true;
+        try {
+          DB.set('mdb_dashRange', {});
+          var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo');
+          if (fEl) fEl.value = '';
+          if (tEl) tEl.value = '';
+        } catch(eR) {}
+      } else {
+        window._csAllPeriods = false;
+        window._csSelMonth = m.value;
+        try { DB.set('mdb_caisseMonth', m.value); } catch(e1) {}
+      }
+    }
     if (y && y.value) { window._csSelYear = y.value; try { DB.set('mdb_caisseYear', y.value); } catch(e2) {} }
-    window._csBrouillonMode = (m && m.value === 'all') ? true : false;
     try { saveAppState(); } catch(e3) {}
     syncGlobalPeriodUI();
     if (typeof currentPage !== 'undefined' && currentPage === 'tresorerie') { renderTresorerieActiveTab(); return; }
@@ -33736,12 +33852,34 @@ function onCaisseViewChange(){
   if(el) renderCaisseIn(el);
 }
 
+function csSearchAllCaissesAndPeriods() {
+  window._seeAllCaisses = true;
+  window._csViewCaisseId = 'all';
+  window._csAllPeriods = true;
+  window._csBrouillonMode = false;
+  try {
+    DB.set('mdb_dashRange', {});
+    var fEl = document.getElementById('hdrDateFrom'), tEl = document.getElementById('hdrDateTo');
+    if (fEl) fEl.value = '';
+    if (tEl) tEl.value = '';
+  } catch(e) {}
+  var gM = document.getElementById('gPeriodMonth');
+  if (gM) gM.value = 'all';
+  var cv = document.getElementById('csCaisseView');
+  if (cv) cv.value = 'all';
+  var tf = document.getElementById('csFilterType');
+  if (tf) tf.value = '';
+  var el = document.getElementById('tresorerieContent');
+  if (el) renderCaisseIn(el);
+}
+
 function filterCaisseOps() {
   var q = (document.getElementById('csSearchTop').value || '').toLowerCase().trim();
   var chargeFilter = document.getElementById('csFilterCharge') ? document.getElementById('csFilterCharge').value : '';
   var typeFilter = document.getElementById('csFilterType') ? document.getElementById('csFilterType').value : '';
   var onlyPendingTransf = !!window._csOnlyPendingTransf;
-  var rows = document.getElementById('csOpsBody').getElementsByTagName('tr');
+  var rows = document.getElementById('csOpsBody') ? document.getElementById('csOpsBody').getElementsByTagName('tr') : [];
+  var visibleCount = 0;
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     var searchStr = row.getAttribute('data-search') || '';
@@ -33759,7 +33897,25 @@ function filterCaisseOps() {
     if (typeFilter === 'non_imprime' && rowImprime !== 'non_imprime') show = false;
     if (typeFilter === 'importe' && rowImport !== 'importe') show = false;
     if (onlyPendingTransf && rowStatus !== 'en_attente') show = false;
-    rows[i].style.display = show ? '' : 'none';
+    row.style.display = show ? '' : 'none';
+    if (show) visibleCount++;
+  }
+  var hintEl = document.getElementById('csSearchGlobalHint');
+  if (q && visibleCount === 0 && (!window._seeAllCaisses || !window._csAllPeriods)) {
+    if (!hintEl) {
+      hintEl = document.createElement('div');
+      hintEl.id = 'csSearchGlobalHint';
+      hintEl.style.cssText = 'margin:8px 0;padding:10px 14px;background:#ecfdf5;border:1px solid #86efac;border-radius:8px;font-size:12px;color:#166534;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap';
+      var csTableWrap = document.querySelector('#tresorerieContent .table-wrap');
+      if (csTableWrap && csTableWrap.parentNode) csTableWrap.parentNode.insertBefore(hintEl, csTableWrap);
+    }
+    if (hintEl) {
+      hintEl.innerHTML = '<span>&#x1F50D; 0 r\u00e9sultat pour « <strong>' + escH(q) + '</strong> » dans cette caisse ou ce mois.</span>'
+        + '<button class="btn btn-primary btn-sm" onclick="csSearchAllCaissesAndPeriods()" style="font-size:11px;padding:4px 10px;font-weight:700">&#x1F50E; Chercher « ' + escH(q) + ' » dans TOUTES les caisses et TOUTES les p\u00e9riodes (1 clic)</button>';
+      hintEl.style.display = 'flex';
+    }
+  } else if (hintEl) {
+    hintEl.style.display = 'none';
   }
 }
 function setCaisseFilterTransfert() {
