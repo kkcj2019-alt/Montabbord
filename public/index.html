@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-28-311';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-29-312';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -24816,9 +24816,10 @@ function onRegClientChange() {
   var html = '<option value="">-- Sans facture --</option>';
   for (var i = 0; i < factures.length; i++) {
     var f = factures[i];
-    if (f.clientId !== cid || f.statut === 'payee') continue;
-    var restant = (f.total || 0) - (f.montantPaye || 0);
-    html += '<option value="' + f.id + '">' + escH(f.numero) + ' (restant: ' + fmtMoney(restant) + ')</option>';
+    if (f.clientId !== cid) continue;
+    var restant = Math.max(0, ((f.totalTTC != null ? f.totalTTC : f.total) || 0) - (f.montantPaye || 0));
+    var label = escH(f.numero) + (f.statut === 'payee' || restant <= 0 ? ' ✓ [Réglée]' : ' (restant: ' + fmtMoney(restant) + ')');
+    html += '<option value="' + f.id + '">' + label + '</option>
   }
   facSel.innerHTML = html;
   var selBanque = document.getElementById('regBanqueId');
@@ -24912,10 +24913,22 @@ function saveReglement(id) {
   } else { data.id = DB.genId(); regs.push(data); }
   DB.set('mdb_reglements', regs);
   syncReglementBanqueOp(oldReg, data);
+  syncReglementCaisseOp(oldReg, data);
   updateFactureFromReglement(oldReg, data);
   closeModal();
   toast('R\u00e8glement enregistr\u00e9');
-  if (window._retourReleveClient) { retourReleve(window._retourReleveClient); return; }
+  if (window._retourReleveClient) {
+    var _cbCli = window._retourReleveClient;
+    window._retourReleveClient = '';
+    retourReleve(_cbCli);
+    return;
+  }
+  if (currentPage === 'facturation' || currentPage === 'factures') {
+    if (typeof renderFacturesJournal === 'function') renderFacturesJournal();
+    else if (typeof renderFactures === 'function') renderFactures();
+    buildSidebar();
+    return;
+  }
   renderTresorerie();
   buildSidebar();
 }
@@ -24975,7 +24988,18 @@ function deleteReglement(id) {
   removeReglementCaisseOps(id, oldReg);
   if (oldReg) updateFactureFromReglement(oldReg, null);
   toast('R\u00e8glement supprim\u00e9');
-  if (window._retourReleveClient) { retourReleve(window._retourReleveClient); return; }
+  if (window._retourReleveClient) {
+    var _cbCli2 = window._retourReleveClient;
+    window._retourReleveClient = '';
+    retourReleve(_cbCli2);
+    return;
+  }
+  if (currentPage === 'facturation' || currentPage === 'factures') {
+    if (typeof renderFacturesJournal === 'function') renderFacturesJournal();
+    else if (typeof renderFactures === 'function') renderFactures();
+    buildSidebar();
+    return;
+  }
   renderTresorerie();
   buildSidebar();
 }
@@ -24985,6 +25009,18 @@ function reglerFactureDepuisCompte(clientId, factureId) {
   if (!fac) { toast('Facture introuvable', 'error'); return; }
   /* Le montant a encaisser est TOUJOURS le TTC, jamais le HT. */
   var reste = ((fac.totalTTC != null ? fac.totalTTC : fac.total) || 0) - (fac.montantPaye || 0);
+  if (reste <= 0 || fac.statut === 'payee') {
+    var regs = getReglements();
+    var existingReg = null;
+    for (var ri = regs.length - 1; ri >= 0; ri--) {
+      if (regs[ri].factureId === factureId) { existingReg = regs[ri]; break; }
+    }
+    if (existingReg) {
+      window._retourReleveClient = clientId;
+      openReglementModal(existingReg.id);
+      return;
+    }
+  }
   var html = '<div class="form-group"><label>Client</label><input type="text" value="' + escH(cl ? cl.nom : '') + '" disabled></div>';
   html += '<div class="form-group"><label>Facture</label><input type="text" value="' + escH(fac.numero || '') + ' \u2014 Reste : ' + fmtMoney(reste) + '" disabled></div>';
   html += '<div class="form-group"><label>Montant \u00e0 r\u00e9gler (FCFA) *</label><input type="number" id="regMontantDirect" value="' + reste + '" min="1" max="' + reste + '"></div>';
@@ -25051,6 +25087,10 @@ function saveReglementDirect(clientId, factureId) {
   }
   closeModal();
   toast('Règlement enregistré');
+  if (window._retourReleveClient || currentPage === 'creancesDettes' || currentPage === 'comptesClients') {
+    retourReleve(clientId);
+    return;
+  }
   showExtraitCompte(clientId);
 }
 function openFacturePayment(factureId) {
@@ -27649,6 +27689,39 @@ function syncReglementBanqueOp(oldReg, newReg) {
   if (oldReg && oldReg.id) removeReglementBanqueOps(oldReg.id);
   if (newReg && newReg.dest === 'banque' && newReg.clientBankId) createReglementBanqueOp(newReg);
 }
+function createReglementCaisseOp(reg) {
+  if (!reg || reg.dest !== 'caisse') return;
+  var cl = getClientById(reg.clientId);
+  var facNum = '';
+  if (reg.factureId) { var f = getFactureById(reg.factureId); facNum = f ? (f.numero || '') : ''; }
+  var caisses = getCaisses();
+  var caisseId = '';
+  for (var ci = 0; ci < caisses.length; ci++) {
+    if (caisses[ci].type === 'generale') { caisseId = caisses[ci].id; break; }
+  }
+  if (!caisseId && caisses.length > 0) caisseId = caisses[0].id;
+  var ops = getOperationsCaisse() || [];
+  ops.push({
+    id: DB.genId(),
+    reglementId: reg.id,
+    caisseId: caisseId,
+    date: reg.date,
+    heure: new Date().toTimeString().substr(0, 5),
+    sens: 'entree',
+    montant: reg.montant || 0,
+    libelle: 'Règlement ' + (facNum ? 'facture ' + facNum : 'client ' + (cl ? cl.nom : '')),
+    observations: reg.reference || reg.notes || '',
+    beneficiaireType: 'client',
+    beneficiaireId: reg.clientId,
+    beneficiaireNom: (cl ? cl.nom : ''),
+    moyenPaiement: reg.modePaiement || 'especes'
+  });
+  DB.set('mdb_operationsCaisse', ops);
+}
+function syncReglementCaisseOp(oldReg, newReg) {
+  if (oldReg && oldReg.id) removeReglementCaisseOps(oldReg.id, oldReg);
+  if (newReg && newReg.dest === 'caisse') createReglementCaisseOp(newReg);
+}
 
 function openPrintActifModal(mode) {
   window._actifOutMode = (mode === 'pdf') ? 'pdf' : 'print';
@@ -29817,7 +29890,7 @@ function showExtraitCompte(clientId) {
         if (factures[k].id === r.factureId) { facNum = factures[k].numero; break; }
       }
     }
-    operations.push({date: r.date, libelle: 'R\u00e8glement ' + (r.modePaiement || '') + (r.dest === 'banque' && r.clientBankId ? (' \u2014 ' + (getBanqueNameById(r.clientBankId) || 'Banque')) : ''), numero: facNum, debit: 0, credit: r.montant || 0, bcRef: ''});
+    operations.push({date: r.date, libelle: 'R\u00e8glement ' + (r.modePaiement || '') + (r.reference ? (' \u2014 R\u00e9f: ' + r.reference) : '') + (r.dest === 'banque' && r.clientBankId ? (' \u2014 ' + (getBanqueNameById(r.clientBankId) || 'Banque')) : ''), numero: facNum, debit: 0, credit: r.montant || 0, bcRef: '', reglementId: r.id});
   }
   /* Add caisse operations for this client (filter out tombstoned/ghost operations) */
   var allOps = getOperationsCaisse();
@@ -30200,7 +30273,7 @@ function toggleClientSimpleDetail(clientId, tdEl) {
     var _r=reglements[_rj]; if(_r.clientId!==clientId) continue;
     var _facNum=''; if(_r.factureId) for(var _k=0;_k<factures.length;_k++) if(factures[_k].id===_r.factureId){ _facNum=factures[_k].numero; break; }
     var _lettR = lettrageMap['reg_'+_r.id] || lettrageMap[_r.factureId] || '';
-    ops.push({date:_r.date, numero:_facNum, bc:'', bl:'', echeance:'', lettrage:_lettR, libelle:'Règlement ' + (_r.modePaiement||'') + (_r.dest==='banque'?' — '+(getBanqueNameById(_r.clientBankId)||'Banque') : ''), debit:0, credit:_r.montant||0, reglementId:_r.id, factureId:_r.factureId||''});
+    ops.push({date:_r.date, numero:_facNum, bc:'', bl:'', echeance:'', lettrage:_lettR, libelle:'Règlement ' + (_r.modePaiement||'') + (_r.reference ? ' — Réf: ' + _r.reference : '') + (_r.dest==='banque'?' — '+(getBanqueNameById(_r.clientBankId)||'Banque') : ''), debit:0, credit:_r.montant||0, reglementId:_r.id, factureId:_r.factureId||''});
   }
   ops.sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
   var _soldeProg=0; for(var _m=0;_m<ops.length;_m++){ _soldeProg+=ops[_m].debit - ops[_m].credit; ops[_m].solde=_soldeProg; }
@@ -30221,7 +30294,7 @@ function toggleClientSimpleDetail(clientId, tdEl) {
     '<div style="margin:0 12px 10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-sm" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;font-weight:700" onclick="reglerSelectionCompte(\'' + clientId + '\')">R\u00e9gler la s\u00e9lection (1 ch\u00e8que)</button><span style="font-size:11px;color:var(--gray-500)">Cochez plusieurs factures : un seul r\u00e8glement les solde ensemble.</span></div>' +
     '<div style="margin:0 12px 16px;border:1.5px solid #94a3b8;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.06)"><div style="max-height:480px;overflow:auto" id="inlineWrap_'+clientId+'">' +
     '<table style="width:100%;border-collapse:collapse;font-size:12px;border:1.5px solid #94a3b8"><thead><tr style="background:#f1f5f9;position:sticky;top:0;z-index:1"><th style="padding:8px 6px;text-align:center;border:1px solid #94a3b8;border-bottom:2px solid #64748b;width:30px"></th><th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b;white-space:nowrap">Date</th><th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b">Facture</th><th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#92400e;border:1px solid #94a3b8;border-bottom:2px solid #64748b;white-space:nowrap">Échéance</th><th style="padding:8px 10px;text-align:left;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b;min-width:320px;width:38%">Articles</th><th class="col-detail-inline" style="display:none;padding:8px 10px;text-align:left;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b">BC</th><th class="col-detail-inline" style="display:none;padding:8px 10px;text-align:left;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b">BL</th><th style="padding:8px 10px;text-align:center;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#7c3aed;border:1px solid #94a3b8;border-bottom:2px solid #64748b;white-space:nowrap">Lettrage</th><th style="padding:8px 10px;text-align:right;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b">Débit</th><th style="padding:8px 10px;text-align:right;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#334155;border:1px solid #94a3b8;border-bottom:2px solid #64748b">Crédit</th><th style="padding:8px 10px;text-align:right;font-size:10px;letter-spacing:0.04em;text-transform:uppercase;color:#0f172a;border:1px solid #94a3b8;border-bottom:2px solid #64748b">Solde</th><th style="padding:8px 6px;text-align:center;font-size:9px;letter-spacing:0.04em;text-transform:uppercase;color:#0f172a;border:1px solid #94a3b8;border-bottom:2px solid #64748b;white-space:nowrap" class="col-actions">Actions</th></tr></thead><tbody>' +
-    ops.map(function(o,idx){ var isEven=idx%2===0; return '<tr style="background:'+(isEven?'#fff':'#f8fafc')+';transition:background 0.12s" onmouseenter="this.style.background=\'#f1f5f9\'" onmouseleave="this.style.background=\''+(isEven?'#fff':'#f8fafc')+'\'">' + (o.factureId && ccResteFacture(o.factureId) > 0 ? '<td style="padding:7px 6px;text-align:center;border:1px solid #cbd5e1"><input type="checkbox" class="cc-fac-check" data-id="' + o.factureId + '"></td>' : '<td style="border:1px solid #cbd5e1"></td>') + '<td style="padding:7px 10px;white-space:nowrap;color:#334155;font-weight:500;border:1px solid #cbd5e1">'+fmtDate(o.date)+'</td><td style="padding:7px 10px;white-space:nowrap;border:1px solid #cbd5e1"><span style="background:#f1f5f9;padding:2px 6px;border-radius:6px;font-weight:600;font-size:11px;color:#334155">'+escH(o.numero||'—')+'</span></td><td style="padding:7px 10px;white-space:nowrap;text-align:center;border:1px solid #cbd5e1"'+(o.echeance? '<span style="font-size:11px;white-space:nowrap;'+(o.echeance < getToday() && o.debit ? 'color:#dc2626;font-weight:700;background:#fef2f2;padding:2px 6px;border-radius:6px;border:1px solid #fecaca' : 'color:#334155')+'">'+fmtDate(o.echeance)+'</span>' : '<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;min-width:280px;border:1px solid #cbd5e1"><div style="font-size:12px;color:#0f172a;white-space:normal;word-break:break-word;line-height:1.4" title="'+escH(o.articles||o.libelle||'-')+'">'+escH(o.articles||o.libelle||'-').replace(/(\d+)\s*x/g, '<b style="font-weight:700;color:#f97316">$1</b> ×')+'</div></td><td class="col-detail-inline" style="display:none;padding:7px 10px;font-size:11px;color:#64748b;border:1px solid #cbd5e1">'+escH(o.bc||'—')+'</td><td class="col-detail-inline" style="display:none;padding:7px 10px;font-size:11px;color:#64748b;border:1px solid #cbd5e1">'+escH(o.bl||'—')+'</td><td style="padding:7px 10px;text-align:center;white-space:nowrap;border:1px solid #cbd5e1"'+(o.lettrage? '<span style="display:inline-flex;width:22px;height:22px;border-radius:6px;background:#fff7ed;border:1px solid #dbeafe;color:#ea580c;font-weight:800;font-size:11px;align-items:center;justify-content:center">'+escH(o.lettrage)+'</span>' : '<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:600;color:'+(o.debit?'#dc2626':'#94a3b8')+';border-bottom:1px solid #f1f5f9">'+(o.debit?fmtMoney(o.debit):'<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:600;color:'+(o.credit?'#059669':'#94a3b8')+';border-bottom:1px solid #f1f5f9">'+(o.credit?fmtMoney(o.credit):'<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;text-align:right;white-space:nowrap"><span style="display:inline-flex;padding:3px 8px;border-radius:20px;font-size:11px;font-weight:700;background:'+(o.solde>0?'#fef3c7;color:#92400e':'#dcfce7;color:#166534')+';border:1px solid '+(o.solde>0?'#fde68a':'#bbf7d0')+'">'+fmtMoney(o.solde)+'</span></td>'+ '<td class="col-actions" style="padding:4px 4px;text-align:center;white-space:nowrap;border:1px solid #cbd5e1">'+ (o.factureId ? '<button class="btn-icon" onclick="event.stopPropagation();openFactureModal(\''+o.factureId+'\')" title="Modifier facture" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:10px">✏️</button> <button class="btn-icon" onclick="event.stopPropagation();reglerFactureDepuisCompte(\''+clientId+'\',\''+o.factureId+'\')" title="Enregistrer paiement" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;cursor:pointer;font-size:10px">💰</button>' : '<span style="color:#cbd5e1">—</span>') +'</td></tr>'; }).join('') +
+    ops.map(function(o,idx){ var isEven=idx%2===0; return '<tr style="background:'+(isEven?'#fff':'#f8fafc')+';transition:background 0.12s" onmouseenter="this.style.background=\'#f1f5f9\'" onmouseleave="this.style.background=\''+(isEven?'#fff':'#f8fafc')+'\'">' + (o.factureId && ccResteFacture(o.factureId) > 0 ? '<td style="padding:7px 6px;text-align:center;border:1px solid #cbd5e1"><input type="checkbox" class="cc-fac-check" data-id="' + o.factureId + '"></td>' : '<td style="border:1px solid #cbd5e1"></td>') + '<td style="padding:7px 10px;white-space:nowrap;color:#334155;font-weight:500;border:1px solid #cbd5e1">'+fmtDate(o.date)+'</td><td style="padding:7px 10px;white-space:nowrap;border:1px solid #cbd5e1"><span style="background:#f1f5f9;padding:2px 6px;border-radius:6px;font-weight:600;font-size:11px;color:#334155">'+escH(o.numero||'—')+'</span></td><td style="padding:7px 10px;white-space:nowrap;text-align:center;border:1px solid #cbd5e1"'+(o.echeance? '<span style="font-size:11px;white-space:nowrap;'+(o.echeance < getToday() && o.debit ? 'color:#dc2626;font-weight:700;background:#fef2f2;padding:2px 6px;border-radius:6px;border:1px solid #fecaca' : 'color:#334155')+'">'+fmtDate(o.echeance)+'</span>' : '<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;min-width:280px;border:1px solid #cbd5e1"><div style="font-size:12px;color:#0f172a;white-space:normal;word-break:break-word;line-height:1.4" title="'+escH(o.articles||o.libelle||'-')+'">'+escH(o.articles||o.libelle||'-').replace(/(\d+)\s*x/g, '<b style="font-weight:700;color:#f97316">$1</b> ×')+'</div></td><td class="col-detail-inline" style="display:none;padding:7px 10px;font-size:11px;color:#64748b;border:1px solid #cbd5e1">'+escH(o.bc||'—')+'</td><td class="col-detail-inline" style="display:none;padding:7px 10px;font-size:11px;color:#64748b;border:1px solid #cbd5e1">'+escH(o.bl||'—')+'</td><td style="padding:7px 10px;text-align:center;white-space:nowrap;border:1px solid #cbd5e1"'+(o.lettrage? '<span style="display:inline-flex;width:22px;height:22px;border-radius:6px;background:#fff7ed;border:1px solid #dbeafe;color:#ea580c;font-weight:800;font-size:11px;align-items:center;justify-content:center">'+escH(o.lettrage)+'</span>' : '<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:600;color:'+(o.debit?'#dc2626':'#94a3b8')+';border-bottom:1px solid #f1f5f9">'+(o.debit?fmtMoney(o.debit):'<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:600;color:'+(o.credit?'#059669':'#94a3b8')+';border-bottom:1px solid #f1f5f9">'+(o.credit?fmtMoney(o.credit):'<span style="color:#cbd5e1">—</span>')+'</td><td style="padding:7px 10px;text-align:right;white-space:nowrap"><span style="display:inline-flex;padding:3px 8px;border-radius:20px;font-size:11px;font-weight:700;background:'+(o.solde>0?'#fef3c7;color:#92400e':'#dcfce7;color:#166534')+';border:1px solid '+(o.solde>0?'#fde68a':'#bbf7d0')+'">'+fmtMoney(o.solde)+'</span></td>'+ '<td class="col-actions" style="padding:4px 4px;text-align:center;white-space:nowrap;border:1px solid #cbd5e1">'+ (o.reglementId ? '<button class="btn-icon" onclick="event.stopPropagation();window._retourReleveClient=\''+clientId+'\';openReglementModal(\''+o.reglementId+'\')" title="Modifier ce règlement" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:10px">✏️</button> <button class="btn-icon" onclick="event.stopPropagation();window._retourReleveClient=\''+clientId+'\';deleteReglement(\''+o.reglementId+'\')" title="Supprimer ce règlement" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #fee2e2;border-radius:6px;cursor:pointer;font-size:10px;color:#dc2626">🗑️</button>' : (o.factureId ? '<button class="btn-icon" onclick="event.stopPropagation();openFactureModal(\''+o.factureId+'\')" title="Modifier facture" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#fff;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:10px">✏️</button> ' + (ccResteFacture(o.factureId) > 0 ? '<button class="btn-icon" onclick="event.stopPropagation();reglerFactureDepuisCompte(\''+clientId+'\',\''+o.factureId+'\')" title="Enregistrer paiement" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;cursor:pointer;font-size:10px">💰</button>' : '<button class="btn-icon" onclick="event.stopPropagation();reglerFactureDepuisCompte(\''+clientId+'\',\''+o.factureId+'\')" title="Voir / modifier le règlement" style="width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;cursor:pointer;font-size:10px">💳</button>') : '<span style="color:#cbd5e1">—</span>')) +'</td></tr>'; }).join('') +
     (ops.length===0?'<tr><td colspan="11" style="padding:24px;text-align:center;color:#94a3b8"><div style="font-size:24px;margin-bottom:6px">📄</div>Aucune opération pour ce client</td></tr>':'') +
     '</tbody></table></div></div>' +
     '</div></td>';
