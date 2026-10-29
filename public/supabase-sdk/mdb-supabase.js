@@ -9,11 +9,452 @@
 (function() {
   'use strict';
 
-  var SUPABASE_URL = 'https://pywacfwhwsvidkhqsjqv.supabase.co';
-  var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5d2FjZndod3N2aWRraHFzanF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczMDMyMTksImV4cCI6MjEwMjg3OTIxOX0.wmt5vKo189wxQ9loIYprj8PE-Xd3y0Xs_-n61UJjbls';
+  /* ========================================================================
+     CLOUDFLARE D1 ADAPTER (Bypasses Supabase, 100% Free, 0 FCFA/mo)
+     ======================================================================== */
+  var API_ROOT = (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin.indexOf('http') === 0)
+    ? ''
+    : 'https://montabbord.pages.dev';
 
-  var sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  function d1Fetch(endpoint, options) {
+    options = options || {};
+    options.headers = options.headers || {};
+    if (!options.headers['Content-Type'] && options.body) {
+      options.headers['Content-Type'] = 'application/json';
+    }
+    return fetch(API_ROOT + endpoint, options).then(function (res) {
+      if (!res.ok) {
+        return res.json().catch(function () { return { error: 'HTTP ' + res.status }; }).then(function (err) {
+          throw err;
+        });
+      }
+      return res.json();
+    });
+  }
+
+  function D1QueryBuilder(table) {
+    this.table = table;
+    this.filters = [];
+    this.orders = [];
+    this._limit = null;
+    this._select = '*';
+    this._action = 'select';
+    this._data = null;
+    this._opts = null;
+  }
+
+  D1QueryBuilder.prototype.select = function (fields) {
+    this._select = fields || '*';
+    return this;
+  };
+
+  D1QueryBuilder.prototype.eq = function (field, val) {
+    this.filters.push({ type: 'eq', field: field, val: val });
+    return this;
+  };
+
+  D1QueryBuilder.prototype.in = function (field, arr) {
+    this.filters.push({ type: 'in', field: field, val: arr });
+    return this;
+  };
+
+  D1QueryBuilder.prototype.like = function (field, pat) {
+    this.filters.push({ type: 'like', field: field, val: pat });
+    return this;
+  };
+
+  D1QueryBuilder.prototype.order = function (field, opts) {
+    this.orders.push({ field: field, ascending: opts && opts.ascending === false ? false : true });
+    return this;
+  };
+
+  D1QueryBuilder.prototype.limit = function (n) {
+    this._limit = n;
+    return this;
+  };
+
+  D1QueryBuilder.prototype.upsert = function (data, opts) {
+    this._action = 'upsert';
+    this._data = data;
+    this._opts = opts;
+    return this;
+  };
+
+  D1QueryBuilder.prototype.insert = function (data) {
+    this._action = 'insert';
+    this._data = data;
+    return this;
+  };
+
+  D1QueryBuilder.prototype.update = function (data) {
+    this._action = 'update';
+    this._data = data;
+    return this;
+  };
+
+  D1QueryBuilder.prototype.delete = function () {
+    this._action = 'delete';
+    return this;
+  };
+
+  D1QueryBuilder.prototype._getEq = function (field) {
+    for (var i = 0; i < this.filters.length; i++) {
+      if (this.filters[i].type === 'eq' && this.filters[i].field === field) return this.filters[i].val;
+    }
+    return null;
+  };
+
+  D1QueryBuilder.prototype._getIn = function (field) {
+    for (var i = 0; i < this.filters.length; i++) {
+      if (this.filters[i].type === 'in' && this.filters[i].field === field) return this.filters[i].val;
+    }
+    return null;
+  };
+
+  D1QueryBuilder.prototype._getLike = function (field) {
+    for (var i = 0; i < this.filters.length; i++) {
+      if (this.filters[i].type === 'like' && this.filters[i].field === field) return this.filters[i].val;
+    }
+    return null;
+  };
+
+  D1QueryBuilder.prototype._exec = function () {
+    var self = this;
+    var table = self.table;
+    var action = self._action;
+
+    // --- TABLE: enterprise_data ---
+    if (table === 'enterprise_data') {
+      var uid = self._getEq('enterprise_id');
+      if (!uid) {
+        try { uid = (window.currentUser && window.currentUser.id) || localStorage.getItem('mdb_enterpriseUid'); } catch (e) {}
+      }
+      if (action === 'select') {
+        if (!uid) return Promise.resolve({ data: [], error: null });
+        var cleEq = self._getEq('cle');
+        var cleIn = self._getIn('cle');
+        var cleLike = self._getLike('cle');
+        var since = self._getEq('updated_at');
+
+        return d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + (since ? '&since=' + encodeURIComponent(since) : ''))
+          .then(function (res) {
+            var rows = [];
+            var dataObj = (res && res.data) || {};
+            var tsObj = (res && res.ts) || {};
+            for (var k in dataObj) {
+              if (!dataObj.hasOwnProperty(k)) continue;
+              if (cleEq && k !== cleEq) continue;
+              if (cleIn && cleIn.indexOf(k) === -1) continue;
+              if (cleLike) {
+                var prefix = cleLike.replace(/%/g, '');
+                if (k.indexOf(prefix) !== 0) continue;
+              }
+              rows.push({
+                enterprise_id: uid,
+                cle: k,
+                data: dataObj[k],
+                updated_at: tsObj[k] || res.serverTime || Date.now().toString()
+              });
+            }
+            if (self._limit && rows.length > self._limit) {
+              rows = rows.slice(0, self._limit);
+            }
+            return { data: rows, error: null };
+          })
+          .catch(function (err) {
+            return { data: null, error: err };
+          });
+      }
+
+      if (action === 'upsert' || action === 'insert') {
+        var rawRows = Array.isArray(self._data) ? self._data : [self._data];
+        var entId = uid || (rawRows[0] && rawRows[0].enterprise_id);
+        var payloadRows = [];
+        for (var i = 0; i < rawRows.length; i++) {
+          if (rawRows[i] && rawRows[i].cle) {
+            payloadRows.push({
+              cle: rawRows[i].cle,
+              data: rawRows[i].data,
+              updated_at: rawRows[i].updated_at || Date.now().toString()
+            });
+          }
+        }
+        return d1Fetch('/api/sync', {
+          method: 'POST',
+          body: JSON.stringify({ uid: entId, rows: payloadRows })
+        }).then(function () {
+          return { data: rawRows, error: null };
+        }).catch(function (err) {
+          return { data: null, error: err };
+        });
+      }
+
+      if (action === 'update') {
+        var cleToUp = self._getEq('cle');
+        var valToUp = self._data ? self._data.data : null;
+        var updates = {};
+        if (cleToUp) updates[cleToUp] = valToUp;
+        return d1Fetch('/api/sync', {
+          method: 'POST',
+          body: JSON.stringify({ uid: uid, updates: updates })
+        }).then(function (res) {
+          return { data: [{ cle: cleToUp, updated_at: res.ts || Date.now().toString() }], error: null };
+        }).catch(function (err) {
+          return { data: null, error: err };
+        });
+      }
+
+      if (action === 'delete') {
+        var cleToDel = self._getEq('cle');
+        return d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + (cleToDel ? '&cle=' + encodeURIComponent(cleToDel) : ''), {
+          method: 'DELETE'
+        }).then(function () {
+          return { data: [], error: null };
+        }).catch(function (err) {
+          return { data: null, error: err };
+        });
+      }
+    }
+
+    // --- TABLE: enterprises ---
+    if (table === 'enterprises') {
+      var entDocId = self._getEq('id');
+      if (action === 'select') {
+        if (!entDocId) {
+          return d1Fetch('/api/enterprise?list=1')
+            .then(function (res) { return { data: res.data || [], error: null }; })
+            .catch(function (err) { return { data: null, error: err }; });
+        }
+        return d1Fetch('/api/enterprise?id=' + encodeURIComponent(entDocId))
+          .then(function (res) {
+            if (res && res.found && res.enterprise) return { data: [res.enterprise], error: null };
+            return { data: [], error: null };
+          })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+
+      if (action === 'upsert' || action === 'insert') {
+        var entRow = Array.isArray(self._data) ? self._data[0] : self._data;
+        return d1Fetch('/api/enterprise', {
+          method: 'POST',
+          body: JSON.stringify(entRow || {})
+        }).then(function () {
+          return { data: [entRow], error: null };
+        }).catch(function (err) {
+          return { data: null, error: err };
+        });
+      }
+
+      if (action === 'delete') {
+        return d1Fetch('/api/enterprise?id=' + encodeURIComponent(entDocId), { method: 'DELETE' })
+          .then(function () { return { data: [], error: null }; })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+    }
+
+    // --- TABLE: enterprise_index ---
+    if (table === 'enterprise_index') {
+      var identId = self._getEq('identifiant');
+      if (action === 'select') {
+        return d1Fetch('/api/enterprise?identifiant=' + encodeURIComponent(identId))
+          .then(function (res) {
+            if (res && res.found && res.enterprise) {
+              return {
+                data: [{
+                  identifiant: res.enterprise.identifiant,
+                  uid: res.enterprise.id,
+                  nom: res.enterprise.nom,
+                  email: res.enterprise.email,
+                  data: res.enterprise.data
+                }],
+                error: null
+              };
+            }
+            return { data: [], error: null };
+          })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+      return Promise.resolve({ data: [], error: null });
+    }
+
+    // --- TABLE: sessions ---
+    if (table === 'sessions') {
+      var sEntId = self._getEq('enterprise_id');
+      var sUserId = self._getEq('user_id');
+      if (action === 'select') {
+        var sUrl = '/api/session?enterprise_id=' + encodeURIComponent(sEntId || '');
+        if (sUserId) sUrl += '&user_id=' + encodeURIComponent(sUserId);
+        return d1Fetch(sUrl)
+          .then(function (res) {
+            if (res && res.session) return { data: [res.session], error: null };
+            if (res && res.sessions) return { data: res.sessions, error: null };
+            return { data: [], error: null };
+          })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+      if (action === 'upsert' || action === 'insert') {
+        var sRow = Array.isArray(self._data) ? self._data[0] : self._data;
+        return d1Fetch('/api/session', {
+          method: 'POST',
+          body: JSON.stringify(sRow || {})
+        }).then(function () {
+          return { data: [sRow], error: null };
+        }).catch(function (err) {
+          return { data: null, error: err };
+        });
+      }
+      if (action === 'delete') {
+        return d1Fetch('/api/session?enterprise_id=' + encodeURIComponent(sEntId || '') + (sUserId ? '&user_id=' + encodeURIComponent(sUserId) : ''), { method: 'DELETE' })
+          .then(function () { return { data: [], error: null }; })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+    }
+
+    // --- TABLE: backups ---
+    if (table === 'backups') {
+      var bEntId = self._getEq('enterprise_id');
+      var bTs = self._getEq('ts');
+      if (action === 'select') {
+        var bUrl = '/api/backup?enterprise_id=' + encodeURIComponent(bEntId || '');
+        if (bTs) bUrl += '&ts=' + encodeURIComponent(bTs);
+        return d1Fetch(bUrl)
+          .then(function (res) {
+            if (res && res.backup) return { data: [res.backup], error: null };
+            if (res && res.backups) return { data: res.backups, error: null };
+            return { data: [], error: null };
+          })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+      if (action === 'upsert' || action === 'insert') {
+        var bRow = Array.isArray(self._data) ? self._data[0] : self._data;
+        return d1Fetch('/api/backup', {
+          method: 'POST',
+          body: JSON.stringify(bRow || {})
+        }).then(function () {
+          return { data: [bRow], error: null };
+        }).catch(function (err) {
+          return { data: null, error: err };
+        });
+      }
+      if (action === 'delete') {
+        return d1Fetch('/api/backup?enterprise_id=' + encodeURIComponent(bEntId || '') + (bTs ? '&ts=' + encodeURIComponent(bTs) : ''), { method: 'DELETE' })
+          .then(function () { return { data: [], error: null }; })
+          .catch(function (err) { return { data: null, error: err }; });
+      }
+    }
+
+    return Promise.resolve({ data: [], error: null });
+  };
+
+  D1QueryBuilder.prototype.then = function (resolve, reject) {
+    return this._exec().then(resolve, reject);
+  };
+
+  D1QueryBuilder.prototype.catch = function (reject) {
+    return this.then(null, reject);
+  };
+
+  function D1Channel(chName) {
+    this.name = chName;
+    this.handlers = [];
+    this.timer = null;
+    this.active = false;
+  }
+
+  D1Channel.prototype.on = function (event, cfg, cb) {
+    this.handlers.push({ event: event, cfg: cfg, cb: cb });
+    return this;
+  };
+
+  D1Channel.prototype.subscribe = function (statusCb) {
+    var self = this;
+    self.active = true;
+    if (typeof statusCb === 'function') {
+      setTimeout(function () {
+        if (self.active) statusCb('SUBSCRIBED');
+      }, 50);
+    }
+    window.__MDB_RT__ = true;
+
+    var uid = null;
+    for (var i = 0; i < self.handlers.length; i++) {
+      var cfg = self.handlers[i].cfg;
+      if (cfg && cfg.filter) {
+        var m = /enterprise_id=eq\.([^\s&]+)/.exec(cfg.filter) || /id=eq\.([^\s&]+)/.exec(cfg.filter);
+        if (m) { uid = m[1]; break; }
+      }
+    }
+    if (!uid) {
+      var parts = self.name.split('-');
+      uid = parts[parts.length - 1];
+    }
+
+    if (!uid || uid === 'undefined') return self;
+
+    var lastTs = Date.now().toString();
+
+    function poll() {
+      if (!self.active) return;
+      var interval = (typeof document !== 'undefined' && document.hidden) ? 4000 : 1500;
+      d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + '&since=' + encodeURIComponent(lastTs))
+        .then(function (res) {
+          if (!self.active) return;
+          if (res && res.count > 0 && res.data) {
+            lastTs = res.maxTs || res.serverTime || Date.now().toString();
+            for (var k in res.data) {
+              var updated_at = (res.ts && res.ts[k]) || lastTs;
+              for (var h = 0; h < self.handlers.length; h++) {
+                try {
+                  self.handlers[h].cb({
+                    eventType: 'UPDATE',
+                    new: { enterprise_id: uid, cle: k, data: res.data[k], updated_at: updated_at }
+                  });
+                } catch (eH) {}
+              }
+            }
+          }
+        })
+        .catch(function () {})
+        .finally(function () {
+          if (self.active) {
+            self.timer = setTimeout(poll, interval);
+          }
+        });
+    }
+
+    self.timer = setTimeout(poll, 1500);
+    return self;
+  };
+
+  D1Channel.prototype.unsubscribe = function () {
+    this.active = false;
+    if (this.timer) clearTimeout(this.timer);
+  };
+
+  function D1Client() {}
+
+  D1Client.prototype.from = function (table) {
+    return new D1QueryBuilder(table);
+  };
+
+  D1Client.prototype.rpc = function () {
+    return Promise.resolve({ data: null, error: null });
+  };
+
+  D1Client.prototype.channel = function (chName) {
+    return new D1Channel(chName);
+  };
+
+  D1Client.prototype.removeChannel = function (ch) {
+    if (ch && typeof ch.unsubscribe === 'function') ch.unsubscribe();
+  };
+
+  var sb = new D1Client();
   window.SB_CLIENT = sb;
+  if (typeof window !== 'undefined') {
+    if (!window.supabase) window.supabase = {};
+    window.supabase.createClient = function () { return sb; };
+  }
 
   /* ---------- Utilitaires ---------- */
 
@@ -179,7 +620,9 @@
       if (idx >= lots.length) return Promise.resolve();
       var lot = lots[idx++];
       function send(retries) {
-        return sb.from(SPLIT_TABLE).upsert(lot, { onConflict: 'enterprise_id,cle' })
+        /* .select(): PostgREST renvoie sinon la REPRESENTATION complete du lot
+           (egoût du payload entier en bande passante sortante = egress). */
+        return sb.from(SPLIT_TABLE).upsert(lot, { onConflict: 'enterprise_id,cle' }).select('cle,updated_at')
           .then(function (r) {
             if (r.error) {
               var is57014 = r.error.code === '57014' || /57014|timeout/i.test(r.error.message || '');
@@ -217,7 +660,9 @@
 
   var _rowsTs = {};    /* uid -> { cle: updated_at } : version serveur de chaque ligne en cache */
 
-  var DELTA_FULL_MS = 30 * 60 * 1000; /* relecture integrale de controle : 1 fois / 30 min */
+  var DELTA_FULL_MS = 12 * 60 * 60 * 1000; /* relecture integrale de controle : 1 fois / 12 h
+    (etait 30 min : chaque poste retelechargeait le dossier entier ~2,3 Mo toutes les
+    30 min — principale source d'epuisement du quota d'egress Supabase) */
   var _watchers = {};  /* uid -> [fonction] : rafraichir les pages apres une fusion */
   var SYNC = window.MDB_SYNC = { lastWriteOk: 0, lastWriteErr: 0, lastFetchOk: 0, errStreak: 0,
     lastError: '', conflits: 0, fusions: 0, garde: 0, enCours: 0 };
@@ -237,6 +682,86 @@
 
     if (ts) (_rowsTs[uid] = _rowsTs[uid] || {})[cle] = ts;
 
+    idbCachePersister(uid);
+  }
+
+  /* ---- Cache split PERSISTANT (IndexedDB) ----
+     La lecture differentielle ne servait QUE dans la session : chaque
+     rechargement de page (et chaque onglet — index, production, paie en a
+     un) retelechargeait le DOSSIER ENTIER (~2,3 Mo), puis une relecture
+     integrale de controle toutes les 30 min. Avec plusieurs postes,
+     c'etait la principale cause d'epuisement du quota d'egress
+     (bande passante sortante) Supabase -> 402 -> appli bloquee.
+     On conserve donc les lignes serveur (cle -> json + version) dans
+     IndexedDB : au demarrage on ne retelecharge QUE ce qui a change. */
+  var _idbNom = 'mdb_split_cache', _idbStore = 'lignes';
+  var _idbP = null, _idbDefini = false, _idbRestaureP = {}, _idbPersisteT = {};
+
+  function _idbOuvrir() {
+    if (_idbDefini) return _idbP;
+    _idbDefini = true;
+    try {
+      if (typeof indexedDB === 'undefined') { _idbP = Promise.resolve(null); return _idbP; }
+      _idbP = new Promise(function (res) {
+        try {
+          var rq = indexedDB.open(_idbNom, 1);
+          rq.onupgradeneeded = function (ev) {
+            try {
+              var db = ev.target.result;
+              if (!db.objectStoreNames.contains(_idbStore)) db.createObjectStore(_idbStore);
+            } catch (e) {}
+          };
+          rq.onsuccess = function (ev) { res(ev.target.result); };
+          rq.onerror = function () { res(null); };
+          rq.onblocked = function () { res(null); };
+        } catch (e) { res(null); }
+      });
+    } catch (e2) { _idbP = Promise.resolve(null); }
+    return _idbP;
+  }
+
+  function idbCacheRestaurer(uid) {
+    if (_idbRestaureP[uid]) return _idbRestaureP[uid];
+    var p = _idbOuvrir().then(function (db) {
+      if (!db || _rowsCache[uid]) return !!_rowsCache[uid];
+      return new Promise(function (res) {
+        try {
+          var tx = db.transaction(_idbStore, 'readonly');
+          var rq = tx.objectStore(_idbStore).get(uid);
+          rq.onsuccess = function () {
+            try {
+              var v = rq.result;
+              if (v && v.rows && v.ts && typeof v.rows === 'object' && !_rowsCache[uid]) {
+                _rowsCache[uid] = v.rows;
+                _rowsTs[uid] = v.ts || {};
+                res(true);
+              } else res(!!_rowsCache[uid]);
+            } catch (e) { res(false); }
+          };
+          rq.onerror = function () { res(false); };
+        } catch (e2) { res(false); }
+      });
+    }).catch(function () { return false; });
+    _idbRestaureP[uid] = p;
+    return p;
+  }
+
+  function idbCachePersister(uid) {
+    try {
+      if (_idbPersisteT[uid] || !_rowsCache[uid]) return;
+      _idbPersisteT[uid] = setTimeout(function () {
+        _idbPersisteT[uid] = null;
+        try {
+          _idbOuvrir().then(function (db) {
+            if (!db || !_rowsCache[uid]) return;
+            try {
+              var tx = db.transaction(_idbStore, 'readwrite');
+              tx.objectStore(_idbStore).put({ rows: _rowsCache[uid], ts: _rowsTs[uid] || {}, at: Date.now() }, uid);
+            } catch (e) {}
+          }).catch(function () {});
+        } catch (e2) {}
+      }, 1500);
+    } catch (e3) {}
   }
 
   /* ---- Journal local des 200 dernieres ecritures (pour retrouver qui a efface quoi) ---- */
@@ -547,7 +1072,7 @@
         try { console.warn('[mdb] ecriture protegee refusee, envoi simple pour ' + l.cle + ' :', (e && e.message) || e); } catch (eW) {}
         delete _rowBase[bkey(uid, l.cle)];
         return avecReessai(function () {
-          return sb.from(SPLIT_TABLE).upsert([{ enterprise_id: uid, cle: l.cle, data: l.data, updated_at: isoNow() }], { onConflict: 'enterprise_id,cle' })
+          return sb.from(SPLIT_TABLE).upsert([{ enterprise_id: uid, cle: l.cle, data: l.data, updated_at: isoNow() }], { onConflict: 'enterprise_id,cle' }).select('cle,updated_at')
             .then(function (r) { if (r.error) throw r.error; });
         }, 2);
       }).then(function () {
@@ -557,13 +1082,13 @@
     }
     return prelire().then(suivante).then(function () {
       if (!ecrites) return;
-      return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' })
+      return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' }).select('id')
         .then(function (r2) { if (r2.error) throw r2.error; });
     }).then(function () {
       if (!ecrites || _sentinelleOk[uid]) return;
       return sb.from(SPLIT_TABLE).upsert(
         [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
-        { onConflict: 'enterprise_id,cle' })
+        { onConflict: 'enterprise_id,cle' }).select('cle')
         .then(function (r3) { if (r3.error) throw r3.error; _sentinelleOk[uid] = true; });
     }).then(function () {
       SYNC.enCours = Math.max(0, SYNC.enCours - 1);
@@ -606,14 +1131,14 @@
       var paquets = splitParPaquets(toutes, 15);
       paquets.forEach(function(pq) {
         chain = chain.then(function() {
-          return sb.from(SPLIT_TABLE).upsert(pq, { onConflict: 'enterprise_id,cle' })
+          return sb.from(SPLIT_TABLE).upsert(pq, { onConflict: 'enterprise_id,cle' }).select('cle')
             .then(function(r) { if (r.error) throw r.error; });
         });
       });
       return chain.then(function() {
         return sb.from(SPLIT_TABLE).upsert(
           [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
-          { onConflict: 'enterprise_id,cle' })
+          { onConflict: 'enterprise_id,cle' }).select('cle')
           .then(function(r) { if (r.error) throw r.error; });
       }).catch(function() {});
     } catch (e) { return Promise.resolve(); }
@@ -649,7 +1174,7 @@
       if (!aSentinelle) return null; /* cas non standard : lecture complete */
       for (var k in c) { if (c.hasOwnProperty(k) && !vu[k]) { delete c[k]; delete tsC[k]; } }
       SYNC.deltaLus = (SYNC.deltaLus || 0) + aLire.length;
-      if (!aLire.length) { SYNC.lastFetchOk = Date.now(); return snapshotFromCache(uid); }
+      if (!aLire.length) { SYNC.lastFetchOk = Date.now(); idbCachePersister(uid); return snapshotFromCache(uid); }
       var lots = [];
       for (var j = 0; j < aLire.length; j += 40) lots.push(aLire.slice(j, j + 40));
       return Promise.all(lots.map(function (lot) {
@@ -657,7 +1182,7 @@
           if (r.error) throw r.error;
           (r.data || []).forEach(function (row) { c[row.cle] = sjson(row.data); tsC[row.cle] = row.updated_at; });
         });
-      })).then(function () { SYNC.lastFetchOk = Date.now(); return snapshotFromCache(uid); });
+      })).then(function () { SYNC.lastFetchOk = Date.now(); idbCachePersister(uid); return snapshotFromCache(uid); });
     });
   }
 
@@ -668,7 +1193,19 @@
         return fetchEnterpriseSplitComplet(uid);
       });
     }
-    return fetchEnterpriseSplitComplet(uid);
+    /* Froid (debut de page/onglet) : on tente d'abord le cache IndexedDB.
+       S'il est valide, la lecture repart en differentiel (liste + cles
+       changees) au lieu de retelecharger les ~2,3 Mo du dossier. */
+    return idbCacheRestaurer(uid).then(function (restaure) {
+      if (restaure) {
+        SYNC.lastFull = Date.now();
+        return fetchEnterpriseDelta(uid).then(function (sn) { return sn || fetchEnterpriseSplitComplet(uid); }, function (e) {
+          if (splitEstTableManquante(e)) throw e;
+          return fetchEnterpriseSplitComplet(uid);
+        });
+      }
+      return fetchEnterpriseSplitComplet(uid);
+    });
   }
 
   /* Lecture COMPLETE par petits lots : d'abord la liste des rubriques (quelques
@@ -697,6 +1234,45 @@
       return Promise.all(fils).then(function () { return { data: lignes, error: null }; });
     }, function (e) { return { data: null, error: e }; });
   }
+  function seedD1FromLocalStorageIfEmpty(uid) {
+    try {
+      var keys = [
+        'clients', 'fournisseurs', 'articles', 'devis', 'factures', 'reglements',
+        'depenses', 'tresorerie', 'comptesBancaires', 'banqueOps', 'categories',
+        'dettesFournisseurs', 'operationsCaisse', 'production', 'paye', 'compte',
+        'parametres', 'users', 'collaborateurs', 'ui_prefs'
+      ];
+      var toUpload = {};
+      var foundAny = false;
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        var raw = localStorage.getItem('mdb_' + k);
+        if (raw) {
+          try { toUpload[k] = JSON.parse(raw); foundAny = true; }
+          catch (e) { toUpload[k] = raw; foundAny = true; }
+        }
+      }
+      if (!foundAny) {
+        for (var j = 0; j < localStorage.length; j++) {
+          var lk = localStorage.key(j);
+          if (lk && lk.indexOf('mdb_') === 0 && lk !== 'mdb_enterpriseUid' && lk !== 'mdb_lastSession') {
+            var val = localStorage.getItem(lk);
+            if (val) {
+              var subK = lk.replace(/^mdb_/, '');
+              try { toUpload[subK] = JSON.parse(val); foundAny = true; }
+              catch (e2) { toUpload[subK] = val; foundAny = true; }
+            }
+          }
+        }
+      }
+      if (foundAny) {
+        console.log('[MDB D1] Seeding D1 database from localStorage for enterprise', uid);
+        return writeEnterpriseSplit(uid, toUpload).then(function() { return true; }).catch(function() { return false; });
+      }
+    } catch (e3) {}
+    return Promise.resolve(false);
+  }
+
   function fetchEnterpriseSplitComplet(uid) {
     return lireToutParLots(uid).then(function(res) {
       if (res.error) {
@@ -713,31 +1289,22 @@
         for (var ci = 0; ci < lignes.length; ci++) { if (lignes[ci] && typeof lignes[ci].cle === 'string') { _nc[lignes[ci].cle] = sjson(lignes[ci].data); _nt[lignes[ci].cle] = lignes[ci].updated_at; } }
         _rowsCache[uid] = _nc; _rowsTs[uid] = _nt;
         SYNC.lastFetchOk = Date.now(); SYNC.lastFull = Date.now();
+        idbCachePersister(uid);
       } catch (eCache) {}
-      var aSentinelle = false;
-      for (var i = 0; i < lignes.length; i++) {
-        if (lignes[i] && lignes[i].cle === SPLIT_MIGRATION_CLE) { aSentinelle = true; break; }
-      }
-      if (aSentinelle) {
+
+      if (lignes.length > 0) {
         var snap = new DocSnapshot(uid, true, splitAssemble(lignes));
         snap._split = true;
         return snap;
       }
-      /* Pas de sentinelle : le legacy fait foi + migration en arriere-plan */
-      return sb.from('enterprises').select('id').eq('id', uid).limit(1).then(function(rId) {
-        if (rId.error) throw rId.error;
-        var identExiste = !!(rId.data && rId.data.length > 0);
-        if (!lignes.length && !identExiste) {
-          var vide = new DocSnapshot(uid, false, null);
-          vide._split = true;
-          return vide;
-        }
-        return fetchEnterpriseLegacy(uid).then(function(snapLegacy) {
-          try {
-            migrerLegacyVersSplit(uid, snapLegacy.exists ? snapLegacy.data() : null, lignes);
-          } catch (eM) {}
-          return snapLegacy;
-        });
+
+      /* Base D1 encore vide pour cette entreprise : on verifie si le poste local
+         a deja les donnees dans le localStorage pour les synchroniser vers D1 automatiquement */
+      return seedD1FromLocalStorageIfEmpty(uid).then(function(seeded) {
+        if (seeded) return fetchEnterpriseSplitComplet(uid);
+        var vide = new DocSnapshot(uid, false, null);
+        vide._split = true;
+        return vide;
       });
     });
   }
@@ -901,13 +1468,17 @@
               while (merged.length > 5) merged.shift();
             }
             row.token = merged.join('|');
-            return sb.from('sessions').upsert(row, { onConflict: 'enterprise_id,user_id' })
+            return sb.from('sessions').upsert(row, { onConflict: 'enterprise_id,user_id' }).select('user_id')
               .then(function(r2) { if (r2.error) throw r2.error; });
           });
       }
       if (table === 'backups') {
         row.enterprise_id = parentId;
-        return sb.from('backups').upsert(row, { onConflict: 'enterprise_id,ts' })
+        /* .select('ts') : SANS cela PostgREST renvoie la REPRESENTATION
+           complete — i.e. la sauvegarde entiere (plusieurs Mo) recopiee en
+           bande passante sortante a CHAQUE envoi de sauvegarde. C'etait
+           l'un des principaux de deriveurs du quota d'egress Supabase. */
+        return sb.from('backups').upsert(row, { onConflict: 'enterprise_id,ts' }).select('ts')
           .then(function(res) { if (res.error) throw res.error; });
       }
     }
@@ -922,12 +1493,12 @@
           var merged = Object.assign({}, base, data);
           var conv2 = docToRow(table, docId, merged);
           conv2.row[pkOf(table)] = (table === 'super_admin_config') ? 1 : docId;
-          return sb.from(table).upsert(conv2.row, { onConflict: pkOf(table) })
+          return sb.from(table).upsert(conv2.row, { onConflict: pkOf(table) }).select(pkOf(table))
             .then(function(r2) { if (r2.error) throw r2.error; });
         });
     }
 
-    return sb.from(table).upsert(row, { onConflict: pkOf(table) })
+    return sb.from(table).upsert(row, { onConflict: pkOf(table) }).select(pkOf(table))
       .then(function(res) { if (res.error) throw res.error; });
   }
 
@@ -1137,6 +1708,7 @@
       var rows = res.data || [];
       for (var j = 0; j < rows.length; j++) { c[rows[j].cle] = sjson(rows[j].data); t[rows[j].cle] = rows[j].updated_at; }
       SYNC.lastFetchOk = Date.now();
+      idbCachePersister(uid);
     });
   }
   function snapshotFromCache(uid) {
@@ -1287,7 +1859,7 @@
     return { split: _splitOK };
   };
 
-  console.log('[MDB] Adaptateur Supabase prêt (' + SUPABASE_URL + ')');
+  console.log('[MDB] Adaptateur Cloudflare D1 prêt (0 FCFA/mois — 100% Cloudflare Edge)');
 
   /* ========================================================================
      INDICATEUR DE SYNCHRO (visible dans toutes les pages) : l'utilisateur sait
@@ -1323,8 +1895,8 @@
         else if ((S.errStreak || 0) >= 2) { txt = '⚠ Synchro en attente (' + S.errStreak + ' echecs) — reessai auto'; bg = '#ea580c'; }
         else if ((S.enCours || 0) > 0) { txt = '↻ Envoi en cours…'; bg = '#2563eb'; }
         else if (window.__MDB_RT__ === false) { txt = 'Relais : temps reel coupe — verification automatique'; bg = '#f59e0b'; }
-        else if (dern) { var sec = Math.round((now - dern) / 1000); txt = 'En direct · synchro OK' + (sec < 90 ? '' : ' (' + Math.round(sec / 60) + ' min)'); bg = '#16a34a'; }
-        else { txt = 'Connexion…'; bg = '#94a3b8'; }
+        else if (dern) { var sec = Math.round((now - dern) / 1000); txt = 'En direct · Cloudflare D1 OK' + (sec < 90 ? '' : ' (' + Math.round(sec / 60) + ' min)'); bg = '#16a34a'; }
+        else { txt = 'Connexion D1…'; bg = '#94a3b8'; }
         /* Point seul, sauf alerte (hors ligne / echecs) ou appui de l'utilisateur */
         var alerte = bg === '#dc2626' || bg === '#ea580c';
         var deplie = alerte || now < ouvertJusqua;
