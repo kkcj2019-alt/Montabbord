@@ -20834,23 +20834,30 @@ function _csDedupliquerCollectif() {
   return removed;
 }
 function _dedupliquerAcomptesPrets() {
-  var list = dbArr('mdb_acomptesPrets') || [];
+  var rawList = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_acomptesPrets', dbArr('mdb_acomptesPrets')) : dbArr('mdb_acomptesPrets');
+  var list = rawList || [];
   if (!list.length) return 0;
   var seenKeys = {};
   var kept = [];
-  var removed = 0;
+  var removedIds = [];
   for (var i = 0; i < list.length; i++) {
     var a = list[i];
     if (!a || !a.id) continue;
+    var mntInt = Math.round((parseFloat(a.montant) || 0) * 100);
+    var empKey = String(a.employeId || a.employeNom || '').trim().toLowerCase();
+    var npKey = String(a.numeroPiece || '').trim().toUpperCase();
     var key = '';
-    if (a.caisseOpId && a.employeId) {
-      key = 'OP:' + String(a.caisseOpId).trim() + ':' + String(a.employeId).trim();
-    } else if (a.numeroPiece && a.employeId) {
-      key = 'PC:' + String(a.numeroPiece).trim().toUpperCase() + ':' + String(a.employeId).trim() + ':' + (a.type || 'acompte') + ':' + (parseInt(a.montant, 10) || 0);
+    /* Déduplication par signature métier : même pièce valide, même employé, même type, même montant */
+    if (npKey && npKey !== '-' && npKey !== '—' && empKey && mntInt > 0) {
+      key = 'PC:' + npKey + ':' + empKey + ':' + (a.type || 'acompte') + ':' + mntInt;
+    } else if (a.caisseOpId && empKey) {
+      key = 'OP:' + String(a.caisseOpId).trim() + ':' + empKey;
     }
     if (key) {
       if (seenKeys[key]) {
         var existing = seenKeys[key];
+        var toDiscardId = a.id;
+        /* Si 'a' est validé et 'existing' ne l'est pas, privilégier les données de 'a' */
         if (a.valide && !existing.valide) { existing.valide = true; existing.valideLe = a.valideLe; }
         if (a.preleve && !existing.preleve) { existing.preleve = true; existing.moisPreleve = a.moisPreleve; }
         if ((a.montantRembourse || 0) > (existing.montantRembourse || 0)) {
@@ -20861,23 +20868,26 @@ function _dedupliquerAcomptesPrets() {
         if (a.echeances && a.echeances.length && (!existing.echeances || !existing.echeances.length)) {
           existing.echeances = a.echeances;
         }
-        removed++;
+        removedIds.push(toDiscardId);
         continue;
       }
       seenKeys[key] = a;
     }
     kept.push(a);
   }
-  if (removed > 0) {
+  if (removedIds.length > 0 || kept.length !== list.length) {
     DB.set('mdb_acomptesPrets', kept);
+    if (typeof addTombstones === 'function' && removedIds.length > 0) {
+      try { addTombstones('mdb_acomptesPrets', removedIds); } catch (eAT) {}
+    }
     try {
       _dirtyKeys['mdb_acomptesPrets'] = true;
       persistPendingSync();
       schedulePush();
     } catch (e) {}
-    console.log('[_dedupliquerAcomptesPrets] ' + removed + ' doublon(s) d\'acompte/prêt supprimé(s)');
+    console.log('[_dedupliquerAcomptesPrets] ' + removedIds.length + ' doublon(s) d\'acompte/prêt supprimé(s)');
   }
-  return removed;
+  return removedIds.length;
 }
 function _purgeOrphanAcomptes(){
   var _opsAll = getOperationsCaisse() || [];
@@ -21816,6 +21826,38 @@ function renderAcomptesPrets() {
   html += '<div class="t' + (activeTab === 'cumul' ? ' on' : '') + '" onclick="window._apActiveTab=\'cumul\';renderAcomptesPrets()">Cumul par employé</div>';
   html += '</div>';
 
+  /* Bandeau récapitulatif cumul employé lors d'une recherche */
+  if (apSearch.trim()) {
+    var _sTerm = apSearch.trim().toLowerCase();
+    var _sAcomptes = 0, _sPretsInitial = 0, _sPretsRembourse = 0, _sPretsReste = 0, _sCount = 0;
+    var _sEmpNames = {};
+    for (var si = 0; si < acomptes.length; si++) {
+      var _sa = acomptes[si];
+      if (!_sa) continue;
+      var _seName = empMap[_sa.employeId] ? empMap[_sa.employeId].nom : (_sa.employeNom || '');
+      if ((_seName || '').toLowerCase().indexOf(_sTerm) === -1) continue;
+      _sCount++;
+      if (_seName) _sEmpNames[_seName] = true;
+      if (_sa.type === 'acompte') {
+        _sAcomptes += (_sa.montant || 0);
+      } else {
+        _sPretsInitial += (_sa.montant || 0);
+        _sPretsRembourse += (_sa.montantRembourse || 0);
+        _sPretsReste += Math.max(0, (_sa.montant || 0) - (_sa.montantRembourse || 0));
+      }
+    }
+    var _sTotalDette = _sAcomptes + _sPretsReste;
+    var _sEmpList = Object.keys(_sEmpNames);
+    var _sLabelEmp = (_sEmpList.length === 1) ? _sEmpList[0] : (_sEmpList.length > 1 ? _sEmpList.length + ' employés' : escH(apSearch.trim()));
+    html += '<div style="background:#f8fafc;border:1px solid #cbd5e1;border-left:4px solid var(--primary);border-radius:8px;padding:12px 16px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:20px;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    html += '<div><span style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#64748b;font-weight:700">Cumul dette en cours \u2014 ' + escH(_sLabelEmp) + '</span><div style="font-size:22px;font-weight:800;color:' + (_sTotalDette > 0 ? '#b91c1c' : '#15803d') + '">' + fmtMoney(_sTotalDette) + ' <span style="font-size:13px;font-weight:600">FCFA</span></div></div>';
+    html += '<div style="border-left:1px solid #cbd5e1;padding-left:16px"><span style="font-size:11px;color:#64748b;font-weight:600">Acomptes \u00e0 d\u00e9duire</span><div style="font-size:16px;font-weight:700;color:var(--pink,#ec4899)">' + fmtMoney(_sAcomptes) + ' <span style="font-size:12px;font-weight:600">FCFA</span></div></div>';
+    html += '<div style="border-left:1px solid #cbd5e1;padding-left:16px"><span style="font-size:11px;color:#64748b;font-weight:600">Pr\u00eats restant d\u00fb</span><div style="font-size:16px;font-weight:700;color:var(--danger,#dc2626)">' + fmtMoney(_sPretsReste) + ' <span style="font-size:12px;font-weight:600">FCFA</span></div></div>';
+    html += '<div style="border-left:1px solid #cbd5e1;padding-left:16px"><span style="font-size:11px;color:#64748b;font-weight:600">Total pr\u00eats accord\u00e9s</span><div style="font-size:16px;font-weight:700;color:var(--primary)">' + fmtMoney(_sPretsInitial) + ' <span style="font-size:12px;font-weight:600">FCFA</span></div></div>';
+    html += '<div style="margin-left:auto;font-size:11px;color:#64748b;font-weight:500">' + _sCount + ' \u00e9criture(s) trouv\u00e9e(s)</div>';
+    html += '</div>';
+  }
+
   /* Classement : par matricule, en regroupant les types de contrat
      (CDI + CDD d'abord, puis Externe + Journalier).
      Aucune modification des montants ni des statuts : uniquement l'ordre d'affichage. */
@@ -21846,7 +21888,7 @@ function renderAcomptesPrets() {
   });
 
   if (activeTab === 'cumul') {
-    /* Cumul par employ\u00e9 */
+    /* Cumul par employé */
     var apSearchVal2 = (window._apSearch || '').toLowerCase();
     var empStats2 = {};
     for (var esj = 0; esj < acomptes.length; esj++) {
@@ -21860,11 +21902,12 @@ function renderAcomptesPrets() {
       empStats2[eid2].nb++;
     }
     var eids2 = Object.keys(empStats2);
-    html += '<div class="apl"><div class="table-wrap"><div class="table-responsive"><table><thead><tr><th style="width:34px"></th><th>Employ\u00e9</th><th>Pr\u00eats</th><th style="text-align:right">Total acomptes</th><th style="text-align:right">Total pr\u00eats</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th></tr></thead><tbody>';
-    if (eids2.length === 0) html += '<tr><td colspan="8" class="text-center text-muted">Aucune donn\u00e9e</td></tr>';
+    html += '<div class="apl"><div class="table-wrap"><div class="table-responsive"><table><thead><tr><th style="width:34px"></th><th>Employé</th><th>Prêts</th><th style="text-align:right">Acomptes à déduire</th><th style="text-align:right">Total prêts</th><th style="text-align:right">Remboursé</th><th style="text-align:right">Reste dû (Prêts)</th><th style="text-align:right;color:#0f172a">Dette totale en cours</th></tr></thead><tbody>';
+    if (eids2.length === 0) html += '<tr><td colspan="8" class="text-center text-muted">Aucune donnée</td></tr>';
     for (var eij = 0; eij < eids2.length; eij++) {
       var es2 = empStats2[eids2[eij]];
       var resteDue2 = Math.max(0, es2.prets - es2.rembourse);
+      var totalDette2 = es2.acomptes + resteDue2;
       var empId2 = eids2[eij];
       html += '<tr class="ap-cumul-row" data-emp-id="' + escH(empId2) + '" style="cursor:pointer">';
       html += '<td style="text-align:center"><span class="ap-expand-icon" style="cursor:pointer;transition:transform .2s;display:inline-block">\u25b6</span></td>';
@@ -21875,8 +21918,9 @@ function renderAcomptesPrets() {
       html += '<td class="text-right" style="color:var(--indigo)">' + fmtMoney(es2.prets) + '</td>';
       html += '<td class="text-right" style="color:var(--success)">' + fmtMoney(es2.rembourse) + '</td>';
       var _pc2 = (es2.prets > 0) ? Math.max(0, Math.min(100, Math.round(((es2.prets - resteDue2) / es2.prets) * 100))) : (es2.acomptes > 0 ? 100 : 0);
-      html += '<td class="num"><span class="gros-r" style="color:' + (resteDue2 > 0 ? '#dc2626' : '#16a34a') + '">' + fmtMoney(resteDue2) + '</span><div class="bar"><i class="' + (resteDue2 <= 0 ? 'ok' : '') + '" style="width:' + _pc2 + '%"></i></div></td></tr>';
-      html += '<tr class="ap-detail-row" data-emp-id="' + escH(empId2) + '" style="display:none"><td colspan="7" style="padding:0;background:#fafafa"></td></tr>';
+      html += '<td class="num"><span class="gros-r" style="color:' + (resteDue2 > 0 ? '#dc2626' : '#16a34a') + '">' + fmtMoney(resteDue2) + '</span><div class="bar"><i class="' + (resteDue2 <= 0 ? 'ok' : '') + '" style="width:' + _pc2 + '%"></i></div></td>';
+      html += '<td class="text-right num"><strong style="font-size:13px;color:' + (totalDette2 > 0 ? '#b91c1c' : '#15803d') + '">' + fmtMoney(totalDette2) + '</strong></td></tr>';
+      html += '<tr class="ap-detail-row" data-emp-id="' + escH(empId2) + '" style="display:none"><td colspan="8" style="padding:0;background:#fafafa"></td></tr>';
     }
     html += '</tbody></table></div></div></div>';
   } else {
@@ -35442,7 +35486,19 @@ function ovFournChange() {
   var sel = document.getElementById('ovFournId');
   if (!sel) return;
   var id = sel.value;
+  // "__nouveau__" -> création fournisseur
   if (id === '__nouveau__') { closeModal(); openFournisseurModal(); toast('Créez le fournisseur (avec sa banque et son n° de compte), puis relancez « Nouvel ordre de virement »'); return; }
+  // "autre" ou vide -> bénéficiaire libre (personne tierce / employé)
+  if (id === '__autre__') {
+    // Champs libres : on ne remplit rien, l'utilisateur saisit manuellement
+    document.getElementById('ovBenefBanque').value = '';
+    document.getElementById('ovBenefCompte').value = '';
+    document.getElementById('ovBenefSwift').value = '';
+    document.getElementById('ovBenefAdresse').value = '';
+    document.getElementById('ovBenefNom').value = '';
+    return;
+  }
+  // Fournisseur existant -> remplir depuis la fiche fournisseur
   var fs = getFournisseurs(), f = null;
   for (var i = 0; i < fs.length; i++) { if (fs[i].id === id) { f = fs[i]; break; } }
   if (!f) return;
@@ -35450,6 +35506,8 @@ function ovFournChange() {
   document.getElementById('ovBenefCompte').value = f.numeroCompte || '';
   document.getElementById('ovBenefSwift').value = f.swift || '';
   document.getElementById('ovBenefAdresse').value = f.adresse || '';
+  var benefNomEl = document.getElementById('ovBenefNom');
+  if (benefNomEl) benefNomEl.value = f.nom || '';
 }
 function openOrdreVirementModal() {
   var banques = getBanques();
@@ -35468,7 +35526,7 @@ function openOrdreVirementModal() {
   html += '</select></div>';
   html += '<div class="form-group"><label>B\u00e9n\u00e9ficiaire (fournisseur) *</label><select id="ovFournId" onchange="ovFournChange()"><option value="">-- Choisir un fournisseur --</option>';
   for (var j = 0; j < fournisseurs.length; j++) html += '<option value="' + fournisseurs[j].id + '">' + escH(fournisseurs[j].nom) + '</option>';
-  html += '<option value="__nouveau__">+ Cr\u00e9er un nouveau fournisseur\u2026</option></select></div>';
+  html += '<option value="__nouveau__">+ Cr\u00e9er un nouveau fournisseur\u2026</option>\n  <option value="__autre__">+ Autre bénéficiaire (employé, tiers...)</option></select></div>';
   html += '<div class="form-group"><label>Adresse du b\u00e9n\u00e9ficiaire</label><input type="text" id="ovBenefAdresse" placeholder="Ville, quartier..."></div>';
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Banque du b\u00e9n\u00e9ficiaire</label><input type="text" id="ovBenefBanque" placeholder="Ex: SGBCI"></div>';
@@ -35491,7 +35549,14 @@ function saveOrdreVirement() {
   var banqueId = document.getElementById('ovBanqueId').value;
   var fournId = document.getElementById('ovFournId').value;
   var benefNom = '';
-  if (fournId && fournId !== '__nouveau__') { var fs = getFournisseurs(); for (var i = 0; i < fs.length; i++) { if (fs[i].id === fournId) { benefNom = fs[i].nom; break; } } }
+  if (fournId && fournisseurs) {
+    if (fournId === '__autre__') {
+      benefNom = document.getElementById('ovBenefNom').value.trim();
+    } else {
+      var fs = getFournisseurs();
+      for (var i = 0; i < fs.length; i++) { if (fs[i].id === fournId) { benefNom = fs[i].nom; break; } }
+    }
+  }
   var benefBanque = document.getElementById('ovBenefBanque').value.trim();
   var benefCompte = document.getElementById('ovBenefCompte').value.trim();
   var benefSwift = document.getElementById('ovBenefSwift').value.trim();
