@@ -4610,10 +4610,10 @@
               </button>
             </div>
             <div class="tab-pills" id="lp-vue-pills" style="margin-bottom: 0">
-              <button class="active" onclick="setLPVue('avant')">
+              <button onclick="setLPVue('avant')">
                 Vue avant paie
               </button>
-              <button onclick="setLPVue('apres')">Vue après paie</button>
+              <button class="active" onclick="setLPVue('apres')">Vue après paie</button>
             </div>
             <button class="btn" onclick="loadLivrePaie()">Actualiser</button>
             <button class="btn btn-sec" onclick="exportLP()">Export CSV</button>
@@ -6231,7 +6231,15 @@ function apNatureLigne(ap, op) {
   var brut = (op && op.code) || "";
   var c = String(brut).toUpperCase().trim();
   if (c) {
-    if (c === "SOLDE_SALAIRE" || c === "SOLDE_INDEMNITE") return "solde";
+    if (
+      c === "SOLDE_SALAIRE" ||
+      c === "SOLDE_INDEMNITE" ||
+      c === "SOLDE" ||
+      c.indexOf("SOLDE_") === 0 ||
+      c.indexOf("SOLDE-") === 0 ||
+      /_SOLDE(_|$)/.test(c)
+    )
+      return "solde";
     if (c === "ACOMPTE_INDEMNITE") return "acompte";
     if (
       c === "ACOMPTE" ||
@@ -6243,7 +6251,13 @@ function apNatureLigne(ap, op) {
     if (/^PRET(_|-|$)/.test(c) || /_PRET(_|$)/.test(c)) return "pret";
   }
   var lt = ap && ap.type;
-  if (lt === "pret") return "pret";
+  if (lt === "solde" || lt === "pret") return lt;
+  if (
+    ap &&
+    ap.motif &&
+    /solde\s*(de\s*tout\s*compte|\s*salaire|\s*indemnit[eé])?/i.test(ap.motif)
+  )
+    return "solde";
   return "acompte";
 }
 /* Moyen de paiement d'une ligne : caisse ou banque + n° de compte auto
@@ -6292,9 +6306,13 @@ function lignesDetailAp(records, opsById, caisses, banques, mois) {
     var op = a.caisseOpId && opsById ? opsById[a.caisseOpId] || null : null;
     var nature = apNatureLigne(ra, op);
     var mc = apMoyenCompte(ra, op, caisses || [], banques || []);
-    if (a.type === "acompte") {
+    if (a.type === "acompte" || a.type === "solde") {
       var md = apMoisPrisEnCompte(a);
-      if (!(a.valide === true && md && md === mois)) return;
+      var isSol =
+        nature === "solde" ||
+        a.type === "solde" ||
+        (op && op.apType === "solde");
+      if (!((isSol || a.valide === true) && md && md === mois)) return;
       lignes.push({
         employe: ra.employeNom || "",
         nature: nature,
@@ -6326,36 +6344,57 @@ function apNatureDe(a) {
   try {
     var raws = getAPList() || [];
     var raw = null;
-    for (var i = 0; i < raws.length; i++) if (raws[i] && raws[i].id === a.id) { raw = raws[i]; break; }
+    for (var i = 0; i < raws.length; i++)
+      if (raws[i] && raws[i].id === a.id) {
+        raw = raws[i];
+        break;
+      }
     var lk = (raw && raw.caisseOpId) || a.caisseOpId || "";
     var op = null;
     if (lk) {
       var ops = payeArr("mdb_operationsCaisse") || [];
-      for (var j = 0; j < ops.length; j++) if (ops[j] && ops[j].id === lk) { op = ops[j]; break; }
+      for (var j = 0; j < ops.length; j++)
+        if (ops[j] && ops[j].id === lk) {
+          op = ops[j];
+          break;
+        }
     }
     var n = apNatureLigne(raw || a, op);
     if (n === "solde" || n === "pret" || n === "acompte") return n;
   } catch (e) {}
-  return a.type === "pret" ? "pret" : "acompte";
+  return a.type === "pret" ? "pret" : a.type === "solde" ? "solde" : "acompte";
 }
 /* Restes NETS pour l'impression : un SOLDE déjà versé n'est PAS une dette
    (jamais en SUIVI ni au TOTAL) ; ce que le bulletin du mois retient déjà
    ne "reste" plus à rembourser. Mêmes règles que la déduction (ligne 81). */
 function apNetImpression(a, mois) {
-  var nat = "acompte", rest = 0, deduit = 0;
-  try { nat = apNatureDe(a); } catch (eN) {}
-  if (nat !== "solde" && nat !== "pret" && nat !== "acompte") nat = (a.type === "pret" ? "pret" : "acompte");
+  var nat = "acompte",
+    rest = 0,
+    deduit = 0;
+  try {
+    nat = apNatureDe(a);
+  } catch (eN) {}
+  if (nat !== "solde" && nat !== "pret" && nat !== "acompte")
+    nat = a.type === "pret" ? "pret" : a.type === "solde" ? "solde" : "acompte";
   rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
   try {
-    if (a.type === "acompte") {
+    if (a.type === "acompte" || a.type === "solde") {
       var _md = apMoisPrisEnCompte(a);
-      if (a.valide === true && _md && _md === mois) deduit = a.montant || 0;
+      var isSol = nat === "solde" || a.type === "solde";
+      if ((isSol || a.valide === true) && _md && _md === mois)
+        deduit = a.montant || 0;
     } else if (a.type === "pret" && a.statut !== "termine") {
       var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
-      if (moisDed && moisDed <= mois && rest > 0) deduit = Math.min(a.mensualite || 0, rest);
+      if (moisDed && moisDed <= mois && rest > 0)
+        deduit = Math.min(a.mensualite || 0, rest);
     }
   } catch (eD) {}
-  return { nature: nat, rest: rest, deduit: deduit, restNet: Math.max(0, rest - deduit) };
+  return {
+    nature: nat,
+    rest: rest,
+    deduit: deduit,
+    restNet: Math.max(0, rest - deduit),
+  };
 }
 /* Rappel contrat sur le bulletin : N° du contrat en cours + 1re embauche. */
 function contratLigneB(emp) {
@@ -10091,10 +10130,61 @@ function renderPrimeEmpMatrix() {
          a disparu de mdb_acomptesPrets (purge accidentelle côté app Principale)
          est rétablie ici. Sans cela l'employé affiche « 0 op. » alors que son
          prêt existe bien en caisse. */
+      function _dedupliquerAcomptesPretsPaye() {
+        try {
+          var rawList = _payeStripTombstoned("mdb_acomptesPrets", payeArr("mdb_acomptesPrets")) || [];
+          if (!rawList.length) return 0;
+          var seenKeys = {};
+          var kept = [];
+          var removedIds = [];
+          for (var i = 0; i < rawList.length; i++) {
+            var a = rawList[i];
+            if (!a || !a.id) continue;
+            var mntInt = Math.round((parseFloat(a.montant) || 0) * 100);
+            var empKey = String(a.employeId || a.employeNom || "").trim().toLowerCase();
+            var npKey = String(a.numeroPiece || "").trim().toUpperCase();
+            var key = "";
+            if (npKey && npKey !== "-" && empKey && mntInt > 0) {
+              key = "PC:" + npKey + ":" + empKey + ":" + (a.type || "acompte") + ":" + mntInt;
+            } else if (a.caisseOpId && empKey) {
+              key = "OP:" + String(a.caisseOpId).trim() + ":" + empKey;
+            }
+            if (key) {
+              if (seenKeys[key]) {
+                var existing = seenKeys[key];
+                var toDiscardId = a.id;
+                if (a.valide && !existing.valide) { existing.valide = true; existing.valideLe = a.valideLe; }
+                if (a.preleve && !existing.preleve) { existing.preleve = true; existing.moisPreleve = a.moisPreleve; }
+                if ((a.montantRembourse || 0) > (existing.montantRembourse || 0)) {
+                  existing.montantRembourse = a.montantRembourse;
+                }
+                if (a.caisseOpId && !existing.caisseOpId) existing.caisseOpId = a.caisseOpId;
+                if (a.statut === "rembourse" && existing.statut !== "rembourse") existing.statut = "rembourse";
+                if (a.echeances && a.echeances.length && (!existing.echeances || !existing.echeances.length)) {
+                  existing.echeances = a.echeances;
+                }
+                removedIds.push(toDiscardId);
+                continue;
+              }
+              seenKeys[key] = a;
+            }
+            kept.push(a);
+          }
+          if (removedIds.length > 0) {
+            console.log("[Paye] Déduplication acomptes/prêts : " + removedIds.length + " doublon(s) retiré(s)");
+            saveAPList(kept);
+            return removedIds.length;
+          }
+        } catch (e) {
+          console.warn("[Paye] Erreur _dedupliquerAcomptesPretsPaye:", e);
+        }
+        return 0;
+      }
       var _payeApReconciled = false;
       function _payeReconcileAPFromCaisse() {
         if (_payeApReconciled) return;
         try {
+          _dedupliquerAcomptesPretsPaye();
           var ops = payeArr("mdb_operationsCaisse");
           if (!ops.length) return;
           var list = payeArr("mdb_acomptesPrets");
@@ -10105,6 +10195,13 @@ function renderPrimeEmpMatrix() {
             if (it.caisseOpId) linked[it.caisseOpId] = true;
             if (it.numeroPiece) linked["P:" + it.numeroPiece] = true;
             if (it.id) linked["A:" + it.id] = true;
+            if (it.numeroPiece && it.employeId) {
+              var npCln = String(it.numeroPiece).trim().toUpperCase();
+              var empCln = String(it.employeId).trim().toLowerCase();
+              if (npCln && npCln !== "-" && empCln) {
+                linked["PE:" + npCln + ":" + empCln] = it;
+              }
+            }
           }
           var emps = [];
           try { emps = payeArr("mdb_employes"); } catch (e1) { emps = []; }
@@ -10130,6 +10227,16 @@ function renderPrimeEmpMatrix() {
                une seule ligne est recréée et les autres restent à « 0 op. ». */
             if (linked[op.id]) continue;
             if (op.acomptePretId && linked["A:" + op.acomptePretId]) continue;
+            var _npO = String(op.numeroPiece || '').trim().toUpperCase();
+            var _emO = String(op.beneficiaireId || '').trim().toLowerCase();
+            if (_npO && _npO !== '-' && _emO && linked["PE:" + _npO + ":" + _emO]) {
+              var existingAp = linked["PE:" + _npO + ":" + _emO];
+              if (!existingAp.caisseOpId || existingAp.caisseOpId !== op.id) {
+                existingAp.caisseOpId = op.id;
+              }
+              linked[op.id] = true;
+              continue;
+            }
             var rec = {
               id: op.acomptePretId || "ap" + op.id,
               type: t,
@@ -10395,7 +10502,7 @@ function renderPrimeEmpMatrix() {
         return {
           id: a.id || DB.id(),
           employee_id: a.employeId || a.employee_id || "",
-          type: a.type === "pret" ? "pret" : "acompte",
+          type: a.type === "pret" ? "pret" : a.type === "solde" ? "solde" : "acompte",
           montant: parseFloat(a.montant) || 0,
           mensualite: parseFloat(a.montantMensuel || a.mensualite) || (parseInt(a.dureeMois) > 0 ? Math.round((parseFloat(a.montant) || 0) / parseInt(a.dureeMois)) : 0),
           dureeMois: parseInt(a.dureeMois) || 0,
@@ -10491,21 +10598,26 @@ function renderPrimeEmpMatrix() {
            (vue avant / apres paie) et le bulletin. */
         var _opsSol = null;
         function _estSolde(a) {
+          if (!a) return false;
+          if (a.type === "solde" || a.nature === "solde" || a.apType === "solde") return true;
+          if (a.motif && /solde\s*(de\s*tout\s*compte|\s*salaire|\s*indemnit[eé])?/i.test(a.motif)) return true;
           if (!a.caisseOpId) return false;
           if (!_opsSol) {
             _opsSol = {};
             try { (payeArr("mdb_operationsCaisse") || []).forEach(function (o) { if (o && o.id) _opsSol[o.id] = o; }); } catch (eO) {}
           }
           var o = _opsSol[a.caisseOpId];
-          return !!o && apNatureCodeStricte(o) === "solde";
+          return !!o && (apNatureCodeStricte(o) === "solde" || o.apType === "solde" || (o.code && /solde/i.test(o.code)) || (o.libelle && /solde/i.test(o.libelle)));
         }
         list.forEach(function (a) {
           if (a.employee_id !== empId) return;
-          if (a.type === "acompte") {
+          if (a.type === "acompte" || a.type === "solde") {
             var _mdAcc = apMoisPrisEnCompte(a);
-            if (a.valide === true && _mdAcc && _mdAcc === mois) {
+            var isSol = _estSolde(a);
+            /* Règle absolue : tous les soldes se déduisent AUTOMATIQUEMENT de la paie de tous les employés sans exception */
+            if ((isSol || a.valide === true) && _mdAcc && _mdAcc === mois) {
               mAcc += a.montant || 0;
-              if (_estSolde(a)) mSolde += a.montant || 0;
+              if (isSol) mSolde += a.montant || 0;
             }
           } else if (a.type === "pret" && a.statut !== "termine") {
             var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
@@ -26693,6 +26805,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         try {
           _purgeOrphanAcomptesP();
         } catch (e) {}
+        try {
+          _dedupliquerAcomptesPretsPaye();
+        } catch (eD) {}
         /* Rétablit les prêts/acomptes disparus de la liste alors que leur pièce
            de caisse existe (évite « 0 op. » pour un employé qui a bien un prêt).
            Doit tourner AVANT getAPList(). */
@@ -36708,7 +36823,7 @@ function printCongeIndividuel(empId) {
       /* ==================== DASHBOARD ==================== */
       var _dashChartContrats, _dashChartDepts;
       var lpFilter = "all";
-      var lpVue = "avant";
+      var lpVue = "apres";
       function _fmtMoisLabel(mois) {
         if (!mois) return "";
         var parts = mois.split("-");
@@ -41097,7 +41212,7 @@ function printCongeIndividuel(empId) {
           loadCategories();
         } catch (eLC) {}
         lpFilter = "all";
-        lpVue = "avant";
+        lpVue = "apres";
         var saved = localStorage.getItem("paye_currentSection") || "dashboard";
         /* Intégré dans production.html (Exploitation → Pointage) via iframe
            same-origin : paye.html#pointage ouvre directement le pointage. */
