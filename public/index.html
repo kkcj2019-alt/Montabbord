@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-29-318';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-29-319';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -5772,6 +5772,7 @@ function initAuth() {
   initDB();
   /* Migration des mots de passe en clair deja presents sur ce poste. */
   try { mdbMigrateUserHashes(); } catch (eMH0) {}
+  try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS0) {}
   /* DÃƒÂ©connexion demandÃƒÂ©e depuis une autre app (ex. production.html ?logout=1) */
   try {
     if ((window.location.search || '').indexOf('logout=1') !== -1) {
@@ -7599,6 +7600,7 @@ var local = DB.get(key);
     /* mdb_users peut arriver encore en clair d'un poste ancien : hachage
        immediat (la poussee repart avec l'empreinte, plus rien en clair). */
     try { mdbMigrateUserHashes(); } catch (eMH3) {}
+    try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS4) {}
     if (changed) {
       var ind = document.getElementById('syncIndicator');
       if (ind) { ind.textContent = '\u2713 Sync'; setTimeout(function() { ind.textContent = ''; }, 2000); }
@@ -21214,6 +21216,92 @@ function _corrigerMoisPieces() {
   }
   return fixed;
 }
+/* Correction des libelles de soldes collectifs ou le nom d'un employe
+   a ete duplique sur toute la piece pour tous les beneficiaires (ex: KANGA).
+   Retablit le nom propre de chaque beneficiaire dans op.libelle et acompte.motif. */
+function _corrigerLibellesSoldesCollectifs() {
+  var ops = [];
+  try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
+  var employes = [];
+  try { employes = getEmployes() || []; } catch (eEmp) {}
+  var empMap = {};
+  for (var e = 0; e < employes.length; e++) {
+    if (employes[e] && employes[e].id) empMap[employes[e].id] = employes[e];
+  }
+
+  var fixed = 0;
+  for (var i = 0; i < ops.length; i++) {
+    var op = ops[i];
+    if (!op || op.reversed) continue;
+    var isSolde = (op.code === 'SOLDE_SALAIRE' || op.code === 'SOLDE_INDEMNITE' || op.apType === 'solde' || (op.libelle && /^Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:/i.test(op.libelle)));
+    if (!isSolde) continue;
+
+    var empNom = '';
+    if (op.beneficiaireId && empMap[op.beneficiaireId]) {
+      var empObj = empMap[op.beneficiaireId];
+      empNom = ((empObj.nom || '') + (empObj.prenoms ? ' ' + empObj.prenoms : '')).trim() || empObj.nom || '';
+    }
+    if (!empNom && op.beneficiaireNom) {
+      empNom = String(op.beneficiaireNom).trim();
+    }
+    if (!empNom) continue;
+
+    var curLib = String(op.libelle || '').trim();
+    var m = curLib.match(/^(Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)(\/.*)?$/i);
+    if (m) {
+      var prefix = (op.code === 'SOLDE_INDEMNITE' || /indemnit[e\u00e9]/i.test(m[1])) ? 'Solde indemnité : ' : 'Solde salaire : ';
+      var nameInLib = (m[2] || '').trim();
+      var extraPart = m[3] || '';
+      if (nameInLib && nameInLib.toUpperCase() !== empNom.toUpperCase()) {
+        op.libelle = prefix + empNom + extraPart;
+        fixed++;
+      }
+    }
+  }
+  if (fixed > 0) {
+    DB.set('mdb_operationsCaisse', ops);
+    try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e2) {}
+  }
+
+  var apList = [];
+  try { apList = dbArr('mdb_acomptesPrets') || []; } catch (eAP) {}
+  var apFixed = 0;
+  for (var k = 0; k < apList.length; k++) {
+    var a = apList[k];
+    if (!a) continue;
+
+    var aEmpNom = '';
+    if (a.employeId && empMap[a.employeId]) {
+      var aEmp = empMap[a.employeId];
+      aEmpNom = ((aEmp.nom || '') + (aEmp.prenoms ? ' ' + aEmp.prenoms : '')).trim() || aEmp.nom || '';
+    }
+    if (!aEmpNom && a.employeNom) {
+      aEmpNom = String(a.employeNom).trim();
+    }
+    if (!aEmpNom) continue;
+
+    var curMotif = String(a.motif || '').trim();
+    var isSoldeAP = (a.type === 'solde' || /^Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:/i.test(curMotif));
+    if (!isSoldeAP) continue;
+
+    var mm = curMotif.match(/^(Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)(\/.*)?$/i);
+    if (mm) {
+      var aPrefix = /indemnit[e\u00e9]/i.test(mm[1]) ? 'Solde indemnité : ' : 'Solde salaire : ';
+      var aNameInLib = (mm[2] || '').trim();
+      var aExtraPart = mm[3] || '';
+      if (aNameInLib && aNameInLib.toUpperCase() !== aEmpNom.toUpperCase()) {
+        a.motif = aPrefix + aEmpNom + aExtraPart;
+        apFixed++;
+      }
+    }
+  }
+  if (apFixed > 0) {
+    DB.set('mdb_acomptesPrets', apList);
+    try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e3) {}
+  }
+
+  return fixed + apFixed;
+}
 /* Repose les liens retour piÃƒÂ¨ce Ã¢â€ â€™ ligne manquants (anciennes piÃƒÂ¨ces crÃƒÂ©ÃƒÂ©es
    sans acomptePretId, ex. collectifs). Sans eux, le nettoyeur de fantÃƒÂ´mes
    mangeait la ligne Ã¢â‚¬â€ MÃƒÅ ME VALIDÃƒâ€°E Ã¢â‚¬â€ qui revenait non validÃƒÂ©e : la validation
@@ -21257,6 +21345,7 @@ function _reconcileAcomptesPretsFromCaisse() {
   try { _csDedupliquerCollectif(); } catch (eDed) {}
   /* D'abord les piÃƒÂ¨ces elles-mÃƒÂªmes (mÃƒÂªme sans ligne liÃƒÂ©e), puis les lignes. */
   try { _corrigerMoisPieces(); } catch (eCMP) {}
+  try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS) {}
   var ops = getOperationsCaisse() || [];
   if (!ops.length) return;
   var list = dbArr('mdb_acomptesPrets');
@@ -24194,10 +24283,12 @@ function saveSoldeCollectif(caisseId, fullDate, soldeCode, groupeIdEdit, masterO
     var montant = parseSep(montEl ? montEl.value : 0) || 0;
     if (!empId || montant <= 0) return;
     var emp = empMap[empId] || null;
-    var empNom = emp ? emp.nom : empId;
+    var empNom = emp ? (((emp.nom || '') + (emp.prenoms ? ' ' + emp.prenoms : '')).trim() || emp.nom) : empId;
     var moisEl = row.querySelector('.cs-coll-moisded');
     var moisVal = (moisEl && moisEl.value) || periodeDef || '';
-    var lib = csPeriodeBuildLibelle(baseLib, moisVal || fullDate.substring(0, 7));
+    var prefix = (soldeCode && (soldeCode.code === 'SOLDE_INDEMNITE' || /indemnit[eé]/i.test(soldeCode.libelle || soldeCode.code || baseLib))) ? 'Solde indemnité : ' : 'Solde salaire : ';
+    var rowBaseLib = prefix + (empNom || '');
+    var lib = csPeriodeBuildLibelle(rowBaseLib, moisVal || fullDate.substring(0, 7));
     var moyenEl = row.querySelector('.cs-coll-moyen');
     var moyenRaw = moyenEl ? moyenEl.value.trim() : moyenDef;
     var moyen2 = moyenRaw, numTrans = '';
@@ -25310,6 +25401,9 @@ function saveSoldeGroupeEdits() {
           ops[j].moisManuel = !!(moisVal && moisVal !== period);
           ops[j].frais = fraisVal;
           ops[j].periode = period;
+          var _sPrefix = (ops[j].code === 'SOLDE_INDEMNITE' || /indemnit[e\u00e9]/i.test(ops[j].code || ops[j].libelle || '')) ? 'Solde indemnité : ' : 'Solde salaire : ';
+          var _sMois = moisVal || ops[j].apMoisDeduction || ops[j].periode || period;
+          ops[j].libelle = _sPrefix + empNom + (_sMois ? ' / ' + _sMois : '');
           updated++;
           _trouve = true;
           break;
@@ -25330,7 +25424,9 @@ function saveSoldeGroupeEdits() {
       for (var ci = 0; ci < codes.length; ci++) {
         if (codes[ci].id === codeId) { codeLib = codes[ci].libelle || codes[ci].code; break; }
       }
-      var libelle = csPeriodeBuildLibelle ? csPeriodeBuildLibelle(codeLib, period) : codeLib;
+      var _cPrefix = (code === 'SOLDE_INDEMNITE' || /indemnit[e\u00e9]/i.test(codeLib || code)) ? 'Solde indemnité : ' : 'Solde salaire : ';
+      var _cMois = moisVal || period;
+      var libelle = _cPrefix + empNom + (_cMois ? ' / ' + _cMois : '');
       ops.push({
         id: DB.genId(), numeroPiece: np, date: (dateVal || fullDate),
         heure: '', codeId: codeId, code: code, libelle: libelle,
@@ -32858,6 +32954,7 @@ function renderTresorerie() {
   try { _syncApproBanque(); } catch (eSAB) {}
   /* Mois des piÃƒÂ¨ces remis sur pÃƒÂ©riode avant affichage (silencieux). */
   try { _corrigerMoisPieces(); } catch (eCM) {}
+  try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS) {}
   if (_tresorerieContext === 'banque' && !canAccessSection('tresorerie', 'banque')) {
     _tresorerieContext = 'caisse'; _tresorerieTab = 'caisse';
   }
@@ -34024,6 +34121,7 @@ function renderCaisseIn(el) {
     if (window._csLastDedup && (_nowDedup - window._csLastDedup) < 4000) { /* trop tÃƒÂ´t */ }
     else { window._csLastDedup = _nowDedup; _csDedupliquerCollectif(); }
   } catch (eDD) {}
+  try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS) {}
   /* Un snapshot temps rÃƒÂ©el peut re-rendre le module PENDANT une modification.
      Sans cette conservation, l'id d'ÃƒÂ©dition disparaissait et Ã‚Â« Modifier Ã‚Â»
      enregistrait une seconde piÃƒÂ¨ce au lieu de modifier l'ancienne. */
