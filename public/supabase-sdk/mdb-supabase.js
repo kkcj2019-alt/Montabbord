@@ -32,6 +32,16 @@
     });
   }
 
+  var _inFlightSyncGet = {};
+  function d1GetSyncCached(url) {
+    if (_inFlightSyncGet[url]) return _inFlightSyncGet[url];
+    var p = d1Fetch(url).finally(function() {
+      setTimeout(function() { delete _inFlightSyncGet[url]; }, 250);
+    });
+    _inFlightSyncGet[url] = p;
+    return p;
+  }
+
   function D1QueryBuilder(table) {
     this.table = table;
     this.filters = [];
@@ -136,7 +146,7 @@
         var cleLike = self._getLike('cle');
         var since = self._getEq('updated_at');
 
-        return d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + (since ? '&since=' + encodeURIComponent(since) : ''))
+        return d1GetSyncCached('/api/sync?uid=' + encodeURIComponent(uid) + (since ? '&since=' + encodeURIComponent(since) : ''))
           .then(function (res) {
             var rows = [];
             var dataObj = (res && res.data) || {};
@@ -191,7 +201,7 @@
 
       if (action === 'update') {
         var cleToUp = self._getEq('cle');
-        var valToUp = self._data ? self._data.data : null;
+        var valToUp = (self._data && typeof self._data.data !== 'undefined') ? self._data.data : self._data;
         var updates = {};
         if (cleToUp) updates[cleToUp] = valToUp;
         return d1Fetch('/api/sync', {
@@ -228,7 +238,15 @@
         return d1Fetch('/api/enterprise?id=' + encodeURIComponent(entDocId))
           .then(function (res) {
             if (res && res.found && res.enterprise) return { data: [res.enterprise], error: null };
-            return { data: [], error: null };
+            return d1GetSyncCached('/api/sync?uid=' + encodeURIComponent(entDocId))
+              .then(function(syncRes) {
+                if (syncRes && syncRes.count > 0) {
+                  return { data: [{ id: entDocId, updated_at: syncRes.maxTs || syncRes.serverTime || Date.now().toString() }], error: null };
+                }
+                return { data: [{ id: entDocId, updated_at: Date.now().toString() }], error: null };
+              }).catch(function() {
+                return { data: [{ id: entDocId, updated_at: Date.now().toString() }], error: null };
+              });
           })
           .catch(function (err) { return { data: null, error: err }; });
       }
@@ -354,11 +372,13 @@
     return this.then(null, reject);
   };
 
+  var _sharedPollers = {};
+
   function D1Channel(chName) {
     this.name = chName;
     this.handlers = [];
-    this.timer = null;
     this.active = false;
+    this._uid = null;
   }
 
   D1Channel.prototype.on = function (event, cfg, cb) {
@@ -390,45 +410,65 @@
     }
 
     if (!uid || uid === 'undefined') return self;
+    self._uid = uid;
 
-    var lastTs = Date.now().toString();
-
-    function poll() {
-      if (!self.active) return;
-      var interval = (typeof document !== 'undefined' && document.hidden) ? 4000 : 1500;
-      d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + '&since=' + encodeURIComponent(lastTs))
-        .then(function (res) {
-          if (!self.active) return;
-          if (res && res.count > 0 && res.data) {
-            lastTs = res.maxTs || res.serverTime || Date.now().toString();
-            for (var k in res.data) {
-              var updated_at = (res.ts && res.ts[k]) || lastTs;
-              for (var h = 0; h < self.handlers.length; h++) {
-                try {
-                  self.handlers[h].cb({
-                    eventType: 'UPDATE',
-                    new: { enterprise_id: uid, cle: k, data: res.data[k], updated_at: updated_at }
-                  });
-                } catch (eH) {}
+    if (!_sharedPollers[uid]) {
+      _sharedPollers[uid] = {
+        channels: [],
+        lastTs: Date.now().toString(),
+        timer: null
+      };
+      var pObj = _sharedPollers[uid];
+      function loop() {
+        if (!pObj.channels.length) {
+          pObj.timer = null;
+          delete _sharedPollers[uid];
+          return;
+        }
+        var interval = (typeof document !== 'undefined' && document.hidden) ? 4000 : 1500;
+        d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + '&since=' + encodeURIComponent(pObj.lastTs))
+          .then(function (res) {
+            if (res && res.count > 0 && res.data) {
+              pObj.lastTs = res.maxTs || res.serverTime || Date.now().toString();
+              for (var k in res.data) {
+                var updated_at = (res.ts && res.ts[k]) || pObj.lastTs;
+                for (var c = 0; c < pObj.channels.length; c++) {
+                  var chan = pObj.channels[c];
+                  if (!chan.active) continue;
+                  for (var h = 0; h < chan.handlers.length; h++) {
+                    try {
+                      chan.handlers[h].cb({
+                        eventType: 'UPDATE',
+                        new: { enterprise_id: uid, cle: k, data: res.data[k], updated_at: updated_at }
+                      });
+                    } catch (eH) {}
+                  }
+                }
               }
             }
-          }
-        })
-        .catch(function () {})
-        .finally(function () {
-          if (self.active) {
-            self.timer = setTimeout(poll, interval);
-          }
-        });
+          })
+          .catch(function () {})
+          .finally(function () {
+            if (pObj.channels.length) {
+              pObj.timer = setTimeout(loop, interval);
+            }
+          });
+      }
+      pObj.timer = setTimeout(loop, 1500);
     }
+    _sharedPollers[uid].channels.push(self);
 
-    self.timer = setTimeout(poll, 1500);
     return self;
   };
 
   D1Channel.prototype.unsubscribe = function () {
     this.active = false;
-    if (this.timer) clearTimeout(this.timer);
+    var uid = this._uid;
+    if (uid && _sharedPollers[uid]) {
+      var list = _sharedPollers[uid].channels;
+      var at = list.indexOf(this);
+      if (at !== -1) list.splice(at, 1);
+    }
   };
 
   function D1Client() {}
@@ -1044,61 +1084,38 @@
       var b = _rowBase[bkey(uid, l.cle)];
       return !(b && b.json === sjson(l.data));
     });
+    if (!aEcrire.length) {
+      return Promise.resolve();
+    }
     try { console.log('[mdb] push cible : ' + aEcrire.length + ' rubrique(s) modifiee(s) sur ' + lignes.length); } catch (eL) {}
     SYNC.enCours++;
-    var idx = 0, pre = {}, ecrites = 0;
-    /* Rubriques jamais ecrites par ce poste : une seule lecture groupee */
-    var sansBase = aEcrire.filter(function (l) { return !_rowBase[bkey(uid, l.cle)]; }).map(function (l) { return l.cle; });
-    function prelire() {
-      if (!sansBase.length) return Promise.resolve();
-      return avecReessai(function () {
-        return sb.from(SPLIT_TABLE).select('cle,data,updated_at').eq('enterprise_id', uid).in('cle', sansBase)
-          .then(function (r) {
-            if (r.error) throw r.error;
-            sansBase.forEach(function (c) { pre[c] = null; });
-            (r.data || []).forEach(function (row) { pre[row.cle] = row; });
-          });
-      }, 2).catch(function () { pre = {}; });
-    }
-    function suivante() {
-      if (idx >= aEcrire.length) return Promise.resolve();
-      var l = aEcrire[idx++];
-      var avant = _rowBase[bkey(uid, l.cle)];
-      return ecrireLigneSure(uid, l, lignes, pre).catch(function (e) {
-        /* Filet de securite : refus inattendu de l'ecriture conditionnelle (droits,
-           colonne, version du serveur) -> ancien envoi simple plutot que blocage. */
-        if (passager(e) || /Conflit de synchro/.test(String((e && e.message) || ''))) throw e;
-        journal({ op: 'SECOURS', cle: l.cle, message: String((e && e.message) || e) });
-        try { console.warn('[mdb] ecriture protegee refusee, envoi simple pour ' + l.cle + ' :', (e && e.message) || e); } catch (eW) {}
-        delete _rowBase[bkey(uid, l.cle)];
-        return avecReessai(function () {
-          return sb.from(SPLIT_TABLE).upsert([{ enterprise_id: uid, cle: l.cle, data: l.data, updated_at: isoNow() }], { onConflict: 'enterprise_id,cle' }).select('cle,updated_at')
-            .then(function (r) { if (r.error) throw r.error; });
-        }, 2);
-      }).then(function () {
-        var apres = _rowBase[bkey(uid, l.cle)];
-        if (!avant || !apres || apres.ts !== avant.ts) ecrites++;
-      }).then(suivante);
-    }
-    return prelire().then(suivante).then(function () {
-      if (!ecrites) return;
-      return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' }).select('id')
-        .then(function (r2) { if (r2.error) throw r2.error; });
-    }).then(function () {
-      if (!ecrites || _sentinelleOk[uid]) return;
-      return sb.from(SPLIT_TABLE).upsert(
-        [{ enterprise_id: uid, cle: SPLIT_MIGRATION_CLE, data: { v: 1 }, updated_at: isoNow() }],
-        { onConflict: 'enterprise_id,cle' }).select('cle')
-        .then(function (r3) { if (r3.error) throw r3.error; _sentinelleOk[uid] = true; });
-    }).then(function () {
-      SYNC.enCours = Math.max(0, SYNC.enCours - 1);
-      SYNC.lastWriteOk = Date.now(); SYNC.errStreak = 0; SYNC.lastError = '';
-    }, function (e) {
-      SYNC.enCours = Math.max(0, SYNC.enCours - 1);
-      SYNC.lastWriteErr = Date.now(); SYNC.errStreak++; SYNC.lastError = String((e && e.message) || e);
-      journal({ op: 'ERREUR', message: SYNC.lastError });
-      throw e;
-    });
+    var nowTs = Date.now().toString();
+
+    return sb.from(SPLIT_TABLE).upsert(aEcrire, { onConflict: 'enterprise_id,cle' })
+      .then(function() {
+        for (var i = 0; i < aEcrire.length; i++) {
+          var l = aEcrire[i];
+          _rowBase[bkey(uid, l.cle)] = { ts: nowTs, json: sjson(l.data), srv: null };
+          cacheSet(uid, l.cle, l.data, nowTs);
+        }
+        idbCachePersister(uid);
+        return sb.from('enterprises').upsert(upsertIdent, { onConflict: 'id' }).catch(function() {});
+      })
+      .then(function() {
+        SYNC.enCours = Math.max(0, SYNC.enCours - 1);
+        SYNC.lastWriteOk = Date.now();
+        SYNC.errStreak = 0;
+        SYNC.lastError = '';
+        journal({ op: 'ecrit_lot', n: aEcrire.length });
+      })
+      .catch(function(e) {
+        SYNC.enCours = Math.max(0, SYNC.enCours - 1);
+        SYNC.lastWriteErr = Date.now();
+        SYNC.errStreak++;
+        SYNC.lastError = String((e && e.message) || e);
+        journal({ op: 'ERREUR', message: SYNC.lastError });
+        throw e;
+      });
   }
 
   /* Ancien chemin (table enterprise_data absente) : conserve tel quel. */
