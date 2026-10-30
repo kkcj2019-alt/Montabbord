@@ -8077,6 +8077,18 @@ function confirmImportMerge() {
     }
     var keysPropres = {};
     var statsParCle = {}, ordreCles = [];
+    /* Pieces de caisse en CONFLIT (meme piece ou meme n\u00b0, contenu different) :
+       on ne decide plus en silence, l'utilisateur choisit a la fin. */
+    var conflits = [], supprimees = [];
+    function cleContenuOp(o) {
+      o = o || {};
+      return [o.date || '', Math.round((parseFloat(o.montant) || 0) * 100), String(o.libelle || '').trim().toLowerCase(), o.sens || '', o.code || '', o.beneficiaireId || '', String(o.beneficiaireNom || '').trim().toLowerCase(), o.moyenPaiement || '', o.caisseId || '', String(o.numeroPiece || '').trim().toUpperCase(), !!o.reversed].join('|');
+    }
+    function slotOp(o) {
+      var np0 = String((o && o.numeroPiece) || '').trim().toUpperCase();
+      if (!np0) return '';
+      return (o.caisseId || '') + '|' + np0 + '|' + (o.beneficiaireId || String(o.beneficiaireNom || '').trim().toLowerCase()) + '|' + (o.fraisLiaison ? 'F' : '');
+    }
     for (var bki = 0; bki < backups.length; bki++) {
     var backup = backups[bki];
     for (var mk = 0; mk < DATA_KEYS.length; mk++) {
@@ -8090,10 +8102,14 @@ function confirmImportMerge() {
         /* For operations: smart dedup by date+libelle+montant+sens+beneficiaire */
         if (key === 'mdb_operationsCaisse') {
           /* Build fingerprint map of existing ops */
-          var fpMap = {}, idxParId = {};
+          var fpMap = {}, idxParId = {}, slotMap = {}, dejaConflit = {};
+          /* Conflits deja tranches « garder celle de l'appli » : on ne redemande pas. */
+          try { (JSON.parse(localStorage.getItem('mdb_fusionRefus') || '[]') || []).forEach(function (k) { dejaConflit[k] = true; }); } catch (eRf) {}
+          for (var _cf = 0; _cf < conflits.length; _cf++) dejaConflit[cleContenuOp(conflits[_cf].io)] = true;
           for (var ei = 0; ei < existing.length; ei++) {
             var eo = existing[ei];
             if (eo && eo.id) idxParId[eo.id] = ei;
+            var _sl = slotOp(eo); if (_sl) { (slotMap[_sl] = slotMap[_sl] || []).push(eo); }
             var fp = (eo.date || '') + '|' + (eo.libelle || '').toLowerCase() + '|' + (eo.montant || 0) + '|' + (eo.sens || '') + '|' + ((eo.beneficiaireNom || eo.beneficiaire || '') + '').toLowerCase();
             /* Une piece n'est un doublon que si son contenu ET son n\u00b0 sont identiques :
                deux pieces au meme contenu mais de n\u00b0 differents sont deux pieces. */
@@ -8104,19 +8120,31 @@ function confirmImportMerge() {
             var io = incoming[ni];
             var ifp = (io.date || '') + '|' + (io.libelle || '').toLowerCase() + '|' + (io.montant || 0) + '|' + (io.sens || '') + '|' + ((io.beneficiaireNom || io.beneficiaire || '') + '').toLowerCase();
             var fpComplet = (typeof operationFingerprint === 'function') ? operationFingerprint(io) : '';
-            if (itemSupprime(key, io.id, fpComplet)) { stats.skipped++; continue; }
-            /* Meme piece (meme id) des deux cotes : la version la PLUS RECENTE
-               gagne (modifiee entre deux sauvegardes) ; sinon rien. */
+            if (itemSupprime(key, io.id, fpComplet)) { stats.skipped++; supprimees.push(io); continue; }
+            /* Meme piece (meme id) des deux cotes : identique -> rien ;
+               contenu different -> CONFLIT montre a l'utilisateur (il choisit). */
             if (io.id && idxParId[io.id] !== undefined) {
               var exOp = existing[idxParId[io.id]];
-              if (tModif(io) > tModif(exOp)) { existing[idxParId[io.id]] = io; stats.updated++; fpMap[ifp] = true; }
-              else stats.skipped++;
+              if (cleContenuOp(exOp) === cleContenuOp(io) || dejaConflit[cleContenuOp(io)]) { stats.skipped++; continue; }
+              conflits.push({ type: 'id', exId: exOp.id, ex: JSON.parse(JSON.stringify(exOp)), io: io, choix: (tModif(io) > tModif(exOp)) ? 'sauvegarde' : 'app' });
+              dejaConflit[cleContenuOp(io)] = true;
               continue;
             }
             /* Meme n\u00b0 de piece mais montant / contenu different : ce n'est PAS la
                meme piece -> elle est ajoutee (sauf suppression volontaire, vue plus haut). */
             var _npI = String(io.numeroPiece || '').trim().toUpperCase();
             if (fpMap[ifp + '#' + _npI] || (!_npI && Object.keys(fpMap).some(function (kf) { return kf.indexOf(ifp + '#') === 0; })) || (_npI && fpMap[ifp + '#*'])) { stats.skipped++; continue; }
+            /* Meme n\u00b0 de piece (meme caisse, meme beneficiaire) mais contenu
+               different : CONFLIT montre a l'utilisateur (garder les deux / l'une / l'autre). */
+            var _slI = slotOp(io);
+            if (_slI && slotMap[_slI] && slotMap[_slI].length) {
+              var _memes = slotMap[_slI].some(function (x) { return cleContenuOp(x) === cleContenuOp(io); });
+              if (_memes || dejaConflit[cleContenuOp(io)]) { stats.skipped++; continue; }
+              var _exS = slotMap[_slI][0];
+              conflits.push({ type: 'numero', exId: _exS.id, ex: JSON.parse(JSON.stringify(_exS)), io: io, choix: 'deux' });
+              dejaConflit[cleContenuOp(io)] = true;
+              continue;
+            }
             /* ID d'origine conserve : deux postes qui restaurent la meme piece
                produisent le MEME id — le cloud n'en garde alors qu'une copie
                (avant, chaque poste regenrait l'id : doublons permanents). */
@@ -8158,6 +8186,13 @@ function confirmImportMerge() {
       var st0 = statsParCle[ordreCles[oc]];
       if (st0.added > 0 || st0.updated > 0 || st0.skipped > 0) summary.push(st0);
     }
+    var _finFusion = function () {
+      /* Bilan recalcule APRES les choix de l'utilisateur (conflits). */
+      summary.length = 0;
+      for (var oc2 = 0; oc2 < ordreCles.length; oc2++) {
+        var st2 = statsParCle[ordreCles[oc2]];
+        if (st2 && (st2.added > 0 || st2.updated > 0 || st2.skipped > 0)) summary.push(st2);
+      }
     /* MARQUER SALES puis pousser : pushToCloud n'envoie que les cles sales —
        sans markDirty la fusion restait locale et les autres postes ne voyaient
        que l'ancien cloud. */
@@ -8189,6 +8224,91 @@ function confirmImportMerge() {
       '<p style="font-size:14px;margin-bottom:12px"><b style="color:var(--success)">' + totalAdded + ' ajout\u00e9(s)</b> | <b style="color:var(--primary)">' + totalUpdated + ' mis \u00e0 jour (version plus r\u00e9cente ou champs vides remplis)</b> | <b style="color:var(--gray-400)">' + totalSkipped + ' d\u00e9j\u00e0 pr\u00e9sent(s)</b></p>' +
       '<div style="max-height:300px;overflow-y:auto"><table style="font-size:12px;width:100%"><thead><tr><th>Module</th><th style="text-align:center">Ajout\u00e9</th><th style="text-align:center">MAJ</th><th style="text-align:center">Ignor\u00e9</th></tr></thead><tbody>' + detailHtml + '</tbody></table></div>',
       '<button class="btn btn-primary" onclick="closeModal();navigateTo(currentPage)">OK</button>');
+    };
+    if (conflits.length || supprimees.length) { _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, _finFusion); return; }
+    _finFusion();
+}
+
+/* ===== FUSION : revue des pieces de caisse en conflit =====
+   Chaque piece de la sauvegarde qui a le meme n° (ou est la meme piece) qu'une
+   piece de l'appli mais un CONTENU DIFFERENT est montree ici. L'utilisateur
+   choisit : garder les deux, garder celle de l'appli, ou prendre celle de la
+   sauvegarde. Les pieces ignorees car supprimees volontairement sont listees. */
+function _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, fin) {
+  window._fusRevue = { conflits: conflits, supprimees: supprimees, statsParCle: statsParCle, keysPropres: keysPropres, fin: fin };
+  var esc = function (v) { return escH(v == null ? '' : String(v)); };
+  var cname = {}; try { (getCaisses() || []).forEach(function (c) { cname[c.id] = c.nom || c.id; }); } catch (eC) {}
+  var carte = function (o, diff) {
+    var d = function (f, txt) { return (diff && diff[f]) ? '<b style="background:#fef3c7">' + txt + '</b>' : txt; };
+    return '<div style="font-size:12px;line-height:1.45">' + d('date', esc(fmtDate(o.date))) + ' · ' + d('montant', '<b>' + fmtMoney(o.montant || 0) + '</b>') + ' ' + esc(o.sens === 'entree' ? '(entrée)' : '') +
+      '<br>' + d('libelle', esc(o.libelle || '')) + '<br><span style="color:#64748b">' + d('benef', esc(o.beneficiaireNom || '')) + (o.moyenPaiement ? ' · ' + esc(o.moyenPaiement) : '') + '</span></div>';
+  };
+  var h = '';
+  if (conflits.length) {
+    h += '<p style="font-size:13px;margin:0 0 10px">' + conflits.length + ' pièce(s) de la sauvegarde ont le <b>même n°</b> qu’une pièce de l’appli mais un <b>contenu différent</b>. Choisissez pour chacune (les différences sont surlignées).</p>';
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"><button class="btn btn-sm btn-outline" onclick="_fusTous(\'deux\')">Tout : garder les deux</button><button class="btn btn-sm btn-outline" onclick="_fusTous(\'app\')">Tout : garder l’appli</button><button class="btn btn-sm btn-outline" onclick="_fusTous(\'sauvegarde\')">Tout : prendre la sauvegarde</button></div>';
+    h += '<div style="max-height:52vh;overflow:auto;border:1px solid #e2e8f0;border-radius:10px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:#f8fafc;position:sticky;top:0"><th style="padding:6px 8px;text-align:left">N° pièce</th><th style="padding:6px 8px;text-align:left">Dans l’appli</th><th style="padding:6px 8px;text-align:left">Dans la sauvegarde</th><th style="padding:6px 8px;text-align:left;min-width:170px">Votre choix</th></tr></thead><tbody>';
+    conflits.forEach(function (c, i) {
+      var a = c.ex || {}, b = c.io || {};
+      var diff = { date: a.date !== b.date, montant: Math.round(a.montant || 0) !== Math.round(b.montant || 0), libelle: String(a.libelle || '') !== String(b.libelle || ''), benef: String(a.beneficiaireNom || '') !== String(b.beneficiaireNom || '') };
+      h += '<tr style="border-top:1px solid #eef2f7;vertical-align:top"><td style="padding:8px"><b>' + esc(b.numeroPiece || a.numeroPiece || '') + '</b><div style="font-size:11px;color:#64748b">' + esc(cname[b.caisseId] || cname[a.caisseId] || '') + '</div></td>' +
+        '<td style="padding:8px">' + carte(a, diff) + '</td><td style="padding:8px">' + carte(b, diff) + '</td><td style="padding:8px">' +
+        ['deux', 'app', 'sauvegarde'].map(function (v) {
+          var lb = v === 'deux' ? 'Garder les deux' : (v === 'app' ? 'Garder celle de l’appli' : 'Prendre celle de la sauvegarde');
+          return '<label style="display:block;margin:2px 0;cursor:pointer"><input type="radio" name="fusc' + i + '" value="' + v + '"' + (c.choix === v ? ' checked' : '') + ' onchange="window._fusRevue.conflits[' + i + '].choix=this.value"> ' + lb + '</label>';
+        }).join('') + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  if (supprimees.length) {
+    h += '<details style="margin-top:12px"' + (conflits.length ? '' : ' open') + '><summary style="cursor:pointer;font-size:13px;font-weight:700">' + supprimees.length + ' pièce(s) de la sauvegarde ignorée(s) car supprimée(s) volontairement dans l’appli</summary>' +
+      '<div style="max-height:200px;overflow:auto;font-size:12px;margin-top:6px">' + supprimees.map(function (o) { return '<div style="padding:3px 0;border-bottom:1px dashed #e2e8f0">' + esc(o.numeroPiece || '') + ' · ' + esc(fmtDate(o.date)) + ' · ' + esc(o.libelle || '') + ' · <b>' + fmtMoney(o.montant || 0) + '</b></div>'; }).join('') + '</div></details>';
+  }
+  openFormModal('Fusion : pièces à vérifier', h,
+    '<button class="btn btn-primary" onclick="_fusAppliquer()">Appliquer mes choix et terminer</button>', '1100px');
+}
+function _fusTous(v) {
+  var R = window._fusRevue; if (!R) return;
+  R.conflits.forEach(function (c, i) { c.choix = v; var el = document.querySelector('input[name="fusc' + i + '"][value="' + v + '"]'); if (el) el.checked = true; });
+}
+function _fusAppliquer() {
+  var R = window._fusRevue; if (!R) return;
+  var ops = getOperationsCaisse();
+  var st = R.statsParCle['mdb_operationsCaisse'] || (R.statsParCle['mdb_operationsCaisse'] = { key: 'mdb_operationsCaisse', added: 0, updated: 0, skipped: 0 });
+  var aSuppr = [], refus = [];
+  var cleRefus = function (o) { o = o || {}; return [o.date || '', Math.round((parseFloat(o.montant) || 0) * 100), String(o.libelle || '').trim().toLowerCase(), o.sens || '', o.code || '', o.beneficiaireId || '', String(o.beneficiaireNom || '').trim().toLowerCase(), o.moyenPaiement || '', o.caisseId || '', String(o.numeroPiece || '').trim().toUpperCase(), !!o.reversed].join('|'); };
+  R.conflits.forEach(function (c) {
+    var io = JSON.parse(JSON.stringify(c.io));
+    var idx = -1;
+    for (var i = 0; i < ops.length; i++) { if (ops[i] && ops[i].id === c.exId) { idx = i; break; } }
+    if (c.choix === 'app') { st.skipped++; refus.push(cleRefus(c.io)); return; }
+    if (c.choix === 'deux') {
+      if (!io.id || (c.type === 'id') || ops.some(function (x) { return x && x.id === io.id; })) io.id = DB.genId();
+      io.updatedAt = Date.now();
+      ops.push(io); st.added++; return;
+    }
+    /* Prendre celle de la sauvegarde */
+    if (c.type === 'id') {
+      io.updatedAt = Date.now();
+      if (idx >= 0) ops[idx] = io; else ops.push(io);
+    } else {
+      if (idx >= 0) { aSuppr.push(ops[idx]); ops.splice(idx, 1); }
+      if (!io.id || ops.some(function (x) { return x && x.id === io.id; })) io.id = DB.genId();
+      io.updatedAt = Date.now();
+      ops.push(io);
+    }
+    st.updated++;
+  });
+  if (aSuppr.length) {
+    try { rememberDeletedOperations(aSuppr); } catch (eR) {}
+    try { addTombstones('mdb_operationsCaisse', aSuppr.map(function (x) { return x.id; })); } catch (eT) {}
+  }
+  if (refus.length) { try { var _old = JSON.parse(localStorage.getItem('mdb_fusionRefus') || '[]') || []; localStorage.setItem('mdb_fusionRefus', JSON.stringify(_old.concat(refus).slice(-3000))); } catch (eSR) {} }
+  DB.set('mdb_operationsCaisse', ops);
+  R.keysPropres['mdb_operationsCaisse'] = true;
+  window._fusRevue = null;
+  try { closeModal(); } catch (eC) {}
+  R.fin();
 }
 
 function refreshData() {
