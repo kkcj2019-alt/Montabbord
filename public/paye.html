@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-30-327';
+      window.__APP_VERSION = '2026-10-30-329';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -21745,10 +21745,35 @@ function peTogglePst() {
           var isPST = []; // track PST days for red total
           var tJ=0, tN=0, tR=0, gTot=0, uTot=0;
           var joursARattraper = [], joursRattrapes = [];
+          /* Motif des jours ouvrables SANS travail : conge (annuel, maladie,
+             maternite...), accident de travail, retard de reprise, hors contrat,
+             absence. Avant, ces jours restaient vides sur la fiche. */
+          var _motifJour = {}, _kindRow = [];
+          try {
+            ptRhCongesActifs().forEach(function (c) {
+              if (!c || c.employee_id !== emp.id) return;
+              var d1c = String(c.date_depart || ""), d2c = ptCongeDernierJour(c);
+              if (!d1c || !d2c) return;
+              for (var dc = 1; dc <= daysInMonth; dc++) {
+                var dkc = mois + "-" + (dc < 10 ? "0" : "") + dc;
+                if (dkc >= d1c && dkc <= d2c) _motifJour[dkc] = { t: (c.type === "maladie" || c.type === "maternite") ? "mal" : "conge", l: ptCongeMotifAuto(c.type) };
+              }
+            });
+          } catch (eCg) {}
+          try {
+            var _acc = ptAccidentsPlages(mois);
+            for (var da = 1; da <= daysInMonth; da++) {
+              var dka = mois + "-" + (da < 10 ? "0" : "") + da;
+              if (_acc.arret[emp.id + "|" + dka]) _motifJour[dka] = { t: "acc", l: "Accident de travail" + (_acc.num[emp.id + "|" + dka] ? " (" + _acc.num[emp.id + "|" + dka] + ")" : "") };
+              else if (_acc.retard[emp.id + "|" + dka]) _motifJour[dka] = { t: "abs", l: "Absent — reprise en retard (accident)" };
+            }
+          } catch (eAc) {}
+          var _dEmb = String(emp.date_embauche || "").slice(0, 10), _dSor = String(emp.date_sortie || "").slice(0, 10);
           for (var d=1;d<=daysInMonth;d++){
             var dk = mois+"-"+(d<10?"0":"")+d;
             var dkF = ((d<10?"0":"")+d) + "/" + (((mIdx+1)<10?"0":"")+(mIdx+1)) + "/" + String(year).slice(2);
             var dw = new Date(year,mIdx,d).getDay();
+            var dkAff = ["dim","lun","mar","mer","jeu","ven","sam"][dw] + " " + dkF;
             var we = dw===0||dw===6;
             var rec = empPts.find(function(r){ return r.date===dk; });
             var jStr="-",nStr="-",total="-",obs="";
@@ -21782,6 +21807,11 @@ function peTogglePst() {
                    (comme le récap — la production reste visible). */
                 else if (montSetF[dk] && rec.present !== false) { jStr="R+0h"; total="R+0h"; }
                 if (rec.present===false) { obs="Absent"; }
+              }
+              if (obs === "Absent") {
+                var _mjA = _motifJour[dk];
+                if (_mjA) { obs = _mjA.l; _kindRow[rows.length] = _mjA.t; }
+                else { obs = "Absent" + (String(rec.motif || "").trim() ? " \u2014 " + String(rec.motif).trim() : ""); _kindRow[rows.length] = "abs"; }
               }
               if (rec.faute_societe) obs="Faute société";
               if (rec.pst_a_rattraper) obs = (obs ? obs + " \u2014 " : "") + "\u00e0 rattraper";
@@ -21833,16 +21863,19 @@ function peTogglePst() {
                         _motifPart +
                         (obs ? " — " + obs : "");
                 }
-              rows.push([dkF,ptStr,jStr==="-"?"-":jStr,nStr==="-"?"-":nStr,total,obs]);
+              rows.push([dkAff,ptStr,jStr==="-"?"-":jStr,nStr==="-"?"-":nStr,total,obs]);
               isPST.push(rec.paye_sans_travail === true);
             } else if ((emp.rendement===true) && montSetF[dk]) {
               var mq2 = ptMontageObs(montQteF, dk);
-              rows.push([dkF,"Montage","R+0h","-","R+0h",(obs ? obs+" — " : "") + "Montage (rendement)" + (mq2 ? " : " + mq2 : "")]);
+              rows.push([dkAff,"Montage","R+0h","-","R+0h",(obs ? obs+" — " : "") + "Montage (rendement)" + (mq2 ? " : " + mq2 : "")]);
               isPST.push(false);
             } else {
               if (ptEstFerie(year,mIdx,d)) obs="Férié (chômé)";
               else if (we) obs="Week-end";
-              rows.push([dkF,"-","-","-","-",obs]);
+              else if ((_dEmb && dk < _dEmb) || (_dSor && dk > _dSor)) { obs = (_dEmb && dk < _dEmb) ? "Avant l\u2019embauche" : "Après la sortie"; _kindRow[rows.length] = "hors"; }
+              else if (_motifJour[dk]) { obs = _motifJour[dk].l; _kindRow[rows.length] = _motifJour[dk].t; }
+              else if (dk <= new Date().toISOString().slice(0, 10)) { obs = "Absent (non pointé)"; _kindRow[rows.length] = "abs"; }
+              rows.push([dkAff,"-","-","-","-",obs]);
               isPST.push(false);
             }
           }
@@ -21851,11 +21884,15 @@ function peTogglePst() {
             headStyles:{fillColor:[15,23,42],textColor:[255,255,255],fontSize:7,fontStyle:"bold",minCellHeight:6.5,cellPadding:1.2},
             styles:{fontSize:6.2,lineColor:[51,65,85],lineWidth:0.3,cellPadding:1.2,minCellHeight:_rowH},
             bodyStyles:{lineColor:[51,65,85],lineWidth:0.3,minCellHeight:_rowH},
-            columnStyles:{0:{cellWidth:20},1:{cellWidth:42}},
+            columnStyles:{0:{cellWidth:24},1:{cellWidth:40}},
             margin:{top:27,bottom:10,left:12,right:12},
             pageBreak:"avoid",
             rowPageBreak:"avoid",
             didParseCell: function(data) {
+              if (data.section === "body" && data.column.index === 5 && _kindRow[data.row.index]) {
+                var _cK = { abs: [220, 38, 38], conge: [37, 99, 235], mal: [147, 51, 234], acc: [234, 88, 12], hors: [100, 116, 139] }[_kindRow[data.row.index]];
+                if (_cK) { data.cell.styles.textColor = _cK; data.cell.styles.fontStyle = "bold"; }
+              }
               if (data.section === "body" && data.column.index === 4 && isPST[data.row.index]) {
                 data.cell.styles.textColor = [220, 38, 38];
                 data.cell.styles.fontStyle = "bold";
@@ -21865,10 +21902,21 @@ function peTogglePst() {
           doc.setFontSize(7.5); doc.setFont("helvetica","bold");
           doc.text("Total JH: "+ptFmtDec(tJ)+"h | NH: "+ptFmtDec(tN)+"h | R: "+ptFmtDec(tR)+"h | Total: "+ptFmtDec((tJ+tN+tR))+"h",105,_fy,{align:"center"});
           doc.setFontSize(6.5); doc.setFont("helvetica","normal");
-          doc.text("Heures à rattraper — gagnées: "+ptFmtDec(gTot)+"h | utilisées: "+ptFmtDec(uTot)+"h | solde: "+ptFmtDec((gTot-uTot))+"h",105,_fy+4,{align:"center"});
+          doc.text("Heures à rattraper — gagnées: "+ptFmtDec(gTot)+"h | utilisées: "+ptFmtDec(uTot)+"h | solde: "+ptFmtDec((gTot-uTot))+"h",105,_fy+4,{align:"center"});
+          /* Bilan des jours ouvrables non travailles */
+          (function () {
+            var cpt = { abs: 0, conge: 0, mal: 0, acc: 0 };
+            _kindRow.forEach(function (k) { if (cpt[k] !== undefined) cpt[k]++; });
+            var parts = [];
+            if (cpt.abs) parts.push("Absences : " + cpt.abs + " j");
+            if (cpt.conge) parts.push("Congés : " + cpt.conge + " j");
+            if (cpt.mal) parts.push("Maladie / maternité : " + cpt.mal + " j");
+            if (cpt.acc) parts.push("Accident de travail : " + cpt.acc + " j");
+            if (parts.length) { doc.setFont("helvetica","bold"); doc.setFontSize(7); doc.text(parts.join("   |   "), 105, _fy + 7.5, {align:"center"}); doc.setFont("helvetica","normal"); doc.setFontSize(6.5); }
+          })();
           /* Détail : les jours où des heures ont été PAYÉES et restent à
              rattraper, et les jours où elles ont été rattrapées. */
-          var _yR = _fy + 8.5;
+          var _yR = _fy + 11.5;
           if (joursARattraper.length) {
             doc.setFont("helvetica","bold"); doc.setTextColor(220, 38, 38);
             var _lA = doc.splitTextToSize("Jours payés à rattraper (" + joursARattraper.length + ") : " + joursARattraper.join("  •  "), 186);
