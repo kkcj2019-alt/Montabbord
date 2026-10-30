@@ -1586,7 +1586,7 @@ try{(function(){var b=document.createElement('button');b.id='hdrFiltersToggle';b
 </div>
 </div>
 
-<script src="supabase-sdk/mdb-supabase.js?v=20261029-d9"></script>
+<script src="supabase-sdk/mdb-supabase.js?v=20261030-d10"></script>
 <script src="vendor/xlsx.full.min.js" defer></script>
 <script src="vendor/pdf.min.js" defer></script>
 <script src="vendor/mammoth.browser.min.js" defer></script>
@@ -6389,6 +6389,49 @@ function doFirebaseLoginInner() {
       doSaConfigFallback();
       return;
     }
+    /* Le bon dossier = celui qui contient VRAIMENT ce compte. Si l'identifiant
+       pointe vers un dossier sans ce compte (ex. dossier vide cree pendant
+       une panne du cloud), on cherche le compte dans les autres dossiers
+       puis on repare l'identifiant au cloud. */
+    var _mdbLoginResoudreUid = function(u0, lg, pw, ident) {
+      if (typeof fetch !== 'function') return Promise.resolve(u0);
+      var lu = String(lg || '').toLowerCase();
+      var aLeCompte = function(uid) {
+        if (!uid) return Promise.resolve(false);
+        return fetch('/api/sync?uid=' + encodeURIComponent(uid) + '&cle=mdb_users').then(function(r) { return r.ok ? r.json() : null; }).then(function(j) {
+          var us = j && j.data && j.data.mdb_users;
+          if (typeof us === 'string') { try { us = JSON.parse(us); } catch (eJ) { us = null; } }
+          if (!Array.isArray(us)) return false;
+          for (var i = 0; i < us.length; i++) { var x = us[i] || {}; if ((x.login === lg || String(x.login || '').toLowerCase() === lu || x.email === lg) && mdbPassCheck(x, pw)) return true; }
+          return false;
+        }).catch(function() { return false; });
+      };
+      return aLeCompte(u0).then(function(ok) {
+        if (ok) return u0;
+        var cands = [];
+        try { var lu0 = localStorage.getItem('mdb_lastLoginUid'); if (lu0 && lu0 !== u0) cands.push(lu0); } catch (eLU) {}
+        return fetch('/api/enterprise?list=1').then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; }).then(function(j) {
+          ((j && j.data) || []).forEach(function(e) { if (e && e.id && e.id !== u0 && cands.indexOf(e.id) < 0) cands.push(e.id); });
+          var i = 0;
+          var suivant = function() {
+            if (i >= cands.length) return u0;
+            var c = cands[i++];
+            return aLeCompte(c).then(function(ok2) {
+              if (!ok2) return suivant();
+              console.warn('[Login] Compte trouve dans le dossier ' + c + ' (identifiant ' + ident + ' pointait vers ' + u0 + ') -> reparation');
+              try {
+                fetch('/api/enterprise?id=' + encodeURIComponent(c)).then(function(r) { return r.json(); }).then(function(g) {
+                  var e = (g && g.enterprise) || {};
+                  return fetch('/api/enterprise', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: c, identifiant: String(ident || '').toLowerCase(), email: e.email || '', nom: e.nom || '', data: e.data || {} }) });
+                }).catch(function() {});
+              } catch (eRp) {}
+              return c;
+            });
+          };
+          return suivant();
+        });
+      });
+    };
     var entIdVariants = [entId, entIdRaw, entIdRaw.toUpperCase()];
     var adminUid = null;
     var tryNextVariant = function(idx) {
@@ -6402,7 +6445,7 @@ function doFirebaseLoginInner() {
         });
       });
     };
-    tryNextVariant(0).then(function(adminUid) {
+    tryNextVariant(0).then(function(u0) { return _mdbLoginResoudreUid(u0, login, pass, entId); }).then(function(adminUid) {
       console.log('[Login] enterpriseIndex résultat:', adminUid);
       if(window._mdbFatal) _mdbFatal(adminUid ? ('[2] Entreprise trouv\u00e9e: ' + adminUid) : '[2] Entreprise introuvable');
       if (!adminUid) {
@@ -6552,8 +6595,10 @@ function doFirebaseLoginInner() {
           if(_last && _last.login===login && _last.entId===entId && _last.user && (_last.pass===pass || mdbPassCheck(_last.user, pass))) _foundLocal=_last.user;
         }
         if(_foundLocal){
-          var _adminUidLocal = null; try{ _adminUidLocal = localStorage.getItem('mdb_lastLoginUid') || DB.get('mdb_enterpriseUid') || _foundLocal.enterpriseUid || entId; }catch(_eA){}
-          if(!_adminUidLocal) _adminUidLocal = entId || 'offline';
+          var _adminUidLocal = null; try{ _adminUidLocal = localStorage.getItem('mdb_lastLoginUid') || DB.get('mdb_enterpriseUid') || _foundLocal.enterpriseUid || null; }catch(_eA){}
+          /* Sans numero de dossier connu sur ce poste, on n'invente rien : utiliser
+             le texte saisi creait un faux dossier vide au cloud (ex. « acser »). */
+          if(!_adminUidLocal) throw new Error('dossier inconnu sur ce poste');
           currentUser = {id: _adminUidLocal, nom: _foundLocal.nom, email: _foundLocal.email||'', login: _foundLocal.login, isAdmin: _foundLocal.isAdmin||false, adminType: _foundLocal.adminType||(_foundLocal.isAdmin?'admin':'user'), deniedPages: _foundLocal.deniedPages||[], isSuperAdmin:false, sections:_foundLocal.sections||{}, subUserId:_foundLocal.id, caisseId:_foundLocal.caisseId||'', employeeId:_foundLocal.employeeId||'', caisseCentralisee:_foundLocal.caisseCentralisee||false, caissesAutorisees:_foundLocal.caissesAutorisees||[]};
           DB.set('mdb_currentUser', _foundLocal.id);
           DB.set('mdb_enterpriseUid', _adminUidLocal);

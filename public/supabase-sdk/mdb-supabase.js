@@ -1294,6 +1294,14 @@
     }, function (e) { return { data: null, error: e }; });
   }
   function seedD1FromLocalStorageIfEmpty(uid) {
+    /* On ne recopie le stockage local QUE s'il appartient a ce dossier.
+       Sinon un identifiant mal resolu creait un faux dossier au cloud. */
+    try {
+      var _propri = localStorage.getItem('mdb_lastLoginUid') || '';
+      var _eu = localStorage.getItem('mdb_enterpriseUid') || '';
+      try { _eu = JSON.parse(_eu); } catch (eP) {}
+      if (!uid || (_propri !== uid && _eu !== uid)) return Promise.resolve(false);
+    } catch (eG) { return Promise.resolve(false); }
     try {
       var keys = [
         'clients', 'fournisseurs', 'articles', 'devis', 'factures', 'reglements',

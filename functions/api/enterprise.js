@@ -44,8 +44,24 @@ export async function onRequest(context) {
         const stmt = db.prepare('SELECT * FROM enterprises WHERE id = ? LIMIT 1');
         ent = await stmt.bind(id).first();
       } else if (identifiant) {
-        const stmt = db.prepare('SELECT * FROM enterprises WHERE identifiant = ? LIMIT 1');
-        ent = await stmt.bind(identifiant).first();
+        /* Plusieurs dossiers peuvent porter le meme identifiant (ex. faux
+           dossier vide cree pendant une panne) : on garde celui qui contient
+           les comptes utilisateurs (mdb_users), sinon le premier. */
+        const ids = [];
+        const r1 = await db.prepare('SELECT id FROM enterprises WHERE identifiant = ? COLLATE NOCASE').bind(identifiant).all();
+        (r1.results || []).forEach(r => { if (r.id && ids.indexOf(r.id) < 0) ids.push(r.id); });
+        try {
+          const r2 = await db.prepare('SELECT enterprise_id FROM enterprise_index WHERE identifiant = ? COLLATE NOCASE').bind(identifiant).all();
+          (r2.results || []).forEach(r => { if (r.enterprise_id && ids.indexOf(r.enterprise_id) < 0) ids.push(r.enterprise_id); });
+        } catch (eIdx) {}
+        let best = null, bestLen = -1;
+        for (const cid of ids) {
+          const u = await db.prepare("SELECT length(valeur) AS l FROM enterprise_data WHERE (enterprise_id = ? OR enterprise_id = ?) AND cle = 'mdb_users' ORDER BY l DESC LIMIT 1").bind(cid, '"' + cid + '"').first();
+          const l = (u && u.l) || 0;
+          if (l > bestLen) { bestLen = l; best = cid; }
+        }
+        if (best) ent = await db.prepare('SELECT * FROM enterprises WHERE id = ? LIMIT 1').bind(best).first();
+        if (!ent && best) ent = { id: best, identifiant: identifiant, email: '', nom: '', data: '{}', updated_at: '' };
       }
 
       if (!ent) {
