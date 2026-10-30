@@ -22,12 +22,18 @@
     if (!options.headers['Content-Type'] && options.body) {
       options.headers['Content-Type'] = 'application/json';
     }
+    var _ecriture = !!(options.method && options.method !== 'GET');
     return fetch(API_ROOT + endpoint, options).then(function (res) {
       if (!res.ok) {
         return res.json().catch(function () { return { error: 'HTTP ' + res.status }; }).then(function (err) {
+          try { var S0 = window.MDB_SYNC; if (S0 && _ecriture) { S0.lastWriteErr = Date.now(); S0.errStreak = (S0.errStreak || 0) + 1; S0.lastError = String((err && err.error) || 'HTTP ' + res.status); } } catch (eS0) {}
           throw err;
         });
       }
+      /* Voyant de synchro : TOUT echange reussi avec le cloud compte (avant,
+         seuls les chemins de l'appli principale le signalaient -> le voyant
+         de l'Exploitation restait gris « Connexion D1... »). */
+      try { var S = window.MDB_SYNC; if (S) { if (_ecriture) { S.lastWriteOk = Date.now(); S.errStreak = 0; S.lastError = ''; } else S.lastFetchOk = Date.now(); } } catch (eS) {}
       return res.json();
     });
   }
@@ -431,7 +437,10 @@
           delete _sharedPollers[uid];
           return;
         }
-        var interval = (typeof document !== 'undefined' && document.hidden) ? 4000 : 1500;
+        /* Verification des changements des autres postes : toutes les 8 s
+           (60 s si l'onglet est cache). Avant 1,5 s / 4 s : des dizaines de
+           milliers d'appels par jour et par onglet -> quota gratuit depasse. */
+        var interval = (typeof document !== 'undefined' && document.hidden) ? 60000 : 8000;
         d1Fetch('/api/sync?uid=' + encodeURIComponent(uid) + '&since=' + encodeURIComponent(pObj.lastTs))
           .then(function (res) {
             if (res && res.count > 0 && res.data) {
@@ -460,7 +469,7 @@
             }
           });
       }
-      pObj.timer = setTimeout(loop, 1500);
+      pObj.timer = setTimeout(loop, 3000);
     }
     _sharedPollers[uid].channels.push(self);
 

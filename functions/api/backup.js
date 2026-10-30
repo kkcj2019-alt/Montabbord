@@ -67,6 +67,12 @@ export async function onRequest(context) {
         ON CONFLICT(id) DO UPDATE SET data = excluded.data, date = excluded.date
       `);
       await stmt.bind(id, enterpriseId, ts, date, dataStr, createdAt).run();
+      /* On ne garde que les 10 sauvegardes cloud les plus recentes : avant,
+         la purge cote appli ne voyait que 20 lignes et n'effacait jamais
+         rien (5 Mo de plus a chaque sauvegarde, sans fin). */
+      try {
+        await db.prepare('DELETE FROM backups WHERE enterprise_id = ? AND id NOT IN (SELECT id FROM backups WHERE enterprise_id = ? ORDER BY ts DESC LIMIT 10)').bind(enterpriseId, enterpriseId).run();
+      } catch (ePr) {}
 
       return new Response(JSON.stringify({ ok: true, id, ts }), { headers: corsHeaders });
     }

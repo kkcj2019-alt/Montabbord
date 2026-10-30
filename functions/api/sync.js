@@ -1,4 +1,20 @@
 // Cloudflare Pages Function: /api/sync
+/* Index pour la synchro : sans lui, CHAQUE petite verification « quoi de
+   neuf depuis X ? » relisait toutes les lignes de l'entreprise (~200),
+   toutes les 1,5 s, sur chaque onglet ouvert : des millions de lignes lues
+   par jour, d'ou le blocage « D1 free tier exceeded ». Avec l'index, une
+   verification sans changement ne lit (presque) rien. Cree une seule fois. */
+let _indexPrets = false;
+async function assurerIndex(db) {
+  if (_indexPrets) return;
+  try {
+    await db.batch([
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_ed_ent_upd ON enterprise_data(enterprise_id, updated_at)'),
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_backups_ent_ts ON backups(enterprise_id, ts)')
+    ]);
+    _indexPrets = true;
+  } catch (e) {}
+}
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -23,6 +39,7 @@ export async function onRequest(context) {
     }
 
     const url = new URL(request.url);
+    await assurerIndex(db);
 
     // GET /api/sync?uid=...[&since=...][&cle=...][&cles=...][&prefix=...][&ping=1]
     if (request.method === 'GET') {
@@ -50,7 +67,7 @@ export async function onRequest(context) {
       const limitParam = url.searchParams.get('limit');
 
       // Normaliser l'uid pour matcher les enregistrements existants (avec ou sans guillemets)
-      let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE (enterprise_id = ? OR enterprise_id = ?)';
+      let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id IN (?, ?)';
       const params = [uid, '"' + uid + '"'];
 
       // Mode meta : ne renvoie que les clés + tailles (réponse minuscule, quasi aucun CPU)
