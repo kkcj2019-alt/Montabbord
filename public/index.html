@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-30-322';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-30-323';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -7982,6 +7982,14 @@ function confirmImportMerge() {
       }
       return false;
     }
+    /* Date de derniere modification d'une ligne (0 si inconnue). */
+    function tModif(r) {
+      if (!r || typeof r !== 'object') return 0;
+      var t = r.updatedAt !== undefined ? r.updatedAt : (r.updated_at !== undefined ? r.updated_at : r.modifieLe);
+      if (typeof t === 'number') return t;
+      var pt = Date.parse(t);
+      return isFinite(pt) ? pt : 0;
+    }
     var keysPropres = {};
     for (var mk = 0; mk < DATA_KEYS.length; mk++) {
       var key = DATA_KEYS[mk];
@@ -7993,9 +8001,10 @@ function confirmImportMerge() {
         /* For operations: smart dedup by date+libelle+montant+sens+beneficiaire */
         if (key === 'mdb_operationsCaisse') {
           /* Build fingerprint map of existing ops */
-          var fpMap = {};
+          var fpMap = {}, idxParId = {};
           for (var ei = 0; ei < existing.length; ei++) {
             var eo = existing[ei];
+            if (eo && eo.id) idxParId[eo.id] = ei;
             var fp = (eo.date || '') + '|' + (eo.libelle || '').toLowerCase() + '|' + (eo.montant || 0) + '|' + (eo.sens || '') + '|' + ((eo.beneficiaireNom || eo.beneficiaire || '') + '').toLowerCase();
             fpMap[fp] = true;
           }
@@ -8003,32 +8012,68 @@ function confirmImportMerge() {
             var io = incoming[ni];
             var ifp = (io.date || '') + '|' + (io.libelle || '').toLowerCase() + '|' + (io.montant || 0) + '|' + (io.sens || '') + '|' + ((io.beneficiaireNom || io.beneficiaire || '') + '').toLowerCase();
             var fpComplet = (typeof operationFingerprint === 'function') ? operationFingerprint(io) : '';
-            if (fpMap[ifp] || itemSupprime(key, io.id, fpComplet)) { stats.skipped++; continue; }
+            if (itemSupprime(key, io.id, fpComplet)) { stats.skipped++; continue; }
+            /* Meme piece (meme id) des deux cotes : la version la PLUS RECENTE
+               gagne (modifiee entre deux sauvegardes) ; sinon rien. */
+            if (io.id && idxParId[io.id] !== undefined) {
+              var exOp = existing[idxParId[io.id]];
+              if (tModif(io) > tModif(exOp)) { existing[idxParId[io.id]] = io; stats.updated++; fpMap[ifp] = true; }
+              else stats.skipped++;
+              continue;
+            }
+            if (fpMap[ifp]) { stats.skipped++; continue; }
             /* ID d'origine conserve : deux postes qui restaurent la meme piece
                produisent le MEME id — le cloud n'en garde alors qu'une copie
                (avant, chaque poste regenrait l'id : doublons permanents). */
             if (!io.id) io.id = DB.genId();
             if (!io.numeroPiece) io.numeroPiece = (typeof generatePieceNumber === 'function' && io.caisseId) ? generatePieceNumber(io.caisseId, io.date) : '';
+            io.updatedAt = Date.now();
             existing.push(io); stats.added++; fpMap[ifp] = true;
           }
           DB.set(key, existing);
         } else {
-          /* For other arrays: merge by ID */
-          var byId = {};
-          for (var ei2 = 0; ei2 < existing.length; ei2++) { if (existing[ei2].id) byId[existing[ei2].id] = existing[ei2]; }
+          /* Autres tableaux, par id. REGLE : on n'ECRASE JAMAIS ce qui existe.
+             - ligne absente  -> ajoutee ;
+             - ligne presente -> on remplit SEULEMENT ses champs vides avec
+               ceux de la sauvegarde (ex. prenoms manquants) ;
+             - sinon rien (doublon ignore).
+             Chaque ligne ajoutee/completee recoit updatedAt = maintenant :
+             a la synchro elle est plus recente que la copie du cloud et ne
+             « revient » donc plus en arriere apres actualisation. Refaire la
+             meme fusion ne change plus rien (0 ajoute, 0 complete). */
+          var _vide = function (v) { return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0); };
+          var byId = {}, ordre = [];
+          for (var ei2 = 0; ei2 < existing.length; ei2++) {
+            var ex2 = existing[ei2];
+            if (ex2 && ex2.id) { if (!byId[ex2.id]) ordre.push(ex2.id); byId[ex2.id] = ex2; }
+          }
+          var sansId = existing.filter(function (x) { return !x || !x.id; });
+          var _now = Date.now();
           for (var ni2 = 0; ni2 < incoming.length; ni2++) {
             var item = incoming[ni2];
-            if (!item) continue;
+            if (!item || typeof item !== 'object') continue;
             if (item.id && itemSupprime(key, item.id, '')) { stats.skipped++; continue; }
-            if (item.id) {
-              if (byId[item.id]) { byId[item.id] = item; stats.updated++; }
-              else { byId[item.id] = item; stats.added++; }
+            if (item.id && byId[item.id] && tModif(item) > tModif(byId[item.id])) {
+              /* Saisie modifiee entre deux sauvegardes : la plus recente
+                 remplace la plus ancienne (elle garde sa date). */
+              byId[item.id] = Object.assign({}, item);
+              stats.updated++;
+            } else if (item.id && byId[item.id]) {
+              var cible = byId[item.id], change = false;
+              for (var fk in item) {
+                if (!Object.prototype.hasOwnProperty.call(item, fk) || fk === 'updatedAt' || fk === 'id') continue;
+                if (_vide(cible[fk]) && !_vide(item[fk])) { cible[fk] = item[fk]; change = true; }
+              }
+              if (change) { cible.updatedAt = _now; stats.updated++; } else stats.skipped++;
             } else {
-              item.id = DB.genId(); byId[item.id] = item; stats.added++;
+              var nouv = Object.assign({}, item);
+              if (!nouv.id) nouv.id = DB.genId();
+              nouv.updatedAt = _now;
+              byId[nouv.id] = nouv; ordre.push(nouv.id); stats.added++;
             }
           }
-          var merged = [];
-          for (var mid in byId) { if (byId.hasOwnProperty(mid)) merged.push(byId[mid]); }
+          var merged = sansId.slice();
+          for (var oi = 0; oi < ordre.length; oi++) merged.push(byId[ordre[oi]]);
           DB.set(key, merged);
         }
       } else {
@@ -8063,7 +8108,7 @@ function confirmImportMerge() {
     }
     toast('Fusion : ' + totalAdded + ' ajout\u00e9(s), ' + totalUpdated + ' mis \u00e0 jour, ' + totalSkipped + ' doublon(s) ignor\u00e9(s)', 'success');
     openFormModal('Fusion termin\u00e9e',
-      '<p style="font-size:14px;margin-bottom:12px"><b style="color:var(--success)">' + totalAdded + ' ajout\u00e9(s)</b> | <b style="color:var(--primary)">' + totalUpdated + ' mis \u00e0 jour</b> | <b style="color:var(--gray-400)">' + totalSkipped + ' doublon(s) ignor\u00e9(s)</b></p>' +
+      '<p style="font-size:14px;margin-bottom:12px"><b style="color:var(--success)">' + totalAdded + ' ajout\u00e9(s)</b> | <b style="color:var(--primary)">' + totalUpdated + ' mis \u00e0 jour (version plus r\u00e9cente ou champs vides remplis)</b> | <b style="color:var(--gray-400)">' + totalSkipped + ' doublon(s) ignor\u00e9(s)</b></p>' +
       '<div style="max-height:300px;overflow-y:auto"><table style="font-size:12px;width:100%"><thead><tr><th>Module</th><th style="text-align:center">Ajout\u00e9</th><th style="text-align:center">MAJ</th><th style="text-align:center">Ignor\u00e9</th></tr></thead><tbody>' + detailHtml + '</tbody></table></div>',
       '<button class="btn btn-primary" onclick="closeModal();navigateTo(currentPage)">OK</button>');
 }
