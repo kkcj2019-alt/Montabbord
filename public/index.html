@@ -7875,42 +7875,66 @@ function importData() {
   var input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
+  input.multiple = true; /* plusieurs sauvegardes d'un coup (fusion) */
   input.onchange = function(e) {
-    var file = e.target.files[0];
-    if (!file) return;
-    var reader = new FileReader();
-    reader.onload = function(ev) {
-      try {
-        var backup = JSON.parse(ev.target.result);
-        if (!backup._exportDate) { toast('Fichier de sauvegarde invalide', 'error'); return; }
-        showImportAuthModal(backup, file.name);
-      } catch(err) {
-        toast('Erreur lors de l\'import : fichier corrompu', 'error');
-      }
-    };
-    reader.readAsText(file);
+    var files = [].slice.call(e.target.files || []);
+    if (!files.length) return;
+    var lus = [], noms = [], invalides = [];
+    Promise.all(files.map(function (file) {
+      return new Promise(function (ok) {
+        var reader = new FileReader();
+        reader.onload = function (ev) {
+          try {
+            var b = JSON.parse(ev.target.result);
+            if (b && b._exportDate) { lus.push(b); noms.push(file.name); } else invalides.push(file.name);
+          } catch (err) { invalides.push(file.name); }
+          ok();
+        };
+        reader.onerror = function () { invalides.push(file.name); ok(); };
+        reader.readAsText(file);
+      });
+    })).then(function () {
+      if (invalides.length) toast(invalides.length + ' fichier(s) ignor\u00e9(s) (invalide ou corrompu) : ' + invalides.join(', '), 'error');
+      if (!lus.length) return;
+      /* De la plus ancienne a la plus recente. */
+      var ordre = lus.map(function (b, i) { return i; }).sort(function (x, y) { return String(lus[x]._exportDate).localeCompare(String(lus[y]._exportDate)); });
+      var bs = ordre.map(function (i) { return lus[i]; }), ns = ordre.map(function (i) { return noms[i]; });
+      if (bs.length === 1) showImportAuthModal(bs[0], ns[0]);
+      else showImportAuthModal(bs, ns);
+    });
   };
   input.click();
 }
 
 function showImportAuthModal(backup, fname) {
+  var plusieurs = Array.isArray(backup);
   var overlay = document.createElement('div');
   overlay.id = 'importAuthModal';
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;';
   var html = '<div style="background:#fff;border-radius:12px;padding:32px 36px;text-align:center;max-width:440px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3)">';
   html += '<div style="font-size:48px;margin-bottom:12px">&#x1F4C1;</div>';
   html += '<h2 style="margin:0 0 6px 0;font-size:18px">Importation de donn\u00e9es</h2>';
+  if (plusieurs) {
+    html += '<p style="color:var(--gray-500);margin:0 0 10px 0;font-size:13px"><strong>' + backup.length + ' sauvegardes</strong> s\u00e9lectionn\u00e9es (fusionn\u00e9es de la plus ancienne \u00e0 la plus r\u00e9cente) :</p>';
+    html += '<div style="max-height:150px;overflow:auto;text-align:left;font-size:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;margin-bottom:12px">';
+    for (var fi = 0; fi < backup.length; fi++) html += '<div>\u2022 ' + escH(fname[fi] || '') + ' <span style="color:#94a3b8">(' + escH(String(backup[fi]._exportDate || '').substring(0, 16).replace('T', ' ')) + ')</span></div>';
+    html += '</div>';
+    html += '<div style="display:flex;gap:10px;justify-content:center;margin-bottom:12px">';
+    html += '<button class="btn btn-success" onclick="confirmImportMerge()" style="padding:10px 20px">Fusionner les ' + backup.length + ' sauvegardes</button>';
+    html += '</div>';
+  } else {
   html += '<p style="color:var(--gray-500);margin:0 0 16px 0;font-size:13px">Fichier : <strong>' + escH(fname) + '</strong><br>Date d\'export : ' + (backup._exportDate ? backup._exportDate.substring(0, 10) : 'Inconnue') + '</p>';
   html += '<p style="color:var(--gray-500);margin:0 0 12px 0;font-size:12px">Choisissez comment importer les donn\u00e9es :</p>';
   html += '<div style="display:flex;gap:10px;justify-content:center;margin-bottom:12px">';
   html += '<button class="btn btn-danger" onclick="confirmImportReplace()" style="padding:10px 20px">Remplacer tout</button>';
   html += '<button class="btn btn-success" onclick="confirmImportMerge()" style="padding:10px 20px">Fusionner (ajouter)</button>';
   html += '</div>';
-  html += '<p style="color:var(--gray-400);font-size:11px;margin:0 0 8px 0"><b>Remplacer</b> : \u00e9crase toutes les donn\u00e9es actuelles.<br><b>Fusionner</b> : ajoute les nouveaux enregistrements, ignore les doublons.</p>';
+  }
+  html += '<p style="color:var(--gray-400);font-size:11px;margin:0 0 8px 0">' + (plusieurs ? '' : '<b>Remplacer</b> : \u00e9crase toutes les donn\u00e9es actuelles.<br>') + '<b>Fusionner</b> : ajoute ce qui manque ; pour une m\u00eame saisie, la version la plus r\u00e9cente gagne ; rien n\u2019est ajout\u00e9 deux fois.</p>';
   html += '<button class="btn btn-outline" onclick="closeImportAuthModal()" style="margin-top:8px">Annuler</button>';
   html += '</div></div>';
   overlay.innerHTML = html;
-  overlay._backup = backup;
+  if (plusieurs) overlay._backups = backup; else overlay._backup = backup;
   document.body.appendChild(overlay);
 }
 
@@ -7923,7 +7947,7 @@ function doImportReplace() { confirmImportReplace(); }
 function doImportMerge() { confirmImportMerge(); }
 function confirmImportReplace() {
   var overlay = document.getElementById('importAuthModal');
-  var backup = overlay ? overlay._backup : null;
+  var backup = overlay ? (overlay._backup || null) : null;
   if (!backup) return;
   closeImportAuthModal();
   if (!window.confirm('\u00c9CRASER toutes les donn\u00e9es ?\n\nDate : ' + backup._exportDate + '\n\nATTENTION : toutes les donn\u00e9es actuelles seront remplac\u00e9es.')) return;
@@ -7941,8 +7965,8 @@ function confirmImportReplace() {
 }
 function confirmImportMerge() {
   var overlay = document.getElementById('importAuthModal');
-  var backup = overlay ? overlay._backup : null;
-  if (!backup) return;
+  var backups = overlay ? (overlay._backups || (overlay._backup ? [overlay._backup] : [])) : [];
+  if (!backups.length) return;
   closeImportAuthModal();
     /* MERGE mode */
     var summary = [];
@@ -7990,13 +8014,78 @@ function confirmImportMerge() {
       var pt = Date.parse(t);
       return isFinite(pt) ? pt : 0;
     }
+    var _vide = function (v) { return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0); };
+    /* Cle d'une ligne : numero metier (pointage employe|jour|article), sinon id. */
+    function cleLigne(x) {
+      if (!x || typeof x !== 'object') return '';
+      try { var m = (typeof _syncCleMetier === 'function') ? _syncCleMetier(x) : ''; if (m) return 'M|' + m; } catch (eM) {}
+      return (x.id !== undefined && x.id !== null && String(x.id) !== '') ? 'ID|' + String(x.id) : '';
+    }
+    /* Fusion d'un tableau. REGLE (toutes les donnees) :
+       - ligne absente -> ajoutee ;
+       - meme ligne des deux cotes -> la version la PLUS RECENTE gagne
+         (date de modification), l'ancienne est remplacee ;
+       - date inconnue / egale -> on remplit seulement les cases vides ;
+       - lignes supprimees (tombstones) jamais ramenees.
+       Refaire la meme fusion ne change plus rien. */
+    function fusionTab(cleDonnee, existing, incoming, stats, tombPt) {
+      var byK = {}, ordre = [], sansCle = [], sigs = {};
+      var _now = Date.now();
+      for (var i = 0; i < existing.length; i++) {
+        var ex = existing[i], k = cleLigne(ex);
+        if (k) { if (!byK[k]) ordre.push(k); byK[k] = ex; }
+        else { sansCle.push(ex); try { sigs[JSON.stringify(ex)] = true; } catch (eS) {} }
+      }
+      for (var j = 0; j < incoming.length; j++) {
+        var it = incoming[j];
+        if (it === undefined || it === null) continue;
+        if (typeof it !== 'object') {
+          var sg = ''; try { sg = JSON.stringify(it); } catch (eS2) {}
+          if (sigs[sg]) { stats.skipped++; } else { sigs[sg] = true; sansCle.push(it); stats.added++; }
+          continue;
+        }
+        var cleTop = cleDonnee.indexOf('.') === -1 ? cleDonnee : '';
+        if (cleTop && it.id && itemSupprime(cleTop, it.id, '')) { stats.skipped++; continue; }
+        try { if (tombPt && typeof _mdbTombPtSupprime === 'function' && _mdbTombPtSupprime(tombPt, it)) { stats.skipped++; continue; } } catch (eT) {}
+        var kk = cleLigne(it);
+        if (!kk) {
+          var sg2 = ''; try { sg2 = JSON.stringify(it); } catch (eS3) {}
+          if (sigs[sg2]) { stats.skipped++; } else { sigs[sg2] = true; sansCle.push(it); stats.added++; }
+          continue;
+        }
+        var cur = byK[kk];
+        if (cur && tModif(it) > tModif(cur)) {
+          byK[kk] = Object.assign({}, it); stats.updated++;
+        } else if (cur) {
+          var change = false;
+          for (var fk in it) {
+            if (!Object.prototype.hasOwnProperty.call(it, fk) || fk === 'updatedAt' || fk === 'id') continue;
+            if (_vide(cur[fk]) && !_vide(it[fk])) { cur[fk] = it[fk]; change = true; }
+          }
+          /* Juste plus recent que les deux versions : gagne a la synchro, sans
+             passer devant une vraie modification plus recente d'une autre sauvegarde. */
+          if (change) { cur.updatedAt = Math.max(tModif(cur), tModif(it)) + 1; stats.updated++; } else stats.skipped++;
+        } else {
+          var nv = Object.assign({}, it);
+          if (!nv.id && !(typeof _syncCleMetier === 'function' && _syncCleMetier(nv))) nv.id = DB.genId();
+          byK[kk] = nv; ordre.push(kk); stats.added++;
+        }
+      }
+      var out = sansCle.slice();
+      for (var o = 0; o < ordre.length; o++) out.push(byK[ordre[o]]);
+      return out;
+    }
     var keysPropres = {};
+    var statsParCle = {}, ordreCles = [];
+    for (var bki = 0; bki < backups.length; bki++) {
+    var backup = backups[bki];
     for (var mk = 0; mk < DATA_KEYS.length; mk++) {
       var key = DATA_KEYS[mk];
       var incoming = backup[key];
       if (incoming === undefined || incoming === null) continue;
       var existing = DB.get(key);
-      var stats = {key: key, added: 0, updated: 0, skipped: 0};
+      if (!statsParCle[key]) { statsParCle[key] = {key: key, added: 0, updated: 0, skipped: 0}; ordreCles.push(key); }
+      var stats = statsParCle[key];
       if (Array.isArray(existing) && Array.isArray(incoming)) {
         /* For operations: smart dedup by date+libelle+montant+sens+beneficiaire */
         if (key === 'mdb_operationsCaisse') {
@@ -8032,56 +8121,36 @@ function confirmImportMerge() {
           }
           DB.set(key, existing);
         } else {
-          /* Autres tableaux, par id. REGLE : on n'ECRASE JAMAIS ce qui existe.
-             - ligne absente  -> ajoutee ;
-             - ligne presente -> on remplit SEULEMENT ses champs vides avec
-               ceux de la sauvegarde (ex. prenoms manquants) ;
-             - sinon rien (doublon ignore).
-             Chaque ligne ajoutee/completee recoit updatedAt = maintenant :
-             a la synchro elle est plus recente que la copie du cloud et ne
-             « revient » donc plus en arriere apres actualisation. Refaire la
-             meme fusion ne change plus rien (0 ajoute, 0 complete). */
-          var _vide = function (v) { return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0); };
-          var byId = {}, ordre = [];
-          for (var ei2 = 0; ei2 < existing.length; ei2++) {
-            var ex2 = existing[ei2];
-            if (ex2 && ex2.id) { if (!byId[ex2.id]) ordre.push(ex2.id); byId[ex2.id] = ex2; }
-          }
-          var sansId = existing.filter(function (x) { return !x || !x.id; });
-          var _now = Date.now();
-          for (var ni2 = 0; ni2 < incoming.length; ni2++) {
-            var item = incoming[ni2];
-            if (!item || typeof item !== 'object') continue;
-            if (item.id && itemSupprime(key, item.id, '')) { stats.skipped++; continue; }
-            if (item.id && byId[item.id] && tModif(item) > tModif(byId[item.id])) {
-              /* Saisie modifiee entre deux sauvegardes : la plus recente
-                 remplace la plus ancienne (elle garde sa date). */
-              byId[item.id] = Object.assign({}, item);
-              stats.updated++;
-            } else if (item.id && byId[item.id]) {
-              var cible = byId[item.id], change = false;
-              for (var fk in item) {
-                if (!Object.prototype.hasOwnProperty.call(item, fk) || fk === 'updatedAt' || fk === 'id') continue;
-                if (_vide(cible[fk]) && !_vide(item[fk])) { cible[fk] = item[fk]; change = true; }
-              }
-              if (change) { cible.updatedAt = _now; stats.updated++; } else stats.skipped++;
-            } else {
-              var nouv = Object.assign({}, item);
-              if (!nouv.id) nouv.id = DB.genId();
-              nouv.updatedAt = _now;
-              byId[nouv.id] = nouv; ordre.push(nouv.id); stats.added++;
-            }
-          }
-          var merged = sansId.slice();
-          for (var oi = 0; oi < ordre.length; oi++) merged.push(byId[ordre[oi]]);
-          DB.set(key, merged);
+          DB.set(key, fusionTab(key, existing, incoming, stats, null));
         }
-      } else {
-        /* Non-array data: keep existing, don't overwrite */
-        stats.skipped = 0;
+      } else if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
+        /* Objets (Paie, Exploitation, Entreprise...) : section par section.
+           Tableaux -> meme regle que ci-dessus (la plus recente gagne) ;
+           section absente/vide ici -> reprise de la sauvegarde ;
+           sinon on garde l'existant. */
+        var exObj = (existing && typeof existing === 'object' && !Array.isArray(existing)) ? existing : {};
+        var objChange = false;
+        for (var sk in incoming) {
+          if (!Object.prototype.hasOwnProperty.call(incoming, sk)) continue;
+          var iv = incoming[sk], ev = exObj[sk];
+          if (Array.isArray(iv) && Array.isArray(ev)) {
+            var avant = stats.added + stats.updated;
+            var tomb = null;
+            try { if ((sk === 'pointage' || sk === 'pointageMontage') && typeof _mdbTombPtSet === 'function') tomb = _mdbTombPtSet([].concat(exObj[sk + '_tombstones'] || [], iv === incoming[sk] ? (incoming[sk + '_tombstones'] || []) : [])); } catch (eTo) {}
+            var res = fusionTab(key + '.' + sk, ev, iv, stats, tomb);
+            if (stats.added + stats.updated > avant) { exObj[sk] = res; objChange = true; }
+          } else if (_vide(ev) && !_vide(iv)) {
+            exObj[sk] = iv; objChange = true; stats.added++;
+          }
+        }
+        if (objChange) DB.set(key, exObj);
       }
-      if (stats.added > 0 || stats.updated > 0 || stats.skipped > 0) summary.push(stats);
       if (stats.added > 0 || stats.updated > 0) keysPropres[key] = true;
+    }
+    }
+    for (var oc = 0; oc < ordreCles.length; oc++) {
+      var st0 = statsParCle[ordreCles[oc]];
+      if (st0.added > 0 || st0.updated > 0 || st0.skipped > 0) summary.push(st0);
     }
     /* MARQUER SALES puis pousser : pushToCloud n'envoie que les cles sales —
        sans markDirty la fusion restait locale et les autres postes ne voyaient
@@ -8106,9 +8175,12 @@ function confirmImportMerge() {
       detailHtml += '<td style="padding:4px 8px;text-align:center;font-size:12px;color:var(--primary)">' + (s.updated > 0 ? '\u21bb' + s.updated : '') + '</td>';
       detailHtml += '<td style="padding:4px 8px;text-align:center;font-size:12px;color:var(--gray-400)">' + (s.skipped > 0 ? '\u2715' + s.skipped : '') + '</td></tr>';
     }
-    toast('Fusion : ' + totalAdded + ' ajout\u00e9(s), ' + totalUpdated + ' mis \u00e0 jour, ' + totalSkipped + ' doublon(s) ignor\u00e9(s)', 'success');
+    var _rienANouveau = (totalAdded === 0 && totalUpdated === 0);
+    var _nbSauv = backups.length > 1 ? (backups.length + ' sauvegardes') : 'la sauvegarde';
+    toast(_rienANouveau ? ('\u2705 Tout le contenu de ' + _nbSauv + ' est d\u00e9j\u00e0 dans l\u2019appli (\u00e0 jour)') : ('Fusion : +' + totalAdded + ' ajout\u00e9(s), ' + totalUpdated + ' mis \u00e0 jour, ' + totalSkipped + ' d\u00e9j\u00e0 pr\u00e9sent(s)'), 'success');
     openFormModal('Fusion termin\u00e9e',
-      '<p style="font-size:14px;margin-bottom:12px"><b style="color:var(--success)">' + totalAdded + ' ajout\u00e9(s)</b> | <b style="color:var(--primary)">' + totalUpdated + ' mis \u00e0 jour (version plus r\u00e9cente ou champs vides remplis)</b> | <b style="color:var(--gray-400)">' + totalSkipped + ' doublon(s) ignor\u00e9(s)</b></p>' +
+      (_rienANouveau ? '<div style="padding:12px 14px;border-radius:10px;background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;font-weight:700;margin-bottom:12px">\u2705 Tout le contenu de ' + _nbSauv + ' est d\u00e9j\u00e0 dans l\u2019appli et \u00e0 jour. Aucun \u00e9l\u00e9ment ajout\u00e9 (+0).</div>' : '') +
+      '<p style="font-size:14px;margin-bottom:12px"><b style="color:var(--success)">' + totalAdded + ' ajout\u00e9(s)</b> | <b style="color:var(--primary)">' + totalUpdated + ' mis \u00e0 jour (version plus r\u00e9cente ou champs vides remplis)</b> | <b style="color:var(--gray-400)">' + totalSkipped + ' d\u00e9j\u00e0 pr\u00e9sent(s)</b></p>' +
       '<div style="max-height:300px;overflow-y:auto"><table style="font-size:12px;width:100%"><thead><tr><th>Module</th><th style="text-align:center">Ajout\u00e9</th><th style="text-align:center">MAJ</th><th style="text-align:center">Ignor\u00e9</th></tr></thead><tbody>' + detailHtml + '</tbody></table></div>',
       '<button class="btn btn-primary" onclick="closeModal();navigateTo(currentPage)">OK</button>');
 }
