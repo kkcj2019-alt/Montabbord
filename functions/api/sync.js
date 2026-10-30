@@ -24,7 +24,7 @@ export async function onRequest(context) {
 
     const url = new URL(request.url);
 
-    // GET /api/sync?uid=...[&since=...][&cle=...][&cles=...][&prefix=...]
+    // GET /api/sync?uid=...[&since=...][&cle=...][&cles=...][&prefix=...][&ping=1]
     if (request.method === 'GET') {
       const rawUid = url.searchParams.get('uid');
       if (!rawUid) {
@@ -32,11 +32,24 @@ export async function onRequest(context) {
       }
       const uid = rawUid.replace(/^["']+|["']+$/g, '').trim();
 
+      // Mode ping ultra-rapide : utilisé pour vérifier que le cloud est joignable
+      if (url.searchParams.get('ping') === '1') {
+        try {
+          // Requête minimaliste pour valider le binding D1 sans charger toutes les données
+          await db.prepare('SELECT 1 as ok').first();
+          return new Response(JSON.stringify({ ok: true, ping: true, uid: uid, serverTime: Date.now().toString() }), { headers: corsHeaders });
+        } catch (e) {
+          return new Response(JSON.stringify({ ok: false, ping: false, error: e.message || String(e) }), { status: 503, headers: corsHeaders });
+        }
+      }
+
       const since = url.searchParams.get('since') || '0';
       const cle = url.searchParams.get('cle');
       const cles = url.searchParams.get('cles');
       const prefix = url.searchParams.get('prefix');
+      const limitParam = url.searchParams.get('limit');
 
+      // Normaliser l'uid pour matcher les enregistrements existants (avec ou sans guillemets)
       let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE (enterprise_id = ? OR enterprise_id = ?)';
       const params = [uid, '"' + uid + '"'];
 
@@ -59,6 +72,18 @@ export async function onRequest(context) {
         sql += ' AND updated_at > ?';
         params.push(since);
       }
+
+      // Éviter de charger TOUT d'un coup : limiter pour rester sous les limites CPU de Cloudflare
+      sql += ' ORDER BY updated_at DESC';
+      let limit = 250;
+      if (cle || cles || prefix) {
+        limit = 1000;
+      }
+      if (limitParam) {
+        const lp = parseInt(limitParam, 10);
+        if (!isNaN(lp) && lp > 0 && lp <= 2000) limit = lp;
+      }
+      sql += ' LIMIT ' + limit;
 
       const stmt = db.prepare(sql);
       const res = await stmt.bind(...params).all();
@@ -86,6 +111,7 @@ export async function onRequest(context) {
         ts: tsMap,
         maxTs: maxUpdatedAt,
         count: rows.length,
+        limited: rows.length >= limit,
         serverTime: Date.now().toString()
       }), { headers: corsHeaders });
     }
