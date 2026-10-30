@@ -11,6 +11,27 @@ function run(rapport) {
     try { res = String(vm.runInContext(code, h.ctx, { timeout: 30000 })).trim(); } catch (e) { rapport.ko(nom + ' : exception ' + e.message); return; }
     if (res.indexOf('OK') === 0) rapport.ok(nom + '  ->  ' + res); else rapport.ko(nom + '  ->  ' + res);
   }
+  cas('Prime de production : un journalier suivant un bareme la touche sur son bulletin (tranches)', `
+    var L = JSON.parse(localStorage.getItem('mdb_employes') || '[]');
+    L.push({ id: 'empF', matricule: '06', nom: 'FALLE', prenoms: 'OUELLE', statut: 'actif', categorie: 'journalier', en_paie: true, type_contrat: 'CDD', nb_parts: 1, date_embauche: '2020-01-01', taux_journalier: 3000, bareme_prime_id: 'bF' });
+    localStorage.setItem('mdb_employes', JSON.stringify(L));
+    var cfg = getPrimeProdConfig();
+    cfg.actif = true;
+    cfg.baremes = [{ id: 'bF', label: 'Falle', debut: '2020-01', fin: '', bandes: [{ jusqu_a: 2000, taux: 0 }, { jusqu_a: null, taux: 50 }], taux_ca_ht: 0, articles_exclus: ['cc', 'com'], factures_exclus: [] }];
+    setPrimeProdConfig(cfg);
+    var am = getArticlesMontage(); am.push({ id: 'amP', code: 'PAL', libelle: 'Palette', prix: 100 }); am.push({ id: 'amC', code: 'CC', libelle: 'Couvercle', prix: 50 });
+    setPayeSection('articlesMontage', am);
+    setPayeSection('pointageMontage', [
+      { id: 'pm1', employee_id: 'empF', date: '2026-10-05', article_code: 'PAL', quantite: 1407 },
+      { id: 'pm2', employee_id: 'empF', date: '2026-10-12', article_code: 'PAL', quantite: 1000 },
+      { id: 'pm3', employee_id: 'empF', date: '2026-10-12', article_code: 'CC', quantite: 500 }
+    ]);
+    window._payrollCache = {};
+    var e = getPersonnel().filter(function (x) { return x.id === 'empF'; })[0];
+    var c = calculatePayroll(e, '2026-10');
+    var it = (c.items || []).filter(function (x) { return /^Prime de Production/.test(x.label || ''); })[0];
+    (it && it.gain === 20350) ? 'OK : 2407 articles (CC exclu) -> (2407-2000) x 50 = 20 350 sur le bulletin'
+      : 'ECHEC : ' + JSON.stringify(it) + ' calc=' + JSON.stringify(ptPrimeProdCalcul('empF', '2026-10'))`);
   cas('Reduction charges de famille plafonnee a 5 parts', `
     var a = getRICF(1), b = getRICF(1.5), c = getRICF(5), d = getRICF(7);
     (a === 0 && b === 5500 && c === 44000 && d === 44000) ? 'OK : 1->0, 1.5->5500, 5->44000, 7->44000' : 'ECHEC : ' + [a, b, c, d].join('/')`);
