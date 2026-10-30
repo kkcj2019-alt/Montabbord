@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-30-323';
+      window.__APP_VERSION = '2026-10-30-324';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -34831,6 +34831,8 @@ function panierVerserJour() {
           taux_ca_ht: parseFloat(bareme.taux_ca_ht) || 0,
           articles_exclus: (bareme.articles_exclus || []).filter(Boolean),
           factures_exclus: (bareme.factures_exclus || []).filter(Boolean),
+          /* Equipe conservee (avant : perdue a chaque enregistrement des tranches). */
+          employes: Array.isArray(bareme.employes) ? bareme.employes.map(String) : ((i !== -1 && Array.isArray(l[i].employes)) ? l[i].employes.slice() : []),
         };
         if (i === -1) l.push(propre);
         else l[i] = propre;
@@ -34934,10 +34936,11 @@ function panierVerserJour() {
           .join(" ");
         return out;
       }
-      function showModalPrimeProd() {
+      function showModalPrimeProd(baremeId) {
         var cfg = getPrimeProdConfig();
         var mz = (document.getElementById("pt-mois") || {}).value || "";
-        window._ppCible = "__global__";
+        /* « Tranches » d'un bareme ouvre CE bareme (avant : toujours le general). */
+        window._ppCible = (typeof baremeId === "string" && baremeId) ? baremeId : "__global__";
         var html =
           '<div style="padding:14px 18px 18px;max-width:900px;margin:0 auto">' +
           '<div style="font-size:.95rem;font-weight:800">🏆 Prime de Production — barres progressives <button class="btn btn-sec" title="Fermer" aria-label="Fermer" onclick="closePtModal()" style="float:right;padding:2px 10px;font-size:.9rem">✕</button></div>' +
@@ -34947,11 +34950,13 @@ function panierVerserJour() {
           '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:7px 9px;margin-bottom:9px">' +
           '<label style="font-size:.74rem;font-weight:800">Barème</label>' +
           '<select id="pp-sel-bar" onchange="ppChoisirBar(this.value)" style="flex:1;min-width:140px;padding:5px;border:1px solid #cbd5e1;border-radius:6px;font-size:.78rem"></select>' +
-          '<input type="text" id="pp-lab-nom" placeholder="nom du barème" oninput="ppRenommerCible(this.value)" style="width:118px;padding:5px;border:1px solid #cbd5e1;border-radius:6px;font-size:.75rem">' +
+          '<input type="text" id="pp-lab-nom" style="display:none">' +
           '<button class="btn" onclick="ppBarNouveau()" title="Créer un barème supplémentaire" style="padding:5px 9px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;font-size:.72rem;font-weight:700">+ Nouveau</button>' +
           '<button class="btn" onclick="ppBarDupliquer()" title="Dupliquer le barème courant" style="padding:5px 9px;background:#8b5cf6;color:#fff;border:none;border-radius:6px;font-size:.72rem;font-weight:700">⧉ Dupliquer</button>' +
           '<button class="btn" onclick="ppBarSupprimer()" title="Supprimer le barème sélectionné" style="padding:5px 9px;background:#fee2e2;color:#dc2626;border:none;border-radius:6px;font-size:.72rem;font-weight:700">🗑</button>' +
           '</div>' +
+          '<div id="pp-bar-fiche"></div>' +
+          '<div style="font-size:.74rem;font-weight:800;margin:6px 0 4px">Tranches (intervalles)</div>' +
           '<div id="pp-bandes"></div>' +
           '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">' +
           '<label style="font-size:.74rem;font-weight:700">À partir du mois</label>' +
@@ -34964,7 +34969,7 @@ function panierVerserJour() {
           '</div>' +
           '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">' +
           '<button class="btn btn-sec" onclick="closePtModal()" style="padding:8px 18px">Fermer</button>' +
-          '<button class="btn" onclick="ptPrimeProdEnregistrer()" style="padding:8px 18px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700">💾 Enregistrer les taux</button>' +
+          '<button class="btn" onclick="ptPrimeProdEnregistrer()" style="padding:8px 18px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700">💾 Enregistrer le barème</button>' +
           "</div>" +
           '<div id="pp-apercu" style="margin-top:10px"></div>' +
           "</div>";
@@ -35035,6 +35040,84 @@ function panierVerserJour() {
         if (inpNom) inpNom.disabled = !b;
         ppRendreBandes();
         ppRendreEmps();
+        ppRendreFiche();
+      }
+      /* Fiche du bareme selectionne : NOM (modifiable), periode, TRAVAILLEURS
+         concernes — tout au meme endroit que les tranches et les exclusions. */
+      function ppRendreFiche() {
+        var box = document.getElementById("pp-bar-fiche");
+        if (!box) return;
+        var b = ppCible();
+        if (!b) {
+          box.innerHTML = '<div style="font-size:.72rem;color:#475569;background:#f1f5f9;border-radius:8px;padding:7px 9px;margin-bottom:8px">Barème <b>général</b> : il s\u2019applique à tous les employés qui n\u2019ont pas de barème propre. Pour une équipe (ex. monteurs de palettes), cliquez <b>+ Nouveau</b>.</div>';
+          return;
+        }
+        var deja = {};
+        (Array.isArray(b.employes) ? b.employes : []).forEach(function (x) { deja[String(x)] = true; });
+        var emps = [];
+        try { emps = ((typeof getPersonnelActifs === "function") ? getPersonnelActifs() : getPersonnel()) || []; } catch (eE) {}
+        emps.forEach(function (p) { if (p && String(p.bareme_prime_id || "") === String(b.id)) deja[String(p.id)] = true; });
+        window._ppEquipe = Object.keys(deja);
+        emps = emps.slice().sort(function (x, y) { return String(x.matricule || "").localeCompare(String(y.matricule || ""), undefined, { numeric: true }); });
+        var h = '<div style="border:1px solid #c7d2fe;background:#f8faff;border-radius:10px;padding:9px 10px;margin-bottom:9px">';
+        h += '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
+          '<div style="flex:2;min-width:180px"><label style="font-size:.72rem;font-weight:800">✏️ Nom du barème</label><input type="text" id="pp-fiche-nom" value="' + escH(b.label || "") + '" oninput="window._ppDirty=true" style="width:100%;padding:6px 8px;border:1px solid #a5b4fc;border-radius:6px;font-weight:700"></div>' +
+          '<div style="flex:1;min-width:120px"><label style="font-size:.72rem;font-weight:700">Jusqu\u2019au mois (vide = sans fin)</label><input type="month" id="pp-fiche-fin" value="' + escH(b.fin || "") + '" oninput="window._ppDirty=true" style="width:100%;padding:5px;border:1px solid #cbd5e1;border-radius:6px"></div>' +
+          '</div>';
+        h += '<div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap"><label style="font-size:.72rem;font-weight:800">👷 Travailleurs concernés</label>' +
+          '<span id="pp-fiche-nb" style="font-size:.68rem;color:#4338ca"></span>' +
+          '<input type="text" placeholder="Rechercher…" oninput="ppFicheFiltre(this.value)" style="margin-left:auto;padding:4px 8px;border:1px solid #cbd5e1;border-radius:14px;font-size:.72rem;width:150px"></div>';
+        h += '<div id="pp-fiche-emps" style="max-height:150px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px;padding:4px;margin-top:4px;background:#fff;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0 8px">';
+        emps.forEach(function (p) {
+          if (!p) return;
+          var autre = String(p.bareme_prime_id || "");
+          var autreNom = (autre && autre !== String(b.id)) ? (ptBaremeNom(autre) || "autre barème") : "";
+          h += '<label data-q="' + escH(((p.matricule || "") + " " + (p.nom || "") + " " + (p.prenoms || "")).toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:.73rem;padding:2px 4px;cursor:pointer">' +
+            '<input type="checkbox" class="pp-fiche-emp" value="' + escH(p.id) + '"' + (deja[String(p.id)] ? " checked" : "") + ' onchange="window._ppDirty=true;ppFicheCompte()" style="width:14px;height:14px">' +
+            '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escH((p.matricule ? p.matricule + " - " : "") + (p.nom || "") + (p.prenoms ? " " + p.prenoms : "")) + '</span>' +
+            (autreNom ? '<span style="font-size:.62rem;color:#b45309" title="Actuellement dans ce barème : le cocher l\u2019y retire">' + escH(autreNom) + '</span>' : "") + '</label>';
+        });
+        h += '</div></div>';
+        box.innerHTML = h;
+        ppFicheCompte();
+      }
+      function ppFicheFiltre(q) {
+        q = String(q || "").toLowerCase();
+        document.querySelectorAll("#pp-fiche-emps label[data-q]").forEach(function (l) { l.style.display = (!q || l.getAttribute("data-q").indexOf(q) !== -1) ? "" : "none"; });
+      }
+      function ppFicheCompte() {
+        var n = document.querySelectorAll("#pp-fiche-emps input.pp-fiche-emp:checked").length;
+        var el = document.getElementById("pp-fiche-nb");
+        if (el) el.textContent = n + " coché(s)";
+      }
+      /* Applique nom, fin et equipe du bareme (apres les tranches). */
+      function ppFicheEnregistrer(b) {
+        if (!b || !document.getElementById("pp-fiche-emps")) return;
+        var nom = String((document.getElementById("pp-fiche-nom") || {}).value || "").trim();
+        if (nom) b.label = nom;
+        var fin = String((document.getElementById("pp-fiche-fin") || {}).value || "");
+        b.fin = fin ? fin.slice(0, 7) : "";
+        var ids = [];
+        document.querySelectorAll("#pp-fiche-emps input.pp-fiche-emp").forEach(function (cb) { if (cb.checked) ids.push(String(cb.value)); });
+        b.employes = ids;
+        ptBaremeEnregistrer(b);
+        /* Fiches employes : coches -> ce bareme ; decoches qui l'avaient -> general. */
+        var retires = [];
+        try { getPersonnel().forEach(function (p) { if (p && String(p.bareme_prime_id || "") === String(b.id) && ids.indexOf(String(p.id)) === -1) retires.push(p.id); }); } catch (eR) {}
+        if (ids.length) ptAffecterBareme(b.id, ids);
+        if (retires.length) ptAffecterBareme("", retires);
+        /* Un employe ne peut etre que dans UN bareme : on le retire des listes des autres. */
+        try {
+          var autres = getPrimeProdBaremes();
+          var chg = false;
+          autres.forEach(function (x) {
+            if (!x || String(x.id) === String(b.id) || !Array.isArray(x.employes)) return;
+            var av = x.employes.length;
+            x.employes = x.employes.filter(function (e) { return ids.indexOf(String(e)) === -1; });
+            if (x.employes.length !== av) chg = true;
+          });
+          if (chg) setPrimeProdBaremes(autres);
+        } catch (eA) {}
       }
       /* Distinctes factures du mois (depuis les pointages montage). */
       function ptFacturesMois(mois) {
@@ -35407,6 +35490,8 @@ function panierVerserJour() {
           cible.factures_exclus = exf;
           if (debut) cible.debut = String(debut).slice(0, 7);
           ptBaremeEnregistrer(cible);
+          try { ppFicheEnregistrer(cible); ppRendreSelectBar(); } catch (eFi) { console.warn("[Bareme] fiche", eFi); }
+          try { renderBarresPanel(); renderPrimeEmpMatrix(); } catch (eRP) {}
         } else {
           /* Barème général : versionné par mois. ORDRE CRITIQUE — NouvelleVersion
              persiste d'abord (elle relit le store), puis on relit FRAIS avant

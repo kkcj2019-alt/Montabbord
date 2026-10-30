@@ -8080,6 +8080,9 @@ function confirmImportMerge() {
     /* Pieces de caisse en CONFLIT (meme piece ou meme n\u00b0, contenu different) :
        on ne decide plus en silence, l'utilisateur choisit a la fin. */
     var conflits = [], supprimees = [];
+    /* Copie de l'etat AVANT fusion : si l'utilisateur annule l'apercu, on remet tout. */
+    var _avantFusion = {};
+    for (var _sv = 0; _sv < DATA_KEYS.length; _sv++) { try { _avantFusion[DATA_KEYS[_sv]] = localStorage.getItem(DATA_KEYS[_sv]); } catch (eSv) {} }
     function cleContenuOp(o) {
       o = o || {};
       return [o.date || '', Math.round((parseFloat(o.montant) || 0) * 100), String(o.libelle || '').trim().toLowerCase(), o.sens || '', o.code || '', o.beneficiaireId || '', String(o.beneficiaireNom || '').trim().toLowerCase(), o.moyenPaiement || '', o.caisseId || '', String(o.numeroPiece || '').trim().toUpperCase(), !!o.reversed].join('|');
@@ -8225,8 +8228,32 @@ function confirmImportMerge() {
       '<div style="max-height:300px;overflow-y:auto"><table style="font-size:12px;width:100%"><thead><tr><th>Module</th><th style="text-align:center">Ajout\u00e9</th><th style="text-align:center">MAJ</th><th style="text-align:center">Ignor\u00e9</th></tr></thead><tbody>' + detailHtml + '</tbody></table></div>',
       '<button class="btn btn-primary" onclick="closeModal();navigateTo(currentPage)">OK</button>');
     };
-    if (conflits.length || supprimees.length) { _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, _finFusion); return; }
-    _finFusion();
+    /* APERCU AVANT VALIDATION : rien n'est envoye au cloud tant que
+       l'utilisateur n'a pas valide (Annuler remet l'appli comme avant). */
+    var _rienAFaire = !conflits.length && !Object.keys(keysPropres).length;
+    if (_rienAFaire && !supprimees.length) { _finFusion(); return; }
+    var _annulerFusion = function () {
+      for (var kA in keysPropres) {
+        if (!keysPropres.hasOwnProperty(kA)) continue;
+        try { var vA = _avantFusion[kA]; DB.set(kA, vA == null ? null : JSON.parse(vA)); } catch (eA) {}
+      }
+      try { var vC = _avantFusion['mdb_operationsCaisse']; if (vC != null) DB.set('mdb_operationsCaisse', JSON.parse(vC)); } catch (eC2) {}
+      /* Remettre les listes de suppressions telles qu'avant : sinon retirer les
+         lignes ajoutees par l'apercu les marquait « supprimees » et la fusion
+         suivante les ignorait. */
+      ['mdb_tombstones', 'mdb_deletedOps', 'mdb_deletedBLs', 'mdb_deletedFactures', 'mdb_deletedProformas', 'mdb_deletedStocks', 'mdb_deletedTauxPerte'].forEach(function (kT) {
+        try {
+          var vT = _avantFusion[kT];
+          if (vT == null) { try { localStorage.removeItem(kT); } catch (eRm) {} try { if (typeof _dbMemCache === 'object' && _dbMemCache) delete _dbMemCache[kT]; } catch (eMc) {} }
+          else DB.set(kT, JSON.parse(vT));
+          try { delete _dirtyKeys[kT]; } catch (eDk) {}
+        } catch (eT) {}
+      });
+      for (var kD in keysPropres) { if (keysPropres.hasOwnProperty(kD)) { try { delete _dirtyKeys[kD]; } catch (eD2) {} } }
+      toast('Fusion annul\u00e9e : rien n\u2019a \u00e9t\u00e9 modifi\u00e9', 'info');
+      if (currentPage) navigateTo(currentPage);
+    };
+    _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, _finFusion, _annulerFusion, backups.length);
 }
 
 /* ===== FUSION : revue des pieces de caisse en conflit =====
@@ -8234,8 +8261,9 @@ function confirmImportMerge() {
    piece de l'appli mais un CONTENU DIFFERENT est montree ici. L'utilisateur
    choisit : garder les deux, garder celle de l'appli, ou prendre celle de la
    sauvegarde. Les pieces ignorees car supprimees volontairement sont listees. */
-function _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, fin) {
-  window._fusRevue = { conflits: conflits, supprimees: supprimees, statsParCle: statsParCle, keysPropres: keysPropres, fin: fin };
+function _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, fin, annuler, nbSauv) {
+  var _etatRevue = { conflits: conflits, supprimees: supprimees, statsParCle: statsParCle, keysPropres: keysPropres, fin: fin, annuler: annuler };
+  window._fusRevue = null; /* pose APRES l'ouverture (openFormModal ferme d'abord la fenetre precedente) */
   var esc = function (v) { return escH(v == null ? '' : String(v)); };
   var cname = {}; try { (getCaisses() || []).forEach(function (c) { cname[c.id] = c.nom || c.id; }); } catch (eC) {}
   var carte = function (o, diff) {
@@ -8244,6 +8272,22 @@ function _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, fi
       '<br>' + d('libelle', esc(o.libelle || '')) + '<br><span style="color:#64748b">' + d('benef', esc(o.beneficiaireNom || '')) + (o.moyenPaiement ? ' · ' + esc(o.moyenPaiement) : '') + '</span></div>';
   };
   var h = '';
+  /* Bilan de ce que la fusion VA faire (pas encore valide). */
+  var noms = { mdb_operationsCaisse: 'Pi\u00e8ces de caisse', mdb_employes: 'Employ\u00e9s', mdb_clients: 'Clients', mdb_fournisseurs: 'Fournisseurs', mdb_acomptesPrets: 'Acomptes / Pr\u00eats', mdb_factures: 'Factures', mdb_proformas: 'Pro-formas', mdb_reglements: 'R\u00e8glements', mdb_paye: 'Paie', mdb_production: 'Exploitation', mdb_stocks: 'Stocks', mdb_users: 'Utilisateurs' };
+  var lignesB = '', totA = 0, totM = 0;
+  for (var kS in statsParCle) {
+    if (!statsParCle.hasOwnProperty(kS)) continue;
+    var sS = statsParCle[kS];
+    if (!sS || !(sS.added || sS.updated)) continue;
+    totA += sS.added; totM += sS.updated;
+    lignesB += '<tr><td style="padding:4px 8px">' + esc(noms[kS] || kS.replace(/^mdb_/, '')) + '</td><td style="padding:4px 8px;text-align:center;color:#16a34a;font-weight:700">' + (sS.added ? '+' + sS.added : '') + '</td><td style="padding:4px 8px;text-align:center;color:#2563eb;font-weight:700">' + (sS.updated ? sS.updated : '') + '</td></tr>';
+  }
+  h += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;margin-bottom:12px">';
+  h += '<div style="font-size:13px;font-weight:800;margin-bottom:6px">\ud83d\udd0e Aper\u00e7u avant validation' + (nbSauv > 1 ? ' (' + nbSauv + ' sauvegardes)' : '') + ' \u2014 rien n\u2019est encore enregistr\u00e9</div>';
+  if (lignesB) h += '<table style="font-size:12px;border-collapse:collapse;min-width:320px"><thead><tr style="color:#64748b"><th style="text-align:left;padding:4px 8px">Module</th><th style="padding:4px 8px">\u00c0 ajouter</th><th style="padding:4px 8px">\u00c0 mettre \u00e0 jour</th></tr></thead><tbody>' + lignesB + '</tbody></table>';
+  else h += '<div style="font-size:12px;color:#166534">Aucune nouvelle saisie hors pi\u00e8ces en conflit.</div>';
+  if (conflits.length) h += '<div style="font-size:12px;color:#b45309;margin-top:6px;font-weight:700">\u26a0 ' + conflits.length + ' pi\u00e8ce(s) de caisse en conflit : choisissez ci-dessous.</div>';
+  h += '</div>';
   if (conflits.length) {
     h += '<p style="font-size:13px;margin:0 0 10px">' + conflits.length + ' pièce(s) de la sauvegarde ont le <b>même n°</b> qu’une pièce de l’appli mais un <b>contenu différent</b>. Choisissez pour chacune (les différences sont surlignées).</p>';
     h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"><button class="btn btn-sm btn-outline" onclick="_fusTous(\'deux\')">Tout : garder les deux</button><button class="btn btn-sm btn-outline" onclick="_fusTous(\'app\')">Tout : garder l’appli</button><button class="btn btn-sm btn-outline" onclick="_fusTous(\'sauvegarde\')">Tout : prendre la sauvegarde</button></div>';
@@ -8264,8 +8308,17 @@ function _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, fi
     h += '<details style="margin-top:12px"' + (conflits.length ? '' : ' open') + '><summary style="cursor:pointer;font-size:13px;font-weight:700">' + supprimees.length + ' pièce(s) de la sauvegarde ignorée(s) car supprimée(s) volontairement dans l’appli</summary>' +
       '<div style="max-height:200px;overflow:auto;font-size:12px;margin-top:6px">' + supprimees.map(function (o) { return '<div style="padding:3px 0;border-bottom:1px dashed #e2e8f0">' + esc(o.numeroPiece || '') + ' · ' + esc(fmtDate(o.date)) + ' · ' + esc(o.libelle || '') + ' · <b>' + fmtMoney(o.montant || 0) + '</b></div>'; }).join('') + '</div></details>';
   }
-  openFormModal('Fusion : pièces à vérifier', h,
-    '<button class="btn btn-primary" onclick="_fusAppliquer()">Appliquer mes choix et terminer</button>', '1100px');
+  openFormModal('Fusion : aper\u00e7u avant validation', h,
+    '<button class="btn btn-outline" onclick="_fusAnnuler()">Annuler (ne rien changer)</button>' +
+    '<button class="btn btn-primary" onclick="_fusAppliquer()">Valider la fusion</button>', '1100px');
+  /* La croix / clic dehors : on annule aussi (rien ne doit rester a moitie fait). */
+  window._fusRevue = _etatRevue;
+}
+function _fusAnnuler() {
+  var R = window._fusRevue; if (!R) { try { closeModal(); } catch (e0) {} return; }
+  window._fusRevue = null;
+  try { closeModal(); } catch (eC) {}
+  try { if (R.annuler) R.annuler(); } catch (eA) {}
 }
 function _fusTous(v) {
   var R = window._fusRevue; if (!R) return;
@@ -10061,6 +10114,8 @@ function openModal(content) {
 }
 
 function closeModal() {
+  /* Apercu de fusion ferme par la croix / clic dehors = ANNULER (rien ne reste a moitie fait). */
+  try { if (window._fusRevue) { var _fR = window._fusRevue; window._fusRevue = null; setTimeout(function () { try { if (_fR.annuler) _fR.annuler(); } catch (eFA) {} }, 0); } } catch (eFR) {}
   try {
     window._modalOpen = false;
     try { if (window._csCollModalOpen) { window._csCollModalOpen = false; restoreCsCollectifBlock(); } } catch (eRM) {}
