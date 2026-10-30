@@ -7900,6 +7900,43 @@ function confirmImportMerge() {
   closeImportAuthModal();
     /* MERGE mode */
     var summary = [];
+    /* ZOMBIS : une ligne deja supprimee ici (mdb_tombstones / mdb_deletedOps,
+       qui voyagent aussi au cloud) ne doit JAMAIS etre ramenee par une
+       restauration. Avant, elle etait re-additionnee a chaque import
+       (« +37 » identique a chaque fois) puis retiree physiquement au
+       chargement cloud suivant : la fusion ne « prenait » donc jamais. */
+    var tomb = {};
+    try { tomb = getTombstones(); } catch (eTb) { tomb = {}; }
+    function rawArrLst(k) {
+      try { var v = JSON.parse(localStorage.getItem(k) || '[]'); return Array.isArray(v) ? v : []; } catch (eR) { return []; }
+    }
+    var delOps = rawArrLst('mdb_deletedOps');
+    var delOpIds = {}, delOpFps = {}, di;
+    for (di = 0; di < delOps.length; di++) {
+      if (delOps[di] && delOps[di].id) delOpIds[delOps[di].id] = true;
+      if (delOps[di] && delOps[di].fp) delOpFps[delOps[di].fp] = true;
+    }
+    var DEL_LIST_FOR_KEY = {'mdb_bl':'mdb_deletedBLs','mdb_factures':'mdb_deletedFactures','mdb_proformas':'mdb_deletedProformas','mdb_tauxPerteJour':'mdb_deletedTauxPerte','mdb_stocks':'mdb_deletedStocks'};
+    var delIdsCache = {};
+    function itemSupprime(key, id, fp) {
+      var t = tomb[key] || {};
+      if (id && t[id]) return true;
+      if (key === 'mdb_operationsCaisse') {
+        if (id && delOpIds[id]) return true;
+        if (fp && delOpFps[fp]) return true;
+      }
+      var dl = DEL_LIST_FOR_KEY[key];
+      if (dl) {
+        if (!delIdsCache[dl]) {
+          delIdsCache[dl] = {};
+          var arr = rawArrLst(dl);
+          for (var dj = 0; dj < arr.length; dj++) { if (arr[dj] && arr[dj].id) delIdsCache[dl][arr[dj].id] = true; }
+        }
+        if (id && delIdsCache[dl][id]) return true;
+      }
+      return false;
+    }
+    var keysPropres = {};
     for (var mk = 0; mk < DATA_KEYS.length; mk++) {
       var key = DATA_KEYS[mk];
       var incoming = backup[key];
@@ -7919,36 +7956,46 @@ function confirmImportMerge() {
           for (var ni = 0; ni < incoming.length; ni++) {
             var io = incoming[ni];
             var ifp = (io.date || '') + '|' + (io.libelle || '').toLowerCase() + '|' + (io.montant || 0) + '|' + (io.sens || '') + '|' + ((io.beneficiaireNom || io.beneficiaire || '') + '').toLowerCase();
-            if (fpMap[ifp]) { stats.skipped++; } else {
-              io.id = DB.genId();
-              if (!io.numeroPiece) io.numeroPiece = (typeof generatePieceNumber === 'function' && io.caisseId) ? generatePieceNumber(io.caisseId, io.date) : '';
-              existing.push(io); stats.added++; fpMap[ifp] = true;
-            }
+            var fpComplet = (typeof operationFingerprint === 'function') ? operationFingerprint(io) : '';
+            if (fpMap[ifp] || itemSupprime(key, io.id, fpComplet)) { stats.skipped++; continue; }
+            /* ID d'origine conserve : deux postes qui restaurent la meme piece
+               produisent le MEME id — le cloud n'en garde alors qu'une copie
+               (avant, chaque poste regenrait l'id : doublons permanents). */
+            if (!io.id) io.id = DB.genId();
+            if (!io.numeroPiece) io.numeroPiece = (typeof generatePieceNumber === 'function' && io.caisseId) ? generatePieceNumber(io.caisseId, io.date) : '';
+            existing.push(io); stats.added++; fpMap[ifp] = true;
           }
+          DB.set(key, existing);
         } else {
           /* For other arrays: merge by ID */
           var byId = {};
           for (var ei2 = 0; ei2 < existing.length; ei2++) { if (existing[ei2].id) byId[existing[ei2].id] = existing[ei2]; }
           for (var ni2 = 0; ni2 < incoming.length; ni2++) {
             var item = incoming[ni2];
+            if (!item) continue;
+            if (item.id && itemSupprime(key, item.id, '')) { stats.skipped++; continue; }
             if (item.id) {
               if (byId[item.id]) { byId[item.id] = item; stats.updated++; }
               else { byId[item.id] = item; stats.added++; }
             } else {
-              item.id = DB.genId(); existing.push(item); stats.added++;
+              item.id = DB.genId(); byId[item.id] = item; stats.added++;
             }
           }
           var merged = [];
           for (var mid in byId) { if (byId.hasOwnProperty(mid)) merged.push(byId[mid]); }
-          DB.set(key, merged); continue;
+          DB.set(key, merged);
         }
-        DB.set(key, existing);
       } else {
         /* Non-array data: keep existing, don't overwrite */
         stats.skipped = 0;
       }
       if (stats.added > 0 || stats.updated > 0 || stats.skipped > 0) summary.push(stats);
+      if (stats.added > 0 || stats.updated > 0) keysPropres[key] = true;
     }
+    /* MARQUER SALES puis pousser : pushToCloud n'envoie que les cles sales —
+       sans markDirty la fusion restait locale et les autres postes ne voyaient
+       que l'ancien cloud. */
+    for (var pk in keysPropres) { if (keysPropres.hasOwnProperty(pk)) markDirty(pk); }
     pushToCloud();
     var totalAdded = 0, totalUpdated = 0, totalSkipped = 0;
     for (var si = 0; si < summary.length; si++) {

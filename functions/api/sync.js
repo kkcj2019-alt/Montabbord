@@ -53,6 +53,21 @@ export async function onRequest(context) {
       let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE (enterprise_id = ? OR enterprise_id = ?)';
       const params = [uid, '"' + uid + '"'];
 
+      // Mode meta : ne renvoie que les clés + tailles (réponse minuscule, quasi aucun CPU)
+      // Utile pour diagnostiquer quelle rubrique gonfle le payload complet.
+      if (url.searchParams.get('meta') === '1') {
+        const metaSql = 'SELECT cle, length(valeur) as len, updated_at FROM enterprise_data WHERE (enterprise_id = ? OR enterprise_id = ?) ORDER BY len DESC LIMIT 300';
+        const metaRes = await db.prepare(metaSql).bind(...params).all();
+        const mrows = metaRes.results || [];
+        return new Response(JSON.stringify({
+          ok: true,
+          uid: uid,
+          total: mrows.length,
+          bytes: mrows.reduce((s, r) => s + (r.len || 0), 0),
+          keys: mrows.map(r => ({ cle: r.cle, len: r.len, at: r.updated_at }))
+        }), { headers: corsHeaders });
+      }
+
       if (cle) {
         sql += ' AND cle = ?';
         params.push(cle);
@@ -92,31 +107,50 @@ export async function onRequest(context) {
       const res = await stmt.bind(...params).all();
       const rows = res.results || [];
 
-      const data = {};
-      const tsMap = {};
+      /* Assemblage SANS JSON.parse / JSON.stringify des grosses valeurs.
+         Parser puis re-sérialiser ~9 Mo de JSON dépassait le budget CPU de
+         Cloudflare (Error 1102). On recolle les valeurs brutes (déjà du JSON
+         valide à l'écriture) dans la réponse, en dédupliquant par clé la plus
+         récente (rows ordonnées updated_at DESC). */
+      const seen = new Set();
+      const dataParts = [];
+      const tsParts = [];
       let maxUpdatedAt = since;
+      let uniq = 0;
       for (const r of rows) {
-        try {
-          data[r.cle] = JSON.parse(r.valeur);
-        } catch (e) {
-          data[r.cle] = r.valeur;
+        if (seen.has(r.cle)) continue;
+        seen.add(r.cle);
+        uniq++;
+        const raw = typeof r.valeur === 'string' ? r.valeur : JSON.stringify(r.valeur);
+        const s = raw.trim();
+        const c0 = s.charAt(0);
+        const cl = s.charAt(s.length - 1);
+        let js;
+        if (s.length < 4096) {
+          /* Petite valeur : on garde la sémantique d'origine (parse propre),
+             le coût CPU est négligeable. */
+          try { js = JSON.stringify(JSON.parse(s)); } catch (e) { js = JSON.stringify(raw); }
+        } else if ((c0 === '{' && cl === '}') || (c0 === '[' && cl === ']') || (c0 === '"' && cl === '"')) {
+          js = s;                       /* JSON produit par JSON.stringify : valide */
+        } else {
+          js = JSON.stringify(raw);     /* scalaire stocké brut (string) : on l'échappe */
         }
-        tsMap[r.cle] = r.updated_at;
+        dataParts.push(JSON.stringify(r.cle) + ':' + js);
+        tsParts.push(JSON.stringify(r.cle) + ':' + JSON.stringify(r.updated_at));
         if (r.updated_at && r.updated_at > maxUpdatedAt) {
           maxUpdatedAt = r.updated_at;
         }
       }
 
-      return new Response(JSON.stringify({
-        ok: true,
-        uid: uid,
-        data: data,
-        ts: tsMap,
-        maxTs: maxUpdatedAt,
-        count: rows.length,
-        limited: rows.length >= limit,
-        serverTime: Date.now().toString()
-      }), { headers: corsHeaders });
+      const body = '{"ok":true,"uid":' + JSON.stringify(uid) +
+        ',"data":{' + dataParts.join(',') + '}' +
+        ',"ts":{' + tsParts.join(',') + '}' +
+        ',"maxTs":' + JSON.stringify(maxUpdatedAt) +
+        ',"count":' + uniq +
+        ',"limited":' + (rows.length >= limit) +
+        ',"serverTime":' + JSON.stringify(Date.now().toString()) + '}';
+
+      return new Response(body, { headers: corsHeaders });
     }
 
     // POST /api/sync { uid: '...', updates: { [cle]: val } } OR { uid: '...', rows: [ { cle, data, updated_at } ] }
