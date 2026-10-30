@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-30-325';
+      window.__APP_VERSION = '2026-10-30-327';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -10628,6 +10628,7 @@ function renderPrimeEmpMatrix() {
           caisseOpId: a.caisseOpId || "",
           preleve: a.preleve || false,
           moisPreleve: a.moisPreleve || "",
+          echeances: Array.isArray(a.echeances) ? a.echeances : null,
           valide: a.valide === true,
           /* Marqueur remise collective (saisie caisse) : tout ce qui a un groupeId va en collectif, le reste en individuel */
           groupeId: a.groupeId || "",
@@ -10691,6 +10692,7 @@ function renderPrimeEmpMatrix() {
       }
 
       /* Récupère les acomptes/prêts pour un employé et un mois donné (déduction) */
+      var PRET_VALIDATION_DEPUIS = "2026-10";
       function getAPForMonth(empId, mois) {
         var list = (getAPList() || []).map(normalizeAP);
         var mAcc = 0,
@@ -10722,11 +10724,21 @@ function renderPrimeEmpMatrix() {
               mAcc += a.montant || 0;
               if (isSol) mSolde += a.montant || 0;
             }
-          } else if (a.type === "pret" && a.statut !== "termine") {
-            var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
-            if (moisDed && moisDed <= mois) {
-              var rest = (a.montant || 0) - (a.rembourse || 0);
-              mPret += Math.min(a.mensualite || 0, rest);
+          } else if (a.type === "pret") {
+            /* A partir d'octobre 2026 : seule l'ECHEANCE DU MOIS VALIDEE
+               (page Acomptes et Prets : Valider / Deduire les prets) est
+               retenue, avec son montant. Non validee -> rien n'est deduit.
+               Mois anterieurs : ancien calcul (bulletins deja payes inchanges). */
+            if (mois >= PRET_VALIDATION_DEPUIS) {
+              var _ech = null;
+              (a.echeances || []).forEach(function (e) { if (e && e.mois === mois) _ech = e; });
+              if (_ech && _ech.preleve === true) mPret += parseFloat(_ech.montant) || 0;
+            } else if (a.statut !== "termine") {
+              var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
+              if (moisDed && moisDed <= mois) {
+                var rest = (a.montant || 0) - (a.rembourse || 0);
+                mPret += Math.min(a.mensualite || 0, rest);
+              }
             }
           }
         });
@@ -26928,7 +26940,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         for (var i = 0; i < personnel.length; i++)
           empById[personnel[i].id] = personnel[i];
         var month = window._apMonthP || "";
-        var activeTab = window._apTabP || "tous";
+        var activeTab = window._apTabP || "bulletin";
         var search = (window._apSearch || "").toLowerCase().trim();
         var statutFilter = (function () {
           var el = document.getElementById("ap-filter-statut");
@@ -27074,6 +27086,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         /* Tabs */
         var tabs = [
+          { k: "bulletin", l: "\ud83d\udccc Retenu sur les bulletins du mois" },
           { k: "tous", l: "Tous" },
           { k: "acompte", l: "Acomptes" },
           { k: "pret", l: "Pr\u00eats" },
@@ -27097,7 +27110,57 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
 
         var out = "";
 
-        if (activeTab === "cumul") {
+        if (activeTab === "bulletin") {
+          /* Vue la plus simple : pour le mois choisi, par employe, ce que le
+             BULLETIN retient (meme calcul que le bulletin) et ce qui attend
+             encore une validation dans l'appli principale. */
+          var moisB = month || ((typeof getPayeMonth === "function") ? getPayeMonth() : "");
+          var parE = {}, ordreE = [];
+          var ligneE = function (eid) { if (!parE[eid]) { parE[eid] = { ac: 0, so: 0, pr: 0, acA: 0, prA: 0 }; ordreE.push(eid); } return parE[eid]; };
+          list.forEach(function (a) {
+            if (!a || !a.employee_id) return;
+            if (a.type === "pret") {
+              var ech = null;
+              (a.echeances || []).forEach(function (e) { if (e && e.mois === moisB) ech = e; });
+              if (ech && ech.preleve !== true) ligneE(a.employee_id).prA += parseFloat(ech.montant) || 0;
+              else if (!a.echeances && a.statut !== "termine" && a.moisDeduction && a.moisDeduction <= moisB && moisB >= PRET_VALIDATION_DEPUIS) ligneE(a.employee_id).prA += Math.min(a.mensualite || 0, Math.max(0, (a.montant || 0) - (a.rembourse || 0)));
+            } else if (apMoisPrisEnCompte(a) === moisB && !apEstSoldeP(a) && a.valide !== true) {
+              ligneE(a.employee_id).acA += a.montant || 0;
+            }
+          });
+          (getPersonnel() || []).forEach(function (pE) {
+            if (!pE || !pE.id) return;
+            var r = getAPForMonth(pE.id, moisB);
+            if (r && (r.acomptes || r.prets)) { var l = ligneE(pE.id); l.so = r.soldes || 0; l.ac = (r.acomptes || 0) - (r.soldes || 0); l.pr = r.prets || 0; }
+          });
+          var T = { ac: 0, so: 0, pr: 0, acA: 0, prA: 0 };
+          ordreE = ordreE.filter(function (e) { var l = parE[e]; return l.ac || l.so || l.pr || l.acA || l.prA; });
+          ordreE.sort(function (x, y) { var px = empById[x] || {}, py = empById[y] || {}; return String(px.matricule || "").localeCompare(String(py.matricule || ""), undefined, { numeric: true }); });
+          if (search) ordreE = ordreE.filter(function (e) { var pS = empById[e] || {}; return ((pS.matricule || "") + " " + empName(e)).toLowerCase().indexOf(search) !== -1; });
+          var rowsB = ordreE.map(function (e) {
+            var l = parE[e]; for (var k in T) T[k] += l[k];
+            var att = l.acA + l.prA, tot = l.ac + l.so + l.pr;
+            return '<tr style="border-bottom:1px solid #eef2f7"><td style="padding:7px 10px;font-weight:700">' + escH(((empById[e] || {}).matricule ? (empById[e].matricule + " - ") : "") + empName(e)) + '</td>' +
+              '<td style="padding:7px 10px;text-align:right">' + (l.ac ? fmtF(l.ac) : '<span style="color:#cbd5e1">—</span>') + '</td>' +
+              '<td style="padding:7px 10px;text-align:right">' + (l.so ? fmtF(l.so) : '<span style="color:#cbd5e1">—</span>') + '</td>' +
+              '<td style="padding:7px 10px;text-align:right">' + (l.pr ? fmtF(l.pr) : '<span style="color:#cbd5e1">—</span>') + '</td>' +
+              '<td style="padding:7px 10px;text-align:right;font-weight:900;color:#b91c1c;background:#fef2f2">' + fmtF(tot) + '</td>' +
+              '<td style="padding:7px 10px;text-align:right;color:#b45309">' + (att ? fmtF(att) + '<div style="font-size:10px;color:#94a3b8">' + (l.acA ? 'acompte ' + fmtF(l.acA) : '') + (l.acA && l.prA ? ' · ' : '') + (l.prA ? 'prêt ' + fmtF(l.prA) : '') + '</div>' : '') + '</td></tr>';
+          }).join("");
+          var totB = T.ac + T.so + T.pr, attB = T.acA + T.prA;
+          var tuile = function (t, v, s, c, f) { return '<div style="flex:1;min-width:190px;background:' + f + ';border-left:5px solid ' + c + ';border-radius:12px;padding:11px 14px"><div style="font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + c + '">' + t + '</div><div style="font-size:23px;font-weight:900;color:#0f172a">' + v + '</div><div style="font-size:11px;color:#475569">' + s + '</div></div>'; };
+          out += '<div style="font-size:15px;font-weight:800;margin:4px 0 8px">' + escH((function (m) { var M = ['Janvier','F\u00e9vrier','Mars','Avril','Mai','Juin','Juillet','Ao\u00fbt','Septembre','Octobre','Novembre','D\u00e9cembre']; var k = parseInt(String(m).slice(5, 7), 10); return (M[k - 1] || m) + ' ' + String(m).slice(0, 4); })(moisB)) + ' \u2014 retenu sur les bulletins</div>';
+          out += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">' +
+            tuile('\u2705 Retenu sur les bulletins', fmtF(totB), ordreE.length + ' employ\u00e9(s)', '#b91c1c', '#fef2f2') +
+            tuile('Acomptes valid\u00e9s', fmtF(T.ac), 'avances du mois', '#ea580c', '#fff7ed') +
+            tuile('\u00c9ch\u00e9ances de pr\u00eat', fmtF(T.pr), 'valid\u00e9es pour le mois', '#4f46e5', '#eef2ff') +
+            tuile('Soldes vers\u00e9s', fmtF(T.so), 'd\u00e9j\u00e0 pay\u00e9s en caisse', '#0891b2', '#ecfeff') +
+            (attB ? tuile('\u23f3 En attente de validation', fmtF(attB), 'pas retenu tant que non valid\u00e9 (appli principale)', '#b45309', '#fffbeb') : '') +
+          '</div>';
+          out += '<div style="overflow:auto;border:1px solid #e2e8f0;border-radius:12px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:#f8fafc;color:#475569;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em"><th style="padding:8px 10px;text-align:left">Employ\u00e9</th><th style="padding:8px 10px;text-align:right">Acomptes</th><th style="padding:8px 10px;text-align:right">Soldes</th><th style="padding:8px 10px;text-align:right">\u00c9ch\u00e9ance pr\u00eat</th><th style="padding:8px 10px;text-align:right;color:#b91c1c">Retenu sur bulletin</th><th style="padding:8px 10px;text-align:right;color:#b45309">En attente</th></tr></thead><tbody>' +
+            (rowsB || '<tr><td colspan="6" style="padding:16px;text-align:center;color:#94a3b8">Rien \u00e0 retenir pour ce mois</td></tr>') +
+            '</tbody><tfoot><tr style="background:#f1f5f9;font-weight:900"><td style="padding:8px 10px">TOTAL</td><td style="padding:8px 10px;text-align:right">' + fmtF(T.ac) + '</td><td style="padding:8px 10px;text-align:right">' + fmtF(T.so) + '</td><td style="padding:8px 10px;text-align:right">' + fmtF(T.pr) + '</td><td style="padding:8px 10px;text-align:right;color:#b91c1c">' + fmtF(totB) + '</td><td style="padding:8px 10px;text-align:right;color:#b45309">' + fmtF(attB) + '</td></tr></tfoot></table></div>';
+        } else if (activeTab === "cumul") {
           /* Cumul par employ\u00e9 */
           var empAgg = {};
           for (var ci = 0; ci < filtered.length; ci++) {

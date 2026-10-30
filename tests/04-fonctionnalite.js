@@ -2768,6 +2768,7 @@ attenduPrefixe: 'OK'
     nom: 'Recherche globale : les dates des pieces s\u2019affichent en JJ/MM/AA',
     app: 'index.html', store: storeRealiste,
     code: `
+      currentUser = { id: 'u1', isAdmin: true, isSuperAdmin: true, sections: {} };
       var ops = getOperationsCaisse();
       ops.push({ id: 'opR', numeroPiece: 'BR-1', date: '2026-08-05', code: 'DIVERS', libelle: 'DIVERS frais de route', montant: 10000, sens: 'sortie', caisseId: 'c1' });
       DB.set('mdb_operationsCaisse', ops);
@@ -2800,7 +2801,7 @@ attenduPrefixe: 'OK'
         if (ops2[i] && ops2[i].id === 'opV2') l2 = ops2[i].libelle;
         if (ops2[i] && ops2[i].id === 'opV3') l3 = ops2[i].libelle;
       }
-      (r && r.converties === 2 && r.ignorees === 1 && t1 === 'solde' && l1 === 'Solde indemnité : KOFFI/Mois de Septembre 2026' && l2 === 'Solde indemnité : RACHIDOU/Mois de Octobre 2026' && l3 === 'Solde indemnité : NOUH' && m1 === 220000)
+      (r && r.converties === 2 && r.ignorees === 1 && t1 === 'solde' && l1 === 'Solde indemnité : DIALLO A/Mois de Septembre 2026' && l2 === 'Solde indemnité : DIALLO A/Mois de Octobre 2026' && l3 === 'Solde indemnité : DIALLO A' && m1 === 220000)
         ? 'OK : 2 converties (libelles Solde indemnité + mois), 1 deja solde ignoree, montant garde'
         : 'ECHEC r=' + JSON.stringify(r) + ' l1=' + l1 + ' l2=' + l2
     `,
@@ -2869,7 +2870,7 @@ attenduPrefixe: 'OK'
       var after = dbArr('mdb_acomptesPrets');
       var kept = false, val = false;
       for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apZ1') { kept = true; val = after[j].valide === true; } }
-      (r && r.converties === 1 && back === 'apZ1' && lib === 'Solde indemnité : GAHIE/Mois de Octobre 2026' && kept && val)
+      (r && r.converties === 1 && back === 'apZ1' && lib === 'Solde indemnité : DIALLO A/Mois de Octobre 2026' && kept && val)
         ? 'OK : convertie + lien retour, ligne validee gardee (pas mangee)'
         : 'ECHEC back=' + back + ' lib=' + lib + ' gardee=' + kept + ' validee=' + val
     `,
@@ -2889,7 +2890,7 @@ attenduPrefixe: 'OK'
       var ops2 = getOperationsCaisse();
       var l1 = null;
       for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opY1') l1 = ops2[i].libelle; }
-      (r && r.converties === 1 && l1 === 'Solde indemnité : GAHIE/Mois de Août 2026')
+      (r && r.converties === 1 && l1 === 'Solde indemnité : DIALLO A/Mois de Août 2026')
         ? 'OK : mois de la periode (aout), pas septembre par defaut'
         : 'ECHEC l1=' + l1
     `,
@@ -2915,7 +2916,7 @@ attenduPrefixe: 'OK'
       var after = dbArr('mdb_acomptesPrets');
       var lm = null, lflag = null;
       for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apF1') { lm = after[j].moisDeduction; lflag = after[j].moisManuel; } }
-      (r && r.converties === 1 && lib === 'Solde indemnité : KOFFI/Mois de Septembre 2026' && om === '2026-09' && oflag === true && lm === '2026-09' && lflag === true)
+      (r && r.converties === 1 && lib === 'Solde indemnité : DIALLO A/Mois de Septembre 2026' && om === '2026-09' && oflag === true && lm === '2026-09' && lflag === true)
         ? 'OK : libelle + piece + ligne sur septembre choisi (proteges)'
         : 'ECHEC lib=' + lib + ' piece=' + om + '/' + oflag + ' ligne=' + lm + '/' + lflag
     `,
@@ -3015,7 +3016,7 @@ attenduPrefixe: 'OK'
       var after = dbArr('mdb_acomptesPrets');
       var lm = null;
       for (var j = 0; j < after.length; j++) { if (after[j] && after[j].id === 'apM1') lm = after[j].moisDeduction; }
-      (r && r.converties === 0 && r.moisMaj === 1 && lib === 'Solde indemnité : KOFFI/Mois de Septembre 2026' && om === '2026-09' && lm === '2026-09')
+      (r && r.converties === 0 && r.moisMaj === 1 && lib === 'Solde indemnité : DIALLO A/Mois de Septembre 2026' && om === '2026-09' && lm === '2026-09')
         ? 'OK : mois ajoute au libelle, piece et ligne (0 conversion, 1 mois)'
         : 'ECHEC lib=' + lib + ' piece=' + om + ' ligne=' + lm + ' r=' + JSON.stringify(r)
     `,
@@ -3121,16 +3122,20 @@ attenduPrefixe: 'OK'
     nom: 'Revue : le filtre Valides / Non valides vaut pour acomptes ET prets',
     app: 'index.html', store: storeRealiste,
     code: `
+      /* Pret « valide » = echeance du mois affiche payee (decision utilisateur 30/10). */
+      var mC = new Date().toISOString().slice(0, 7); _apFilterMonth = mC;
+      var PP = { type: 'pret', montant: 40000, dureeMois: 2, montantMensuel: 20000, moisDeduction: mC, echeances: [{ mois: mC, montant: 20000, preleve: true }, { mois: '2099-01', montant: 20000, preleve: false }] };
+      var PN = { type: 'pret', montant: 40000, dureeMois: 2, montantMensuel: 20000, moisDeduction: mC, echeances: [{ mois: mC, montant: 20000, preleve: false }, { mois: '2099-01', montant: 20000, preleve: false }] };
       window._apValFilter = 'valides';
       var vv = apPasseFiltreValide({ type: 'acompte', valide: true });
       var vn = apPasseFiltreValide({ type: 'acompte', valide: false });
-      var pv = apPasseFiltreValide({ type: 'pret', valide: true });
-      var pn = apPasseFiltreValide({ type: 'pret' });
+      var pv = apPasseFiltreValide(PP);
+      var pn = apPasseFiltreValide(PN);
       window._apValFilter = 'nonvalides';
       var nv = apPasseFiltreValide({ type: 'acompte', valide: true });
       var nn = apPasseFiltreValide({ type: 'acompte' });
-      var npv = apPasseFiltreValide({ type: 'pret', valide: true });
-      var npn = apPasseFiltreValide({ type: 'pret' });
+      var npv = apPasseFiltreValide(PP);
+      var npn = apPasseFiltreValide(PN);
       window._apValFilter = '';
       var t = apPasseFiltreValide({ type: 'pret' });
       (vv && !vn && pv && !pn && !nv && nn && !npv && npn && t)
@@ -3148,7 +3153,7 @@ attenduPrefixe: 'OK'
       var list = dbArr('mdb_acomptesPrets');
       list.push({ id: 'apVA', type: 'acompte', employeId: 'ex1', employeNom: 'ValideAcompte', montant: 10000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', valide: true, motif: 'Test' });
       list.push({ id: 'apNA', type: 'acompte', employeId: 'ex2', employeNom: 'NonValideAcompte', montant: 10000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', motif: 'Test' });
-      list.push({ id: 'apVP', type: 'pret', employeId: 'ex3', employeNom: 'ValidePret', montant: 100000, dureeMois: 5, montantMensuel: 20000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', valide: true, motif: 'Test' });
+      list.push({ id: 'apVP', type: 'pret', employeId: 'ex3', employeNom: 'ValidePret', montant: 100000, dureeMois: 5, montantMensuel: 20000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', valide: true, motif: 'Test', echeances: [{ mois: moisC, montant: 20000, preleve: true }, { mois: '2099-01', montant: 80000, preleve: false }] });
       list.push({ id: 'apNP', type: 'pret', employeId: 'ex4', employeNom: 'NonValidePret', montant: 100000, dureeMois: 5, montantMensuel: 20000, moisDeduction: moisC, date: moisC + '-05', statut: 'en_cours', motif: 'Test' });
       DB.set('mdb_acomptesPrets', list);
       var ops = getOperationsCaisse();
@@ -3159,6 +3164,8 @@ attenduPrefixe: 'OK'
       renderAcomptesPrets();
       var box = document.getElementById('content');
       var h = box ? (box.innerHTML || '') : '';
+      /* Le tableau « Detail a deduire » liste aussi l'en-attente : on ne controle que la revue. */
+      h = h.replace(/<details[\\s\\S]*?<\\/details>/g, '');
       var ok = h.indexOf('ValideAcompte') !== -1 && h.indexOf('ValidePret') !== -1;
       var ko = h.indexOf('NonValideAcompte') !== -1 || h.indexOf('NonValidePret') !== -1 || h.indexOf('PEND-1') !== -1;
       (ok && !ko) ? 'OK : seuls les 2 valides affiches' : 'ECHEC ok=' + ok + ' ko=' + ko
@@ -3197,7 +3204,7 @@ attenduPrefixe: 'OK'
       var list = dbArr('mdb_acomptesPrets');
       list.push({ id: 'apRV', type: 'acompte', employeId: 'exRV', employeNom: 'SurvitValide', montant: 10000, moisDeduction: moisC, date: moisC + '-10', statut: 'en_cours', valide: true, provenance: 'caisse', caisseOpId: 'opRV', numeroPiece: 'KCJ-41', motif: 'Test' });
       DB.set('mdb_acomptesPrets', list);
-      window._apValFilter = '';
+      window._apValFilter = 'tous';
       window._apFilterMonth = moisC;
       renderAcomptesPrets();
       renderAcomptesPrets();
@@ -8112,7 +8119,7 @@ r.push({
       list.push(
         { id: 'acS', employee_id: 'zzz', employeNom: 'SoldeTest', type: 'acompte', montant: 400000, moisDeduction: '2026-10', date: '2026-10-10', caisseOpId: 'opSl', numeroPiece: 'KS-1', valide: true },
         { id: 'acA', employee_id: 'zzz', employeNom: 'AcTest', type: 'acompte', montant: 50000, moisDeduction: '2026-10', date: '2026-10-12', caisseOpId: 'opAc', numeroPiece: 'KC-2', valide: true },
-        { id: 'acP', employee_id: 'zzz', employeNom: 'PretTest', type: 'pret', montant: 600000, montantMensuel: 100000, moisDeduction: '2026-09', date: '2026-09-05', caisseOpId: 'opPr', numeroPiece: 'KP-3', rembourse: 300000 }
+        { id: 'acP', employee_id: 'zzz', employeNom: 'PretTest', type: 'pret', montant: 600000, montantMensuel: 100000, moisDeduction: '2026-09', date: '2026-09-05', caisseOpId: 'opPr', numeroPiece: 'KP-3', rembourse: 300000, echeances: [{ mois: '2026-09', montant: 100000, preleve: true }, { mois: '2026-10', montant: 100000, preleve: true }] }
       );
       setAPList(list);
       var recs = getAPList();
@@ -8202,7 +8209,7 @@ r.push({
       DB.setMain('mdb_operationsCaisse', ops);
       var list = payeArr('mdb_acomptesPrets');
       list.push({ id: 'acW1', employee_id: 'e1', employeNom: 'Diallo', type: 'acompte', montant: 30000, moisDeduction: '2026-10', date: '2026-10-05', caisseOpId: 'opW1', numeroPiece: 'KV-1', valide: true });
-      list.push({ id: 'acW2', employee_id: 'e1', employeNom: 'Diallo', type: 'pret', montant: 60000, montantMensuel: 60000, moisDeduction: '2026-10', date: '2026-10-06', caisseOpId: 'opW2', numeroPiece: 'KP-V', valide: true });
+      list.push({ id: 'acW2', employee_id: 'e1', employeNom: 'Diallo', type: 'pret', montant: 60000, montantMensuel: 60000, moisDeduction: '2026-10', date: '2026-10-06', caisseOpId: 'opW2', numeroPiece: 'KP-V', valide: true, echeances: [{ mois: '2026-10', montant: 60000, preleve: true }] });
       setAPList(list);
       var v = ventilationPaie('2026-10');
       var ligne = function (cpte) {
@@ -13435,7 +13442,8 @@ function run(rapport) {
     const segPrimes = iPrimes >= 0 ? src.slice(iPrimes, iPrimes + 2000) : '';
     const okHdr = !!segHdr && segHdr.indexOf('showModalPrimeProd') === -1;
     const okMont = !!segMont && segMont.indexOf('pp-resume') === -1 && segMont.indexOf('showModalPrimeProd') === -1;
-    const okPrimes = !!segPrimes && segPrimes.indexOf('pp-resume') !== -1 && segPrimes.indexOf('showModalPrimeProd(') !== -1;
+    /* Les boutons « Modifier » des baremes sont rendus dans pp-baremes-panel. */
+    const okPrimes = !!segPrimes && segPrimes.indexOf('pp-resume') !== -1 && (segPrimes.indexOf('showModalPrimeProd(') !== -1 || segPrimes.indexOf('pp-baremes-panel') !== -1);
     if (okHdr && okMont && okPrimes) {
       rapport.ok('Prime production : carte configurée dans Éléments de paie (tab-primes), retirée de tab-montage et de l\'en-tête');
     } else {
