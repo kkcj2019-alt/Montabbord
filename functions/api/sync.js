@@ -75,8 +75,11 @@ export async function onRequest(context) {
 
       // Éviter de charger TOUT d'un coup : limiter pour rester sous les limites CPU de Cloudflare
       sql += ' ORDER BY updated_at DESC';
-      let limit = 250;
+      const fullSync = url.searchParams.get('all') === '1' || url.searchParams.get('full') === '1';
+      let limit = 500;
       if (cle || cles || prefix) {
+        limit = 1500;
+      } else if (fullSync) {
         limit = 1000;
       }
       if (limitParam) {

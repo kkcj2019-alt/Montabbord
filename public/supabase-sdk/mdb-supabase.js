@@ -146,7 +146,7 @@
         var cleLike = self._getLike('cle');
         var since = self._getEq('updated_at');
 
-        var queryUrl = '/api/sync?uid=' + encodeURIComponent(uid);
+        var queryUrl = '/api/sync?uid=' + encodeURIComponent(uid) + '&all=1';
         if (cleEq) queryUrl += '&cle=' + encodeURIComponent(cleEq);
         else if (cleIn && cleIn.length > 0) queryUrl += '&cles=' + encodeURIComponent(cleIn.join(','));
         else if (cleLike) queryUrl += '&prefix=' + encodeURIComponent(cleLike.replace(/%/g, ''));
