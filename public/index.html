@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-30-331';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-336';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2300,6 +2300,23 @@ function _mdbTombPtSupprime(set, r) {
   } catch (e) {}
   return false;
 }
+/* Union par cle metier ou la version la plus RECENTE (updatedAt) gagne ;
+   a egalite, le premier tableau garde la priorite. Sert au pointage horaire
+   et montage : avant, le premier vu gagnait toujours, et une correction
+   (ou une fusion de sauvegarde) etait ecrasee par l'ancienne version. */
+function _syncT(x) { var u = x && (x.updatedAt !== undefined ? x.updatedAt : x.updated_at); var t = typeof u === 'number' ? u : Date.parse(u); return isFinite(t) ? t : 0; }
+function syncUnionRecent(premier, second) {
+  var out = [], pos = {}, i, x, k, lst = [Array.isArray(premier) ? premier : [], Array.isArray(second) ? second : []];
+  for (var l = 0; l < 2; l++) {
+    for (i = 0; i < lst[l].length; i++) {
+      x = lst[l][i]; if (x === undefined) continue;
+      k = _syncCle(x);
+      if (pos[k] === undefined) { pos[k] = out.length; out.push(x); }
+      else if (_syncT(x) > _syncT(out[pos[k]])) out[pos[k]] = x;
+    }
+  }
+  return out;
+}
 function syncUnionTableaux(localArr, cloudArr, cloudDabord) {
   var out = [], vus = {}, i, x, k;
   var premier = cloudDabord ? cloudArr : localArr;
@@ -2360,7 +2377,7 @@ function mergePayeRecu(_lpP, _npP) {
     var _sk3 = _grdK[_gk2];
     var _lvArr = Array.isArray(_lpP[_sk3]) ? _lpP[_sk3] : [];
     var _cvArr = Array.isArray(_npP[_sk3]) ? _npP[_sk3] : [];
-    _lpP[_sk3] = syncUnionTableaux(_lvArr, _cvArr, true);
+    _lpP[_sk3] = (_sk3 === 'pointage' || _sk3 === 'pointageMontage') ? syncUnionRecent(_cvArr, _lvArr) : syncUnionTableaux(_lvArr, _cvArr, true);
     delete _npP[_sk3];
   }
   var _evtK = { articlesMontage: true };
@@ -2616,7 +2633,7 @@ function pushToCloud() {
         if (k === 'mdb_paye' && data[k] && typeof data[k] === 'object' && !Array.isArray(data[k])) {
           /* Jamais de doublons metier sur le pointage (reconstructions multi-postes). */
           ['pointage', 'pointageMontage'].forEach(function (sec) {
-            if (Array.isArray(data[k][sec])) data[k][sec] = syncUnionTableaux(data[k][sec], []);
+            if (Array.isArray(data[k][sec])) data[k][sec] = syncUnionRecent(Array.isArray(lv[sec]) ? lv[sec] : [], data[k][sec]);
           });
         }
       } else {
@@ -8014,6 +8031,7 @@ function confirmImportMerge() {
   closeImportAuthModal();
     /* MERGE mode */
     var summary = [];
+    window._fusPtSuppr = [];
     /* ZOMBIS : une ligne deja supprimee ici (mdb_tombstones / mdb_deletedOps,
        qui voyagent aussi au cloud) ne doit JAMAIS etre ramenee par une
        restauration. Avant, elle etait re-additionnee a chaque import
@@ -8072,7 +8090,7 @@ function confirmImportMerge() {
        - date inconnue / egale -> on remplit seulement les cases vides ;
        - lignes supprimees (tombstones) jamais ramenees.
        Refaire la meme fusion ne change plus rien. */
-    function fusionTab(cleDonnee, existing, incoming, stats, tombPt) {
+    function fusionTab(cleDonnee, existing, incoming, stats, tombPt, tSecoursEx, tSecoursIn) {
       var byK = {}, ordre = [], sansCle = [], sigs = {};
       var _now = Date.now();
       for (var i = 0; i < existing.length; i++) {
@@ -8090,7 +8108,7 @@ function confirmImportMerge() {
         }
         var cleTop = cleDonnee.indexOf('.') === -1 ? cleDonnee : '';
         if (cleTop && it.id && itemSupprime(cleTop, it.id, '')) { stats.skipped++; continue; }
-        try { if (tombPt && typeof _mdbTombPtSupprime === 'function' && _mdbTombPtSupprime(tombPt, it)) { stats.skipped++; continue; } } catch (eT) {}
+        try { if (tombPt && typeof _mdbTombPtSupprime === 'function' && _mdbTombPtSupprime(tombPt, it)) { stats.skipped++; try { window._fusPtSuppr.push({ cle: cleDonnee, ligne: it }); } catch (eP) {} continue; } } catch (eT) {}
         var kk = cleLigne(it);
         if (!kk) {
           var sg2 = ''; try { sg2 = JSON.stringify(it); } catch (eS3) {}
@@ -8098,8 +8116,14 @@ function confirmImportMerge() {
           continue;
         }
         var cur = byK[kk];
-        if (cur && tModif(it) > tModif(cur)) {
-          byK[kk] = Object.assign({}, it); stats.updated++;
+        /* Sans date sur les lignes : la date de l'ensemble (ex. Exploitation,
+           __prodUpdatedAt) departage. La sauvegarde plus recente gagne. */
+        var _tIt = tModif(it), _tCur = cur ? tModif(cur) : 0;
+        if (cur && _tIt === _tCur && (tSecoursIn || 0) > (tSecoursEx || 0) && JSON.stringify(cur) !== JSON.stringify(it)) { _tIt = _tCur + 1; }
+        if (cur && _tIt > _tCur) {
+          /* Meme saisie : on garde l'identifiant de l'appli (sinon deux id pour
+             la meme ligne, et la synchro gardait l'ancienne version). */
+          byK[kk] = Object.assign({}, it, (cur.id !== undefined && cur.id !== null) ? { id: cur.id } : {}); stats.updated++;
         } else if (cur) {
           var change = false;
           for (var fk in it) {
@@ -8218,12 +8242,15 @@ function confirmImportMerge() {
             var avant = stats.added + stats.updated;
             var tomb = null;
             try { if ((sk === 'pointage' || sk === 'pointageMontage') && typeof _mdbTombPtSet === 'function') tomb = _mdbTombPtSet([].concat(exObj[sk + '_tombstones'] || [], iv === incoming[sk] ? (incoming[sk + '_tombstones'] || []) : [])); } catch (eTo) {}
-            var res = fusionTab(key + '.' + sk, ev, iv, stats, tomb);
+            var _tsEx = (key === 'mdb_production') ? (parseFloat(exObj.__prodUpdatedAt) || 0) : 0;
+            var _tsIn = (key === 'mdb_production') ? (parseFloat(incoming.__prodUpdatedAt) || 0) : 0;
+            var res = fusionTab(key + '.' + sk, ev, iv, stats, tomb, _tsEx, _tsIn);
             if (stats.added + stats.updated > avant) { exObj[sk] = res; objChange = true; }
           } else if (_vide(ev) && !_vide(iv)) {
             exObj[sk] = iv; objChange = true; stats.added++;
           }
         }
+        if (objChange && key === 'mdb_production') exObj.__prodUpdatedAt = Date.now();
         if (objChange) DB.set(key, exObj);
       }
       if (stats.added > 0 || stats.updated > 0) keysPropres[key] = true;
@@ -8275,7 +8302,7 @@ function confirmImportMerge() {
     /* APERCU AVANT VALIDATION : rien n'est envoye au cloud tant que
        l'utilisateur n'a pas valide (Annuler remet l'appli comme avant). */
     var _rienAFaire = !conflits.length && !Object.keys(keysPropres).length;
-    if (_rienAFaire && !supprimees.length) { _finFusion(); return; }
+    if (_rienAFaire && !supprimees.length && !(window._fusPtSuppr || []).length) { _finFusion(); return; }
     var _annulerFusion = function () {
       for (var kA in keysPropres) {
         if (!keysPropres.hasOwnProperty(kA)) continue;
@@ -8352,6 +8379,15 @@ function _fusionRevueConflits(conflits, supprimees, statsParCle, keysPropres, fi
     h += '<details style="margin-top:12px"' + (conflits.length ? '' : ' open') + '><summary style="cursor:pointer;font-size:13px;font-weight:700">' + supprimees.length + ' pièce(s) de la sauvegarde ignorée(s) car supprimée(s) volontairement dans l’appli</summary>' +
       '<div style="max-height:200px;overflow:auto;font-size:12px;margin-top:6px">' + supprimees.map(function (o) { return '<div style="padding:3px 0;border-bottom:1px dashed #e2e8f0">' + esc(o.numeroPiece || '') + ' · ' + esc(fmtDate(o.date)) + ' · ' + esc(o.libelle || '') + ' · <b>' + fmtMoney(o.montant || 0) + '</b></div>'; }).join('') + '</div></details>';
   }
+  var _ptS = (window._fusPtSuppr || []);
+  if (_ptS.length) {
+    var _parSec = {};
+    _ptS.forEach(function (x) { var lb = /pointageMontage$/.test(x.cle) ? 'Pointage montage' : (/pointage$/.test(x.cle) ? 'Pointage horaire' : x.cle); _parSec[lb] = (_parSec[lb] || 0) + 1; });
+    h += '<div style="margin-top:12px;padding:10px 12px;border:1px solid #fcd34d;background:#fffbeb;border-radius:10px;font-size:12.5px">' +
+      '<b>\u26a0 ' + _ptS.length + ' ligne(s) de pointage de la sauvegarde ne sont pas reprises</b> parce qu\u2019elles ont \u00e9t\u00e9 <b>supprim\u00e9es</b> dans l\u2019appli apr\u00e8s cette sauvegarde (' +
+      Object.keys(_parSec).map(function (k) { return esc(k) + ' : ' + _parSec[k]; }).join(', ') + ').' +
+      '<label style="display:flex;gap:8px;align-items:center;margin-top:8px;cursor:pointer;font-weight:700"><input type="checkbox" id="fusRestaurerPt" style="width:16px;height:16px"> Les restaurer quand m\u00eame (si la suppression \u00e9tait une erreur)</label></div>';
+  }
   openFormModal('Fusion : aper\u00e7u avant validation', h,
     '<button class="btn btn-outline" onclick="_fusAnnuler()">Annuler (ne rien changer)</button>' +
     '<button class="btn btn-primary" onclick="_fusAppliquer()">Valider la fusion</button>', '1100px');
@@ -8368,8 +8404,29 @@ function _fusTous(v) {
   var R = window._fusRevue; if (!R) return;
   R.conflits.forEach(function (c, i) { c.choix = v; var el = document.querySelector('input[name="fusc' + i + '"][value="' + v + '"]'); if (el) el.checked = true; });
 }
+function _fusRestaurerPointages(R) {
+  var lst = window._fusPtSuppr || []; if (!lst.length) return 0;
+  var py = dbObj('mdb_paye'), n = 0, now = Date.now();
+  lst.forEach(function (x) {
+    var sec = /pointageMontage$/.test(x.cle) ? 'pointageMontage' : (/pointage$/.test(x.cle) ? 'pointage' : '');
+    if (!sec) return;
+    var arr = Array.isArray(py[sec]) ? py[sec] : (py[sec] = []);
+    var k = _syncCle(x.ligne);
+    if (arr.some(function (r) { return _syncCle(r) === k; })) return;
+    var nv = JSON.parse(JSON.stringify(x.ligne));
+    nv.id = DB.genId(); nv.updatedAt = now; delete nv._seal;
+    arr.push(nv); n++;
+  });
+  if (n) {
+    DB.set('mdb_paye', py); R.keysPropres['mdb_paye'] = true;
+    var st = R.statsParCle['mdb_paye'] || (R.statsParCle['mdb_paye'] = { key: 'mdb_paye', added: 0, updated: 0, skipped: 0 });
+    st.added += n; st.skipped = Math.max(0, st.skipped - n);
+  }
+  return n;
+}
 function _fusAppliquer() {
   var R = window._fusRevue; if (!R) return;
+  try { var _cbR = document.getElementById('fusRestaurerPt'); if (_cbR && _cbR.checked) { var _nR = _fusRestaurerPointages(R); if (_nR) toast(_nR + ' ligne(s) de pointage restaur\u00e9e(s)', 'success'); } } catch (eRP) {}
   var ops = getOperationsCaisse();
   var st = R.statsParCle['mdb_operationsCaisse'] || (R.statsParCle['mdb_operationsCaisse'] = { key: 'mdb_operationsCaisse', added: 0, updated: 0, skipped: 0 });
   var aSuppr = [], refus = [];
