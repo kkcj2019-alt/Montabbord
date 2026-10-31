@@ -2842,7 +2842,7 @@ attenduPrefixe: 'OK'
       var d = csApTypeEtLibelleCreation('pret', 'SOLDE_SALAIRE', 'KOFFI');
       (a.apType === 'solde' && a.libelle === 'Solde indemnité : GAHIE'
         && b.apType === 'solde' && b.libelle === 'Solde salaire : KOFFI'
-        && c.apType === 'acompte' && c.libelle === 'ACOMPTE SALAIRE : ZOH'
+        && c.apType === 'acompte' && c.libelle === 'ACOMPTE/INDEMNITE-ZOH'
         && d.apType === 'pret' && d.libelle === 'Prêt employé : KOFFI')
         ? 'OK : SOLDE_INDEMNITE->Solde indemnité/solde, ACOMPTE_INDEMNITE inchange, pret touche'
         : 'ECHEC ' + JSON.stringify([a, b, c, d])
