@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-31-341';
+      window.__APP_VERSION = '2026-10-31-343';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -16856,6 +16856,20 @@ function addArticleMontageFromPt(e) {
             p.droit_hs === true ||
             (p.droit_hs !== false && (p.mode_pointage || "") !== "forfait");
         updateEmpTypeFields();
+        /* Categorie choisie mais salaire de base vide : on reprend le montant
+           de la grille (a enregistrer), au lieu de laisser la case vide. */
+        try {
+          var _salEl = f.elements["salaire_base"], _catSel = document.getElementById("emp-categorie");
+          var _tcE = (document.getElementById("type_contrat") || {}).value || p.type_contrat || "";
+          if (_salEl && !(parseFloat(_salEl.value) > 0) && _catSel && _tcE !== "Journalier" && _tcE !== "Externe") {
+            var _opt = _catSel.selectedOptions && _catSel.selectedOptions[0];
+            if (_opt && parseFloat(_opt.dataset.sal) > 0) {
+              _salEl.value = _opt.dataset.sal;
+              _salEl.style.background = "#fffbeb"; _salEl.style.borderColor = "#f59e0b";
+              _salEl.title = "Repris de la grille salariale (cat\u00e9gorie " + (_opt.value || "") + ") \u2014 cliquez Enregistrer pour le garder";
+            }
+          }
+        } catch (eSalG) {}
         toggleSortieP();
         autoFillService();
         var histEl = document.getElementById("salaire-hist-list");
@@ -26661,7 +26675,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           return p.employee_id === empId && p && p.date && p.date.indexOf(mois) === 0;
         });
         var total = 0;
-        var qtePrime = 0;
+        var qtePrime = 0, totPal = 0, totCouv = 0, qtePal = 0, qteCouv = 0;
         for (var i = 0; i < pts.length; i++) {
           var am = ams.find(function (a) {
             return a.code === pts[i].article_code;
@@ -26672,6 +26686,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             var _pxL = parseFloat(pts[i].prix);
             var pxE = (_pxL > 0) ? _pxL : ptPrixEffectif(pts[i].article_code, pts[i].employee_id, pts[i].date);
             total += (pts[i].quantite || 0) * pxE;
+            if (ptEstCouvercle(am)) { totCouv += (pts[i].quantite || 0) * pxE; qteCouv += pts[i].quantite || 0; }
+            else { totPal += (pts[i].quantite || 0) * pxE; qtePal += pts[i].quantite || 0; }
             if (ptArticleComptePrime(am.code)) qtePrime += pts[i].quantite || 0;
           }
         }
@@ -26679,7 +26695,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         /* Prime au prorata du seuil (plafonnée) : ex. seuil 250 = 20000 → 100 articles = 8000 */
         var prime = 0;
         if (cfg.seuil > 0 && qtePrime > 0) prime = Math.round(Math.min(qtePrime, cfg.seuil) / cfg.seuil * (cfg.prime || 0));
-        return { total: total, prime: prime };
+        return { total: total, prime: prime, palettes: Math.round(totPal), couvercles: Math.round(totCouv), qtePalettes: qtePal, qteCouvercles: qteCouv };
       }
       function timeToMins(t) {
         if (!t) return null;
@@ -32766,7 +32782,18 @@ function panierVerserJour() {
         rows.push({ label: "Congés", base: "", baseVal: ovrVal("conges", cgG), taux: "", gain: cgG, ret: 0, edit: "conges" });
         var auG = gainOf("Autres Primes Fixes");
         rows.push({ label: "Autres Primes Fixes", base: "", baseVal: ovrVal("autres", auG), taux: "", gain: auG, ret: 0, edit: "autres" });
-        if (montageGain > 0) rows.push({ label: "Rémunération Montage", base: fmt(montageGain), baseVal: 0, taux: "1", gain: montageGain, ret: 0, edit: null });
+        if (montageGain > 0) {
+          /* Detail comme la fiche Excel : palettes et couvercles sur deux lignes
+             (meme total). */
+          var _mDet = null;
+          try { _mDet = calcMontageMensuel(emp.id, mois); } catch (eMD) {}
+          if (_mDet && (_mDet.palettes || 0) + (_mDet.couvercles || 0) === Math.round(montageGain) && _mDet.couvercles > 0) {
+            rows.push({ label: "Rémunération Montage Palettes (" + fmt(_mDet.qtePalettes) + " art.)", base: fmt(_mDet.palettes), baseVal: 0, taux: "1", gain: _mDet.palettes, ret: 0, edit: null });
+            rows.push({ label: "Rémunération Montage Couvercles (" + fmt(_mDet.qteCouvercles) + " art.)", base: fmt(_mDet.couvercles), baseVal: 0, taux: "1", gain: _mDet.couvercles, ret: 0, edit: null });
+          } else {
+            rows.push({ label: "Rémunération Montage", base: fmt(montageGain), baseVal: 0, taux: "1", gain: montageGain, ret: 0, edit: null });
+          }
+        }
         if (ap.acomptes > 0) rows.push({ label: "Acompte", base: fmt(ap.acomptes), baseVal: 0, taux: "1", gain: 0, ret: ap.acomptes, edit: null });
         if (ap.prets > 0) rows.push({ label: "Prêt", base: fmt(ap.prets), baseVal: 0, taux: "1", gain: 0, ret: ap.prets, edit: null });
         return rows;
@@ -34917,8 +34944,13 @@ function panierVerserJour() {
         var exArt = ptPrimeProdExclus(mois, "articles_exclus", empId);
         var exFac = ptPrimeProdExclus(mois, "factures_exclus", empId);
         var exFacEmp = ptFacturesExclusEmploye(empId);
+        /* Bareme « toute la production » : on compte les articles de TOUS les
+           travailleurs du mois (ex. Falle, Oulai Delmas : ils ne pointent pas). */
+        var _bEq = null;
+        try { _bEq = ptBaremePour(empId, mois); } catch (eBq) {}
+        var _equipe = !!(_bEq && _bEq.base === "equipe");
         var pts = (getPointageMontage() || []).filter(function (p) {
-          return p && p.employee_id === empId && p.date && String(p.date).indexOf(mois) === 0;
+          return p && (_equipe || p.employee_id === empId) && p.date && String(p.date).indexOf(mois) === 0;
         });
         var total = 0, parArt = {};
         pts.forEach(function (p) {
@@ -35105,6 +35137,9 @@ function panierVerserJour() {
           taux_ca_ht: parseFloat(bareme.taux_ca_ht) || 0,
           articles_exclus: (bareme.articles_exclus || []).filter(Boolean),
           factures_exclus: (bareme.factures_exclus || []).filter(Boolean),
+          /* Base de comptage : '' = ses propres pointages ; 'equipe' = toute la
+             production du mois (chef d'atelier, logistique... qui ne pointent pas). */
+          base: (bareme.base !== undefined) ? String(bareme.base || "") : ((i !== -1 && l[i].base) ? String(l[i].base) : ""),
           /* Equipe conservee (avant : perdue a chaque enregistrement des tranches). */
           employes: Array.isArray(bareme.employes) ? bareme.employes.map(String) : ((i !== -1 && Array.isArray(l[i].employes)) ? l[i].employes.slice() : []),
         };
@@ -35335,6 +35370,10 @@ function panierVerserJour() {
           '<div style="flex:2;min-width:180px"><label style="font-size:.72rem;font-weight:800">✏️ Nom du barème</label><input type="text" id="pp-fiche-nom" value="' + escH(b.label || "") + '" oninput="window._ppDirty=true" style="width:100%;padding:6px 8px;border:1px solid #a5b4fc;border-radius:6px;font-weight:700"></div>' +
           '<div style="flex:1;min-width:120px"><label style="font-size:.72rem;font-weight:700">Jusqu\u2019au mois (vide = sans fin)</label><input type="month" id="pp-fiche-fin" value="' + escH(b.fin || "") + '" oninput="window._ppDirty=true" style="width:100%;padding:5px;border:1px solid #cbd5e1;border-radius:6px"></div>' +
           '</div>';
+        h += '<div style="margin-top:8px;padding:7px 9px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px">' +
+          '<label style="font-size:.72rem;font-weight:800;display:block;margin-bottom:4px">\ud83d\udcca Articles compt\u00e9s pour les tranches</label>' +
+          '<label style="font-size:.74rem;display:flex;gap:6px;align-items:center;cursor:pointer"><input type="radio" name="pp-fiche-base" value=""' + (b.base === "equipe" ? "" : " checked") + ' onchange="window._ppDirty=true"> ses <b>propres</b> pointages (monteurs)</label>' +
+          '<label style="font-size:.74rem;display:flex;gap:6px;align-items:center;cursor:pointer"><input type="radio" name="pp-fiche-base" value="equipe"' + (b.base === "equipe" ? " checked" : "") + ' onchange="window._ppDirty=true"> <b>toute la production du mois</b> (tous les travailleurs \u2014 chef d\u2019atelier, logistique\u2026)</label></div>';
         h += '<div style="display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap"><label style="font-size:.72rem;font-weight:800">👷 Travailleurs concernés</label>' +
           '<span id="pp-fiche-nb" style="font-size:.68rem;color:#4338ca"></span>' +
           '<input type="text" placeholder="Rechercher…" oninput="ppFicheFiltre(this.value)" style="margin-left:auto;padding:4px 8px;border:1px solid #cbd5e1;border-radius:14px;font-size:.72rem;width:150px"></div>';
@@ -35368,6 +35407,8 @@ function panierVerserJour() {
         if (nom) b.label = nom;
         var fin = String((document.getElementById("pp-fiche-fin") || {}).value || "");
         b.fin = fin ? fin.slice(0, 7) : "";
+        var _rb = document.querySelector('input[name="pp-fiche-base"]:checked');
+        if (_rb) b.base = _rb.value === "equipe" ? "equipe" : "";
         var ids = [];
         document.querySelectorAll("#pp-fiche-emps input.pp-fiche-emp").forEach(function (cb) { if (cb.checked) ids.push(String(cb.value)); });
         b.employes = ids;
