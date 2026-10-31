@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-31-360';
+      window.__APP_VERSION = '2026-10-31-362';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -3965,6 +3965,16 @@
                     jours ouvrables)` — ex: transport/salissure : payé seulement
                     les jours présents. Base et sursalaire : décocher.
                   </div>
+                </div>
+                <div class="form-group">
+                  <label>Taux sur le bulletin (comment la prime est calculée)</label>
+                  <select id="prime-mode-taux">
+                    <option value="">Automatique (selon le type de prime)</option>
+                    <option value="heures">Au prorata des HEURES travaillées (ex. sursalaire, responsabilité)</option>
+                    <option value="jours">Au prorata des JOURS de présence (ex. transport, salissure)</option>
+                    <option value="fixe">Montant FIXE — taux 1 (payé en entier si présent)</option>
+                  </select>
+                  <div style="font-size:0.65rem;color:var(--dim);margin-top:2px">Le taux affiché sur le bulletin suit ce choix : heures (ex. 125,25h), jours (ex. 16/22) ou 1.</div>
                 </div>
                 <div class="form-group">
                   <label>Type d'employé concerné</label>
@@ -9319,12 +9329,16 @@ function renderPrimeEmpMatrix() {
               p.type_employe || "";
             var prEl = document.getElementById("prime-prorata");
             if (prEl) prEl.checked = p.prorata !== false;
+            var mtEl = document.getElementById("prime-mode-taux");
+            if (mtEl) mtEl.value = p.mode_taux || "";
             document.getElementById("prime-label-group").style.display =
               p.type === "custom" ? "" : "none";
           }
         } else {
           var prEl2 = document.getElementById("prime-prorata");
           if (prEl2) prEl2.checked = true;
+          var mtEl2 = document.getElementById("prime-mode-taux");
+          if (mtEl2) mtEl2.value = "";
         }
         document.getElementById("modal-prime").style.display = "flex";
         try { document.querySelector("main").style.overflowY = "hidden"; } catch(eM) {}
@@ -9410,6 +9424,7 @@ function renderPrimeEmpMatrix() {
           existing.type_employe =
             document.getElementById("prime-type-employe").value || "";
           existing.prorata = prorataVal;
+          existing.mode_taux = (document.getElementById("prime-mode-taux") || {}).value || "";
           if (!existing.overrides) existing.overrides = {};
         } else {
           var typeEmp =
@@ -9439,6 +9454,7 @@ function renderPrimeEmpMatrix() {
             employes: assigned,
             type_employe: typeEmp,
             prorata: prorataVal,
+            mode_taux: (document.getElementById("prime-mode-taux") || {}).value || "",
             overrides: {},
           });
         }
@@ -31333,7 +31349,8 @@ if (normalHours > 173.33) {
             try { _extH = externHeuresPayables(emp.id, mois); } catch (eEH) {}
             if (_extH && _extH.jours > 0) {
               joursExt = _extH.jours;
-              var _hRef = jOuvB * 8;
+              /* Valeur d'une journée = forfait ÷ 30 ; d'une heure = journée ÷ 8 */
+              var _hRef = 30 * 8;
               mfPaye = _hRef > 0 ? Math.min(mfJ, Math.round((mfJ * _extH.heures) / _hRef)) : 0;
               stats.hasPointage = true;
               stats.externHeures = _extH.heures;
@@ -31354,7 +31371,7 @@ if (normalHours > 173.33) {
               label:
                 "Montant forfaitaire mensuel" +
                 (stats.externHeures
-                  ? (mfPaye < mfJ ? " (prorata " + String(Math.round(stats.externHeures * 100) / 100).replace(".", ",") + "h/" + stats.externHref + "h)" : "")
+                  ? (mfPaye < mfJ ? " (" + String(Math.round(stats.externHeures * 100) / 100).replace(".", ",") + " h × forfait÷30÷8)" : "")
                   : (joursExt > 0 && joursExt < jOuvB
                   ? " (prorata " + joursExt + "j/" + jOuvB + ")"
                   : "")),
@@ -31756,6 +31773,11 @@ if (normalHours > 173.33) {
           if (p.type === "custom") _ratioEff = 1;
           else if (_isSalaireLike && isProrata) _ratioEff = ratioH;
           else if (p.type === "ind_salissure") _ratioEff = primeRatio;
+          /* Mode de taux choisi dans la configuration de la prime (prioritaire) */
+          var _modeT = p.mode_taux || "";
+          if (_modeT === "heures") { isProrata = true; _ratioEff = ratioH; }
+          else if (_modeT === "jours") { isProrata = true; _ratioEff = primeRatio; }
+          else if (_modeT === "fixe") { isProrata = false; _ratioEff = 1; }
           var pm = isProrata ? Math.round(montant * _ratioEff) : montant;
           var _hasPres = ((stats.businessPresent || 0) > 0) || (((stats.hJour || 0) + (stats.hNuit || 0)) > 0);
           /* Sans aucune présence pointée, aucun versement (pour être payé, il faut être pointé).
@@ -31769,13 +31791,17 @@ if (normalHours > 173.33) {
             if (p.type === "ind_salissure")
               tauxDisp = stats.transportDays + "/" + stats.businessDays;
             else if (_isSalaireLike) tauxDisp = heuresEffFmt;
-            else tauxDisp = Math.round(_ratioEff * 10000) / 100 + "%";
+            else tauxDisp = stats.transportDays + "/" + stats.businessDays;
           } else if (_isSalaireLike) {
             /* Prime forfaitaire non custom : coefficient 1 quand mois complet */
             if (_hasPres && heuresEff > 0) tauxDisp = heuresEffFmt;
           }
           /* Toutes les rubriques de l'onglet Éléments de paie apparaissent sur le bulletin :
              un montant vide (0) reste saisissable à l'écran et est masqué à l'impression */
+          if (_modeT === "heures") tauxDisp = heuresEffFmt;
+          else if (_modeT === "jours") tauxDisp = stats.transportDays + "/" + stats.businessDays;
+          else if (_modeT === "fixe") tauxDisp = "1";
+          else if (!tauxDisp) tauxDisp = isProrata ? (_isSalaireLike ? heuresEffFmt : stats.transportDays + "/" + stats.businessDays) : "1";
           items.push({
             n: num,
             label: label,
@@ -33182,7 +33208,7 @@ function panierVerserJour() {
           var mfEff = (jovrM.forfait || 0) > 0 ? Math.round(jovrM.forfait) : mfJ;
           var jExt = getExternJours(emp.id, mois);
           var jOuvR = ptJoursOuvres(mois);
-          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: st.externHeures ? (String(Math.round(st.externHeures * 100) / 100).replace(".", ",") + "h/" + (st.externHref || jOuvR * 8) + "h (" + (st.joursExtern || 0) + "j)") : ((jExt > 0 ? jExt : 0) + "j/" + jOuvR), gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
+          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: st.externHeures ? (String(Math.round(st.externHeures * 100) / 100).replace(".", ",") + "h (" + (st.joursExtern || 0) + "j) × " + fmt(Math.round(mfEff / 30 / 8)) + "/h") : ((jExt > 0 ? jExt : 0) + "j/" + jOuvR), gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
           rows.push(zero("Heures Suppl."));
         }
         var _pushMontage = function () {
@@ -33674,7 +33700,7 @@ function panierVerserJour() {
               var _xd = externHeuresPayables(empId, mois);
               if (_xd.jours > 0) {
                 h += '<div class="no-print" style="margin-top:.8rem;padding:.6rem .8rem;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;font-size:.78rem">';
-                h += '<div style="font-weight:700;color:#5b21b6;margin-bottom:4px">⏱ Heures payées d’après le pointage : ' + String(_xd.heures).replace(".", ",") + ' h sur ' + (ptJoursOuvres(mois) * 8) + ' h (' + _xd.jours + ' jour(s) pointé(s))</div>';
+                h += '<div style="font-weight:700;color:#5b21b6;margin-bottom:4px">⏱ Heures payées d’après le pointage : ' + String(_xd.heures).replace(".", ",") + ' h (' + _xd.jours + ' jour(s) pointé(s)) × ' + fmt(Math.round((parseFloat(emp.montant_forfaitaire) || parseFloat(emp.salaire_base) || 0) / 30 / 8)) + ' F/h (forfait ÷ 30 jours ÷ 8 h, plafonné au forfait)</div>';
                 h += '<div style="color:#475569;margin-bottom:4px">Journée de 7 h ou plus = 8 h payées. Moins de 7 h = heures réelles, sauf si vous cochez « payer 8 h ».</div>';
                 if (_xd.courts.length) {
                   h += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
@@ -33844,6 +33870,8 @@ function panierVerserJour() {
           tCotis = 0,
           tImp = 0,
           tNet = 0,
+          tNeg = 0,
+          lNeg = [],
           tPaye = 0,
           tSolde = 0;
         var apres = lpVue === "apres";
@@ -33924,7 +33952,11 @@ function panierVerserJour() {
             tBrut += c.totals.brut;
             tCotis += cotis;
             tImp += impots;
-            tNet += c.totals.net;
+            /* Net négatif (le salarié doit plus qu'il ne gagne) : 0 à payer ce
+               mois — compté à part, sinon « Net à payer » et « Solde restant »
+               ne concordent pas alors que rien n'est payé. */
+            if ((c.totals.net || 0) < 0) { tNeg += c.totals.net; lNeg.push(_dispNamePp(emp) + " : " + fmt(c.totals.net)); }
+            else tNet += c.totals.net;
             var catBadge = "";
             var st = c.stats || {};
             var row =
@@ -34127,6 +34159,11 @@ function panierVerserJour() {
         document.getElementById("lp-tot-cotis").textContent = fmtF(tCotis);
         document.getElementById("lp-tot-impots").textContent = fmtF(tImp);
         document.getElementById("lp-tot-net").textContent = fmtF(tNet);
+        try {
+          var _ln = document.getElementById("lp-tot-net"), _nn = document.getElementById("lp-tot-neg");
+          if (!_nn && _ln) { _nn = document.createElement("div"); _nn.id = "lp-tot-neg"; _nn.style.cssText = "font-size:.66rem;color:#b91c1c;font-weight:700;margin-top:2px"; _ln.parentNode.appendChild(_nn); }
+          if (_nn) { _nn.textContent = tNeg < 0 ? "+ " + fmtF(-tNeg) + " dus par " + lNeg.length + " salarié(s) (net négatif)" : ""; _nn.title = lNeg.join("\n"); }
+        } catch (eNg) {}
         var elPaye = document.getElementById("lp-tot-paye");
         if (elPaye) elPaye.textContent = fmtF(tPaye);
         var elSolde = document.getElementById("lp-tot-solde");
@@ -43087,6 +43124,39 @@ function _dsEmbellir() {
     };
     _hookPdf(); setTimeout(_hookPdf, 3000); setTimeout(_hookPdf, 10000);
   } catch (e) {}
+})();
+</script>
+<script>
+/* ===== Dates à l'écran au format jj/mm/aaaa =====
+   Toute case dont le texte est uniquement une date « 2026-10-01 » est
+   affichée « 01/10/2026 » (les champs de saisie et les valeurs enregistrées
+   ne changent pas). */
+(function () {
+  if (window.__mdbDateFr) return;
+  window.__mdbDateFr = true;
+  var RX = /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/;
+  var SKIP = { SCRIPT: 1, STYLE: 1, TEXTAREA: 1, INPUT: 1, OPTION: 1, SELECT: 1, CODE: 1, PRE: 1 };
+  function conv(root) {
+    try {
+      if (!root) return;
+      if (root.nodeType === 3) { var p0 = root.parentNode; if (p0 && !SKIP[p0.nodeName] && !(p0.closest && p0.closest('[data-iso],[contenteditable="true"]')) && RX.test(root.nodeValue)) { var m0 = root.nodeValue.match(RX); root.nodeValue = m0[3] + '/' + m0[2] + '/' + m0[1]; } return; }
+      if (root.nodeType !== 1 || SKIP[root.nodeName]) return;
+      var w = document.createTreeWalker(root, 4, null, false), n, l = [];
+      while ((n = w.nextNode())) { if (n.nodeValue && n.nodeValue.length <= 14 && RX.test(n.nodeValue)) l.push(n); }
+      l.forEach(function (x) { var p = x.parentNode; if (!p || SKIP[p.nodeName] || (p.closest && p.closest('[data-iso],[contenteditable="true"]'))) return; var m = x.nodeValue.match(RX); x.nodeValue = m[3] + '/' + m[2] + '/' + m[1]; });
+    } catch (e) {}
+  }
+  function demarrer() {
+    if (!document.body) return setTimeout(demarrer, 300);
+    conv(document.body);
+    var file = [], prevu = false;
+    if (typeof MutationObserver !== 'function') return;
+    try { var _mo = new MutationObserver(function (ms) {
+      for (var i = 0; i < ms.length; i++) { var a = ms[i].addedNodes; for (var j = 0; j < a.length; j++) file.push(a[j]); if (ms[i].type === 'characterData') file.push(ms[i].target); }
+      if (!prevu) { prevu = true; setTimeout(function () { prevu = false; var f = file; file = []; for (var k = 0; k < f.length; k++) conv(f[k]); }, 0); }
+    }); if (_mo && typeof _mo.observe === 'function') _mo.observe(document.body, { childList: true, subtree: true, characterData: true }); } catch (eMo) {}
+  }
+  demarrer();
 })();
 </script>
 </body>
