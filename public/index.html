@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-337';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-338';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16495,6 +16495,7 @@ function _renderNomenclature() {
     html += '<td>' + nbP + ' p\u00e9riode(s)</td>';
     if (!readonly) {
       html += '<td><button class="btn-icon" onclick="openNomenclatureModal(\'' + a.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
+      html += '<button class="btn-icon" onclick="nomFusionnerArticle(\'' + a.id + '\')" title="Fusionner dans un autre article (doublon) : documents et pointages transférés" style="font-weight:800">\u21c4</button>';
       html += '<button class="btn-icon danger" onclick="deleteNomenclature(\'' + a.id + '\')" title="Supprimer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></td>';
     }
     html += '</tr>';
@@ -16975,6 +16976,125 @@ function _nomUsages(id) {
   out.sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
   return out;
 }
+/* ===== FUSION DE DEUX ARTICLES (doublon) =====
+   L'article « source » (ex. 114) est fondu dans l'article « cible » (ex. PAL114) :
+   - BC / BL / factures / pre-financements : les lignes pointent vers la cible ;
+   - pointage montage (Paie) : les quantites du source sont AJOUTEES a la cible
+     (meme employe, meme jour) ou la ligne passe sous le code cible ;
+   - l'article source est retire de la Nomenclature et des articles de montage. */
+function _nomNormCode(c) { return String(c || '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function _nomFusionApercu(srcId, dstId) {
+  var arts = getArticles() || [], src = null, dst = null;
+  arts.forEach(function (a) { if (a && a.id === srcId) src = a; if (a && a.id === dstId) dst = a; });
+  var r = { src: src, dst: dst, docs: _nomUsages(srcId), pt: 0, ptQte: 0, ptCumul: 0 };
+  try {
+    var py = dbObj('mdb_paye'), cs = _nomNormCode(src && src.code), cd = _nomNormCode(dst && dst.code), cible = {};
+    (py.pointageMontage || []).forEach(function (l) { if (l && _nomNormCode(l.article_code) === cd) cible[l.employee_id + '|' + l.date] = true; });
+    (py.pointageMontage || []).forEach(function (l) {
+      if (!l || !cs || _nomNormCode(l.article_code) !== cs) return;
+      r.pt++; r.ptQte += parseFloat(l.quantite) || 0;
+      if (cible[l.employee_id + '|' + l.date]) r.ptCumul++;
+    });
+  } catch (e) {}
+  return r;
+}
+function nomFusionnerArticle(srcId) {
+  var arts = getArticles() || [], src = null;
+  arts.forEach(function (a) { if (a && a.id === srcId) src = a; });
+  if (!src) { toast('Article introuvable', 'error'); return; }
+  var opts = arts.filter(function (a) { return a && a.id !== srcId; })
+    .sort(function (a, b) { return String(a.code || '').localeCompare(String(b.code || '')); })
+    .map(function (a) { return '<option value="' + escH(a.id) + '">' + escH((a.code || '') + ' — ' + (a.designation || '')) + '</option>'; }).join('');
+  var h = '<div style="font-size:13px;line-height:1.5">' +
+    '<div style="padding:10px 12px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;margin-bottom:10px">Article à <b>supprimer</b> (doublon) : <b>' + escH(src.code || '') + '</b> — ' + escH(src.designation || '') + '</div>' +
+    '<label style="font-weight:700;display:block;margin-bottom:4px">Le fondre dans l’article à <b>garder</b> :</label>' +
+    '<input type="search" id="nomFusQ" placeholder="🔍 Filtrer (code, désignation)…" oninput="var q=this.value.toLowerCase();[].forEach.call(document.getElementById(\'nomFusDst\').options,function(o){o.hidden=q&&o.text.toLowerCase().indexOf(q)===-1;})" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:6px">' +
+    '<select id="nomFusDst" size="8" onchange="_nomFusionMaj(\'' + escH(srcId) + '\')" style="width:100%;padding:4px;border:1px solid #cbd5e1;border-radius:8px">' + opts + '</select>' +
+    '<div id="nomFusApercu" style="margin-top:10px;font-size:12.5px;color:#475569">Choisissez l’article à garder.</div></div>';
+  openFormModal('⇄ Fusionner deux articles', h,
+    '<button class="btn btn-outline" onclick="closeModal()">Annuler</button><button class="btn btn-primary" id="nomFusBtn" disabled onclick="_nomFusionExecuter(\'' + escH(srcId) + '\')">Fusionner</button>', '640px');
+  /* proposition automatique : meme code sans prefixe (114 -> PAL114) ou meme dimensions */
+  try {
+    var cs = _nomNormCode(src.code), best = null, bestSc = 0;
+    var sig = function (d) { var x = String(d || '').toUpperCase(); try { x = x.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) {} return x.replace(/[^A-Z0-9]/g, '').replace(/S(?=\d|$)/g, ''); };
+    arts.forEach(function (a) {
+      if (!a || a.id === srcId) return;
+      var ca = _nomNormCode(a.code), sc = 0;
+      if (sig(a.designation) && sig(a.designation) === sig(src.designation)) sc += 10;
+      if ((a.typeArticle || '') === (src.typeArticle || '')) sc += 4;
+      if (cs && ca !== cs && ca.slice(-cs.length) === cs) sc += 3;
+      if (sc > bestSc) { bestSc = sc; best = a; }
+    });
+    if (bestSc < 10) best = null;
+    if (best) { var sel = document.getElementById('nomFusDst'); sel.value = best.id; _nomFusionMaj(srcId); }
+  } catch (eB) {}
+}
+function _nomFusionMaj(srcId) {
+  var sel = document.getElementById('nomFusDst'), box = document.getElementById('nomFusApercu'), btn = document.getElementById('nomFusBtn');
+  if (!sel || !box) return;
+  var r = _nomFusionApercu(srcId, sel.value);
+  if (!r.dst) { box.innerHTML = 'Choisissez l’article à garder.'; if (btn) btn.disabled = true; return; }
+  var nb = {}; r.docs.forEach(function (u) { nb[u.type] = (nb[u.type] || 0) + 1; });
+  box.innerHTML = '<div style="padding:10px 12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px">' +
+    '<b>' + escH(r.src.code) + '</b> → <b>' + escH(r.dst.code) + '</b> (' + escH(r.dst.designation || '') + ')<ul style="margin:6px 0 0 18px;padding:0">' +
+    '<li>Documents transférés : ' + (r.docs.length ? Object.keys(nb).map(function (k) { return nb[k] + ' ' + k; }).join(', ') : 'aucun') + '</li>' +
+    '<li>Pointage montage : <b>' + r.pt + '</b> ligne(s), <b>' + r.ptQte + '</b> pièce(s) ajoutées à ' + escH(r.dst.code) + (r.ptCumul ? ' (' + r.ptCumul + ' jour(s) où les deux étaient pointés : quantités additionnées)' : '') + '</li>' +
+    '<li>L’article <b>' + escH(r.src.code) + '</b> est ensuite supprimé.</li></ul></div>';
+  if (btn) btn.disabled = false;
+}
+function _nomFusionExecuter(srcId) {
+  var sel = document.getElementById('nomFusDst'); if (!sel || !sel.value) return;
+  var r = _nomFusionApercu(srcId, sel.value);
+  if (!r.src || !r.dst) return;
+  if (!confirm('Fusionner ' + r.src.code + ' dans ' + r.dst.code + ' ?\n\nDocuments et pointages de ' + r.src.code + ' passent sur ' + r.dst.code + ', puis ' + r.src.code + ' est supprimé.')) return;
+  var now = Date.now(), nDoc = 0, nPt = 0;
+  /* 1. Documents */
+  [['mdb_bc', getBCs], ['mdb_bl', getBLs], ['mdb_factures', getFactures], ['mdb_prefinancement', function () { return dbArr('mdb_prefinancement'); }]].forEach(function (kv) {
+    var arr = kv[1]() || [], ch = false;
+    arr.forEach(function (d) {
+      if (!d || !d.lignes) return; var t = false;
+      d.lignes.forEach(function (l) { if (l && l.articleId === srcId) { l.articleId = r.dst.id; if (l.code !== undefined) l.code = r.dst.code; t = true; } });
+      if (t) { d.updatedAt = now; ch = true; nDoc++; }
+    });
+    if (ch) { DB.set(kv[0], arr); try { markDirty(kv[0]); } catch (e) {} }
+  });
+  /* 2. Pointage montage (Paie) */
+  try {
+    var py = dbObj('mdb_paye'), cs = _nomNormCode(r.src.code), cd = _nomNormCode(r.dst.code);
+    var pm = Array.isArray(py.pointageMontage) ? py.pointageMontage : [];
+    var tomb = Array.isArray(py.pointageMontage_tombstones) ? py.pointageMontage_tombstones : (py.pointageMontage_tombstones = []);
+    var cible = {};
+    pm.forEach(function (l) { if (l && _nomNormCode(l.article_code) === cd) cible[l.employee_id + '|' + l.date] = l; });
+    var garde = [];
+    pm.forEach(function (l) {
+      if (!l || _nomNormCode(l.article_code) !== cs) { garde.push(l); return; }
+      nPt++;
+      tomb.push('cle:pt:' + l.employee_id + '|' + l.date + '|' + cs + '@' + now);
+      var c = cible[l.employee_id + '|' + l.date];
+      if (c) {
+        c.quantite = (parseFloat(c.quantite) || 0) + (parseFloat(l.quantite) || 0);
+        c.updatedAt = now + 1; delete c._seal;
+        if (l.id) tomb.push(String(l.id));
+      } else {
+        l.article_code = r.dst.code; l.updatedAt = now + 1; delete l._seal;
+        cible[l.employee_id + '|' + l.date] = l;
+        garde.push(l);
+      }
+    });
+    py.pointageMontage = garde;
+    /* article de montage du doublon retire de la Paie */
+    if (Array.isArray(py.articlesMontage)) py.articlesMontage = py.articlesMontage.filter(function (a) { return _nomNormCode(a && a.code) !== cs; });
+    var at = Array.isArray(py.articlesMontage_tombstones) ? py.articlesMontage_tombstones : (py.articlesMontage_tombstones = []);
+    at.push({ code: String(r.src.code || '').trim().toLowerCase(), deletedAt: now });
+    DB.set('mdb_paye', py); try { markDirty('mdb_paye'); } catch (e2) {}
+  } catch (eP) { console.warn('[fusion article] paie', eP); }
+  /* 3. Suppression de l'article doublon (plus utilise nulle part) */
+  try { closeModal(); } catch (eC) {}
+  var ok = supprimerNomenclature(srcId, 'groupe');
+  try { pushToCloud(); } catch (eU) {}
+  toast(r.src.code + ' fusionné dans ' + r.dst.code + ' : ' + nDoc + ' document(s), ' + nPt + ' ligne(s) de pointage' + (ok === true ? '' : ' (article non supprimé : vérifiez)'), ok === true ? 'success' : 'error');
+  try { renderNomenclature(); } catch (eR) {}
+}
 function _nomOuvrirDoc(type, id) {
   try { closeModal(); } catch (e) {}
   setTimeout(function () {
@@ -16995,7 +17115,7 @@ function _nomAfficherBlocages(liste) {
     b.usages.forEach(function (u) { nb[u.type] = (nb[u.type] || 0) + 1; });
     h += '<div style="border:1px solid #e2e8f0;border-radius:10px;margin-bottom:10px;overflow:hidden">' +
       '<div style="padding:8px 12px;background:#f8fafc;font-weight:800;font-size:13px">' + escH(a.code || b.id) + ' <span style="font-weight:500;color:#475569">\u2014 ' + escH(a.designation || '') + '</span>' +
-      '<span style="float:right;font-size:11.5px;font-weight:700;color:#b91c1c">' + Object.keys(nb).map(function (k) { return nb[k] + ' ' + k; }).join(' \u00b7 ') + '</span></div>' +
+      '<span style="float:right;font-size:11.5px;font-weight:700;color:#b91c1c">' + Object.keys(nb).map(function (k) { return nb[k] + ' ' + k; }).join(' \u00b7 ') + ' <button class="btn btn-sm btn-outline" style="margin-left:8px" onclick="closeModal();setTimeout(function(){nomFusionnerArticle(\'' + escH(b.id) + '\')},60)" title="C\u2019est un doublon : tout transf\u00e9rer sur le bon article puis supprimer celui-ci">\u21c4 Fusionner dans un autre article</button></span></div>' +
       '<div style="max-height:260px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:#64748b;font-size:10.5px;text-transform:uppercase"><th style="padding:6px 10px;text-align:left">Document</th><th style="padding:6px 10px;text-align:left">N\u00b0</th><th style="padding:6px 10px;text-align:left">Date</th><th style="padding:6px 10px;text-align:left">Client</th><th style="padding:6px 10px;text-align:right">Qt\u00e9</th><th style="padding:6px 10px;text-align:left">Statut</th><th></th></tr></thead><tbody>' +
       b.usages.map(function (u) {
         var c = coul[u.type] || '#475569';
