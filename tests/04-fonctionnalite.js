@@ -3161,6 +3161,7 @@ attenduPrefixe: 'OK'
       DB.set('mdb_operationsCaisse', ops);
       window._apValFilter = 'valides';
       window._apFilterMonth = moisC;
+      window._apActiveTab = 'tous';
       renderAcomptesPrets();
       var box = document.getElementById('content');
       var h = box ? (box.innerHTML || '') : '';
