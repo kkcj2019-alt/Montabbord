@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-336';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-337';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -10254,7 +10254,19 @@ function migrateClientTypes() {
   }
   if (changed) DB.set('mdb_clients', clients);
 }
-function getArticles() { return dbArr('mdb_nomenclature'); }
+/* Un article supprime ne doit jamais reapparaitre, meme si une autre appli
+   (Paie, Exploitation) a recopie une ancienne liste du cloud. */
+var _nomTombCache = { t: 0, set: null };
+function getArticles() {
+  var arr = dbArr('mdb_nomenclature');
+  try {
+    var now = Date.now();
+    if (!_nomTombCache.set || now - _nomTombCache.t > 2000) { _nomTombCache.set = (getTombstones() || {})['mdb_nomenclature'] || {}; _nomTombCache.t = now; }
+    var ts = _nomTombCache.set;
+    if (ts && Array.isArray(arr) && arr.some(function (a) { return a && a.id && ts[a.id]; })) arr = arr.filter(function (a) { return !(a && a.id && ts[a.id]); });
+  } catch (eT) {}
+  return arr;
+}
 function getBLs() { return dbArr('mdb_bl'); }
 function getFactures() { return dbArr('mdb_factures'); }
 function getProformas() { return dbArr('mdb_proformas'); }
@@ -16900,7 +16912,13 @@ function supprimerNomenclature(id, dejaConfirme) {
     return '';
   };
   var _bloque = _utilise();
-  if (_bloque) { toast('Supprim\u00e9 : ' + id + ' \u2014 impossible, il est utilis\u00e9 dans un ' + _bloque + '.', 'error'); return false; }
+  if (_bloque) {
+    /* Detail precis : chaque document (BC, BL, facture, pre-financement) qui
+       utilise l'article, avec un bouton pour l'ouvrir directement. */
+    if (dejaConfirme === 'groupe') { return { bloque: true, usages: _nomUsages(id) }; }
+    _nomAfficherBlocages([{ id: id, usages: _nomUsages(id) }]);
+    return false;
+  }
   var _faire = function() {
     var articles = getArticles(); var result = [];
     var suppr = null;
@@ -16938,6 +16956,57 @@ function supprimerNomenclature(id, dejaConfirme) {
   } catch(e) { toast('Erreur: ' + e.message, 'error'); return false; }
   return true;
 }
+/* Ou un article est-il utilise ? Liste de { type, id, numero, date, client, qte, statut }. */
+function _nomUsages(id) {
+  var out = [];
+  var nomCli = function (cid) { try { var c = getClientById(cid); return c ? (c.nom || c.raisonSociale || c.name || '') : ''; } catch (e) { return ''; } };
+  var scan = function (type, arr, champDate) {
+    (arr || []).forEach(function (d) {
+      if (!d || !d.lignes) return;
+      var q = 0, trouve = false;
+      d.lignes.forEach(function (l) { if (l && l.articleId === id) { trouve = true; q += parseFloat(l.quantite || l.qte || 0) || 0; } });
+      if (trouve) out.push({ type: type, id: d.id, numero: d.numero || '', date: d[champDate] || d.date || '', client: nomCli(d.clientId), qte: q, statut: d.statut || '' });
+    });
+  };
+  try { scan('BC', getBCs(), 'dateBC'); } catch (e1) {}
+  try { scan('BL', getBLs(), 'dateLivraison'); } catch (e2) {}
+  try { scan('Facture', getFactures(), 'dateEmission'); } catch (e3) {}
+  try { scan('Pr\u00e9-financement', dbArr('mdb_prefinancement'), 'dateDemande'); } catch (e4) {}
+  out.sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
+  return out;
+}
+function _nomOuvrirDoc(type, id) {
+  try { closeModal(); } catch (e) {}
+  setTimeout(function () {
+    if (type === 'BC') openBCModal(id);
+    else if (type === 'BL') openBLModal(id);
+    else if (type === 'Facture') openFactureModal(id);
+    else openPrefinancementModal(id);
+  }, 50);
+}
+function _nomAfficherBlocages(liste) {
+  var arts = getArticles() || [], parId = {};
+  arts.forEach(function (a) { if (a && a.id) parId[a.id] = a; });
+  var coul = { 'BC': '#2563eb', 'BL': '#0891b2', 'Facture': '#16a34a', 'Pr\u00e9-financement': '#9333ea' };
+  var h = '<p style="font-size:13px;margin:0 0 10px">Ces articles ne peuvent pas \u00eatre supprim\u00e9s : ils figurent sur les documents ci-dessous. Retirez-les (ou remplacez-les) dans ces documents, puis supprimez l\u2019article.</p>';
+  liste.forEach(function (b) {
+    var a = parId[b.id] || {};
+    var nb = {};
+    b.usages.forEach(function (u) { nb[u.type] = (nb[u.type] || 0) + 1; });
+    h += '<div style="border:1px solid #e2e8f0;border-radius:10px;margin-bottom:10px;overflow:hidden">' +
+      '<div style="padding:8px 12px;background:#f8fafc;font-weight:800;font-size:13px">' + escH(a.code || b.id) + ' <span style="font-weight:500;color:#475569">\u2014 ' + escH(a.designation || '') + '</span>' +
+      '<span style="float:right;font-size:11.5px;font-weight:700;color:#b91c1c">' + Object.keys(nb).map(function (k) { return nb[k] + ' ' + k; }).join(' \u00b7 ') + '</span></div>' +
+      '<div style="max-height:260px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:#64748b;font-size:10.5px;text-transform:uppercase"><th style="padding:6px 10px;text-align:left">Document</th><th style="padding:6px 10px;text-align:left">N\u00b0</th><th style="padding:6px 10px;text-align:left">Date</th><th style="padding:6px 10px;text-align:left">Client</th><th style="padding:6px 10px;text-align:right">Qt\u00e9</th><th style="padding:6px 10px;text-align:left">Statut</th><th></th></tr></thead><tbody>' +
+      b.usages.map(function (u) {
+        var c = coul[u.type] || '#475569';
+        return '<tr style="border-top:1px solid #eef2f7"><td style="padding:6px 10px"><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:800;color:' + c + ';background:' + c + '14;border:1px solid ' + c + '40">' + escH(u.type) + '</span></td>' +
+          '<td style="padding:6px 10px;font-weight:700">' + escH(u.numero || '-') + '</td><td style="padding:6px 10px">' + escH(u.date ? fmtDate(u.date) : '-') + '</td><td style="padding:6px 10px">' + escH(u.client || '-') + '</td>' +
+          '<td style="padding:6px 10px;text-align:right">' + (u.qte ? escH(String(u.qte)) : '-') + '</td><td style="padding:6px 10px;color:#64748b">' + escH(u.statut || '') + '</td>' +
+          '<td style="padding:6px 10px;text-align:right"><button class="btn btn-sm btn-outline" onclick="_nomOuvrirDoc(\'' + escH(u.type) + '\',\'' + escH(u.id) + '\')">Ouvrir \u2192</button></td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+  });
+  openFormModal('Suppression impossible \u2014 article(s) utilis\u00e9(s)', h, '<button class="btn btn-primary" onclick="closeModal()">Compris</button>', '900px');
+}
 /* Suppression groupée des articles cochés dans la Nomenclature. */
 function supprimerNomenclatureSelection() {
   var boxes = document.querySelectorAll('#nomBody input[data-nom-sel]:checked');
@@ -16951,9 +17020,10 @@ function supprimerNomenclatureSelection() {
   });
   if (!confirm2('Supprimer ' + ids.length + ' article(s) de la nomenclature ?\n\n' + noms.join(', ') + '\n\nLes produits finis seront aussi retirés de l’Exploitation.')) return;
   var n = 0, blocages = [];
-  ids.forEach(function (id) { if (supprimerNomenclature(id, true)) n++; else blocages.push(id); });
-  toast(n + ' article(s) supprimé(s)' + (blocages.length ? ' — ' + blocages.length + ' impossible(s) (utilisés ailleurs)' : ''), blocages.length ? 'error' : 'success');
+  ids.forEach(function (id) { var r = supprimerNomenclature(id, 'groupe'); if (r === true) n++; else if (r && r.bloque) blocages.push({ id: id, usages: r.usages }); else blocages.push({ id: id, usages: [] }); });
+  toast(n + ' article(s) supprimé(s)' + (blocages.length ? ' — ' + blocages.length + ' impossible(s) (utilisés dans des documents)' : ''), blocages.length ? 'error' : 'success');
   renderNomenclature();
+  if (blocages.length) _nomAfficherBlocages(blocages.filter(function (b) { return b.usages.length; }));
 }
 function nomToutCocher(el) {
   try {
@@ -34958,6 +35028,16 @@ function csCollFraisManual(el) {
   if (typeof updateCsTotal === 'function') updateCsTotal();
 }
 
+/* Affichage seulement : « CAISSE KKCJ - KANGA KOUAME » -> « Caisse KKCJ - Kanga Kouame »
+   (sigles courts et mots avec chiffres gardes en majuscules). */
+function _csNomPropre(t) {
+  t = String(t == null ? '' : t);
+  if (!t || t === '-' || t !== t.toUpperCase()) return t;
+  return t.replace(/[A-Za-z\u00C0-\u017F0-9']+/g, function (w) {
+    if (/\d/.test(w) || (w.length <= 4 && !/[AEIOUY\u00C0-\u00DD]/.test(w)) || /^(KKCJ|SARL|SA|CI|DG|OM|MTN)$/.test(w)) return w;
+    return w.charAt(0) + w.slice(1).toLowerCase();
+  });
+}
 function renderCaisseIn(el) {
   if (window._seeAllCaisses === undefined) window._seeAllCaisses = false;
   /* Dédoublonnage des lignes collectives identiques (throttlé : ce rendu est
@@ -35422,21 +35502,27 @@ function renderCaisseIn(el) {
   if (!_modalOnly) {
   html += '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><span id="csFilterInfo" style="font-size:11px;color:var(--gray-500)"></span></div>';
   html += '<div id="csBulkBar" style="display:none;align-items:center;gap:8px;padding:6px 10px;background:#fef3c7;border:1px solid #fcd34d;border-radius:6px;margin-bottom:6px;font-size:12px"><span id="csBulkCount">0 sélectionnés</span><button class="btn" onclick="openCorrigerPeriodeModal()" style="margin-left:auto;background:#f59e0b;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">⇄ Changer période</button><button class="btn" onclick="convertSelectedToSolde()" title="Convertir les pièces cochées : Acompte vers Solde OU Solde vers Acompte, avec le mois de votre choix (date, montant, caisse inchangés)" style="background:#0d9488;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">⇄ Acompte ⇄ Solde</button><button class="btn" onclick="validerSelectionCaisse()" title="Valider uniquement les brouillons cochés" style="background:var(--success);color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">✔ Valider sélection</button><button class="btn" onclick="printSelectedCaisse()" style="background:#f97316;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">🖨️ Imprimer sélection</button><button class="btn" onclick="deleteSelectedCaisse()" style="background:var(--danger);color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:700">Supprimer sélection</button><button class="btn btn-outline" onclick="clearCaisseSelection()" style="padding:4px 10px;font-size:11px">Annuler</button></div>';
-   html += '<style>#tresorerieContent table{border-collapse:collapse !important;font-size:11px !important;font-variant-numeric:tabular-nums}'
-     + '#tresorerieContent th,#tresorerieContent td{border:1px solid #cbd5e1 !important;padding:4px 8px !important;font-size:11px !important;vertical-align:middle}'
-     + '#tresorerieContent thead th{background:#15803d !important;color:#ffffff !important;font-weight:700;font-size:10.5px !important;text-transform:uppercase;letter-spacing:.4px;border-color:#166534 !important;position:sticky;top:0;z-index:2}'
-     + '#tresorerieContent tbody tr:nth-child(even) td{background:#f6faf7}'
-     + '#tresorerieContent tbody tr:hover td{background:#eef7f0}'
-     + '#tresorerieContent tbody tr.cs-trf-recu td{background:#dcfce7 !important}'
-     + '#tresorerieContent tbody tr.cs-trf-envoye td{background:#ffedd5 !important}'
-     + '#tresorerieContent tbody tr.cs-appro-recu td{background:#dbeafe !important}'
-     + '#tresorerieContent tbody tr.cs-trf-recu:hover td{background:#bbf7d0 !important}'
-     + '#tresorerieContent tbody tr.cs-trf-envoye:hover td{background:#fed7aa !important}'
-     + '#tresorerieContent tbody tr.cs-appro-recu:hover td{background:#bfdbfe !important}'
-     + '#tresorerieContent tbody tr.cs-trf-recu td:first-child{box-shadow:inset 5px 0 0 #16a34a}'
-     + '#tresorerieContent tbody tr.cs-trf-envoye td:first-child{box-shadow:inset 5px 0 0 #ea580c}'
-     + '#tresorerieContent tbody tr.cs-appro-recu td:first-child{box-shadow:inset 5px 0 0 #2563eb}'
-     + '#tresorerieContent td.text-right,#tresorerieContent th.text-right{font-variant-numeric:tabular-nums}'
+   html += '<style>#tresorerieContent table{border-collapse:separate !important;border-spacing:0;font-size:11.5px !important;font-variant-numeric:tabular-nums}'
+     + '#tresorerieContent th,#tresorerieContent td{border:0 !important;border-bottom:1px solid #e8edf3 !important;padding:6px 9px !important;font-size:11.5px !important;vertical-align:middle;line-height:1.35}'
+     + '#tresorerieContent td+td{border-left:1px solid #f1f4f8 !important}'
+     + '#tresorerieContent thead th{background:#1e293b !important;color:#f1f5f9 !important;font-weight:700;font-size:10px !important;text-transform:uppercase;letter-spacing:.06em;border-bottom:2px solid #15803d !important;position:sticky;top:0;z-index:2;padding:9px 9px !important}'
+     + '#tresorerieContent tbody td{background:#fff}'
+     + '#tresorerieContent tbody tr:nth-child(even) td{background:#f8fafc}'
+     + '#tresorerieContent tbody tr:hover td{background:#f0fdf4 !important}'
+     + '#tresorerieContent tbody tr.cs-trf-recu td{background:#f3fbf6 !important}'
+     + '#tresorerieContent tbody tr.cs-trf-envoye td{background:#fffaf4 !important}'
+     + '#tresorerieContent tbody tr.cs-appro-recu td{background:#f5f8ff !important}'
+     + '#tresorerieContent tbody tr.cs-trf-recu:hover td,#tresorerieContent tbody tr.cs-trf-envoye:hover td,#tresorerieContent tbody tr.cs-appro-recu:hover td{background:#eef6f1 !important}'
+     + '#tresorerieContent tbody tr.cs-trf-recu td:first-child{box-shadow:inset 3px 0 0 #16a34a}'
+     + '#tresorerieContent tbody tr.cs-trf-envoye td:first-child{box-shadow:inset 3px 0 0 #ea580c}'
+     + '#tresorerieContent tbody tr.cs-appro-recu td:first-child{box-shadow:inset 3px 0 0 #2563eb}'
+     + '#tresorerieContent td.text-right,#tresorerieContent th.text-right{font-variant-numeric:tabular-nums;letter-spacing:.01em}'
+     + '#tresorerieContent tbody a{text-decoration:none !important;color:#1d4ed8 !important;font-weight:600}'
+     + '#tresorerieContent tbody a:hover{text-decoration:underline !important}'
+     + '#tresorerieContent .table-wrap{border:1px solid #dbe2ea;border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.05)}'
+     + '.cs-pill{display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:999px;font-size:9.5px;font-weight:800;letter-spacing:.03em;border:1px solid}'
+     + '.cs-mob-top .btn-outline.btn-sm{color:#334155 !important;border-color:#cbd5e1 !important;background:#fff !important;font-weight:600 !important;height:28px}'
+     + '.cs-mob-top .btn-outline.btn-sm:hover{background:#f1f5f9 !important;border-color:#94a3b8 !important}'
      + '#tresorerieContent table button.btn-icon svg{width:12px;height:12px}</style>';
    html += '<div class="table-wrap"><div class="table-responsive"><table style="font-size:12px"><thead><tr><th style="width:28px;text-align:center"><input type="checkbox" id="csSelectAll" onchange="toggleSelectAllCaisse(this)"></th><th style="cursor:pointer;user-select:none;white-space:nowrap" onclick="sortCaisseTable(\'date\')" title="Cliquer pour trier par date">Date <span id="csSortDateIcon"></span></th><th style="width:64px;cursor:pointer;user-select:none" onclick="sortCaisseTable(\'piece\')" title="Cliquer pour trier par N\u00b0 de pi\u00e8ce">Pi\u00e8ce <span id="csSortPieceIcon"></span></th><th style="width:52px;font-size:10px">Code</th><th style="min-width:175px">Libell\u00e9</th><th style="width:80px;text-align:right;color:#bbf7d0;white-space:nowrap">Entr\u00e9e</th><th style="width:80px;text-align:right;color:#fecaca;white-space:nowrap">Sortie</th><th style="width:70px;text-align:right;color:#ddd6fe;white-space:nowrap">Charge</th><th style="width:62px;text-align:right;color:#fde68a;white-space:nowrap">Frais</th><th class="cs-col-spf" style="width:66px;text-align:right;color:#ddd6fe;white-space:nowrap">S+F</th><th>B\u00e9n\u00e9ficiaire</th><th>Ex\u00e9cutant</th><th style="white-space:nowrap">Moyen / N\u00b0</th><th>Remettant</th><th style="min-width:150px">Observations</th><th style="text-align:right;font-weight:700;color:#bfdbfe;white-space:nowrap">Solde</th><th style="width:74px">Actions</th></tr></thead><tbody id="csOpsBody">';
   ops.sort(function(a, b) { var da = (a.date || '') + ' ' + (a.heure || '00:00'); var db = (b.date || '') + ' ' + (b.heure || '00:00'); return da.localeCompare(db); });
@@ -35482,18 +35568,18 @@ function renderCaisseIn(el) {
     html += '<tr class="' + _rowCls + '" data-imprime="' + (o.imprime ? 'imprime' : 'non_imprime') + '" data-brouillon="' + (o.brouillon ? 'brouillon' : 'valide') + '" data-status="' + (isTransfertOp(o) ? (o.status || 'en_attente') : 'approuve') + '" data-imported="' + (o.imported ? 'importe' : 'non_importe') + '" data-search="' + escH(searchStr) + '" data-charge-type="' + chargeType + '" data-entree="' + (entreeVal || 0) + '" data-sortie="' + (sortieVal || 0) + '" data-charge="' + (o.montantCharge || 0) + '" data-frais="' + (o.frais || 0) + '" data-date="' + escH((o.date || '') + ' ' + (o.heure || '')) + '" data-piece="' + escH(o.numeroPiece || '') + '"' + (rowStyle ? ' style="' + rowStyle + '"' : '') + '>';
     html += '<td style="text-align:center"><input type="checkbox" class="cs-cb" data-id="' + o.id + '" onchange="csCbChange(this)" style="width:14px;height:14px"></td>';
     html += '<td>' + fmtDateShort(o.date) + '</td>';
-    html += '<td style="color:var(--gray-500);white-space:nowrap;font-size:10px">' + escH(o.numeroPiece || '-') + '</td>';
+    html += '<td style="color:#475569;white-space:nowrap;font-size:10.5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">' + escH(o.numeroPiece || '-') + '</td>';
     html += '<td class="fw-600" style="font-size:10px">' + escH(codeLabel) + '</td>';
     var _csBadge = (window._seeAllCaisses && _cNom) ? ('<span class="badge" style="font-size:9px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;margin-right:5px;display:inline-block;vertical-align:middle" title="Caisse : ' + escH(_cNom) + '">&#x1F3E2; ' + escH(_cNom) + '</span> ') : '';
     var _isPoolPending = !!(o.pendingDetail || o.apType === 'pool' || (o.collective && !o.beneficiaireId));
     var _poolBadge = _isPoolPending ? '<span class="badge" style="background:#fef3c7;color:#b45309;border:1px solid #fcd34d;font-weight:700;margin-left:4px;font-size:10px;padding:2px 7px;border-radius:999px">\u23F3 \u00c0 r\u00e9partir</span>' : '';
-    html += '<td style="min-width:160px">' + _csBadge + escH(o.libelle || '-') + _poolBadge + (o.typeOp === 'transfert' ? '<div style="margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.3px;color:#fff;background:' + (o.sens === 'entree' ? '#16a34a' : '#ea580c') + '">' + (o.sens === 'entree' ? '\u2193 REÇU' : '\u2191 ENVOYÉ') + '</span><span style="font-size:10px;font-weight:700;color:' + (o.sens === 'entree' ? '#15803d' : '#c2410c') + '">' + transfertLabel + '</span></div>' : (_rowCls === 'cs-appro-recu' ? '<div style="margin-top:3px"><span style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.3px;color:#fff;background:#2563eb">\uD83D\uDCE5 APPRO REÇU</span></div>' : '')) + transfertBadge + '</td>';
+    html += '<td style="min-width:160px">' + _csBadge + escH(o.libelle || '-') + _poolBadge + (o.typeOp === 'transfert' ? '<div style="margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span class="cs-pill" style="' + (o.sens === 'entree' ? 'color:#15803d;background:#ecfdf3;border-color:#a7f3d0' : 'color:#c2410c;background:#fff7ed;border-color:#fed7aa') + '">' + (o.sens === 'entree' ? '\u2193 REÇU' : '\u2191 ENVOYÉ') + '</span><span style="font-size:10px;font-weight:700;color:' + (o.sens === 'entree' ? '#15803d' : '#c2410c') + '">' + transfertLabel + '</span></div>' : (_rowCls === 'cs-appro-recu' ? '<div style="margin-top:3px"><span class="cs-pill" style="color:#1d4ed8;background:#eff6ff;border-color:#bfdbfe">\u2193 APPRO REÇU</span></div>' : '')) + transfertBadge + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--success);white-space:nowrap">' + (entreeVal > 0 ? '+ ' + fmtMoneyNoDevise(entreeVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--danger);white-space:nowrap">' + (sortieVal > 0 ? '- ' + fmtMoneyNoDevise(sortieVal) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoneyNoDevise(o.montantCharge) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--warning);white-space:nowrap">' + ((o.frais && o.frais > 0) ? fmtMoneyNoDevise(o.frais) : '') + '</td>';
     html += '<td class="text-right fw-600 cs-col-spf-td" style="color:var(--purple);white-space:nowrap">' + ((sortieVal + (o.frais || 0)) > 0 ? fmtMoneyNoDevise(sortieVal + (o.frais || 0)) : '') + '</td>';
-    html += '<td style="font-size:11px">';
+    html += '<td style="font-size:11px;min-width:150px">';
     if (o.beneficiaireType === 'fournisseur' && o.beneficiaireId) {
       html += '<a href="#" onclick="event.preventDefault();showBenefAccount(\'fournisseur\',\'' + o.beneficiaireId + '\')" style="color:var(--primary);text-decoration:underline;cursor:pointer">' + escH(csBenefDisplay(o) || '-') + '</a>';
     } else if (o.beneficiaireType === 'client' && o.beneficiaireId && o.beneficiaireId !== 'company_self') {
@@ -35508,11 +35594,11 @@ function renderCaisseIn(el) {
       html += '-';
     }
     html += '</td>';
-    html += '<td style="font-size:10.5px">' + escH(csFormatPersonAbrev(o.executant)) + '</td>';
+    html += '<td style="font-size:10.5px;min-width:110px">' + escH(_csNomPropre(csFormatPersonAbrev(o.executant))) + '</td>';
     var _moyB = csMoyenBase(o.moyenPaiement || o.moyen || '');
     var _moyenTxt = (_moyB || '-') + (o.numeroTransaction && _moyB !== 'Esp\u00e8ce' ? ('/' + o.numeroTransaction) : '');
     html += '<td style="font-size:10.5px;white-space:nowrap">' + escH(_moyenTxt) + '</td>';
-    html += '<td style="font-size:10.5px">' + escH(csFormatPersonAbrev(o.remettant)) + '</td>';
+    html += '<td style="font-size:10.5px;min-width:150px;color:#334155">' + escH(_csNomPropre(csFormatPersonAbrev(o.remettant))) + '</td>';
     html += '<td style="font-size:10.5px;min-width:150px;max-width:240px;overflow:hidden;text-overflow:ellipsis" title="' + escH(csObsEnrichie(o)) + '">' + escH(csObsEnrichie(o)) + '</td>';
     var sv = soldeMap[o.id];
     html += '<td class="text-right fw-600" style="color:' + ((sv || 0) >= 0 ? 'var(--success)' : 'var(--danger)') + ';white-space:nowrap">' + ((sv !== undefined && sv !== null) ? fmtMoneyNoDevise(sv) : '') + '</td>';
