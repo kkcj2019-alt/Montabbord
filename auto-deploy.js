@@ -124,7 +124,31 @@ function runInner() {
 /* Mise en ligne Cloudflare avec 3 essais : une coupure reseau pendant l'envoi
    ne doit plus laisser l'ancienne version en ligne sans qu'on le sache. */
 var deployEnAttente = false;
+/* GARDE DE VERSION : on ne met JAMAIS en ligne une version plus ancienne que
+   celle deja en ligne (cas du 31/10 : une ancienne copie du projet a ecrase le
+   site avec une version cassee). Comparaison des numeros __APP_VERSION. */
+function _versionDe(txt) { var m = String(txt || '').match(/__APP_VERSION\s*=\s*'(\d{4}-\d{2}-\d{2}-\d+)'/); return m ? m[1] : ''; }
+function _plusAncienne(a, b) {
+  var A = String(a).split('-').map(Number), B = String(b).split('-').map(Number);
+  if (A.length !== 4 || B.length !== 4) return false;
+  for (var i = 0; i < 4; i++) { if (A[i] !== B[i]) return A[i] < B[i]; }
+  return false;
+}
+function versionLocaleOk() {
+  var fichiers = ['index.html', 'paye.html'];
+  for (var i = 0; i < fichiers.length; i++) {
+    var f = fichiers[i], loc = '', enLigne = '';
+    try { loc = _versionDe(fs.readFileSync(path.join(ROOT, 'public', f), 'utf8')); } catch (e) {}
+    try { enLigne = _versionDe(cp.execSync('curl -s -m 20 "https://montabbord.pages.dev/' + f + '?x=' + Date.now() + '"', { stdio: 'pipe', windowsHide: true, maxBuffer: 50 * 1024 * 1024 }).toString()); } catch (e2) {}
+    if (loc && enLigne && _plusAncienne(loc, enLigne)) {
+      log('ARRET : ' + f + ' local (' + loc + ') est PLUS ANCIEN que la version en ligne (' + enLigne + '). Rien n\'est publie. Mettez ce dossier a jour (git pull) avant.');
+      return false;
+    }
+  }
+  return true;
+}
 function deployerCloudflare() {
+  if (!versionLocaleOk()) { deployEnAttente = false; return false; }
   for (var essai = 1; essai <= 3; essai++) {
     try {
       var out = sh('npx.cmd --yes wrangler@4 pages deploy public --project-name montabbord --branch main --commit-dirty=true', { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });

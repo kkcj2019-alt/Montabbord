@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-398';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-399';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -60384,6 +60384,132 @@ function _csVueSync() {
       '<td style="padding:7px 10px;text-align:right;color:#b91c1c">' + f(R.valide) + '</td><td style="padding:7px 10px;text-align:right;color:#b45309">' + f(R.attente) + '</td></tr></tfoot></table></div></details>';
     return h;
   };
+})();
+</script>
+<script>
+/* ===== GARDE DES DONNÉES (les 2 applis) =====
+   1) ALERTE ROUGE si des saisies n'ont pas pu partir au cloud depuis plus de
+      2 minutes (avant : un petit badge discret, facile à manquer).
+   2) GARDE DE VERSION : si ce poste reçoit une version PLUS ANCIENNE que celle
+      qu'il a déjà utilisée (ancienne copie remise en ligne), alerte rouge.
+   3) COPIE DE SECOURS automatique dans le navigateur (toutes les heures,
+      6 dernières gardées) : téléchargeable depuis l'alerte ou avec
+      mdbSecoursTelecharger() — rien ne peut plus se perdre en silence. */
+(function () {
+  if (window.__mdbGarde) return; window.__mdbGarde = true;
+  var APP = /paye\.html/i.test(location.pathname) ? 'paye' : (/production\.html/i.test(location.pathname) ? 'production' : 'index');
+  var LS = function (k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return null; } };
+
+  /* ---------- 3) Copies de secours (IndexedDB) ---------- */
+  function idb(cb) {
+    try {
+      var rq = indexedDB.open('mdb_secours', 1);
+      rq.onupgradeneeded = function () { try { rq.result.createObjectStore('snaps', { keyPath: 'ts' }); } catch (e) {} };
+      rq.onsuccess = function () { cb(rq.result); };
+      rq.onerror = function () { cb(null); };
+    } catch (e) { cb(null); }
+  }
+  function capture() {
+    var d = {};
+    try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (k && k.indexOf('mdb_') === 0 && !/^mdb_backup/i.test(k)) d[k] = localStorage.getItem(k); } } catch (e) {}
+    return d;
+  }
+  function sauver(raison) {
+    idb(function (db) {
+      if (!db) return;
+      try {
+        var tx = db.transaction('snaps', 'readwrite'), st = tx.objectStore('snaps');
+        st.put({ ts: Date.now(), app: APP, raison: raison || 'auto', version: window.__APP_VERSION || '', data: capture() });
+        var rq = st.getAllKeys();
+        rq.onsuccess = function () { var ks = (rq.result || []).sort(); while (ks.length > 6) { st.delete(ks.shift()); } };
+        LS('mdb_secoursDernier', String(Date.now()));
+      } catch (e) {}
+    });
+  }
+  window.mdbSecoursTelecharger = function () {
+    idb(function (db) {
+      var fin = function (snap) {
+        var obj = snap || { ts: Date.now(), app: APP, raison: 'immédiat', version: window.__APP_VERSION || '', data: capture() };
+        try {
+          var b = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+          var a = document.createElement('a'); a.href = URL.createObjectURL(b);
+          var dt = new Date(obj.ts); a.download = 'copie-secours-montabbord-' + dt.toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.json';
+          document.body.appendChild(a); a.click(); setTimeout(function () { a.remove(); }, 1000);
+        } catch (e) { alert('Téléchargement impossible : ' + e.message); }
+      };
+      /* toujours la copie la plus FRAÎCHE : celle de maintenant */
+      fin(null);
+    });
+  };
+  window.mdbSecoursListe = function (cb) { idb(function (db) { if (!db) return cb && cb([]); var rq = db.transaction('snaps').objectStore('snaps').getAll(); rq.onsuccess = function () { cb && cb((rq.result || []).map(function (s) { return { ts: s.ts, date: new Date(s.ts).toLocaleString('fr-FR'), app: s.app, version: s.version, cles: Object.keys(s.data || {}).length }; })); }; }); };
+  setTimeout(function () { var d = +LS('mdb_secoursDernier') || 0; if (Date.now() - d > 3600000) sauver('auto'); }, 20000);
+  setInterval(function () { sauver('auto'); }, 3600000);
+
+  /* ---------- Bandeau rouge ---------- */
+  function bandeau(id, html) {
+    var b = document.getElementById(id);
+    if (!html) { if (b) b.remove(); return; }
+    if (!b) {
+      b = document.createElement('div'); b.id = id;
+      b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:2147483600;background:#b91c1c;color:#fff;font:700 13px/1.4 system-ui,Segoe UI,Arial,sans-serif;padding:9px 14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center;box-shadow:0 3px 12px rgba(0,0,0,.35)';
+      document.body.appendChild(b);
+    }
+    if (b.getAttribute('data-h') !== html) { b.innerHTML = html; b.setAttribute('data-h', html); }
+  }
+  var BTN = 'style="background:#fff;color:#b91c1c;border:none;border-radius:6px;padding:5px 12px;font-weight:800;cursor:pointer"';
+
+  /* ---------- 2) Garde de version ---------- */
+  try {
+    var cur = String(window.__APP_VERSION || ''), cle = 'mdb_versionMax_' + APP, max = LS(cle) || '';
+    if (/^\d{4}-\d{2}-\d{2}-\d+$/.test(cur)) {
+      var num = function (v) { var m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})-(\d+)$/); return m ? [+m[1], +m[2], +m[3], +m[4]] : null; };
+      var plusAncien = function (a, b) { a = num(a); b = num(b); if (!a || !b) return false; for (var i = 0; i < 4; i++) { if (a[i] !== b[i]) return a[i] < b[i]; } return false; };
+      if (max && plusAncien(cur, max)) {
+        window.__mdbVersionAncienne = true;
+        var go = function () { bandeau('mdbGardeVersion', '⛔ ATTENTION : une VERSION ANCIENNE de l’application est en ligne (' + cur + ') alors que ce poste a déjà utilisé la ' + max + '. Évitez de saisir et prévenez l’administrateur. <button ' + BTN + ' onclick="location.reload(true)">Recharger</button> <button ' + BTN + ' onclick="localStorage.setItem(\'' + cle + '\',\'' + cur + '\');document.getElementById(\'mdbGardeVersion\').remove()">C’est voulu</button>'); };
+        if (document.body) go(); else document.addEventListener('DOMContentLoaded', go);
+      } else LS(cle, cur);
+    }
+  } catch (eV) {}
+
+  /* ---------- 1) Saisies pas encore envoyées ---------- */
+  function enAttente() {
+    var n = 0, horsLigne = false;
+    try {
+      if (APP === 'index') {
+        var p = JSON.parse(LS('mdb_pendingSync') || '{}') || {}; n = Object.keys(p).length;
+        horsLigne = LS('mdb_offlineMode') === '1';
+      } else if (APP === 'paye') {
+        var st = window._payeSyncEtat || {};
+        if (st.echec && (!st.lastOk || st.echec > st.lastOk)) n = 1;
+      }
+    } catch (e) {}
+    return { n: n, horsLigne: horsLigne };
+  }
+  window.mdbEnvoyerMaintenant = function () {
+    try {
+      if (APP === 'index') {
+        LS('mdb_offlineMode', null); window._offlineMode = false;
+        var p = JSON.parse(LS('mdb_pendingSync') || '{}') || {}; for (var k in p) { try { _dirtyKeys[k] = true; } catch (e) {} }
+        if (typeof pushToCloud === 'function') pushToCloud();
+      } else if (APP === 'paye' && typeof pushPayeCloud === 'function') pushPayeCloud(true);
+    } catch (e) {}
+    setTimeout(verifier, 4000);
+  };
+  function verifier() {
+    var e = enAttente();
+    if (!e.n) { LS('mdb_gardeDepuis', null); bandeau('mdbGardeSync', null); return; }
+    var dep = +LS('mdb_gardeDepuis') || 0;
+    if (!dep) { LS('mdb_gardeDepuis', String(Date.now())); return; }
+    var min = Math.floor((Date.now() - dep) / 60000);
+    if (Date.now() - dep < 120000) return;
+    bandeau('mdbGardeSync', '⚠️ ' + (APP === 'index' ? e.n + ' rubrique(s) de saisies' : 'Des saisies de paie') + ' PAS ENCORE ENVOYÉE(S) AU CLOUD depuis ' + min + ' min' + (e.horsLigne ? ' (mode hors-ligne)' : '') +
+      ' — elles sont gardées sur CE poste : ne videz pas le navigateur. <button ' + BTN + ' onclick="mdbEnvoyerMaintenant()">Envoyer maintenant</button> <button ' + BTN + ' onclick="mdbSecoursTelecharger()">Télécharger une copie de secours</button>');
+  }
+  setInterval(verifier, 15000);
+  setTimeout(verifier, 8000);
+  /* Copie de secours aussi juste avant de fermer s'il reste des envois en attente */
+  window.addEventListener('pagehide', function () { try { if (enAttente().n) sauver('fermeture-en-attente'); } catch (e) {} });
 })();
 </script>
 </body>
