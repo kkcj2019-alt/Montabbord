@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-361';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-366';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -21780,7 +21780,10 @@ function _dedupliquerAcomptesPrets() {
 function _purgeOrphanAcomptes(){
   var _opsAll = getOperationsCaisse() || [];
   var _opsById = {}; for(var _oi=0; _oi<_opsAll.length; _oi++) if(_opsAll[_oi].id) _opsById[_opsAll[_oi].id]=_opsAll[_oi];
-  var _opsByPiece = {}; for(var _opi=0; _opi<_opsAll.length; _opi++) if(_opsAll[_opi].numeroPiece) _opsByPiece[_opsAll[_opi].numeroPiece]=_opsAll[_opi];
+  /* Par n° de pièce : UNIQUEMENT les pièces d'acompte/prêt/solde. Avant, un prêt
+     pouvait être raccroché à n'importe quelle pièce du même numéro (ex. le prêt
+     BOLOU 70 700 accroché à un transfert de 4 900 000). */
+  var _opsByPiece = {}; for(var _opi=0; _opi<_opsAll.length; _opi++) { var _oP = _opsAll[_opi]; if(!_oP || !_oP.numeroPiece) continue; var _natP = (typeof _apNatureOp === 'function') ? _apNatureOp(_oP) : (_oP.apType || ''); if (!_natP && !/^SOLDE_/i.test(String(_oP.code || ''))) continue; (_opsByPiece[_oP.numeroPiece] = _opsByPiece[_oP.numeroPiece] || []).push(_oP); }
   var _acs = dbArr('mdb_acomptesPrets');
   var _toRemove = [];
   var _repaired = 0;
@@ -21790,8 +21793,9 @@ function _purgeOrphanAcomptes(){
     // Réparation : le lien interne a été perdu (bug historique sur le rattachement
     // de la pièce) mais la pièce existe en caisse par son numéro => on ré-accroche.
     var _linkedOp = _a.caisseOpId ? _opsById[_a.caisseOpId] : null;
-    if (!_linkedOp && _a.numeroPiece && _opsByPiece[_a.numeroPiece]) {
-      _linkedOp = _opsByPiece[_a.numeroPiece];
+    var _candsP = (!_linkedOp && _a.numeroPiece && _opsByPiece[_a.numeroPiece]) ? _opsByPiece[_a.numeroPiece].filter(function (c) { return (!c.beneficiaireId || !_a.employeId || c.beneficiaireId === _a.employeId) && (!c.acomptePretId || c.acomptePretId === _a.id); }) : [];
+    if (!_linkedOp && _candsP.length === 1) {
+      _linkedOp = _candsP[0];
       _a.caisseOpId = _linkedOp.id;
       if (!_a.provenance) _a.provenance = 'caisse';
       _repaired++;
@@ -46710,6 +46714,38 @@ function dbxSupprimerCoches() {
   dbxLancer();
   try { if (currentPage === 'tresorerie') setTimeout(renderTresorerie, 50); } catch (e) {}
 }
+/* Correction demandée le 31/10/2026 : BOLOU a bien reçu un prêt de 70 700 F
+   (08/10/2026). La ligne avait été raccrochée par erreur à un transfert de
+   4 900 000 F puis supprimée. On la recrée proprement (même échéancier), et la
+   pièce PRET de 25 250 F est rattachée à son vrai prêt (frais médicaux). */
+(function () {
+  var SRC = 'id_1791512916630_ga2mn1', OP25 = 'id_1792815847395_m0rcsi', AP25 = 'id_1793296876559_q7mrce';
+  function tenterB() {
+    try {
+      if (typeof currentUser === 'undefined' || !currentUser || !currentUser.id) return;
+      if ((typeof _loadingCloud !== 'undefined' && _loadingCloud) || (typeof _receivingSnapshot !== 'undefined' && _receivingSnapshot)) return;
+      var apL = dbArr('mdb_acomptesPrets') || [], ops = getOperationsCaisse() || [];
+      if (ops.length < 50 || apL.length < 20) return;
+      var deja = apL.some(function (a) { return a && a.restaureDe === SRC; });
+      var ch = false;
+      if (!deja) {
+        var src = apL.find(function (a) { return a && a.id === SRC; });
+        var base = src ? JSON.parse(JSON.stringify(src)) : { type: 'pret', employeId: 'id_1787921944446_ov8ho9', employeNom: 'BOLOU', montant: 70700, dureeMois: 10, montantMensuel: 7070, moisDeduction: '2026-10', date: '2026-10-08', notes: 'PRET/SALAIRE PERSONNEL', motif: 'PRET/SALAIRE PERSONNEL', statut: 'en_cours', echeances: [] };
+        base.id = DB.genId(); base.restaureDe = SRC; base.caisseOpId = ''; base.numeroPiece = ''; base.provenance = 'manuel';
+        base.notes = (base.notes || 'PRET/SALAIRE PERSONNEL') + ' (pièce de caisse à saisir)';
+        base.updatedAt = Date.now();
+        if (!Array.isArray(base.echeances) || !base.echeances.length) { base.echeances = []; for (var i = 0; i < 10; i++) { var y = 2026 + Math.floor((9 + i) / 12), m = ((9 + i) % 12) + 1; base.echeances.push({ mois: y + '-' + String(m).padStart(2, '0'), montant: 7070, preleve: false }); } }
+        apL = apL.filter(function (a) { return !(a && a.id === SRC); });
+        apL.push(base); ch = true;
+        DB.set('mdb_acomptesPrets', apL); try { markDirty('mdb_acomptesPrets'); } catch (e) {}
+      }
+      var op = ops.find(function (o) { return o && o.id === OP25; });
+      if (op && op.acomptePretId !== AP25) { op.acomptePretId = AP25; op.updatedAt = Date.now(); DB.set('mdb_operationsCaisse', ops); try { markDirty('mdb_operationsCaisse'); } catch (e) {} ch = true; }
+      if (ch) { try { if (typeof schedulePush === 'function') schedulePush(); } catch (e) {} try { toast('Prêt BOLOU 70 700 F rétabli (10 × 7 070 F). Pensez à saisir sa pièce de caisse.'); } catch (e) {} }
+    } catch (e) { try { console.warn('[BOLOU 70700]', e); } catch (e2) {} }
+  }
+  setInterval(tenterB, 25000); setTimeout(tenterB, 9000);
+})();
 /* Correction demandée le 31/10/2026 : 9 prêts scolaires saisis 2 fois le 29/10
    (pièces KKCJ2609207 à KKCJ2609215). On garde les prêts d'origine (avec
    mensualité). S'exécute une fois les données chargées, sur le 1er poste ouvert ;
