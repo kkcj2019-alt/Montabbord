@@ -3842,8 +3842,47 @@ function _syncFiltreTombstonesGenerique(key, arr) {
     else if (key === 'mdb_proformas') out = removeByTombstone('mdb_deletedProformas', out);
     else if (key === 'mdb_tauxPerteJour') out = removeByTombstone('mdb_deletedTauxPerte', out);
     else if (key === 'mdb_stocks') out = removeByTombstone('mdb_deletedStocks', out);
+    else if (key === 'mdb_nomenclature') out = _nomFiltrerCodesSupprimes(out);
   } catch (eF) {}
   return out;
+}
+/* Nomenclature : les pierres tombales PAR CODE (mdb_nomenclature_code) sont
+   la memoire faisant foi d'une suppression volontaire d'article. La protection
+   par id seul ne suffit pas : une copie cloud / une vieille sauvegarde peut
+   ramener le meme article sous un AUTRE id, et l'article « revenait » alors
+   toujours. Ce filtre s'applique a l'affichage, a la purge, a la fusion et
+   aux echanges cloud. */
+function _nomFiltrerCodesSupprimes(arr) {
+  if (!Array.isArray(arr) || !arr.length) return arr;
+  var tc = null;
+  try { tc = (getTombstones() || {})['mdb_nomenclature_code'] || {}; } catch (e) { return arr; }
+  if (!tc || !Object.keys(tc).length) return arr;
+  var changed = false;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var r = arr[i];
+    var c = r ? String(r.code || '').trim().toUpperCase() : '';
+    if (c && Object.prototype.hasOwnProperty.call(tc, c)) { changed = true; continue; }
+    out.push(r);
+  }
+  return changed ? out : arr;
+}
+/* Leve la pierre tombale d'un code : obligatoire quand l'utilisateur RE-CREE
+   un article supprime (sinon son nouveau article serait masque partout). */
+function leverTombstoneNomenclatureCode(code) {
+  var c = String(code || '').trim().toUpperCase();
+  if (!c) return;
+  try {
+    var t = getTombstones();
+    var sec = t['mdb_nomenclature_code'];
+    if (sec && Object.prototype.hasOwnProperty.call(sec, c)) {
+      delete sec[c];
+      if (!Object.keys(sec).length) delete t['mdb_nomenclature_code'];
+      localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(t));
+      if (currentUser && currentUser.id) markDirty(TOMBSTONE_KEY);
+    }
+  } catch (e) {}
+  try { _nomTombCache.t = 0; _nomTombCache.set = null; } catch (e2) {}
 }
 /* Reception d'une cle hors DATA_KEYS (miroir de la boucle principale :
    fusion si sale, union prudente + filtre tombstones, jamais de vide sur
@@ -8108,6 +8147,10 @@ function confirmImportMerge() {
         }
         var cleTop = cleDonnee.indexOf('.') === -1 ? cleDonnee : '';
         if (cleTop && it.id && itemSupprime(cleTop, it.id, '')) { stats.skipped++; continue; }
+        /* Nomenclature : la pierre tombale PAR CODE prime aussi — un article
+           supprime volontairement ne doit pas revenir via une vieille
+           sauvegarde ou une copie cloud, meme sous un autre id. */
+        if (cleTop === 'mdb_nomenclature' && it.code && typeof _nomCodeSupprime === 'function' && _nomCodeSupprime(it.code)) { stats.skipped++; continue; }
         try { if (tombPt && typeof _mdbTombPtSupprime === 'function' && _mdbTombPtSupprime(tombPt, it)) { stats.skipped++; try { window._fusPtSuppr.push({ cle: cleDonnee, ligne: it }); } catch (eP) {} continue; } } catch (eT) {}
         var kk = cleLigne(it);
         if (!kk) {
@@ -10256,14 +10299,37 @@ function migrateClientTypes() {
 }
 /* Un article supprime ne doit jamais reapparaitre, meme si une autre appli
    (Paie, Exploitation) a recopie une ancienne liste du cloud. */
-var _nomTombCache = { t: 0, set: null };
+var _nomTombCache = { t: 0, set: null, codes: null, aIds: false, aCodes: false };
 function getArticles() {
   var arr = dbArr('mdb_nomenclature');
   try {
     var now = Date.now();
-    if (!_nomTombCache.set || now - _nomTombCache.t > 2000) { _nomTombCache.set = (getTombstones() || {})['mdb_nomenclature'] || {}; _nomTombCache.t = now; }
-    var ts = _nomTombCache.set;
-    if (ts && Array.isArray(arr) && arr.some(function (a) { return a && a.id && ts[a.id]; })) arr = arr.filter(function (a) { return !(a && a.id && ts[a.id]); });
+    if (!_nomTombCache.set || now - _nomTombCache.t > 2000) {
+      var _tombAll = getTombstones() || {};
+      _nomTombCache.set = _tombAll['mdb_nomenclature'] || {};
+      _nomTombCache.codes = _tombAll['mdb_nomenclature_code'] || {};
+      _nomTombCache.aIds = Object.keys(_nomTombCache.set).length > 0;
+      _nomTombCache.aCodes = Object.keys(_nomTombCache.codes).length > 0;
+      _nomTombCache.t = now;
+    }
+    var ts = _nomTombCache.set, tc = _nomTombCache.codes;
+    /* Filtre PAR ID et PAR CODE : une suppression volontaire ne doit jamais
+       revenir, meme recopiee depuis le cloud ou une sauvegarde avec un id
+       different (bug « je supprime, ça revient toujours »). */
+    if (Array.isArray(arr) && (_nomTombCache.aIds || _nomTombCache.aCodes) &&
+        arr.some(function (a) {
+          if (!a) return false;
+          if (_nomTombCache.aIds && a.id && ts[a.id]) return true;
+          if (_nomTombCache.aCodes) { var c = String(a.code || '').trim().toUpperCase(); if (c && Object.prototype.hasOwnProperty.call(tc, c)) return true; }
+          return false;
+        })) {
+      arr = arr.filter(function (a) {
+        if (!a) return true;
+        if (_nomTombCache.aIds && a.id && ts[a.id]) return false;
+        if (_nomTombCache.aCodes) { var c = String(a.code || '').trim().toUpperCase(); if (c && Object.prototype.hasOwnProperty.call(tc, c)) return false; }
+        return true;
+      });
+    }
   } catch (eT) {}
   return arr;
 }
@@ -16380,6 +16446,14 @@ function renderNomenclature() {
 }
 function _renderNomenclature() {
   if (window._nomFilterType === undefined || window._nomFilterType === null) { window._nomFilterType = 'produit_fini'; }
+  /* AUTO-REPARATION : un article supprime qui serait revenu (copie cloud,
+     vieille sauvegarde, onglet perime, id different) est purge ici du
+     stockage meme — et la purge repart vers le cloud via DB.set. */
+  try {
+    var _rawNom = dbArr('mdb_nomenclature');
+    var _propreNom = _nomFiltrerCodesSupprimes(_rawNom);
+    if (_propreNom !== _rawNom) DB.set('mdb_nomenclature', _propreNom);
+  } catch (ePurgeNom) {}
   try { reparerArticlesManquantsNomenclature(); } catch (eRep) {}
   try { harmoniserNomenclature(); } catch (eH) {}
   try { syncSemiFinisFromExploitation(); } catch (eS1) {}
@@ -16864,6 +16938,9 @@ function saveNomenclature(id) {
       toast('Un article avec le code « ' + code + ' » existe déjà dans la nomenclature !', 'error');
       return;
     }
+    /* Re-creation d'un code deja supprime : on leve la pierre tombale,
+       sinon le nouveau article serait masque partout comme « supprime ». */
+    try { leverTombstoneNomenclatureCode(cNorm); } catch (eLevNom) {}
   }
   /* Dimensions : Longueur x Largeur x Epaisseur. Cet article est la SOURCE des
    produits finis : l'exploitation reprend ce trio pour sa colonne Dimension
@@ -16925,6 +17002,10 @@ function supprimerNomenclature(id, dejaConfirme) {
     var articles = getArticles(); var result = [];
     var suppr = null;
     for (var i = 0; i < articles.length; i++) { if (articles[i].id !== id) result.push(articles[i]); else suppr = articles[i]; }
+    /* Pierre tombale PAR CODE en PREMIER : c'est la petite ecriture qui
+       survivra meme si l'ecriture volumineuse de la nomenclature echoue
+       (quota localStorage plein) — sans elle l'article « revenait ». */
+    if (suppr && suppr.code) { try { addTombstones('mdb_nomenclature_code', [String(suppr.code).trim().toUpperCase()]); } catch (eTcNom) {} }
     if (suppr && (suppr.typeArticle === 'produit_fini' || suppr.categorie === 'finished') && typeof triSyncSupprimerProduitFini === 'function') { triSyncSupprimerProduitFini(suppr.code || id); }
     /* Produit fini : mémorisé comme refusé pour la synchro ET marqueur
        anti-ressurrection, sinon l'exploitation le recrée. */
@@ -16948,6 +17029,9 @@ function supprimerNomenclature(id, dejaConfirme) {
     }
     DB.set('mdb_nomenclature', result);
     if (suppr) { try { _nomPropagerSuppression(suppr); } catch (ePg) {} }
+    /* Pousser TOUT DE SUITE la suppression : moins de fenetre pendant laquelle
+       le cloud (qui contient encore l'article) peut le renvoyer. */
+    try { if (currentUser && currentUser.id) pushToCloud(); } catch (ePcNom) {}
     return true;
   };
   if (dejaConfirme) { var _ok = _faire(); if (_ok) { toast('Article supprimé'); renderNomenclature(); } return _ok; }
@@ -20733,6 +20817,7 @@ function saveCreateImportArticle(idx) {
   var code = (document.getElementById('newArtCode').value || '').trim();
   var desig = (document.getElementById('newArtDesig').value || '').trim();
   if (!code || !desig) { toast('Code et désignation requis', 'error'); return; }
+  try { leverTombstoneNomenclatureCode(code); } catch (eLevImp) {}
   var typeArt = document.getElementById('newArtType').value;
   var prix = parseFloat(document.getElementById('newArtPrix').value) || 0;
   var articles = getArticles();
