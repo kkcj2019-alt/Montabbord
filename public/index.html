@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-340';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-341';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2630,6 +2630,14 @@ function pushToCloud() {
         data[k] = (k === 'mdb_production' && typeof iProdFusionAvantEnvoi === 'function')
           ? iProdFusionAvantEnvoi(cloud[k], lv)
           : mergeObjetPartage(cloud[k], lv);
+        /* Codes d'articles supprimes / leves : la date la plus recente gagne
+           (sinon un poste perime re-supprimait un article re-cree). */
+        try {
+          if (k === TOMBSTONE_KEY && cloud[k]['mdb_nomenclature_code'] && data[k]['mdb_nomenclature_code']) {
+            var _cc = cloud[k]['mdb_nomenclature_code'], _dc = data[k]['mdb_nomenclature_code'];
+            for (var _ck in _cc) { if (Object.prototype.hasOwnProperty.call(_cc, _ck) && Math.abs(+_cc[_ck] || 0) > Math.abs(+_dc[_ck] || 0)) _dc[_ck] = _cc[_ck]; }
+          }
+        } catch (eTc) {}
         if (k === 'mdb_paye' && data[k] && typeof data[k] === 'object' && !Array.isArray(data[k])) {
           /* Jamais de doublons metier sur le pointage (reconstructions multi-postes). */
           ['pointage', 'pointageMontage'].forEach(function (sec) {
@@ -3862,7 +3870,7 @@ function _nomFiltrerCodesSupprimes(arr) {
   for (var i = 0; i < arr.length; i++) {
     var r = arr[i];
     var c = r ? String(r.code || '').trim().toUpperCase() : '';
-    if (c && Object.prototype.hasOwnProperty.call(tc, c)) { changed = true; continue; }
+    if (c && (+tc[c] || 0) > 0) { changed = true; continue; }
     out.push(r);
   }
   return changed ? out : arr;
@@ -3872,18 +3880,21 @@ function _nomFiltrerCodesSupprimes(arr) {
 function leverTombstoneNomenclatureCode(code) {
   var c = String(code || '').trim().toUpperCase();
   if (!c) return;
+  /* On NE retire PAS la cle : la fusion des pierres tombales (cloud, autres
+     postes) la remettrait. On la marque LEVEE avec une date negative ;
+     la plus recente des deux (suppression / levee) gagne partout. */
   try {
     var t = getTombstones();
     var sec = t['mdb_nomenclature_code'];
-    if (sec && Object.prototype.hasOwnProperty.call(sec, c)) {
-      delete sec[c];
-      if (!Object.keys(sec).length) delete t['mdb_nomenclature_code'];
+    if (sec && Object.prototype.hasOwnProperty.call(sec, c) && (+sec[c] || 0) > 0) {
+      sec[c] = -Date.now();
       localStorage.setItem(TOMBSTONE_KEY, JSON.stringify(t));
       if (currentUser && currentUser.id) markDirty(TOMBSTONE_KEY);
     }
   } catch (e) {}
   try { _nomTombCache.t = 0; _nomTombCache.set = null; } catch (e2) {}
 }
+
 /* Reception d'une cle hors DATA_KEYS (miroir de la boucle principale :
    fusion si sale, union prudente + filtre tombstones, jamais de vide sur
    du plein). Rend true si le local a change. */
@@ -3960,6 +3971,12 @@ function mergeTombstonesFromCloud(cloudT) {
     for (var id in cloudT[k]) {
       /* Remise a zero locale (restauration) : les suppressions du cloud plus anciennes sont obsoletes. */
       if (localReset && typeof cloudT[k][id] === 'number' && cloudT[k][id] <= localReset) continue;
+      /* Codes d'articles : la plus RECENTE des deux (suppression > 0 / levee < 0) gagne. */
+      if (k === 'mdb_nomenclature_code' && cloudT[k].hasOwnProperty(id) && local[k][id] !== undefined) {
+        var _cv = +cloudT[k][id] || 0, _lv = +local[k][id] || 0;
+        if (Math.abs(_cv) > Math.abs(_lv)) { local[k][id] = _cv; changed = true; }
+        continue;
+      }
       if (cloudT[k].hasOwnProperty(id) && !local[k][id]) { local[k][id] = cloudT[k][id]; changed = true; }
     }
   }
@@ -10332,13 +10349,13 @@ function getArticles() {
         arr.some(function (a) {
           if (!a) return false;
           if (_nomTombCache.aIds && a.id && ts[a.id]) return true;
-          if (_nomTombCache.aCodes) { var c = String(a.code || '').trim().toUpperCase(); if (c && Object.prototype.hasOwnProperty.call(tc, c)) return true; }
+          if (_nomTombCache.aCodes) { var c = String(a.code || '').trim().toUpperCase(); if (c && (+tc[c] || 0) > 0) return true; }
           return false;
         })) {
       arr = arr.filter(function (a) {
         if (!a) return true;
         if (_nomTombCache.aIds && a.id && ts[a.id]) return false;
-        if (_nomTombCache.aCodes) { var c = String(a.code || '').trim().toUpperCase(); if (c && Object.prototype.hasOwnProperty.call(tc, c)) return false; }
+        if (_nomTombCache.aCodes) { var c = String(a.code || '').trim().toUpperCase(); if (c && (+tc[c] || 0) > 0) return false; }
         return true;
       });
     }
@@ -17062,7 +17079,7 @@ function supprimerNomenclature(id, dejaConfirme) {
 function _nomCodeSupprime(code) {
   var c = String(code || '').trim().toUpperCase();
   if (!c) return false;
-  try { return !!((getTombstones() || {})['mdb_nomenclature_code'] || {})[c]; } catch (e) { return false; }
+  try { return (+(((getTombstones() || {})['mdb_nomenclature_code'] || {})[c]) || 0) > 0; } catch (e) { return false; }
 }
 function _nomPropagerSuppression(art) {
   var code = String(art && art.code || '').trim();
