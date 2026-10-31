@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-386';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-390';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -1966,12 +1966,30 @@ function isSyncable(key) {
    un tableau fusionne par identifiant (local gagne pour le meme id), le reste
    vient du local. Un appareil perime ne peut donc plus ecraser une section
    qu'il ne connait pas — c'etait la cause des pointages disparus. */
+/* Primes de paie (primesSpec) : la version la plus RÉCENTE de chaque prime
+   gagne (updatedAt), d'où qu'elle vienne. Avant, la copie locale de l'appli
+   principale gagnait toujours : une copie périmée (ex. Prime de salissure sans
+   GABOU) écrasait l'affectation faite dans Salaire -> l'employé « disparaissait »
+   de la prime après actualisation. */
+function _mdbTsPrime(x) { var u = x && x.updatedAt; if (typeof u === 'number') return u; var t = Date.parse(u || ''); return isNaN(t) ? 0 : t; }
+function mergePrimesSpecRecent(a, b) {
+  var byId = {}, ordre = [];
+  [a || [], b || []].forEach(function (arr) {
+    arr.forEach(function (x) {
+      if (!x || x.id === undefined || x.id === null) return;
+      if (!(x.id in byId)) { ordre.push(x.id); byId[x.id] = x; }
+      else if (_mdbTsPrime(x) > _mdbTsPrime(byId[x.id])) byId[x.id] = x;
+    });
+  });
+  return ordre.map(function (id) { return byId[id]; });
+}
 function mergeObjetPartage(cloud, local) {
   var out = {}, k;
   for (k in cloud) if (Object.prototype.hasOwnProperty.call(cloud, k)) out[k] = cloud[k];
   for (k in local) {
     if (!Object.prototype.hasOwnProperty.call(local, k)) continue;
     var lv = local[k], cv = cloud[k];
+    if (k === 'primesSpec' && Array.isArray(lv) && Array.isArray(cv)) { out[k] = mergePrimesSpecRecent(cv, lv); continue; }
     if (Array.isArray(lv) && Array.isArray(cv)) {
       /* Detecter si les elements ont un champ id (donnees transactionnelles)
          ou non (donnees de reference : categories, fonctions, services...).
@@ -2377,7 +2395,7 @@ function mergePayeRecu(_lpP, _npP) {
     var _sk3 = _grdK[_gk2];
     var _lvArr = Array.isArray(_lpP[_sk3]) ? _lpP[_sk3] : [];
     var _cvArr = Array.isArray(_npP[_sk3]) ? _npP[_sk3] : [];
-    _lpP[_sk3] = (_sk3 === 'pointage' || _sk3 === 'pointageMontage') ? syncUnionRecent(_cvArr, _lvArr) : syncUnionTableaux(_lvArr, _cvArr, true);
+    _lpP[_sk3] = (_sk3 === 'pointage' || _sk3 === 'pointageMontage') ? syncUnionRecent(_cvArr, _lvArr) : (_sk3 === 'primesSpec' ? mergePrimesSpecRecent(_cvArr, _lvArr) : syncUnionTableaux(_lvArr, _cvArr, true));
     delete _npP[_sk3];
   }
   var _evtK = { articlesMontage: true };
@@ -22876,7 +22894,7 @@ function _natRowApGlobal(a) {
    passe. Vaut pour acomptes ET prêts. Par défaut : 'nonvalides'. */
 function apPasseFiltreValide(a) {
   if (!window._apValFilter || (window._apValFilter !== 'valides' && window._apValFilter !== 'tous' && window._apValFilter !== 'nonvalides')) {
-    window._apValFilter = 'nonvalides';
+    window._apValFilter = 'tous';
   }
   var f = window._apValFilter;
   if (a === null) return f !== 'valides';
@@ -22974,6 +22992,48 @@ function _apSauverLigne(ligne) {
   DB.set('mdb_acomptesPrets', tout);
   try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e) {}
 }
+/* Plusieurs prêts pour le même employé : UNE ligne de cumul (prêts,
+   mensualités, remboursé, reste dû) ; un clic déplie le détail de chaque prêt. */
+function _apGrouperPrets(nbCol) {
+  var rows = [].slice.call(document.querySelectorAll('#content tr[data-apg-emp]'));
+  var parEmp = {};
+  rows.forEach(function (tr) { var e = tr.getAttribute('data-apg-emp'); if (!e) return; (parEmp[e] = parEmp[e] || []).push(tr); });
+  window._apGrpOuvert = window._apGrpOuvert || {};
+  Object.keys(parEmp).forEach(function (e) {
+    var L = parEmp[e]; if (L.length < 2) return;
+    var t = { mt: 0, mens: 0, reste: 0, remb: 0 }, retard = false, du = false;
+    L.forEach(function (tr) {
+      t.mt += +tr.getAttribute('data-apg-mt') || 0; t.mens += +tr.getAttribute('data-apg-mens') || 0;
+      t.reste += +tr.getAttribute('data-apg-reste') || 0; t.remb += +tr.getAttribute('data-apg-remb') || 0;
+      var st = tr.getAttribute('data-apg-st'); if (st === 'b-late') retard = true; if (st === 'b-due') du = true;
+    });
+    var ouvert = !!window._apGrpOuvert[e];
+    var lignes = [];
+    L.forEach(function (tr) { lignes.push(tr); var ech = document.querySelector('#content tr[data-apg-ech="' + tr.getAttribute('data-apg-id') + '"]'); if (ech) lignes.push(ech); });
+    lignes.forEach(function (x) { x.style.display = ouvert ? '' : 'none'; if (x.hasAttribute('data-apg-emp')) x.style.boxShadow = 'inset 4px 0 0 #6366f1'; });
+    var sum = document.createElement('tr');
+    sum.className = retard ? 'apl-late' : (du ? 'apl-due' : '');
+    sum.style.cursor = 'pointer';
+    sum.title = 'Cliquer pour voir le détail de chaque prêt';
+    var pct = t.mt > 0 ? Math.max(0, Math.min(100, Math.round(t.remb / t.mt * 100))) : 0;
+    var nom = L[0].getAttribute('data-apg-nom') || '';
+    var html = '<td style="text-align:center;font-size:14px;color:#6366f1">' + (ouvert ? '▾' : '▸') + '</td>' +
+      '<td><div class="who">' + escH(nom) + '<small><b style="color:#4f46e5">' + L.length + ' prêts en cours</b> — cliquer pour le détail</small></div></td>' +
+      '<td><span class="b" style="color:#6366f1;border-color:#6366f1">Prêts ×' + L.length + '</span></td><td></td><td></td>' +
+      '<td class="num"><span class="gros">' + fmtMoney(t.mt) + '</span><br><span class="muted">cumul prêts</span></td>' +
+      (nbCol === 11 ? '<td class="num"><span class="gros">' + fmtMoney(t.mens) + '</span><br><span class="muted">cumul mensualités</span></td>' : '') +
+      '<td></td>' +
+      '<td class="num"><span class="gros-r" style="color:' + (t.reste > 0 ? '#dc2626' : '#16a34a') + '">' + fmtMoney(t.reste) + '</span><div class="bar"><i style="width:' + pct + '%"></i></div><div style="font-size:10.5px;color:#15803d;margin-top:3px;text-align:right">Remboursé <b>' + fmtMoney(t.remb) + '</b></div></td>' +
+      '<td><span class="b ' + (retard ? 'b-late' : (du ? 'b-due' : 'b-info')) + '">' + (retard ? 'En retard' : (du ? 'Dû ce mois' : 'En cours')) + '</span></td><td></td>';
+    sum.innerHTML = html;
+    sum.onclick = function () {
+      var o = !window._apGrpOuvert[e]; window._apGrpOuvert[e] = o;
+      lignes.forEach(function (x) { x.style.display = o ? '' : 'none'; });
+      sum.firstChild.textContent = o ? '▾' : '▸';
+    };
+    L[0].parentNode.insertBefore(sum, L[0]);
+  });
+}
 function renderAcomptesPrets() {
   // Nettoyage orphelins générique avant chaque rendu du module acomptes.
   try{ _purgeOrphanAcomptes(); }catch(e){}
@@ -23062,7 +23122,13 @@ function renderAcomptesPrets() {
      La recherche employé reste combinée avec le filtre du mois sélectionné. */
   if (apFilterMonth) {
     var _avantFiltre = acomptes.length;
-    acomptes = acomptes.filter(function(a) { return _apCouvreMois(a, apFilterMonth); });
+    var _apQs = String(apSearchQuery || '').toLowerCase();
+    acomptes = acomptes.filter(function(a) {
+      if (_apCouvreMois(a, apFilterMonth)) return true;
+      /* Recherche d'un employé : ses prêts déjà terminés restent visibles (rangés dans « Classés ») */
+      if (_apQs && a && a.type === 'pret') { var _e = empMap[a.employeId]; var _n = _e ? ((_e.matricule || '') + ' ' + (_e.nom || '') + ' ' + (_e.prenoms || '')) : (a.employeNom || ''); if (_n.toLowerCase().indexOf(_apQs) !== -1) return true; }
+      return false;
+    });
     apMasques = _avantFiltre - acomptes.length;
   }
   var totalAcomptes = 0, totalSoldes = 0, totalPrets = 0, totalRembourse = 0;
@@ -23339,10 +23405,10 @@ function renderAcomptesPrets() {
     html += '<span style="font-size:12px;font-weight:600;color:var(--gray-600)">Revue des acomptes & pr\u00eats</span>';
     html += '<button class="btn btn-sm btn-primary" onclick="apValiderPreselect()">Valider la s\u00e9lection (<span id="apValCount">0</span>)</button>';
     html += '<button class="btn btn-sm btn-outline" onclick="apValiderTous()">Tout valider (non valid\u00e9s)</button>';
-    var _apVF2 = (window._apValFilter === 'tous' || window._apValFilter === 'valides') ? window._apValFilter : 'nonvalides';
+    var _apVF2 = (window._apValFilter === 'nonvalides' || window._apValFilter === 'valides') ? window._apValFilter : 'tous';
     html += '<select id="apValFilter" onchange="window._apValFilter=this.value;renderAcomptesPrets()" style="padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:11px;outline:none">';
-    html += '<option value="nonvalides"' + (_apVF2 === 'nonvalides' ? ' selected' : '') + '>Non d\u00e9duits / Non valid\u00e9s (d\u00e9faut)</option>';
-    html += '<option value="tous"' + (_apVF2 === 'tous' ? ' selected' : '') + '>Tous</option>';
+    html += '<option value="nonvalides"' + (_apVF2 === 'nonvalides' ? ' selected' : '') + '>Non d\u00e9duits / Non valid\u00e9s</option>';
+    html += '<option value="tous"' + (_apVF2 === 'tous' ? ' selected' : '') + '>Tous \u2014 class\u00e9s en bas (d\u00e9faut)</option>';
     html += '<option value="valides"' + (_apVF2 === 'valides' ? ' selected' : '') + '>Valid\u00e9s (\u00e9ch\u00e9ance du mois pay\u00e9e) / Sold\u00e9s</option>';
     html += '</select>';
     html += '<span style="font-size:11px;color:var(--gray-400)">Acomptes valid\u00e9s = d\u00e9ductibles. Pr\u00eats : valid\u00e9s quand l\u2019\u00e9ch\u00e9ance du mois est pay\u00e9e.</span>';
@@ -23384,8 +23450,20 @@ function renderAcomptesPrets() {
     html += '<td class="num"><button class="btn btn-sm" style="padding:3px 9px;font-size:10.5px;background:#ea580c;border-color:#ea580c" onclick="openCollectifNewUIByGroupe(\'' + po2.groupeId + '\')">Répartir</button></td></tr>';
   }
   var _prevGrp = null;   /* detecte le changement de groupe de contrat pour le separateur */
-  for (var i = 0; i < acomptes.length; i++) {
-    var a4 = acomptes[i];
+  /* CLASSÉS : prêt entièrement remboursé, acompte validé d'un mois passé.
+     Ils restent visibles (et modifiables) mais rangés en bas, sous un titre. */
+  var _apClasse = function (a) {
+    if (!a) return false;
+    if (a.type === 'pret') { try { var _cc = _apCalcEcheances(a, currentMonth); return !!(_cc.termine || _cc.resteDu <= 0); } catch (eC) { return false; } }
+    var _mm = apNormMois(a.moisDeduction || '').substring(0, 7) || String(a.date || '').slice(0, 7);
+    return (a.valide === true || _natRowAp(a) === 'solde') && !!_mm && _mm < currentMonth;
+  };
+  var _apActifs = [], _apClasses = [];
+  acomptes.forEach(function (x) { (_apClasse(x) ? _apClasses : _apActifs).push(x); });
+  var _apOrdre = _apActifs.concat(_apClasses), _apTitreClasse = false;
+  for (var i = 0; i < _apOrdre.length; i++) {
+    var a4 = _apOrdre[i];
+    var _estClasse4 = i >= _apActifs.length;
     var _grp4 = _apGroupeContrat(a4.employeId);
     if (activeTab === 'acompte' && _natRowAp(a4) !== 'acompte') continue;
     if (activeTab === 'solde' && _natRowAp(a4) !== 'solde') continue;
@@ -23396,11 +23474,15 @@ function renderAcomptesPrets() {
     /* « Seulement les employés concernés » : un prêt déjà soldé (reste dû nul)
        n'a plus rien à déduire, on le masque. Un acompte reste toujours visible
        tant qu'il n'est pas validé (c'est à valider, donc à suivre). */
-    if (_apHideIdle && a4.type === 'pret') {
+    if (!_estClasse4 && _apHideIdle && a4.type === 'pret') {
       var _c4 = _apCalcEcheances(a4, currentMonth);
       if (_c4.termine || _c4.resteDu <= 0) continue;
     }
     if (!apPasseFiltreValide(a4)) continue;
+    if (_estClasse4 && !_apTitreClasse) {
+      _apTitreClasse = true;
+      html += '<tr><td colspan="' + (activeTab !== 'acompte' ? 11 : 10) + '" style="padding:10px 12px;background:#f1f5f9;font-weight:800;font-size:12px;color:#475569;border-top:2px solid #cbd5e1">\ud83d\udcc1 Class\u00e9s \u2014 pr\u00eats termin\u00e9s et acomptes d\u00e9j\u00e0 valid\u00e9s (toujours modifiables : dur\u00e9e, \u00e9ch\u00e9ances, mois de d\u00e9duction)</td></tr>';
+    }
     displayedCount++;
     var emp4 = empMap[a4.employeId] || null;
     /* Prêts : le restant dû se calcule sur les échéances RÉELLEMENT prélevées,
@@ -23474,7 +23556,7 @@ function renderAcomptesPrets() {
     _prevGrp = _grp4;
     /* Type de contrat affiché sous le nom (aide à la lecture du groupe) */
     var _tc4 = emp4 && emp4.type_contrat ? (emp4.type_contrat === 'Externe' ? 'Externe' : emp4.type_contrat) : '';
-    html += '<tr class="' + _trCls + '">';
+    html += '<tr class="' + _trCls + '"' + (a4.type === 'pret' ? ' data-apg-emp="' + escH(a4.employeId || '') + '" data-apg-id="' + escH(a4.id) + '" data-apg-mt="' + (a4.montant || 0) + '" data-apg-mens="' + (a4.montantMensuel || 0) + '" data-apg-reste="' + (reste4 || 0) + '" data-apg-remb="' + (_remb4 || 0) + '" data-apg-st="' + escH(_stB) + '" data-apg-nom="' + escH(_empNom) + '"' : '') + '>';
     html += '<td style="text-align:center">' + (_natR4 === 'acompte' ? '<input type="checkbox" class="apValCheck" data-ap-id="' + escH(a4.id) + '" onchange="apValCountFn()" style="width:16px;height:16px;cursor:pointer;accent-color:var(--primary)">' : '') + '</td>';
     html += '<td><div class="who">' + escH(_empNom) + '<small>' + (a4.dureeMois && a4.type === 'pret' ? a4.dureeMois + ' mois · ' : '') + fmtDate(a4.date) + (_tc4 ? ' · ' + escH(_tc4) : '') + '</small></div></td>';
     /* Colonnes Nature + Moyen (N° compte) : d\u00e9duites de la pi\u00e8ce de caisse li\u00e9e. */
@@ -23503,7 +23585,15 @@ function renderAcomptesPrets() {
       html += '<td class="num"><span class="muted">—</span></td>';
     } else {
       html += '<td class="num" title="' + escH(_resteTitle) + '"><span class="gros-r" style="color:' + (reste4 > 0 ? (calcRow4 && calcRow4.echeancesDues > 0 ? '#ea580c' : '#dc2626') : '#16a34a') + '">' + fmtMoney(reste4) + '</span>'
-        + '<div class="bar"><i class="' + (reste4 <= 0 ? 'ok' : '') + '" style="width:' + _pct + '%"></i></div></td>';
+        + '<div class="bar"><i class="' + (reste4 <= 0 ? 'ok' : '') + '" style="width:' + _pct + '%"></i></div>'
+        + (function () {
+          /* Déjà remboursé + les mois prélevés (petit, sous le reste dû) */
+          if (a4.type !== 'pret' || !calcRow4) return '';
+          var _pm = (calcRow4.echs || []).filter(function (e) { return e && e.preleve === true && /^\d{4}-\d{2}$/.test(e.mois || ''); }).map(function (e) { return e.mois; }).sort();
+          var _mc = function (m) { var MM = ['janv', 'févr', 'mars', 'avr', 'mai', 'juin', 'juil', 'août', 'sept', 'oct', 'nov', 'déc']; return MM[+m.slice(5, 7) - 1] + '-' + m.slice(2, 4); };
+          return '<div style="font-size:10.5px;color:#15803d;margin-top:3px;white-space:normal;text-align:right">Remboursé <b>' + fmtMoney(_remb4 || 0) + '</b></div>'
+            + (_pm.length ? '<div style="font-size:9.5px;color:#64748b;line-height:1.35;text-align:right">' + _pm.map(_mc).join(', ') + '</div>' : '');
+        })() + '</td>';
     }
     html += '<td><span class="b ' + _stB + '" title="' + escH(stTitle4) + '">' + stLabel4 + '</span></td>';
     html += '<td class="num" style="white-space:nowrap">' + _valCell + '<div style="margin-top:4px">' + _valAct
@@ -23527,7 +23617,7 @@ function renderAcomptesPrets() {
         ? ' — dû ce mois : ' + fmtMoney(calc4.totalDu) + ' (' + calc4.echeancesDues + ' échéance(s)'
           + (calc4.echeancesEnRetard > 0 ? ', dont ' + calc4.echeancesEnRetard + ' en retard' : '') + ')'
         : (calc4.termine ? ' — soldé' : ' — rien à verser ce mois');
-      html += '<tr><td colspan="' + (activeTab !== 'acompte' ? 11 : 10) + '" style="padding:0"><details class="amort"' + ((window._apAmortOuvert || {})[a4.id] ? ' open' : '') + ' ontoggle="(window._apAmortOuvert=window._apAmortOuvert||{})[\'' + a4.id + '\']=this.open"><summary>📅 Échéancier — ' + echs.length + ' mensualités · reste ' + fmtMoney(resteEch) + _dueTxt + '</summary>';
+      html += '<tr data-apg-ech="' + escH(a4.id) + '"><td colspan="' + (activeTab !== 'acompte' ? 11 : 10) + '" style="padding:0"><details class="amort"' + ((window._apAmortOuvert || {})[a4.id] ? ' open' : '') + ' ontoggle="(window._apAmortOuvert=window._apAmortOuvert||{})[\'' + a4.id + '\']=this.open"><summary>📅 Échéancier — ' + echs.length + ' mensualités · reste ' + fmtMoney(resteEch) + _dueTxt + '</summary>';
       var lotN4 = 0;
       if (a4.groupeId) { for (var li4 = 0; li4 < acomptes.length; li4++) { if (acomptes[li4].groupeId === a4.groupeId && acomptes[li4].type === 'pret') lotN4++; } }
       var lotBtn4 = lotN4 > 1 ? '<button class="btn btn-xs btn-outline" onclick="askPrintPretLot(\''+a4.groupeId+'\')" style="font-size:10px;padding:3px 8px;border-color:var(--success);color:var(--success)" title="Imprimer tous les prêts du lot ensemble">👥 Imprimer le lot ('+lotN4+')</button>' : '';
@@ -23562,6 +23652,7 @@ function renderAcomptesPrets() {
   }
   html += '</div></div>';
   document.getElementById('content').innerHTML = html;
+  try { _apGrouperPrets(activeTab !== 'acompte' ? 11 : 10); } catch (eGrp) { console.warn('[AP] regroupement prets', eGrp); }
 
   /* Expansion cumul employ\u00e9 */
   document.querySelectorAll('.ap-cumul-row').forEach(function(row) {
@@ -23724,7 +23815,41 @@ function _apRevuePretsAfficher() {
       '<td style="padding:8px 6px;text-align:right">' + fmtMoney(parseInt(a.montant) || 0) + '</td><td style="padding:8px 6px;text-align:right;color:#64748b">' + fmtMoney(reste) + '</td>' +
       '<td style="padding:8px 6px;text-align:right"><input type="number" min="0" step="1" value="' + mt + '" ' + (coche ? '' : 'disabled') + ' onchange="window._apRevuePrets.montants[\'' + esc(id) + '\']=Math.max(0,parseInt(this.value)||0);_apRevuePretsAfficher()" style="width:110px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;text-align:right;font-weight:700">' + info + '</td>' +
       '<td style="padding:8px 6px;text-align:right;white-space:nowrap"><button class="btn btn-sm btn-success" ' + (coche ? '' : 'disabled') + ' onclick="_apRevuePretsConfirmer([\'' + esc(id) + '\'])">Déduire</button> <button class="btn btn-sm btn-outline" style="border-color:#d97706;color:#b45309" title="Ne pas déduire ce mois : cette échéance et les suivantes passent au mois d’après (paie et caisse suivent)" onclick="_apPretRepousser(\'' + esc(id) + '\')">⏭ Repousser</button></td></tr>';
-  }).join('');
+  });
+  /* PLUSIEURS PRÊTS pour le même employé : une ligne de CUMUL (bien distincte
+     d'un prêt seul), qu'on déroule pour déduire / repousser prêt par prêt, ou
+     « Déduire les N » d'un coup. */
+  R.ouverts = R.ouverts || {};
+  var _rowsP = lignes, _outP = '';
+  for (var _gi = 0; _gi < items.length;) {
+    var _gj = _gi, _eid = items[_gi].ap.employeId;
+    while (_gj + 1 < items.length && items[_gj + 1].ap.employeId === _eid) _gj++;
+    if (_gj === _gi) { _outP += _rowsP[_gi]; _gi++; continue; }
+    var _grp = items.slice(_gi, _gj + 1), _ids = _grp.map(function (x) { return x.ap.id; });
+    var _ouv = !!R.ouverts[_eid];
+    var _tPret = 0, _tReste = 0, _tMt = 0, _nCoche = 0;
+    _grp.forEach(function (x) {
+      _tPret += parseInt(x.ap.montant) || 0;
+      _tReste += Math.max(0, (parseInt(x.ap.montant) || 0) - (x.calc.totalPreleve || 0));
+      var _m = (R.montants[x.ap.id] !== undefined) ? R.montants[x.ap.id] : (parseInt(x.ech.montant) || 0);
+      if (ong === 'faits' || !R.decoches[x.ap.id]) { _tMt += (ong === 'faits' ? (parseInt(x.ech.montant) || 0) : _m); _nCoche++; }
+    });
+    var _idsJs = '[' + _ids.map(function (v) { return '\'' + esc(v) + '\''; }).join(',') + ']';
+    var _tog = 'var R=window._apRevuePrets;R.ouverts[\'' + esc(_eid) + '\']=!R.ouverts[\'' + esc(_eid) + '\'];_apRevuePretsAfficher()';
+    _outP += '<tr data-q="' + esc(_apQ(nomE(_grp[0].ap) + ' ' + _grp.map(function (x) { return x.ap.numeroPiece || ''; }).join(' '))) + '" style="background:#eef2ff;border-top:2px solid #6366f1">' +
+      '<td style="padding:8px 6px;text-align:center">' + (ong === 'faits' ? '' : '<input type="checkbox" ' + (_nCoche === _grp.length ? 'checked' : '') + ' title="Cocher / décocher tous ses prêts" onchange="var R=window._apRevuePrets;' + _idsJs + '.forEach(function(i){R.decoches[i]=!this.checked;},this);_apRevuePretsAfficher()" style="width:18px;height:18px">') + '</td>' +
+      '<td style="cursor:pointer" onclick="' + _tog + '"><div class="apm-emp">' + (_ouv ? '▾ ' : '▸ ') + esc(nomE(_grp[0].ap)) + '</div>' +
+      '<div class="apm-sub"><span style="display:inline-block;background:#4f46e5;color:#fff;border-radius:10px;padding:1px 8px;font-weight:800">' + _grp.length + ' PRÊTS — CUMUL</span> la mensualité ci-contre est la <b>somme</b> de ses ' + _grp.length + ' prêts · <u>' + (_ouv ? 'replier' : 'dérouler pour traiter un par un') + '</u></div></td>' +
+      '<td></td><td style="padding:8px 6px;text-align:right;font-weight:700">' + fmtMoney(_tPret) + '</td><td style="padding:8px 6px;text-align:right;color:#64748b">' + fmtMoney(_tReste) + '</td>' +
+      '<td style="padding:8px 6px;text-align:right;font-weight:900;color:#4f46e5;font-size:14px">' + fmtMoney(_tMt) + '<div style="font-size:10px;font-weight:600;color:#64748b">cumul ' + (ong === 'faits' ? 'déduit' : 'à déduire') + '</div></td>' +
+      '<td style="padding:8px 6px;text-align:right;white-space:nowrap">' + (ong === 'faits' ? '' : '<button class="btn btn-sm btn-success" ' + (_nCoche ? '' : 'disabled') + ' onclick="_apRevuePretsConfirmer(' + _idsJs + '.filter(function(i){return !window._apRevuePrets.decoches[i];}))">Déduire les ' + _nCoche + '</button> ') +
+      '<button class="btn btn-sm btn-outline" onclick="' + _tog + '">' + (_ouv ? '▴ Replier' : '▾ Détail') + '</button></td></tr>';
+    for (var _gk = _gi; _gk <= _gj; _gk++) {
+      _outP += _rowsP[_gk].replace(/^<tr/, '<tr' + (_ouv ? '' : ' hidden') + ' data-apgrp="1"').replace('<td><div class="apm-emp">', '<td style="padding-left:22px;border-left:4px solid #6366f1"><div class="apm-emp">');
+    }
+    _gi = _gj + 1;
+  }
+  lignes = _outP;
   var n = 0, tot = 0;
   if (ong !== 'faits') D.aFaire.forEach(function (x) { if (!R.decoches[x.ap.id]) { n++; tot += (R.montants[x.ap.id] !== undefined ? R.montants[x.ap.id] : (parseInt(x.ech.montant) || 0)); } });
   var onglBtn = function (k, lib, cnt, t, coul) {
@@ -24457,6 +24582,13 @@ function saveAcomptePret(id) {
   var notes = document.getElementById('apNotes').value.trim();
   var executant = document.getElementById('apExecutant') ? document.getElementById('apExecutant').value.trim() : '';
   if (!employeId || montant <= 0) { toast('Employ\u00e9 et montant sont obligatoires', 'error'); return; }
+  /* Prêt qui chevauche un prêt en cours / à venir : même alerte que dans la Caisse */
+  if (type === 'pret' && !window.__csPretConfOk) {
+    try {
+      var _miAP = document.getElementById('apMoisDeduction');
+      if (_csPretChevauchementVerif(id, false, [{ empId: employeId, input: _miAP, mois: moisDeduction }], function () { saveAcomptePret(id); })) return;
+    } catch (ePCA) { console.warn('[pret chevauchement AP]', ePCA); }
+  }
   var montantMensuel = (type === 'pret' && duree > 0) ? Math.round(montant / duree) : 0;
   var employeNom = '';
   var empList = getEmployes();
@@ -27067,7 +27199,29 @@ function enregistrerRemboursementAcompte(id) {
   DB.set('mdb_acomptesPrets', list);
   toast('Remboursement enregistr\u00e9'); renderAcomptesPrets();
 }
+/* Lien avec des salaires DÉJÀ PAYÉS : prêt dont au moins une échéance a été
+   déduite (prélevée), acompte validé (retenu sur un bulletin). On ne le
+   supprime pas — on peut toujours le modifier (durée, échéances, mois). */
+function _apLieSalairePaye(a) {
+  if (!a) return '';
+  if (a.type === 'pret') {
+    var n = 0, t = 0; (a.echeances || []).forEach(function (e) { if (e && e.preleve === true) { n++; t += parseInt(e.montant) || 0; } });
+    if (n) return n + ' \u00e9ch\u00e9ance(s) d\u00e9j\u00e0 d\u00e9duite(s) sur salaire (' + fmtMoney(t) + ')';
+    if ((parseInt(a.montantRembourse) || 0) > 0) return 'd\u00e9j\u00e0 rembours\u00e9 en partie (' + fmtMoney(a.montantRembourse) + ')';
+    return '';
+  }
+  if (a.valide === true) return 'acompte valid\u00e9 : retenu sur le bulletin de ' + (fmtMois(apNormMois(a.moisDeduction || '').substring(0, 7)) || 'son mois');
+  return '';
+}
 function deleteAcomptePret(id) {
+  try {
+    var _cible0 = (dbArr('mdb_acomptesPrets') || []).find(function (x) { return x && x.id === id; });
+    var _lien0 = _apLieSalairePaye(_cible0);
+    if (_lien0) {
+      window.alert('Suppression impossible : ' + _lien0 + '.\n\nCe ' + (_cible0.type === 'pret' ? 'pr\u00eat' : 'acompte') + ' est li\u00e9 \u00e0 des salaires d\u00e9j\u00e0 pay\u00e9s. Vous pouvez le MODIFIER (\u270e) : dur\u00e9e, \u00e9ch\u00e9ances, mois de d\u00e9duction' + (_cible0.type === 'pret' ? '' : ', ou le d\u00e9valider d\u2019abord') + '.');
+      return;
+    }
+  } catch (eLien) {}
   if (!window.confirm('Supprimer cet acompte / pr\u00eat ?')) return;
   var list = dbArr('mdb_acomptesPrets');
   var target = null;
@@ -36557,6 +36711,20 @@ function onGlobalPeriodChange() {
         window._csAllPeriods = false;
         window._csSelMonth = m.value;
         try { DB.set('mdb_caisseMonth', m.value); } catch(e1) {}
+        /* Plage Du/Au incompatible avec le mois choisi (ex. Septembre avec une
+           plage du 01/10 au 31/10) : le tableau sortait VIDE (0 recette, 0
+           dépense) comme si les opérations avaient disparu. La plage suit le mois. */
+        try {
+          var _yy = (y && y.value) || window._csSelYear || String(new Date().getFullYear());
+          var _d1 = _yy + '-' + m.value + '-01';
+          var _d2 = _yy + '-' + m.value + '-' + ('0' + new Date(+_yy, +m.value, 0).getDate()).slice(-2);
+          var _rg = dbObj('mdb_dashRange') || {};
+          if ((_rg.from || _rg.to) && ((_rg.from && _rg.from > _d1) || (_rg.to && _rg.to < _d2))) {
+            DB.set('mdb_dashRange', { from: _d1, to: _d2 });
+            var _fE = document.getElementById('hdrDateFrom'), _tE = document.getElementById('hdrDateTo');
+            if (_fE) _fE.value = _d1; if (_tE) _tE.value = _d2;
+          }
+        } catch (eRg) {}
       }
     }
     if (y && y.value) { window._csSelYear = y.value; try { DB.set('mdb_caisseYear', y.value); } catch(e2) {} }
@@ -44105,24 +44273,25 @@ function _csPretLignesSaisies() {
   }
   return L;
 }
-function _csPretChevauchementVerif(id, asDraft) {
-  var editId = id || window._csEditId || '';
-  var gEdit = window._csCollectifEditGroupeId || '';
-  var excl = function (a) { return (editId && a.caisseOpId === editId) || (gEdit && a.groupeId === gEdit); };
+function _csPretChevauchementVerif(id, asDraft, lignesAP, relance) {
+  /* lignesAP / relance : formulaire « Nouveau prêt » de la page Acompte et Prêts */
+  var editId = lignesAP ? '' : (id || window._csEditId || '');
+  var gEdit = lignesAP ? '' : (window._csCollectifEditGroupeId || '');
+  var excl = lignesAP ? function (a) { return !!(id && a.id === id); } : function (a) { return (editId && a.caisseOpId === editId) || (gEdit && a.groupeId === gEdit); };
   var emps = {}; try { (getEmployes() || []).forEach(function (e) { if (e && e.id) emps[e.id] = e; }); } catch (e) {}
   var conf = [];
-  _csPretLignesSaisies().forEach(function (l) {
+  (lignesAP || _csPretLignesSaisies()).forEach(function (l) {
     var ch = _apPretsChevauches(l.empId, l.mois, excl);
     if (!ch.length) return;
     var finMax = ch.reduce(function (m, x) { return x.fin > m ? x.fin : m; }, '');
     conf.push({ l: l, ch: ch, sugg: _apMoisAdd(finMax, 1), emp: emps[l.empId] });
   });
   if (!conf.length) return false;
-  window.__csPretConf = { conf: conf, id: id, asDraft: asDraft };
+  window.__csPretConf = { conf: conf, id: id, asDraft: asDraft, relance: relance || null };
   var nom = function (e, id2) { return e ? ((e.matricule ? e.matricule + ' - ' : '') + (e.nom || '') + ' ' + (e.prenoms || '')).trim() : id2; };
   /* Modification d'une pièce déjà enregistrée : par défaut on GARDE les mois
      choisis (ne pas décaler un prêt existant sans le vouloir). */
-  var _enEdition = !!(editId || gEdit);
+  var _enEdition = !!(editId || gEdit || (lignesAP && id));
   var rows = conf.map(function (c, i) {
     var det = c.ch.map(function (x) {
       return '<div style="font-size:12px;color:#475569;margin-top:3px">• Prêt de <b>' + fmtMoney(x.a.montant || 0) + '</b>' + (x.a.numeroPiece ? ' (' + escH(x.a.numeroPiece) + ')' : '') + ' : ' + escH(fmtMois(x.debut)) + ' → <b>' + escH(fmtMois(x.fin)) + '</b> — reste ' + fmtMoney(x.reste) + (x.aVenir ? ' <span style="color:#b45309;font-weight:700">(pas encore commencé)</span>' : ' <span style="color:#4f46e5;font-weight:700">(en cours)</span>') + '</div>';
@@ -44151,7 +44320,7 @@ function _csPretConfAppliquer() {
   var o = document.getElementById('csPretConfOv'); if (o) o.remove();
   window.__csPretConf = null;
   window.__csPretConfOk = true;
-  try { saveCaisse(P.id, P.asDraft); } finally { window.__csPretConfOk = false; if (P.fermerColl) { try { closeCsCollectifModal(); } catch (eCl) {} } }
+  try { if (P.relance) P.relance(); else saveCaisse(P.id, P.asDraft); } finally { window.__csPretConfOk = false; if (P.fermerColl) { try { closeCsCollectifModal(); } catch (eCl) {} } }
 }
 function saveCaisse(id, asDraft) {
   if (!window.__csPretConfOk) { try { if (_csPretChevauchementVerif(id, asDraft)) return; } catch (ePC) { console.warn('[pret chevauchement]', ePC); } }
@@ -45055,6 +45224,14 @@ function deleteCaisse(id) {
   var opToCheck = null;
   for (var oi = 0; oi < ops.length; oi++) { if (String(ops[oi].id) === String(id)) { opToCheck = ops[oi]; break; } }
   if (!_requireAdminValidationForReversed(opToCheck)) return;
+  /* Pièce d'un acompte / prêt déjà retenu sur un salaire payé : pas de suppression */
+  try {
+    var _apL = (dbArr('mdb_acomptesPrets') || []).filter(function (a) { return a && opToCheck && (a.caisseOpId === opToCheck.id || (opToCheck.acomptePretId && a.id === opToCheck.acomptePretId)); });
+    for (var _li = 0; _li < _apL.length; _li++) {
+      var _lien = _apLieSalairePaye(_apL[_li]);
+      if (_lien) { window.alert('Suppression impossible : cette pi\u00e8ce est li\u00e9e \u00e0 un ' + (_apL[_li].type === 'pret' ? 'pr\u00eat' : 'acompte') + ' d\u00e9j\u00e0 retenu sur salaire (' + _lien + ').\n\nVous pouvez la modifier.'); return; }
+    }
+  } catch (eLienC) {}
   if (!window.confirm('Supprimer cette op\u00e9ration ?')) return;
   if (opToCheck && !canUserAccessCaisse(currentUser, opToCheck.caisseId)) {
     // double-check par id pour robustesse
