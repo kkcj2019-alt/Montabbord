@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-399';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-400';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -2341,10 +2341,19 @@ function syncUnionTableaux(localArr, cloudArr, cloudDabord) {
   var second = cloudDabord ? localArr : cloudArr;
   premier = Array.isArray(premier) ? premier : [];
   second = Array.isArray(second) ? second : [];
-  for (i = 0; i < premier.length; i++) { x = premier[i]; if (x === undefined) continue; k = _syncCle(x); if (!vus[k]) { vus[k] = true; out.push(x); } }
-  for (i = 0; i < second.length; i++) { x = second[i]; if (x === undefined) continue; k = _syncCle(x); if (!vus[k]) { vus[k] = true; out.push(x); } }
+  var pos = {};
+  for (i = 0; i < premier.length; i++) { x = premier[i]; if (x === undefined) continue; k = _syncCle(x); if (!vus[k]) { vus[k] = true; pos[k] = out.length; out.push(x); } }
+  for (i = 0; i < second.length; i++) {
+    x = second[i]; if (x === undefined) continue; k = _syncCle(x);
+    if (!vus[k]) { vus[k] = true; pos[k] = out.length; out.push(x); }
+    /* Meme ligne des deux cotes : la modification la PLUS RECENTE (_maj) gagne,
+       quel que soit l'ordre. Avant, le cloud gagnait toujours a la reception :
+       un cloud perime ecrasait les saisies plus recentes du poste. */
+    else if (_majDe(x) > _majDe(out[pos[k]])) { if (second === localArr) window.__mdbLocalGagne = (window.__mdbLocalGagne || 0) + 1; out[pos[k]] = x; }
+  }
   return out;
 }
+function _majDe(x) { var t = x && typeof x === 'object' ? +x._maj : 0; return isFinite(t) && t > 0 ? t : 0; }
 /* Vide utile ? null, [], {} ou objet sans contenu (que des tableaux vides et
    des scalaires vides). Sert au garde-fou pousse-a-vide. */
 function _syncEstVide(v) {
@@ -4037,6 +4046,33 @@ function scheduleLocalBackup(key, data) {
   }, 2500);
 }
 
+/* Horodatage des lignes (_maj) : chaque ligne (avec id) creee ou modifiee
+   SUR CE POSTE recoit l'heure de modification. Les fusions cloud gardent la
+   version la plus recente : un cloud perime n'ecrase plus le poste. Les
+   lignes recues du cloud gardent leur _maj d'origine. */
+var _majSig = {};
+function _majSigItem(x) { try { return JSON.stringify(x).replace(/,?"_maj":\d+/, ''); } catch (e) { return ''; } }
+function _majHorodater(key, data) {
+  if (!Array.isArray(data) || data.length > 20000 || String(key).indexOf('mdb_') !== 0) return;
+  if (key === 'mdb_tombstones' || key === 'mdb_pendingSync' || key.indexOf('mdb_backup') === 0) return;
+  var ancien = _majSig[key];
+  if (!ancien) {
+    ancien = {};
+    var raw = null; try { raw = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) {}
+    if (Array.isArray(raw)) for (var r = 0; r < raw.length; r++) { var y = raw[r]; if (y && typeof y === 'object' && y.id !== undefined && y.id !== null && y.id !== '') ancien[String(y.id)] = _majSigItem(y); }
+  }
+  var horsL = false; try { horsL = !!window._offlineMode || localStorage.getItem('mdb_offlineMode') === '1'; } catch (eH) {}
+  var recu = _receivingSnapshot || _loadingCloud || (!window.__mdbHorodatagePret && !horsL);
+  var now = Date.now(), nouv = {};
+  for (var i = 0; i < data.length; i++) {
+    var x = data[i];
+    if (!x || typeof x !== 'object' || Array.isArray(x) || x.id === undefined || x.id === null || x.id === '') continue;
+    var id = String(x.id), sg = _majSigItem(x);
+    if (!recu && ancien[id] !== sg) x._maj = now;
+    nouv[id] = sg;
+  }
+  _majSig[key] = nouv;
+}
 var DB = {
   get: function(key) {
     if (Object.prototype.hasOwnProperty.call(_dbMemCache, key)) {
@@ -4082,6 +4118,7 @@ var DB = {
       data = stripTombstoned(key, data);
       _dbMemCache[key] = data;
     }
+    try { _majHorodater(key, data); } catch (eMaj) {}
     try { localStorage.setItem(key, JSON.stringify(data)); } catch(eLS) {
       /* Quota localStorage plein = ecriture perdue EN SILENCE (les
          suppressions d'articles « revenaient » alors au rechargement).
@@ -7287,6 +7324,7 @@ function mergeArraysPreferCloud(local, cloud) {
     var cloudItem = cloud[i];
     if (cloudItem && cloudItem.id) {
       if (!seen[cloudItem.id]) { seen[cloudItem.id] = true; order.push(cloudItem.id); }
+      if (map[cloudItem.id] && _majDe(map[cloudItem.id]) > _majDe(cloudItem)) { window.__mdbLocalGagne = (window.__mdbLocalGagne || 0) + 1; continue; }
       map[cloudItem.id] = cloudItem;
     } else {
       result.push(cloudItem);
@@ -7434,6 +7472,9 @@ function loadCloudData(uid, callback) {
        lignes d'une piece collective ressortaient au nom du dernier
        beneficiaire, ex. « Solde salaire : KANGA/... »). */
     try { _corrigerLibellesSoldesCollectifs(); } catch (eCLSLoad) {}
+    /* Lignes du poste plus recentes que le cloud : on les renvoie. */
+    try { var _ap = window.__mdbAPousser || {}; window.__mdbAPousser = {}; for (var _apk in _ap) { if (Object.prototype.hasOwnProperty.call(_ap, _apk)) markDirty(_apk); } } catch (eAP) {}
+    window.__mdbHorodatagePret = true;
     if (callback) callback();
   }
   setTimeout(finish, 15000);
@@ -7548,7 +7589,9 @@ entRef.get().then(function(doc) {
           }
           /* Merge array data: cloud wins for an existing ID, local-only rows survive. */
           if (Array.isArray(val) && Array.isArray(localData) && localData.length > 0 && val.length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
+             var _lgAv = window.__mdbLocalGagne || 0;
              var merged = (key === 'mdb_employes') ? mergeEmployesPreferRecent(localData, val) : mergeArraysPreferCloud(localData, val);
+             if ((window.__mdbLocalGagne || 0) !== _lgAv) { window.__mdbAPousser = window.__mdbAPousser || {}; window.__mdbAPousser[key] = true; }
              if (key === 'mdb_operationsCaisse') merged = removeDeletedOperations(merged);
              if (key === 'mdb_acomptesPrets') merged = stripTombstoned(key, merged);
              if (key === 'mdb_reglements') merged = stripTombstoned(key, merged);
@@ -7789,11 +7832,14 @@ var local = DB.get(key);
            (id uniquement) avec filtre sur 2-3 cles : toute suppression sur
            une autre liste ressuscitait via la copie d'un autre poste. */
         if (Array.isArray(data[key]) && Array.isArray(local) && local.length > 0 && data[key].length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
+           var _lgRt = window.__mdbLocalGagne || 0;
            var mergedRealtime = (key === 'mdb_employes') ? mergeEmployesPreferRecent(local, data[key]) : syncUnionTableaux(local, data[key], true);
+           var _rtLocalGagne = (window.__mdbLocalGagne || 0) !== _lgRt;
            mergedRealtime = _syncFiltreTombstonesGenerique(key, mergedRealtime);
            if (key === 'mdb_dashboardCreances') { var seen = {}; for (var dci3 = mergedRealtime.length - 1; dci3 >= 0; dci3--) { if (!mergedRealtime[dci3].id) mergedRealtime[dci3].id = 'dcr_' + DB.genId(); var dk2 = mergedRealtime[dci3].clientId || mergedRealtime[dci3].id; if (seen[dk2]) mergedRealtime.splice(dci3, 1); else seen[dk2] = true; } }
            if (key === 'mdb_dashboardDettesF') { var seenF2 = {}; for (var dfi4 = mergedRealtime.length - 1; dfi4 >= 0; dfi4--) { if (!mergedRealtime[dfi4].id) mergedRealtime[dfi4].id = 'dfm_' + DB.genId(); var dkF2 = mergedRealtime[dfi4].fournisseurId || mergedRealtime[dfi4].id; if (seenF2[dkF2]) mergedRealtime.splice(dfi4, 1); else seenF2[dkF2] = true; } }
            DB.set(key, mergedRealtime);
+           if (_rtLocalGagne) { try { markDirty(key); } catch (eRtG) {} }
         } else {
           var rtVal = data[key];
           if (Array.isArray(rtVal)) rtVal = _syncFiltreTombstonesGenerique(key, rtVal);
@@ -60510,6 +60556,142 @@ function _csVueSync() {
   setTimeout(verifier, 8000);
   /* Copie de secours aussi juste avant de fermer s'il reste des envois en attente */
   window.addEventListener('pagehide', function () { try { if (enAttente().n) sauver('fermeture-en-attente'); } catch (e) {} });
+})();
+</script>
+<script>
+/* ===== Bouton « Envoyer au cloud » + verification + deconnexion sure ===== */
+(function () {
+  function LSg(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function LSs(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function nbAttente() {
+    var n = 0; try { n = Object.keys(_dirtyKeys || {}).length; } catch (e) {}
+    try { var p = JSON.parse(LSg('mdb_pendingSync') || '{}') || {}; n = Math.max(n, Object.keys(p).length); } catch (e) {}
+    return n;
+  }
+  function hh(t) { var d = new Date(t); return ('0' + d.getHours()).slice(-2) + 'h' + ('0' + d.getMinutes()).slice(-2); }
+  var etat = { enCours: false, dernierEchec: 0, manque: 0 };
+  function btn() {
+    var b = document.getElementById('mdbCloudBtn');
+    if (!b) {
+      var ha = document.getElementById('headerActions');
+      if (!ha) return null;
+      b = document.createElement('button');
+      b.id = 'mdbCloudBtn'; b.type = 'button';
+      b.style.cssText = 'border:none;cursor:pointer;padding:7px 12px;border-radius:8px;font-size:13px;font-weight:800;margin-right:8px;white-space:nowrap;color:#fff;flex-shrink:0;touch-action:manipulation';
+      b.onclick = function () { mdbEnvoyerAuCloud(true); return false; };
+      ha.insertBefore(b, ha.firstChild);
+    }
+    return b;
+  }
+  function afficher() {
+    var b = btn(); if (!b) return;
+    if (!window.currentUser || !currentUser.id || currentUser.isSuperAdmin) { b.style.display = 'none'; return; }
+    b.style.display = '';
+    var n = nbAttente();
+    /* Les envois en attente viennent d'etre acceptes par le cloud : on note l'heure */
+    if (n > 0) etat.vuAttente = true; else if (etat.vuAttente && !_isPushing) { etat.vuAttente = false; LSs('mdb_cloudVerifOk', String(Date.now())); }
+    var ok = +LSg('mdb_cloudVerifOk') || 0;
+    var horsL = !!window._offlineMode || LSg('mdb_offlineMode') === '1';
+    var txt, bg, tip;
+    if (etat.enCours) { txt = '☁ Envoi en cours…'; bg = '#d97706'; tip = 'Envoi et vérification en cours'; }
+    else if (etat.manque > 0 || (etat.dernierEchec && etat.dernierEchec > ok)) { txt = '☁ ✖ PAS ENVOYÉ – cliquer'; bg = '#dc2626'; tip = 'Le dernier envoi n’a pas pu être vérifié. Cliquez pour réessayer.'; }
+    else if (horsL || n > 0) { txt = '☁ ⏳ ' + n + ' en attente – Envoyer'; bg = '#d97706'; tip = 'Des saisies ne sont pas encore sur le cloud. Cliquez pour envoyer.'; }
+    else if (ok) { txt = '☁ ✔ Sur le cloud ' + hh(ok); bg = '#16a34a'; tip = 'Tout a été envoyé et vérifié sur le cloud à ' + hh(ok) + '. Cliquez pour revérifier.'; }
+    else { txt = '☁ Envoyer au cloud'; bg = '#2563eb'; tip = 'Envoyer et vérifier sur le cloud'; }
+    if (b.textContent !== txt) b.textContent = txt;
+    b.style.background = bg; b.title = tip;
+  }
+  /* Compare le poste au cloud relu : chaque ligne du poste doit y etre, dans
+     une version au moins aussi recente. Renvoie la liste des rubriques en retard. */
+  function comparer(cloud) {
+    var enRetard = [], total = 0;
+    var cles = (typeof DATA_KEYS !== 'undefined' ? DATA_KEYS : []);
+    for (var i = 0; i < cles.length; i++) {
+      var k = cles[i]; if (k === 'mdb_tombstones') continue;
+      var lv = DB.get(k); if (!Array.isArray(lv) || !lv.length) continue;
+      var cv = Array.isArray(cloud[k]) ? cloud[k] : [];
+      var m = {}; for (var j = 0; j < cv.length; j++) { var c = cv[j]; if (c && c.id !== undefined && c.id !== null) m[String(c.id)] = c; }
+      var manq = 0;
+      for (var l = 0; l < lv.length; l++) {
+        var x = lv[l]; if (!x || x.id === undefined || x.id === null || x.id === '') continue;
+        var cx = m[String(x.id)];
+        if (!cx || _majDe(x) > _majDe(cx)) manq++;
+      }
+      if (manq) { enRetard.push(k); total += manq; }
+    }
+    return { cles: enRetard, total: total };
+  }
+  function attendreFin(cb, t0) {
+    t0 = t0 || Date.now();
+    var n = 0; try { n = Object.keys(_dirtyKeys || {}).length; } catch (e) {}
+    if ((n === 0 && !_isPushing) || Date.now() - t0 > 40000) return cb(n === 0);
+    setTimeout(function () { attendreFin(cb, t0); }, 700);
+  }
+  window.mdbEnvoyerAuCloud = function (manuel, fini) {
+    if (etat.enCours) { if (fini) setTimeout(function () { mdbEnvoyerAuCloud(manuel, fini); }, 1500); return; }
+    if (!window.currentUser || !currentUser.id || !window.firebaseDb) { if (fini) fini(false); return; }
+    etat.enCours = true; afficher();
+    try { localStorage.removeItem('mdb_offlineMode'); window._offlineMode = false; } catch (e) {}
+    try { var p = JSON.parse(LSg('mdb_pendingSync') || '{}') || {}; for (var k in p) if (p.hasOwnProperty(k) && isSyncable(k)) _dirtyKeys[k] = true; } catch (e) {}
+    var essai = 0;
+    function tour() {
+      essai++;
+      try { window._lastCloudAt = 0; } catch (e) {}
+      try { pushToCloud(); } catch (e) {}
+      attendreFin(function () {
+        firebaseDb.collection('enterprises').doc(currentUser.id).get().then(function (doc) {
+          var cloud = (doc && doc.exists) ? doc.data() : {};
+          try { window._lastCloudData = cloud; window._lastCloudAt = Date.now(); } catch (e) {}
+          var r = comparer(cloud);
+          if (r.total && essai < 3) { for (var i = 0; i < r.cles.length; i++) markDirty(r.cles[i]); setTimeout(tour, 800); return; }
+          etat.enCours = false; etat.manque = r.total;
+          if (!r.total && nbAttente() === 0) {
+            LSs('mdb_cloudVerifOk', String(Date.now())); etat.dernierEchec = 0;
+            if (manuel) toast('✔ Tout est envoyé et vérifié sur le cloud (' + hh(Date.now()) + ')', 'success');
+            afficher(); if (fini) fini(true);
+          } else {
+            etat.dernierEchec = Date.now();
+            if (manuel) toast('✖ Envoi non confirmé (' + (r.total || nbAttente()) + ' ligne(s)). Vos données restent sur ce poste. Vérifiez Internet puis recliquez.', 'error');
+            afficher(); if (fini) fini(false);
+          }
+        }).catch(function () {
+          etat.enCours = false; etat.dernierEchec = Date.now();
+          if (manuel) toast('✖ Cloud injoignable (Internet ?). Vos données restent sur ce poste. Recliquez plus tard.', 'error');
+          afficher(); if (fini) fini(false);
+        });
+      });
+    }
+    tour();
+  };
+  /* Deconnexion : on envoie et on VERIFIE d'abord */
+  var _logoutOrig = window.doLogout;
+  if (typeof _logoutOrig === 'function') {
+    window.doLogout = doLogout = function () {
+      var args = arguments, self = this;
+      if (!window.currentUser || !currentUser.id || currentUser.isSuperAdmin || window.__mdbLogoutForce) { window.__mdbLogoutForce = false; return _logoutOrig.apply(self, args); }
+      var ov = document.getElementById('mdbLogoutOv');
+      if (!ov) { ov = document.createElement('div'); ov.id = 'mdbLogoutOv'; ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.75);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px'; document.body.appendChild(ov); }
+      ov.innerHTML = '<div style="background:#fff;border-radius:12px;padding:22px;max-width:420px;width:100%;text-align:center;font-size:15px"><div style="font-size:34px">☁</div><b>Envoi au cloud avant la déconnexion…</b><div style="color:#64748b;margin-top:8px">Ne fermez pas la page.</div></div>';
+      ov.style.display = 'flex';
+      mdbEnvoyerAuCloud(false, function (ok) {
+        if (ok) {
+          ov.innerHTML = '<div style="background:#fff;border-radius:12px;padding:22px;max-width:420px;width:100%;text-align:center;font-size:15px"><div style="font-size:34px;color:#16a34a">✔</div><b>Tout est sur le cloud.</b><div style="color:#64748b;margin-top:8px">Déconnexion…</div></div>';
+          setTimeout(function () { ov.style.display = 'none'; window.__mdbLogoutForce = true; doLogout.apply(self, args); }, 1200);
+          return;
+        }
+        try { if (typeof window.mdbSecoursTelecharger === 'function') window.mdbSecoursTelecharger(); else exportData(true, 'backup-mdb-' + getToday() + '-avant-deconnexion.json'); } catch (e) {}
+        var B = 'style="border:none;border-radius:8px;padding:10px 14px;font-weight:800;font-size:14px;cursor:pointer;margin:4px;color:#fff;background:';
+        ov.innerHTML = '<div style="background:#fff;border-radius:12px;padding:22px;max-width:440px;width:100%;text-align:center;font-size:15px"><div style="font-size:34px;color:#dc2626">✖</div><b>L’envoi au cloud n’est PAS confirmé.</b><div style="color:#334155;margin-top:8px">Une copie de secours vient d’être téléchargée. Vos saisies restent sur ce poste.<br>Vérifiez Internet puis réessayez.</div><div style="margin-top:14px"><button ' + B + '#2563eb" id="mdbLoRetry">Réessayer</button><button ' + B + '#64748b" id="mdbLoStay">Rester connecté</button><button ' + B + '#dc2626" id="mdbLoForce">Déconnecter quand même</button></div></div>';
+        document.getElementById('mdbLoRetry').onclick = function () { doLogout.apply(self, args); };
+        document.getElementById('mdbLoStay').onclick = function () { ov.style.display = 'none'; };
+        document.getElementById('mdbLoForce').onclick = function () { ov.style.display = 'none'; window.__mdbLogoutForce = true; doLogout.apply(self, args); };
+      });
+    };
+  }
+  setInterval(afficher, 2000);
+  setTimeout(afficher, 1500);
+  /* Verification automatique discrete toutes les 5 min si rien en attente */
+  setInterval(function () { try { if (window.currentUser && currentUser.id && !document.hidden && !etat.enCours && (nbAttente() > 0 || Date.now() - (+LSg('mdb_cloudVerifOk') || 0) > 30 * 60 * 1000)) mdbEnvoyerAuCloud(false); } catch (e) {} }, 5 * 60 * 1000);
 })();
 </script>
 </body>
