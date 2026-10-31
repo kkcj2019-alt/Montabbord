@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-31-346';
+      window.__APP_VERSION = '2026-10-31-347';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -15355,6 +15355,209 @@ function addArticleMontageFromPt(e) {
           if (cv2) bC.value = cv2;
         }
       }
+
+      /* ===== FUSION DE DEUX EMPLOYÉS (doublon créé 2 fois) =====
+         Toutes les saisies faites sous l'un ou l'autre (pointage, montage,
+         acomptes/prêts, pièces de caisse, primes, saisies du bulletin...)
+         passent sur l'employé GARDÉ, puis le doublon est supprimé. Rien n'est
+         perdu. Même jour pointé sous les deux noms : la saisie de l'employé
+         gardé est conservée (l'autre ne compte pas en double). */
+      var _EMPF_SKIP = /tomb|^mdb_backup|^mdb_currentUser|^mdb_aliveTs/i;
+      function _empfCles() {
+        var out = [];
+        try {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && k.indexOf("mdb_") === 0 && !_EMPF_SKIP.test(k) && k !== "mdb_employes") out.push(k);
+          }
+        } catch (e) {}
+        return out;
+      }
+      /* Remplace srcId par dstId partout (valeurs ET clés d'objet). Renvoie le
+         nombre de remplacements. stats.conflits : clés d'objet en double. */
+      function _empfRemplacer(o, src, dst, stats, now, profond) {
+        var n = 0;
+        var rs = function (str) { return str.split(src).join(dst); };
+        if (Array.isArray(o)) {
+          for (var i = 0; i < o.length; i++) {
+            var v = o[i];
+            if (typeof v === "string") { if (v.indexOf(src) >= 0) { o[i] = rs(v); n++; } }
+            else if (v && typeof v === "object") {
+              var c = _empfRemplacer(v, src, dst, stats, now, profond + 1);
+              if (c > 0 && !Array.isArray(v) && (v.id || v.updatedAt !== undefined)) {
+                if (typeof v.updatedAt === "string") v.updatedAt = new Date(now).toISOString(); else v.updatedAt = now;
+                delete v._seal;
+              }
+              n += c;
+            }
+          }
+          /* listes de simples identifiants : pas de doublon après fusion */
+          if (n > 0 && o.length && o.every(function (x) { return typeof x === "string"; })) {
+            var vu = {}, j = 0;
+            for (var k2 = 0; k2 < o.length; k2++) if (!vu[o[k2]]) { vu[o[k2]] = 1; o[j++] = o[k2]; }
+            o.length = j;
+          }
+          return n;
+        }
+        if (o && typeof o === "object") {
+          var cles = Object.keys(o);
+          for (var q = 0; q < cles.length; q++) {
+            var kk = cles[q];
+            if (profond === 1 && /tombstones/i.test(kk)) continue;
+            var val = o[kk];
+            if (typeof val === "string") { if (val.indexOf(src) >= 0) { o[kk] = rs(val); n++; } }
+            else if (val && typeof val === "object") n += _empfRemplacer(val, src, dst, stats, now, profond + 1);
+            if (kk.indexOf(src) >= 0) {
+              var nk = rs(kk);
+              n++;
+              if (o.hasOwnProperty(nk) && o[nk] !== null && o[nk] !== "" && o[nk] !== 0) {
+                stats.conflits++; /* l'employé gardé a déjà une valeur : on la garde */
+              } else o[nk] = o[kk];
+              delete o[kk];
+            }
+          }
+        }
+        return n;
+      }
+      /* Pointage / montage : un même jour (et article) sous les deux noms =>
+         on garde la ligne de l'employé gardé. */
+      function _empfPointage(py, src, dst, now, stats, simuler) {
+        ["pointage", "pointageMontage"].forEach(function (sec) {
+          var arr = Array.isArray(py[sec]) ? py[sec] : null;
+          if (!arr) return;
+          var cle = function (l) { return l.date + "|" + String(l.article_code == null ? "" : l.article_code).trim().toLowerCase().replace(/[^a-z0-9]/g, ""); };
+          var dejaDst = {};
+          arr.forEach(function (l) { if (l && l.employee_id === dst) dejaDst[cle(l)] = true; });
+          var tb = Array.isArray(py[sec + "_tombstones"]) ? py[sec + "_tombstones"] : null;
+          var garde = [];
+          arr.forEach(function (l) {
+            if (!l || l.employee_id !== src) { garde.push(l); return; }
+            var c = cle(l);
+            if (!simuler) {
+              if (!tb) tb = py[sec + "_tombstones"] = [];
+              tb.push("cle:pt:" + src + "|" + c + "@" + now);
+            }
+            if (dejaDst[c]) { stats.doublonsJour[sec]++; if (l.id && !simuler) tb.push(String(l.id)); return; }
+            stats.lignes[sec]++;
+            if (!simuler) { l.employee_id = dst; l.updatedAt = now + 1; delete l._seal; }
+            dejaDst[c] = true;
+            garde.push(l);
+          });
+          if (!simuler) py[sec] = garde;
+        });
+      }
+      function _empfCalcul(src, dst, simuler) {
+        var now = Date.now();
+        var stats = { conflits: 0, lignes: { pointage: 0, pointageMontage: 0 }, doublonsJour: { pointage: 0, pointageMontage: 0 }, cles: {}, ecritures: {} };
+        _empfCles().forEach(function (k) {
+          var raw = null;
+          try { raw = localStorage.getItem(k); } catch (e) {}
+          if (!raw || raw.indexOf(src) < 0) return;
+          var v; try { v = JSON.parse(raw); } catch (e) { return; }
+          if (k === PAYE_KEY) {
+            v = JSON.parse(JSON.stringify(getPayeData()));
+            _empfPointage(v, src, dst, now, stats, false);
+          }
+          var n = _empfRemplacer(v, src, dst, stats, now, 1);
+          if (k === PAYE_KEY) n += stats.lignes.pointage + stats.lignes.pointageMontage + stats.doublonsJour.pointage + stats.doublonsJour.pointageMontage;
+          if (n > 0) { stats.cles[k] = n; stats.ecritures[k] = v; }
+        });
+        return stats;
+      }
+      var _EMPF_NOMS = {
+        mdb_paye: "Paie (pointage, montage, primes, saisies du bulletin…)",
+        mdb_acomptesPrets: "Acomptes & prêts",
+        mdb_operationsCaisse: "Pièces de caisse",
+        mdb_banqueOperations: "Opérations banque",
+        mdb_salairesPaiements: "Paiements des salaires",
+        mdb_rh_conges: "Congés",
+        mdb_deletedOps: "Historique des suppressions",
+      };
+      function _empfLabel(p) { return (p.matricule ? p.matricule + " - " : "") + (p.nom || "") + " " + (p.prenoms || ""); }
+      function empFusionOuvrir() {
+        var ids = Array.prototype.map.call(document.querySelectorAll(".pers-cb:checked"), function (c) { return c.getAttribute("data-id"); });
+        if (ids.length !== 2) return toast("Cochez exactement 2 employés", "error");
+        var L = getPersonnel();
+        var a = L.find(function (x) { return x.id === ids[0]; }), b = L.find(function (x) { return x.id === ids[1]; });
+        if (!a || !b) return toast("Employé introuvable", "error");
+        /* par défaut on garde celui qui a le plus de saisies */
+        var sa = _empfCalcul(a.id, b.id, true), sb = _empfCalcul(b.id, a.id, true);
+        var na = sa.lignes.pointage + sa.lignes.pointageMontage + sa.doublonsJour.pointage + sa.doublonsJour.pointageMontage;
+        var nb = sb.lignes.pointage + sb.lignes.pointageMontage + sb.doublonsJour.pointage + sb.doublonsJour.pointageMontage;
+        var garderA = na >= nb;
+        window._empfPaire = [a.id, b.id];
+        var ov = document.getElementById("empf-modal");
+        if (!ov) { ov = document.createElement("div"); ov.id = "empf-modal"; document.body.appendChild(ov); }
+        ov.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px";
+        var radio = function (p, chk) {
+          return '<label style="display:flex;gap:10px;align-items:flex-start;justify-content:flex-start;text-align:left;padding:10px 12px;border:1.5px solid #e2e8f0;border-radius:10px;cursor:pointer;margin-bottom:8px;text-transform:none;letter-spacing:0;font-size:.85rem;color:#0f172a;font-weight:400"><input type="radio" name="empf-garde" value="' + escH(p.id) + '"' + (chk ? " checked" : "") + ' onchange="empFusionApercu()" style="margin-top:3px;width:auto;flex:0 0 auto"><div style="flex:1"><div style="font-weight:800">' + escH(_empfLabel(p)) + '</div><div style="font-size:.72rem;color:#64748b">' + escH((p.fonction || "-") + " · " + (p.type_contrat || "-") + " · entrée " + (p.date_entree || "-")) + "</div></div></label>";
+        };
+        ov.innerHTML = '<div style="background:#fff;border-radius:14px;max-width:620px;width:100%;max-height:90vh;overflow:auto;padding:20px 22px;box-shadow:0 20px 50px rgba(0,0,0,.3)">' +
+          '<div style="font-size:1.05rem;font-weight:800;margin-bottom:4px">🔗 Fusionner deux fiches du même employé</div>' +
+          '<div style="font-size:.78rem;color:#475569;margin-bottom:12px">Choisissez la fiche à <b>garder</b>. Toutes les saisies de l’autre fiche passent dessus, puis l’autre fiche est supprimée.</div>' +
+          radio(a, garderA) + radio(b, !garderA) +
+          '<div id="empf-apercu" style="margin:10px 0;font-size:.8rem"></div>' +
+          '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button type="button" class="btn btn-sec" onclick="document.getElementById(\'empf-modal\').remove()">Annuler</button><button type="button" class="btn" style="background:#7c3aed;border-color:#7c3aed" onclick="empFusionExecuter()">Fusionner</button></div></div>';
+        empFusionApercu();
+      }
+      function _empfSrcDst() {
+        var r = document.querySelector('input[name="empf-garde"]:checked');
+        var pr = window._empfPaire || [];
+        if (!r) return null;
+        var dst = r.value, src = pr[0] === dst ? pr[1] : pr[0];
+        return { src: src, dst: dst };
+      }
+      function empFusionApercu() {
+        var sd = _empfSrcDst(); if (!sd) return;
+        var L = getPersonnel();
+        var ps = L.find(function (x) { return x.id === sd.src; }) || {};
+        var st = _empfCalcul(sd.src, sd.dst, true);
+        var h = '<div style="padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px">';
+        h += '<div style="font-weight:700;margin-bottom:6px">Ce qui passe de « ' + escH(_empfLabel(ps)) + ' » vers la fiche gardée :</div><ul style="margin:0;padding-left:18px;line-height:1.7">';
+        h += "<li>Pointage : <b>" + st.lignes.pointage + "</b> jour(s)" + (st.doublonsJour.pointage ? ' <span style="color:#b45309">(+ ' + st.doublonsJour.pointage + " jour(s) déjà pointé(s) sur la fiche gardée : on garde celui de la fiche gardée)</span>" : "") + "</li>";
+        h += "<li>Pointage montage : <b>" + st.lignes.pointageMontage + "</b> ligne(s)" + (st.doublonsJour.pointageMontage ? ' <span style="color:#b45309">(+ ' + st.doublonsJour.pointageMontage + " en double même jour/article : on garde celle de la fiche gardée)</span>" : "") + "</li>";
+        var autres = Object.keys(st.cles).filter(function (k) { return k !== PAYE_KEY; });
+        autres.forEach(function (k) { h += "<li>" + escH(_EMPF_NOMS[k] || k) + " : <b>" + st.cles[k] + "</b> élément(s)</li>"; });
+        if (st.cles[PAYE_KEY]) h += "<li>Autres données de paie (primes, saisies du bulletin, ordre montage…) : incluses</li>";
+        if (!Object.keys(st.cles).length) h += "<li>Aucune saisie trouvée sur cette fiche : elle sera simplement supprimée.</li>";
+        h += "</ul>";
+        if (st.conflits) h += '<div style="margin-top:6px;color:#b45309">⚠ ' + st.conflits + " réglage(s) existai(en)t sur les deux fiches pour le même mois : on garde celui de la fiche gardée.</div>";
+        h += '<div style="margin-top:6px;color:#64748b;font-size:.74rem">Les informations vides de la fiche gardée (téléphone, CNPS, etc.) sont complétées avec celles de l’autre fiche.</div></div>';
+        var ap = document.getElementById("empf-apercu"); if (ap) ap.innerHTML = h;
+      }
+      function empFusionExecuter() {
+        var sd = _empfSrcDst(); if (!sd || !sd.src || !sd.dst || sd.src === sd.dst) return;
+        var L = getPersonnel();
+        var ps = L.find(function (x) { return x.id === sd.src; }), pd = L.find(function (x) { return x.id === sd.dst; });
+        if (!ps || !pd) return toast("Employé introuvable", "error");
+        if (!confirm("Fusionner « " + _empfLabel(ps) + " » dans « " + _empfLabel(pd) + " » ?\n\nToutes ses saisies passent sur la fiche gardée, puis la fiche « " + _empfLabel(ps) + " » est supprimée.")) return;
+        var st = _empfCalcul(sd.src, sd.dst, false);
+        var now = Date.now();
+        Object.keys(st.ecritures).forEach(function (k) {
+          var v = st.ecritures[k];
+          if (k === PAYE_KEY) {
+            /* sections modifiees horodatees : la synchro les prend comme recentes */
+            try { Object.keys(v).forEach(function (sec) { (window._payeEcritLocal = window._payeEcritLocal || {})[sec] = now; }); } catch (e) {}
+            setPayeData(v);
+          } else DB.setMain(k, v);
+        });
+        /* fiche gardée : on complète les champs vides */
+        Object.keys(ps).forEach(function (f) {
+          if (f === "id" || f === "updatedAt") return;
+          var vd = pd[f];
+          if ((vd === undefined || vd === null || vd === "" || vd === "-") && ps[f] !== undefined && ps[f] !== null && ps[f] !== "") pd[f] = ps[f];
+        });
+        if (ps.date_entree && pd.date_entree && ps.date_entree < pd.date_entree) pd.date_entree = ps.date_entree;
+        pd.updatedAt = now;
+        _payeAddTombstones("mdb_employes", [sd.src]);
+        setPersonnel(L.filter(function (x) { return x.id !== sd.src; }));
+        try { window._payrollCache = {}; } catch (e) {}
+        try { pushPayeCloud(true); } catch (e) {}
+        var ov = document.getElementById("empf-modal"); if (ov) ov.remove();
+        try { loadPersonnel(); } catch (e) {}
+        try { updateBulkBar(); } catch (e) {}
+        toast("Fusion faite : " + (st.lignes.pointage) + " jour(s) de pointage, " + st.lignes.pointageMontage + " ligne(s) de montage et les autres saisies sont passés sur « " + _empfLabel(pd) + " ».", "success");
+      }
       function toggleAllPersCheckboxes(el) {
         document.querySelectorAll(".pers-cb").forEach(function (cb) {
           cb.checked = el.checked;
@@ -15373,6 +15576,13 @@ function addArticleMontageFromPt(e) {
             (cbs.length > 1 ? "s" : "") +
             " sélectionné" +
             (cbs.length > 1 ? "s" : "");
+          try {
+            var fz = document.getElementById("pers-fusion-zone");
+            if (!fz) { fz = document.createElement("span"); fz.id = "pers-fusion-zone"; cnt.parentNode.insertBefore(fz, cnt.nextSibling); }
+            fz.innerHTML = cbs.length === 2
+              ? ' <button type="button" class="btn" style="margin-left:10px;padding:4px 12px;font-size:.74rem;background:#7c3aed;border-color:#7c3aed" onclick="empFusionOuvrir()">🔗 Fusionner ces 2 employés (doublon)</button>'
+              : ' <span style="margin-left:10px;color:#64748b;font-size:.72rem">(cochez exactement 2 employés pour fusionner un doublon)</span>';
+          } catch (eFz) {}
         } else {
           bar.style.display = "none";
         }
