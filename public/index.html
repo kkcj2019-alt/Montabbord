@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-401';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-403';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -4127,6 +4127,10 @@ var DB = {
       _dbMemCache[key] = data;
     }
     try { _majHorodater(key, data); } catch (eMaj) {}
+    /* Ecriture IDENTIQUE a ce qui est deja enregistre : rien a envoyer au cloud
+       (avant, chaque reecriture sans changement relancait un envoi). */
+    var _dbIdem = false;
+    try { var _dbNew = JSON.stringify(data); _dbIdem = (localStorage.getItem(key) === _dbNew); } catch (eId) {}
     try { localStorage.setItem(key, JSON.stringify(data)); } catch(eLS) {
       /* Quota localStorage plein = ecriture perdue EN SILENCE (les
          suppressions d'articles « revenaient » alors au rechargement).
@@ -4141,7 +4145,7 @@ var DB = {
        valeur ecrite pour eviter un re-parsage inutile au prochain DB.get. */
     _dbMemCache[key] = data;
     scheduleLocalBackup(key, data);
-    if (!_receivingSnapshot && currentUser && currentUser.id) {
+    if (!_receivingSnapshot && currentUser && currentUser.id && !_dbIdem) {
       markDirty(key);
     }
     if (!_receivingSnapshot && !_loadingCloud) _broadcastSharedKey(key, data);
@@ -27672,10 +27676,52 @@ function printEtatDetteEmploye(empId, filterMonth, asPdf) {
 
   html += '</body></html>';
 
+  if (asPdf && typeof mdbHtmlVersPdf === 'function') {
+    mdbHtmlVersPdf(html, 'Etat des dettes - ' + empNom + ' - ' + getToday());
+    return;
+  }
   var w = window.open('', '_blank', 'width=950,height=750');
   w.document.write(html);
   w.document.close();
   setTimeout(function() { w.print(); }, 350);
+}
+/* PDF telecharge DIRECTEMENT (sans passer par la fenetre d'impression) :
+   la page est dessinee dans un cadre cache puis convertie en PDF A4. */
+function mdbHtmlVersPdf(html, nomFichier) {
+  var J = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+  if (!J || typeof window.html2canvas !== 'function') { toast('Module PDF pas encore charg\u00e9, r\u00e9essayez dans 2 secondes', 'warning'); return; }
+  if (window.__mdbPdfEnCours) { toast('PDF en cours de cr\u00e9ation\u2026', 'info'); return; }
+  window.__mdbPdfEnCours = true;
+  toast('Cr\u00e9ation du PDF\u2026', 'info');
+  var f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;visibility:hidden';
+  document.body.appendChild(f);
+  var fin = function () { window.__mdbPdfEnCours = false; setTimeout(function () { try { f.remove(); } catch (e) {} }, 500); };
+  try {
+    var d = f.contentWindow.document;
+    d.open();
+    d.write(String(html).replace('</head>', '<style>.no-print{display:none!important}body{background:#fff!important}</style></head>'));
+    d.close();
+  } catch (eW) { fin(); toast('PDF impossible : ' + (eW.message || eW), 'error'); return; }
+  setTimeout(function () {
+    var d = f.contentWindow.document, corps = d.body;
+    try { f.style.height = Math.max(1200, corps.scrollHeight + 40) + 'px'; } catch (e) {}
+    window.html2canvas(corps, { scale: 2, backgroundColor: '#ffffff', useCORS: true, windowWidth: 820, windowHeight: corps.scrollHeight + 40 }).then(function (cv) {
+      var pdf = new J({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      var marge = 8, largeur = 210 - 2 * marge, hautPage = 297 - 2 * marge;
+      var pxParMm = cv.width / largeur, hautTranchePx = Math.floor(hautPage * pxParMm);
+      for (var y = 0, page = 0; y < cv.height; y += hautTranchePx, page++) {
+        var h = Math.min(hautTranchePx, cv.height - y);
+        var c2 = document.createElement('canvas'); c2.width = cv.width; c2.height = h;
+        var cx = c2.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, c2.width, h); cx.drawImage(cv, 0, y, cv.width, h, 0, 0, cv.width, h);
+        if (page > 0) pdf.addPage();
+        pdf.addImage(c2.toDataURL('image/jpeg', 0.92), 'JPEG', marge, marge, largeur, h / pxParMm);
+      }
+      pdf.save(String(nomFichier || 'document').replace(/[\\/:*?"<>|]+/g, '-') + '.pdf');
+      toast('PDF t\u00e9l\u00e9charg\u00e9', 'success');
+      fin();
+    }).catch(function (e) { fin(); toast('PDF impossible : ' + (e && e.message || e), 'error'); });
+  }, 700);
 }
 function togglePreleveAcompte(id) {
   var list = dbArr('mdb_acomptesPrets');
@@ -60453,7 +60499,7 @@ function _csVueSync() {
       mdbSecoursTelecharger() — rien ne peut plus se perdre en silence. */
 (function () {
   if (window.__mdbGarde) return; window.__mdbGarde = true;
-  var APP = /paye\.html/i.test(location.pathname) ? 'paye' : (/production\.html/i.test(location.pathname) ? 'production' : 'index');
+  var APP = /\/paye(\.html)?\/?$/i.test(location.pathname) ? 'paye' : (/\/production(\.html)?\/?$/i.test(location.pathname) ? 'production' : 'index');
   var LS = function (k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { return null; } };
 
   /* ---------- 3) Copies de secours (IndexedDB) ---------- */
@@ -60516,7 +60562,7 @@ function _csVueSync() {
 
   /* ---------- 2) Garde de version ---------- */
   try {
-    var cur = String(window.__APP_VERSION || ''), cle = 'mdb_versionMax_' + APP, max = LS(cle) || '';
+    var cur = String(window.__APP_VERSION || ''), cle = 'mdb_versionMax2_' + APP, max = LS(cle) || '';
     if (/^\d{4}-\d{2}-\d{2}-\d+$/.test(cur)) {
       var num = function (v) { var m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})-(\d+)$/); return m ? [+m[1], +m[2], +m[3], +m[4]] : null; };
       var plusAncien = function (a, b) { a = num(a); b = num(b); if (!a || !b) return false; for (var i = 0; i < 4; i++) { if (a[i] !== b[i]) return a[i] < b[i]; } return false; };
@@ -60599,13 +60645,14 @@ function _csVueSync() {
     b.style.display = '';
     var n = nbAttente();
     /* Les envois en attente viennent d'etre acceptes par le cloud : on note l'heure */
-    if (n > 0) etat.vuAttente = true; else if (etat.vuAttente && !_isPushing) { etat.vuAttente = false; LSs('mdb_cloudVerifOk', String(Date.now())); }
+    if (n > 0) { etat.vuAttente = true; if (!etat.attenteDepuis) etat.attenteDepuis = Date.now(); }
+    else { etat.attenteDepuis = 0; if (etat.vuAttente && !_isPushing) { etat.vuAttente = false; LSs('mdb_cloudVerifOk', String(Date.now())); } }
     var ok = +LSg('mdb_cloudVerifOk') || 0;
     var horsL = !!window._offlineMode || LSg('mdb_offlineMode') === '1';
     var txt, bg, tip;
-    if (etat.enCours) { txt = '☁ Envoi en cours…'; bg = '#d97706'; tip = 'Envoi et vérification en cours'; }
+    if (etat.enCours && etat.manuel) { txt = '☁ Envoi en cours…'; bg = '#d97706'; tip = 'Envoi et vérification en cours'; }
     else if (etat.manque > 0 || (etat.dernierEchec && etat.dernierEchec > ok)) { txt = '☁ ✖ PAS ENVOYÉ – cliquer'; bg = '#dc2626'; tip = 'Le dernier envoi n’a pas pu être vérifié. Cliquez pour réessayer.'; }
-    else if (horsL || n > 0) { txt = '☁ ⏳ ' + n + ' en attente – Envoyer'; bg = '#d97706'; tip = 'Des saisies ne sont pas encore sur le cloud. Cliquez pour envoyer.'; }
+    else if (horsL || (n > 0 && etat.attenteDepuis && Date.now() - etat.attenteDepuis > 10000)) { txt = '☁ ⏳ ' + n + ' en attente – Envoyer'; bg = '#d97706'; tip = 'Des saisies ne sont pas encore sur le cloud. Cliquez pour envoyer.'; }
     else if (ok) { txt = '☁ ✔ Sur le cloud ' + hh(ok); bg = '#16a34a'; tip = 'Tout a été envoyé et vérifié sur le cloud à ' + hh(ok) + '. Cliquez pour revérifier.'; }
     else { txt = '☁ Envoyer au cloud'; bg = '#2563eb'; tip = 'Envoyer et vérifier sur le cloud'; }
     if (b.textContent !== txt) b.textContent = txt;
@@ -60640,7 +60687,7 @@ function _csVueSync() {
   window.mdbEnvoyerAuCloud = function (manuel, fini) {
     if (etat.enCours) { if (fini) setTimeout(function () { mdbEnvoyerAuCloud(manuel, fini); }, 1500); return; }
     if (!window.currentUser || !currentUser.id || !window.firebaseDb) { if (fini) fini(false); return; }
-    etat.enCours = true; afficher();
+    etat.enCours = true; etat.manuel = !!manuel; afficher();
     try { localStorage.removeItem('mdb_offlineMode'); window._offlineMode = false; } catch (e) {}
     try { var p = JSON.parse(LSg('mdb_pendingSync') || '{}') || {}; for (var k in p) if (p.hasOwnProperty(k) && isSyncable(k)) _dirtyKeys[k] = true; } catch (e) {}
     var essai = 0;
