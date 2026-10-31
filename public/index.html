@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-394';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-395';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -22636,6 +22636,19 @@ function _reconcileAcomptesPretsFromCaisse() {
    un autre (ex : saisie d'octobre pour la paie de septembre). */
 function apChangerMois(id, valeur) {
   if (!/^\d{4}-\d{2}$/.test(valeur || '')) return;
+  /* Prêt : le nouveau mois de début tombe pendant un autre prêt de l'employé ?
+     On propose « après la fin du prêt en cours » ou de garder le mois choisi. */
+  if (!window.__csPretConfOk) {
+    try {
+      var _apX = (dbArr('mdb_acomptesPrets') || []).find(function (x) { return x && x.id === id; });
+      if (_apX && _apX.type === 'pret') {
+        var _champ = { value: valeur };
+        if (_csPretChevauchementVerif(id, false, [{ empId: _apX.employeId, input: _champ, mois: valeur }],
+              function () { apChangerMois(id, _champ.value); try { renderAcomptesPrets(); } catch (eR) {} },
+              function () { try { renderAcomptesPrets(); } catch (eR2) {} }, true)) return;
+      }
+    } catch (eChv) { console.warn('[pret chevauchement mois]', eChv); }
+  }
   var list = [];
   try { list = dbArr('mdb_acomptesPrets') || []; } catch (e) { return; }
   var opId = '';
@@ -23952,7 +23965,7 @@ function _apPretRepousser(id) {
     var nouv = _apMoisAdd(md, 1);
     /* apChangerMois recale aussi les échéances : on remet notre plan après. */
     var plan = echs.map(function (e) { return Object.assign({}, e); });
-    try { apChangerMois(id, nouv); } catch (eC) {}
+    window.__csPretConfOk = true; try { apChangerMois(id, nouv); } catch (eC) {} finally { window.__csPretConfOk = false; }
     var l2 = dbArr('mdb_acomptesPrets');
     for (var j = 0; j < l2.length; j++) if (l2[j] && l2[j].id === id) { l2[j].echeances = plan; l2[j].updatedAt = Date.now(); }
     DB.set('mdb_acomptesPrets', l2);
@@ -44323,7 +44336,7 @@ function _csPretLignesSaisies() {
   }
   return L;
 }
-function _csPretChevauchementVerif(id, asDraft, lignesAP, relance) {
+function _csPretChevauchementVerif(id, asDraft, lignesAP, relance, annule, suggDefaut) {
   /* lignesAP / relance : formulaire « Nouveau prêt » de la page Acompte et Prêts */
   var editId = lignesAP ? '' : (id || window._csEditId || '');
   var gEdit = lignesAP ? '' : (window._csCollectifEditGroupeId || '');
@@ -44337,11 +44350,11 @@ function _csPretChevauchementVerif(id, asDraft, lignesAP, relance) {
     conf.push({ l: l, ch: ch, sugg: _apMoisAdd(finMax, 1), emp: emps[l.empId] });
   });
   if (!conf.length) return false;
-  window.__csPretConf = { conf: conf, id: id, asDraft: asDraft, relance: relance || null };
+  window.__csPretConf = { conf: conf, id: id, asDraft: asDraft, relance: relance || null, annule: annule || null };
   var nom = function (e, id2) { return e ? ((e.matricule ? e.matricule + ' - ' : '') + (e.nom || '') + ' ' + (e.prenoms || '')).trim() : id2; };
   /* Modification d'une pièce déjà enregistrée : par défaut on GARDE les mois
      choisis (ne pas décaler un prêt existant sans le vouloir). */
-  var _enEdition = !!(editId || gEdit || (lignesAP && id));
+  var _enEdition = !suggDefaut && !!(editId || gEdit || (lignesAP && id));
   var rows = conf.map(function (c, i) {
     var det = c.ch.map(function (x) {
       return '<div style="font-size:12px;color:#475569;margin-top:3px">• Prêt de <b>' + fmtMoney(x.a.montant || 0) + '</b>' + (x.a.numeroPiece ? ' (' + escH(x.a.numeroPiece) + ')' : '') + ' : ' + escH(fmtMois(x.debut)) + ' → <b>' + escH(fmtMois(x.fin)) + '</b> — reste ' + fmtMoney(x.reste) + (x.aVenir ? ' <span style="color:#b45309;font-weight:700">(pas encore commencé)</span>' : ' <span style="color:#4f46e5;font-weight:700">(en cours)</span>') + '</div>';
@@ -44356,10 +44369,15 @@ function _csPretChevauchementVerif(id, asDraft, lignesAP, relance) {
     '<div style="background:#fff;border-radius:16px;width:100%;max-width:640px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,.3)">' +
     '<div style="padding:16px 18px 8px"><div style="font-size:16px;font-weight:800">⚠ Prêt déjà en cours</div><div style="font-size:12px;color:#64748b;margin-top:3px">Cet employé rembourse déjà un prêt sur le mois choisi. Par défaut, le nouveau prêt commence le mois <b>après la fin</b> du prêt en cours.</div></div>' +
     '<div style="padding:6px 18px;overflow:auto;flex:1">' + rows + '</div>' +
-    '<div style="padding:12px 18px;border-top:1px solid #e2e8f0;display:flex;gap:10px;justify-content:flex-end"><button class="btn btn-outline" onclick="document.getElementById(\'csPretConfOv\').remove();window.__csPretConf=null">Annuler</button><button class="btn btn-primary" onclick="_csPretConfAppliquer()">Continuer l’enregistrement</button></div></div></div>';
+    '<div style="padding:12px 18px;border-top:1px solid #e2e8f0;display:flex;gap:10px;justify-content:flex-end"><button class="btn btn-outline" onclick="_csPretConfAnnuler()">Annuler</button><button class="btn btn-primary" onclick="_csPretConfAppliquer()">Continuer l’enregistrement</button></div></div></div>';
   var o = document.getElementById('csPretConfOv'); if (o) o.remove();
   document.body.insertAdjacentHTML('beforeend', h);
   return true;
+}
+function _csPretConfAnnuler() {
+  var P = window.__csPretConf; var o = document.getElementById('csPretConfOv'); if (o) o.remove();
+  window.__csPretConf = null;
+  try { if (P && P.annule) P.annule(); } catch (e) {}
 }
 function _csPretConfAppliquer() {
   var P = window.__csPretConf; if (!P) return;
