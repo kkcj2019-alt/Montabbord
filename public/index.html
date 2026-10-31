@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-338';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-340';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -16284,6 +16284,7 @@ function importerArticlesExploitation(options) {
     if (!estSemi && !estConso) return;
     var code = String(a.code).trim().toUpperCase();
     if (deja[code]) return;
+    if (_nomCodeSupprime(code)) return; /* supprime volontairement dans l'Index : ne pas le recreer */
     var px0 = parseFloat(a.prix_vente) || 0;
     var an = new Date().getFullYear();
     var typeArt = estConso ? 'consommable' : 'semi_fini';
@@ -16946,6 +16947,7 @@ function supprimerNomenclature(id, dejaConfirme) {
       } catch (eS2) {}
     }
     DB.set('mdb_nomenclature', result);
+    if (suppr) { try { _nomPropagerSuppression(suppr); } catch (ePg) {} }
     return true;
   };
   if (dejaConfirme) { var _ok = _faire(); if (_ok) { toast('Article supprimé'); renderNomenclature(); } return _ok; }
@@ -16956,6 +16958,42 @@ function supprimerNomenclature(id, dejaConfirme) {
   });
   } catch(e) { toast('Erreur: ' + e.message, 'error'); return false; }
   return true;
+}
+/* Suppression d'un article de la Nomenclature (source unique) : propagee aux
+   autres applis et memorisee PAR CODE (pierre tombale synchronisee), sinon
+   l'import automatique depuis l'Exploitation (semi-finis, consommables) le
+   recreait avec un nouvel identifiant a l'affichage suivant. */
+function _nomCodeSupprime(code) {
+  var c = String(code || '').trim().toUpperCase();
+  if (!c) return false;
+  try { return !!((getTombstones() || {})['mdb_nomenclature_code'] || {})[c]; } catch (e) { return false; }
+}
+function _nomPropagerSuppression(art) {
+  var code = String(art && art.code || '').trim();
+  if (!code) return;
+  var cU = code.toUpperCase(), cN = _nomNormCode(code), now = Date.now();
+  try { addTombstones('mdb_nomenclature_code', [cU]); } catch (eT) {}
+  /* Paie : article de montage retire */
+  try {
+    var py = dbObj('mdb_paye'), chg = false;
+    if (Array.isArray(py.articlesMontage) && py.articlesMontage.some(function (a) { return _nomNormCode(a && a.code) === cN; })) {
+      py.articlesMontage = py.articlesMontage.filter(function (a) { return _nomNormCode(a && a.code) !== cN; }); chg = true;
+    }
+    var at = Array.isArray(py.articlesMontage_tombstones) ? py.articlesMontage_tombstones : (py.articlesMontage_tombstones = []);
+    if (!at.some(function (t) { return t && String(t.code || '').toLowerCase() === code.toLowerCase() && (t.deletedAt || 0) >= now - 1000; })) { at.push({ code: code.toLowerCase(), deletedAt: now }); chg = true; }
+    if (chg) { DB.set('mdb_paye', py); try { markDirty('mdb_paye'); } catch (e) {} }
+  } catch (eP) {}
+  /* Exploitation : l'article du referentiel (semi-fini / consommable) est retire.
+     Les produits finis suivent deja leur propre suppression (pfIgnores). Les lignes
+     de stock ne sont PAS effacees (historique des quantites). */
+  try {
+    var pp = (typeof apProdGet === 'function') ? (apProdGet() || {}) : null;
+    if (pp && Array.isArray(pp.articles)) {
+      var av = pp.articles.length;
+      pp.articles = pp.articles.filter(function (a) { return !(a && a.categorie !== 'finished' && String(a.code || '').trim().toUpperCase() === cU); });
+      if (pp.articles.length !== av && typeof apProdSet === 'function') { pp.__prodUpdatedAt = now; apProdSet(pp); try { markDirty('mdb_production'); } catch (e) {} }
+    }
+  } catch (eE) {}
 }
 /* Ou un article est-il utilise ? Liste de { type, id, numero, date, client, qte, statut }. */
 function _nomUsages(id) {
@@ -16973,6 +17011,8 @@ function _nomUsages(id) {
   try { scan('BL', getBLs(), 'dateLivraison'); } catch (e2) {}
   try { scan('Facture', getFactures(), 'dateEmission'); } catch (e3) {}
   try { scan('Pr\u00e9-financement', dbArr('mdb_prefinancement'), 'dateDemande'); } catch (e4) {}
+  try { scan('Proforma', dbArr('mdb_proformas'), 'date'); } catch (e5) {}
+  try { scan('Journal ventes', dbArr('mdb_journal_ventes'), 'date'); } catch (e6) {}
   out.sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
   return out;
 }
@@ -17049,15 +17089,59 @@ function _nomFusionExecuter(srcId) {
   if (!confirm('Fusionner ' + r.src.code + ' dans ' + r.dst.code + ' ?\n\nDocuments et pointages de ' + r.src.code + ' passent sur ' + r.dst.code + ', puis ' + r.src.code + ' est supprimé.')) return;
   var now = Date.now(), nDoc = 0, nPt = 0;
   /* 1. Documents */
-  [['mdb_bc', getBCs], ['mdb_bl', getBLs], ['mdb_factures', getFactures], ['mdb_prefinancement', function () { return dbArr('mdb_prefinancement'); }]].forEach(function (kv) {
-    var arr = kv[1]() || [], ch = false;
+  var csU = String(r.src.code || '').trim().toUpperCase();
+  var estSrc = function (l) { return l && (l.articleId === srcId || (!l.articleId && l.articleCode && String(l.articleCode).trim().toUpperCase() === csU)); };
+  var remap = function (l) { l.articleId = r.dst.id; if (l.code !== undefined) l.code = r.dst.code; if (l.articleCode !== undefined) l.articleCode = r.dst.code; };
+  ['mdb_bc', 'mdb_bl', 'mdb_factures', 'mdb_proformas', 'mdb_prefinancement', 'mdb_journal_ventes'].forEach(function (k) {
+    var arr = dbArr(k) || [], ch = false;
     arr.forEach(function (d) {
-      if (!d || !d.lignes) return; var t = false;
-      d.lignes.forEach(function (l) { if (l && l.articleId === srcId) { l.articleId = r.dst.id; if (l.code !== undefined) l.code = r.dst.code; t = true; } });
+      if (!d || !Array.isArray(d.lignes)) return; var t = false;
+      d.lignes.forEach(function (l) { if (estSrc(l)) { remap(l); t = true; } });
       if (t) { d.updatedAt = now; ch = true; nDoc++; }
     });
-    if (ch) { DB.set(kv[0], arr); try { markDirty(kv[0]); } catch (e) {} }
+    if (ch) { DB.set(k, arr); try { markDirty(k); } catch (e) {} }
   });
+  /* Bilan / actif : lignes rattachees a l'article */
+  try {
+    var act = dbObj('mdb_actif'), chA = false;
+    (act.rubriques || []).forEach(function (rb) { (rb && rb.lignes || []).forEach(function (l) { if (estSrc(l)) { remap(l); chA = true; } }); });
+    if (chA) { DB.set('mdb_actif', act); try { markDirty('mdb_actif'); } catch (e) {} }
+  } catch (eA) {}
+  /* Stock commercial : la quantite du doublon s'ajoute a celle de l'article garde */
+  try {
+    var st = dbArr('mdb_stocks') || [], ligneDst = null, chS = false;
+    st.forEach(function (x) { if (x && x.articleId === r.dst.id && !ligneDst) ligneDst = x; });
+    st = st.filter(function (x) {
+      if (!x || !(x.articleId === srcId || (!x.articleId && String(x.articleCode || x.code || '').trim().toUpperCase() === csU))) return true;
+      chS = true;
+      if (ligneDst) { ligneDst.quantite = (parseFloat(ligneDst.quantite) || 0) + (parseFloat(x.quantite) || 0); ligneDst.updatedAt = now; return false; }
+      x.articleId = r.dst.id; x.articleCode = r.dst.code; if (x.code !== undefined) x.code = r.dst.code; x.articleNom = r.dst.designation || x.articleNom; x.updatedAt = now; ligneDst = x; return true;
+    });
+    if (chS) { DB.set('mdb_stocks', st); try { markDirty('mdb_stocks'); } catch (e) {} }
+  } catch (eS) {}
+  /* Exploitation : stock produits finis, fiches de production, cout de revient */
+  try {
+    var pp = (typeof apProdGet === 'function') ? (apProdGet() || {}) : null;
+    if (pp) {
+      var chP = false, pidS = 'pf_' + r.src.code, pidD = 'pf_' + r.dst.code, artS = null, artD = null;
+      (pp.articles || []).forEach(function (a) { if (a && a.categorie === 'finished') { var c = String(a.code || '').trim().toUpperCase(); if (c === csU) artS = a; if (c === String(r.dst.code || '').trim().toUpperCase()) artD = a; } });
+      if (artS && artD && Array.isArray(pp.stockFinished)) {
+        var sD = null; pp.stockFinished.forEach(function (x) { if (x && x.article_id === artD.id && !sD) sD = x; });
+        pp.stockFinished = pp.stockFinished.filter(function (x) {
+          if (!x || x.article_id !== artS.id) return true; chP = true;
+          if (sD) { sD.quantite = (parseFloat(sD.quantite) || 0) + (parseFloat(x.quantite) || 0); sD.updated_at = new Date().toISOString(); return false; }
+          x.article_id = artD.id; x.updated_at = new Date().toISOString(); return true;
+        });
+      }
+      (pp.productions || []).forEach(function (pr) { (pr && pr.assemblage || []).forEach(function (l) { if (l && String(l.code || '').trim().toUpperCase() === csU) { l.code = r.dst.code; if (r.dst.designation) l.designation = r.dst.designation; chP = true; } }); });
+      if (Array.isArray(pp.costComposition)) {
+        var dejaD = pp.costComposition.some(function (x) { return x && x.article_id === pidD; });
+        pp.costComposition = pp.costComposition.filter(function (x) { if (!x || x.article_id !== pidS) return true; chP = true; if (dejaD) return false; x.article_id = pidD; return true; });
+      }
+      if (pp.costLabor && pp.costLabor.articleId === pidS) { pp.costLabor.articleId = pidD; chP = true; }
+      if (chP && typeof apProdSet === 'function') { pp.__prodUpdatedAt = now; apProdSet(pp); try { markDirty('mdb_production'); } catch (e) {} }
+    }
+  } catch (ePr) { console.warn('[fusion article] exploitation', ePr); }
   /* 2. Pointage montage (Paie) */
   try {
     var py = dbObj('mdb_paye'), cs = _nomNormCode(r.src.code), cd = _nomNormCode(r.dst.code);
@@ -17101,6 +17185,8 @@ function _nomOuvrirDoc(type, id) {
     if (type === 'BC') openBCModal(id);
     else if (type === 'BL') openBLModal(id);
     else if (type === 'Facture') openFactureModal(id);
+    else if (type === 'Proforma' && typeof openProformaModal === 'function') openProformaModal(id);
+    else if (type === 'Journal ventes') toast('Ligne du Journal des ventes : ouvrez le Journal des ventes et cherchez ce n\u00b0', 'info');
     else openPrefinancementModal(id);
   }, 50);
 }
