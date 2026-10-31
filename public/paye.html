@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-10-31-355';
+      window.__APP_VERSION = '2026-10-31-358';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6394,15 +6394,14 @@ function apNatureDe(a) {
 function apNetImpression(a, mois) {
   var nat = "acompte",
     rest = 0,
-    deduit = 0;
+    deduit = 0,
+    aValider = 0;
   try {
     nat = apNatureDe(a);
   } catch (eN) {}
   if (nat !== "solde" && nat !== "pret" && nat !== "acompte")
     nat = a.type === "pret" ? "pret" : a.type === "solde" ? "solde" : "acompte";
-  /* Un SOLDE est verse en caisse le jour de sa creation : ce n'est JAMAIS une
-     dette, dans aucun mois (avant, il ne comptait comme regle que dans son
-     mois de deduction — les autres mois affichaient encore « Reste dû »). */
+  /* Un SOLDE est verse en caisse le jour de sa creation : ce n'est JAMAIS une dette. */
   if (nat === "solde") rest = 0;
   else rest = Math.max(0, (a.montant || 0) - (a.rembourse || 0));
   try {
@@ -6411,16 +6410,32 @@ function apNetImpression(a, mois) {
       var isSol = nat === "solde" || a.type === "solde";
       if ((isSol || a.valide === true) && _md && _md === mois)
         deduit = a.montant || 0;
+      else if (!isSol && _md && _md === mois) aValider = a.montant || 0;
     } else if (a.type === "pret" && a.statut !== "termine") {
-      var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
-      if (moisDed && moisDed <= mois && rest > 0)
-        deduit = Math.min(a.mensualite || 0, rest);
+      var _depuis = (typeof PRET_VALIDATION_DEPUIS !== "undefined" && PRET_VALIDATION_DEPUIS) || "2026-10";
+      if (mois >= _depuis) {
+        /* Même règle que la paie : seule l'échéance du mois VALIDÉE est déduite. */
+        var _ech = null, _rAv = 0;
+        (a.echeances || []).forEach(function (e) {
+          if (!e) return;
+          if (e.mois === mois) _ech = e;
+          else if (e.mois < mois && e.preleve === true) _rAv += parseFloat(e.montant) || 0;
+        });
+        rest = Math.max(0, (a.montant || 0) - Math.max(a.rembourse || 0, _rAv));
+        if (_ech && _ech.preleve === true) deduit = Math.min(parseFloat(_ech.montant) || 0, rest);
+        else if (_ech) aValider = Math.min(parseFloat(_ech.montant) || 0, rest);
+      } else {
+        var moisDed = a.moisDeduction || (a.date || "").substring(0, 7);
+        if (moisDed && moisDed <= mois && rest > 0)
+          deduit = Math.min(a.mensualite || 0, rest);
+      }
     }
   } catch (eD) {}
   return {
     nature: nat,
     rest: rest,
     deduit: deduit,
+    aValider: aValider,
     restNet: Math.max(0, rest - deduit),
   };
 }
@@ -7185,6 +7200,15 @@ function payeObj(key) {
             } catch (eN) {}
           }
         }
+        /* Reports de paie (saisis à la main ou automatiques) : partagés entre
+           postes, la version la plus récente gagne ; suppressions respectées. */
+        try {
+          if (Array.isArray(data.mdb_reports)) {
+            var _cuRp = DB.getMain("mdb_reports"); _cuRp = Array.isArray(_cuRp) ? _cuRp : [];
+            var _mRp = _payeStripTombstoned("mdb_reports", _payeMergeEmployes(_cuRp, data.mdb_reports));
+            if (JSON.stringify(_mRp) !== JSON.stringify(_cuRp)) DB.setMain("mdb_reports", _mRp);
+          }
+        } catch (eRp) {}
         [
           "mdb_employes",
           /* Congés planifiés (index) : la paie doit voir les AJOUTS *et* les
@@ -7566,6 +7590,7 @@ function payeObj(key) {
               "mdb_operationsCaisse",
               "mdb_banqueOperations",
               "mdb_feries",
+              "mdb_reports",
             ];
             for (var si = 0; si < simpleKeys.length; si++) {
               var kX = simpleKeys[si];
@@ -7583,11 +7608,11 @@ function payeObj(key) {
                     payload[kX] = _payeUnion(lvClean, cvClean);
                   else if (cvClean.length > 0) payload[kX] = cvClean;
                   else payload[kX] = [];
-                } else if (kX === "mdb_employes" || kX === "mdb_feries") {
+                } else if (kX === "mdb_employes" || kX === "mdb_feries" || kX === "mdb_reports") {
                   /* Employés + fériés : fusion latest-wins (pas d'union
                      local-first qui réimposerait une fiche périmée). */
                   if (lv.length > 0 || cv.length > 0)
-                    payload[kX] = _payeMergeEmployes(lv, cv);
+                    payload[kX] = kX === "mdb_reports" ? _payeStripTombstoned(kX, _payeMergeEmployes(lv, cv)) : _payeMergeEmployes(lv, cv);
                 } else {
                   if (lv.length > 0) payload[kX] = _payeUnion(lv, cv);
                   else if (cv.length === 0)
@@ -10077,6 +10102,35 @@ function renderPrimeEmpMatrix() {
         try { pushPayeCloud(true); } catch(ePPC){}
         generateBulletin();
       }
+      /* Prestataire externe : heures payables d'après le pointage du mois.
+         ≥ 7 h dans la journée => 8 h payées ; < 7 h => heures réelles par
+         défaut, ou 8 h si on l'a choisi pour ce jour (externJour8h). Faute
+         société => 8 h. Retourne {heures, jours, courts:[{date, h, choix8}]}. */
+      function externHeuresPayables(empId, mois) {
+        var pts = (getPointageData() || []).filter(function (p) { return p && p.employee_id === empId && p.date && String(p.date).indexOf(mois) === 0; });
+        var ch = getPayeSection("externJour8h", {}) || {};
+        var H = 0, J = 0, courts = [];
+        pts.forEach(function (p) {
+          var h = 0;
+          try { h = (ptHImpr(p, false) || 0) + (ptHImpr(p, true) || 0); } catch (e) {}
+          if (p.faute_societe) { H += 8; J++; return; }
+          if (!(h > 0)) return;
+          J++;
+          if (h >= 7) { H += 8; return; }
+          var c8 = ch[empId + "|" + p.date] === true;
+          courts.push({ date: p.date, h: h, choix8: c8 });
+          H += c8 ? 8 : h;
+        });
+        return { heures: Math.round(H * 100) / 100, jours: J, courts: courts };
+      }
+      function externChoix8h(empId, mois, date, on) {
+        var ch = getPayeSection("externJour8h", {}) || {};
+        if (on) ch[empId + "|" + date] = true; else delete ch[empId + "|" + date];
+        setPayeSection("externJour8h", ch);
+        try { window._payrollCache = {}; } catch (e) {}
+        try { pushPayeCloud(); } catch (e) {}
+        generateBulletin();
+      }
       function getExternJours(empId, mois) {
         var m = getPayeSection("externJours", {}) || {};
         return parseInt(m[empId + "|" + mois]) || 0;
@@ -10565,6 +10619,7 @@ function renderPrimeEmpMatrix() {
         for (var i = 0; i < l.length; i++) {
           if (l[i] && l[i].employee_id === empId && l[i].mois === mois) {
             l[i].montant = Math.round(montant);
+            l[i].updatedAt = Date.now();
             l[i].origine = origine || l[i].origine || "auto";
             if (note !== undefined) l[i].note = note;
             found = true;
@@ -10579,12 +10634,14 @@ function renderPrimeEmpMatrix() {
             montant: Math.round(montant),
             origine: origine || "auto",
             note: note || "",
+            updatedAt: Date.now(),
           });
         setReportList(l);
       }
       function deleteReport(empId, mois) {
   /* Suppression definitive : confirmation demandee */
   if (!window.confirm('Supprimer ce rapport ?')) return;
+        try { _payeAddTombstones("mdb_reports", getReportList().filter(function (r) { return r && r.employee_id === empId && r.mois === mois; }).map(function (r) { return r.id; })); } catch (eTR) {}
         setReportList(
           getReportList().filter(function (r) {
             return !(r && r.employee_id === empId && r.mois === mois);
@@ -27746,7 +27803,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                 escH(fmtMoisAP(month)) +
                 ')</th><th style="text-align:right">Pr\u00eats (' +
                 escH(fmtMoisAP(month)) +
-                ')</th><th style="text-align:right">Total \u00e0 d\u00e9duire</th>'
+                ')</th><th style="text-align:right" title="Report du mois précédent : + à ajouter au salarié, − à retenir">Report</th><th style="text-align:right">Total \u00e0 d\u00e9duire</th>'
               : '<th style="text-align:right">Total acomptes</th><th style="text-align:right">Total pr\u00eats</th><th style="text-align:right">Rembours\u00e9</th><th style="text-align:right">Reste d\u00fb</th>') +
             "</tr></thead><tbody>";
           var _hasC = false;
@@ -27757,7 +27814,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             _hasC = true;
             out +=
               '<tr style="background:#e0e7ff"><td colspan="' +
-              (month ? 6 : 7) +
+              7 +
               '" style="font-weight:800;color:#3730a3;padding:6px 8px;border:1px solid #cbd5e1">' +
               typeLabelsC[_tKeyC] +
               " (" +
@@ -27766,7 +27823,9 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             for (var ei = 0; ei < _tEidsC.length; ei++) {
               var es2 = empAgg[_tEidsC[ei]];
               if (month) {
-                var totM = es2.acc + es2.prets;
+                var _repC = 0;
+                try { _repC = getReportFor(_tEidsC[ei], month) || 0; } catch (eRC) {}
+                var totM = es2.acc + es2.prets + (_repC < 0 ? -_repC : 0);
                 out +=
                   '<tr><td style="font-weight:700">' +
                   escH(es2.nom) +
@@ -27778,6 +27837,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
                   fmtF(es2.acc) +
                   '</td><td style="text-align:right">' +
                   fmtF(es2.prets) +
+                  '</td><td style="text-align:right;color:' + (_repC < 0 ? "#b91c1c" : _repC > 0 ? "#15803d" : "#94a3b8") + '">' +
+                  (_repC ? (_repC > 0 ? "+ " : "− ") + fmtF(Math.abs(_repC)) : "-") +
                   '</td><td style="text-align:right;font-weight:700;color:var(--orange-dark)">' +
                   fmtF(totM) +
                   "</td></tr>";
@@ -27806,9 +27867,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           }
           if (!_hasC)
             out +=
-              '<tr><td colspan="' +
-              (month ? 6 : 7) +
-              '" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune donn\u00e9e</td></tr>';
+              '<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:1.5rem">Aucune donn\u00e9e</td></tr>';
           out += "</tbody></table></div>";
           document.getElementById("ap-month-summary").innerHTML = "";
         } else {
@@ -31266,8 +31325,21 @@ if (normalHours > 173.33) {
             joursExt = getExternJours(emp.id, mois);
             var jOuvB = ptJoursOuvres(mois);
             var mfPaye = mfJ;
-            /* Sans jours saisis (non pointé) : aucun versement */
-            if (joursExt <= 0) mfPaye = 0;
+            /* Prestataire POINTÉ : on paie les heures réelles du pointage.
+               Journée de 7 h ou plus = 8 h payées ; moins de 7 h = heures
+               réelles (sauf si on a choisi « payer 8 h » pour ce jour).
+               Forfait intégral = tous les jours ouvrés à 8 h. */
+            var _extH = null;
+            try { _extH = externHeuresPayables(emp.id, mois); } catch (eEH) {}
+            if (_extH && _extH.jours > 0) {
+              joursExt = _extH.jours;
+              var _hRef = jOuvB * 8;
+              mfPaye = _hRef > 0 ? Math.min(mfJ, Math.round((mfJ * _extH.heures) / _hRef)) : 0;
+              stats.hasPointage = true;
+              stats.externHeures = _extH.heures;
+              stats.externHref = _hRef;
+              stats.externDetail = _extH;
+            } else if (joursExt <= 0) mfPaye = 0;
             else {
               /* Prorata sur les JOURS OUVRÉS du mois : présent tous les jours
                  ouvrés = forfait intégral (22j/22 = 100%). */
@@ -31281,9 +31353,11 @@ if (normalHours > 173.33) {
               n: "11",
               label:
                 "Montant forfaitaire mensuel" +
-                (joursExt > 0 && joursExt < jOuvB
+                (stats.externHeures
+                  ? (mfPaye < mfJ ? " (prorata " + String(Math.round(stats.externHeures * 100) / 100).replace(".", ",") + "h/" + stats.externHref + "h)" : "")
+                  : (joursExt > 0 && joursExt < jOuvB
                   ? " (prorata " + joursExt + "j/" + jOuvB + ")"
-                  : ""),
+                  : "")),
               base: mfJ,
               taux: joursExt > 0 ? joursExt + "j/" + jOuvB : "",
               gain: mfPaye,
@@ -33108,7 +33182,7 @@ function panierVerserJour() {
           var mfEff = (jovrM.forfait || 0) > 0 ? Math.round(jovrM.forfait) : mfJ;
           var jExt = getExternJours(emp.id, mois);
           var jOuvR = ptJoursOuvres(mois);
-          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: (jExt > 0 ? jExt : jOuvR) + "j/" + jOuvR, gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
+          rows.push({ label: "Base mensuelle ou Journalière", base: "", baseVal: mfEff, taux: st.externHeures ? (String(Math.round(st.externHeures * 100) / 100).replace(".", ",") + "h/" + (st.externHref || jOuvR * 8) + "h (" + (st.joursExtern || 0) + "j)") : ((jExt > 0 ? jExt : 0) + "j/" + jOuvR), gain: gainRx(/^Montant forfaitaire/), ret: 0, edit: "forfait" });
           rows.push(zero("Heures Suppl."));
         }
         var _pushMontage = function () {
@@ -33152,6 +33226,21 @@ function panierVerserJour() {
         rows.push({ label: "Autres Primes Fixes", base: "", baseVal: ovrVal("autres", auG), taux: "", gain: auG, ret: 0, edit: "autres" });
         if (ap.acomptes > 0) rows.push({ label: "Acompte", base: fmt(ap.acomptes), baseVal: 0, taux: "1", gain: 0, ret: ap.acomptes, edit: null });
         if (ap.prets > 0) rows.push({ label: "Prêt", base: fmt(ap.prets), baseVal: 0, taux: "1", gain: 0, ret: ap.prets, edit: null });
+        /* Colonne Taux jamais vide : transport = jours de présence, salissure =
+           heures travaillées, montants fixes (prime, gratification, congés,
+           autres) = 1. Affichage seulement : les montants ne changent pas. */
+        try {
+          var _jP = st.transportDays || st.joursPresents || st.presentDays || 0;
+          var _hT = (st.normalHours || 0) + (st.hs15 || 0) + (st.hs50 || 0) + (st.hs75 || 0) + (st.hs100 || 0);
+          if (cat === "externe" && st.externHeures) _hT = st.externHeures;
+          rows.forEach(function (r) {
+            if (!r || (r.taux && String(r.taux).trim())) return;
+            if (r.ret > 0 && !(r.gain > 0)) return;
+            if (r.label === "Prime de transport") r.taux = _jP > 0 ? _jP + "j" : "1";
+            else if (r.label === "Prime de Salissure") r.taux = _hT > 0 ? (Math.round(_hT * 100) / 100).toString().replace(".", ",") + "h" : "1";
+            else if (r.edit === "prime" || r.edit === "gratif" || r.edit === "conges" || r.edit === "autres" || r.edit === "anciennete") r.taux = "1";
+          });
+        } catch (eTx) {}
         return rows;
       }
       function generateBulletin() {
@@ -33561,6 +33650,43 @@ function panierVerserJour() {
 
           h +=
             '<div contenteditable="true" style="margin-top:10px;font-size:10px;text-align:center;color:#64748b;font-style:italic;padding:5px;border:1px dashed transparent;transition:border 0.2s" onfocus="this.style.border=\'1px dashed #cbd5e1\'" onblur="this.style.border=\'1px dashed transparent\'">Dans votre intérêt et pour vous aider à faire valoir vos droits, conservez ce bulletin de paie sans limitation de durée.</div>';
+
+          // --- Report du mois précédent (saisie manuelle) ---
+          try {
+            var _rr = getReportRec(empId, mois);
+            var _rv = _rr ? (parseFloat(_rr.montant) || 0) : 0;
+            var _mPrec = _bulMoisSuiv(mois, -1);
+            h += '<div class="no-print" style="margin-top:.8rem;padding:.6rem .8rem;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:.78rem">';
+            h += '<div style="font-weight:700;color:#9a3412;margin-bottom:4px">↪ Report de ' + escH(_bulMoisCourt(_mPrec)) + ' (paie précédente faite hors application)</div>';
+            h += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center"><select id="bul-rep-sens" style="width:auto;font-size:.76rem;padding:3px 6px"><option value="-"' + (_rv <= 0 ? " selected" : "") + '>À retenir (le salarié doit)</option><option value="+"' + (_rv > 0 ? " selected" : "") + '>À ajouter (dû au salarié)</option></select>';
+            h += '<input id="bul-rep-mt" type="number" min="0" step="1" value="' + Math.abs(_rv) + '" style="width:110px;font-size:.76rem;padding:3px 6px;text-align:right"> F';
+            h += '<input id="bul-rep-note" type="text" placeholder="Note (ex. trop-perçu septembre)" value="' + escH((_rr && _rr.note) || "") + '" style="flex:1;min-width:160px;font-size:.76rem;padding:3px 6px">';
+            h += '<button type="button" class="btn" style="padding:3px 12px;font-size:.74rem" onclick="bulEnregReport(\'' + empId + "','" + mois + '\')">Enregistrer</button>';
+            if (_rr) h += '<button type="button" class="btn btn-sec" style="padding:3px 10px;font-size:.74rem" onclick="bulSupprReport(\'' + empId + "','" + mois + '\')">Retirer</button>';
+            h += "</div>";
+            if (_rr) h += '<div style="margin-top:4px;color:#475569">Enregistré : <b>' + (_rv < 0 ? "− " : "+ ") + fmt(Math.abs(_rv)) + " F</b> " + (_rv < 0 ? "retenu" : "ajouté") + " sur ce bulletin" + (_rr.origine === "auto" ? " (calcul automatique)" : " (saisi à la main)") + ".</div>";
+            h += "</div>";
+          } catch (eRep) {}
+
+          // --- Prestataire externe : jours de moins de 7 h (choix payer 8 h) ---
+          if (catBul === "externe") {
+            try {
+              var _xd = externHeuresPayables(empId, mois);
+              if (_xd.jours > 0) {
+                h += '<div class="no-print" style="margin-top:.8rem;padding:.6rem .8rem;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;font-size:.78rem">';
+                h += '<div style="font-weight:700;color:#5b21b6;margin-bottom:4px">⏱ Heures payées d’après le pointage : ' + String(_xd.heures).replace(".", ",") + ' h sur ' + (ptJoursOuvres(mois) * 8) + ' h (' + _xd.jours + ' jour(s) pointé(s))</div>';
+                h += '<div style="color:#475569;margin-bottom:4px">Journée de 7 h ou plus = 8 h payées. Moins de 7 h = heures réelles, sauf si vous cochez « payer 8 h ».</div>';
+                if (_xd.courts.length) {
+                  h += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+                  _xd.courts.forEach(function (c) {
+                    h += '<label style="display:inline-flex;gap:5px;align-items:center;padding:3px 8px;border:1px solid #c4b5fd;border-radius:999px;background:#fff;cursor:pointer;text-transform:none;letter-spacing:0;font-size:.74rem;color:#0f172a;margin:0"><input type="checkbox" style="width:auto"' + (c.choix8 ? " checked" : "") + ' onchange="externChoix8h(\'' + empId + "','" + mois + "','" + c.date + '\',this.checked)"> ' + escH(fmtDate(c.date)) + " : " + String(Math.round(c.h * 100) / 100).replace(".", ",") + " h → payer 8 h</label>";
+                  });
+                  h += "</div>";
+                } else h += '<div style="color:#166534">Aucune journée de moins de 7 h.</div>';
+                h += "</div>";
+              }
+            } catch (eXd) {}
+          }
 
           // --- Résumé pointage du mois (écran) ---
           if (catBul !== "externe") {
@@ -40452,6 +40578,52 @@ function printCongeIndividuel(empId) {
       function _bulMoisCourt(m) {
         try { return _moisCourtFr(m); } catch (e) { return m; }
       }
+      /* Moyen de paiement + n° de transaction (Wave, Orange Money…) d'un acompte/prêt,
+         repris de la pièce de caisse si besoin. */
+      function _apMoyenTxHtml(a) {
+        var moy = (a && (a.moyen || a.moyenPaiement)) || "", tx = (a && (a.numeroTransaction || a.numTransaction)) || "";
+        if ((!moy || !tx) && a && a.caisseOpId) {
+          try {
+            var o = (payeArr("mdb_operationsCaisse") || []).find(function (x) { return x && x.id === a.caisseOpId; });
+            if (o) { moy = moy || o.moyenPaiement || o.moyen || ""; tx = tx || o.numeroTransaction || ""; }
+          } catch (e) {}
+        }
+        if (!moy) return "-";
+        return escH(moy) + (tx ? '<br><span style="font-size:9px;color:#475569">N° ' + escH(tx) + "</span>" : "");
+      }
+      function _bulMoisSuivN(m, n) { return _bulMoisSuiv(m, n); }
+      /* Échéancier d'un prêt : celui enregistré (échéances), sinon recalculé
+         à partir de la mensualité. Chaque mois : {m, v, ok (déduit/validé)}. */
+      function _bulEcheancesPret(a, mois) {
+        var mens = parseFloat(a.montantMensuel || a.mensualite) || 0;
+        var E = (Array.isArray(a.echeances) ? a.echeances : []).filter(function (e) { return e && e.mois; }).map(function (e) { return { m: e.mois, v: parseFloat(e.montant) || 0, ok: e.preleve === true }; });
+        E.sort(function (x, y) { return x.m.localeCompare(y.m); });
+        var tot = E.reduce(function (s0, e) { return s0 + e.v; }, 0);
+        var montant = parseFloat(a.montant) || 0;
+        if ((!E.length || tot + 1 < montant) && mens > 0) {
+          /* échéances incomplètes : on complète avec la mensualité */
+          var dep = E.length ? _bulMoisSuiv(E[E.length - 1].m, 1) : (a.moisDeduction || String(a.date || "").slice(0, 7) || mois);
+          var reste = montant - tot, g = 0;
+          while (reste > 0.5 && g < 120) { var v = Math.min(mens, reste); E.push({ m: dep, v: v, ok: false }); reste -= v; dep = _bulMoisSuiv(dep, 1); g++; }
+        }
+        return E;
+      }
+      function bulEnregReport(empId, mois) {
+        var mt = Math.abs(parseFloat((document.getElementById("bul-rep-mt") || {}).value) || 0);
+        var sens = (document.getElementById("bul-rep-sens") || {}).value || "-";
+        var note = (document.getElementById("bul-rep-note") || {}).value || "";
+        if (!(mt > 0)) { if (getReportRec(empId, mois)) return bulSupprReport(empId, mois); return toast("Indiquez un montant", "error"); }
+        upsertReport(empId, mois, sens === "+" ? mt : -mt, "manuel", note);
+        try { window._payrollCache = {}; } catch (e) {}
+        toast("Report enregistré : " + (sens === "+" ? "+ " : "− ") + fmt(mt) + " F", "success");
+        generateBulletin();
+      }
+      function bulSupprReport(empId, mois) {
+        try { _payeAddTombstones("mdb_reports", getReportList().filter(function (r) { return r && r.employee_id === empId && r.mois === mois; }).map(function (r) { return r.id; })); } catch (e) {}
+        setReportList(getReportList().filter(function (r) { return !(r && r.employee_id === empId && r.mois === mois); }));
+        try { window._payrollCache = {}; } catch (e) {}
+        generateBulletin();
+      }
       function bulDettesSituationHtml(apAll, mois) {
         var lignes = [], total = 0;
         (apAll || []).forEach(function (a) {
@@ -40460,27 +40632,33 @@ function printCongeIndividuel(empId) {
           var md = "";
           try { md = apMoisPrisEnCompte(a) || ""; } catch (e) {}
           if (!md) md = String(a.moisDeduction || (a.date || "").substring(0, 7) || "");
-          var ech = [];
           if (a.type === "pret") {
             if (a.statut === "termine") return;
-            var mens = parseFloat(a.mensualite) || 0;
-            var reste = r.restNet;
-            var dep = (a.moisDeduction || (a.date || "").substring(0, 7) || mois);
-            var m = dep > mois ? dep : _bulMoisSuiv(mois, 1);
-            if (mens > 0) {
-              var garde = 0;
-              while (reste > 0 && garde < 60) { var v = Math.min(mens, reste); ech.push({ m: m, v: v }); reste -= v; m = _bulMoisSuiv(m, 1); garde++; }
-            }
-            lignes.push({ a: a, nat: "Prêt", r: r, mens: mens, ech: ech, deja: (a.rembourse || 0) + r.deduit });
+            var E = _bulEcheancesPret(a, mois);
+            var payes = E.filter(function (e) { return e.ok && e.m <= mois; });
+            var deja = Math.max(parseFloat(a.rembourse) || 0, payes.reduce(function (s0, e) { return s0 + e.v; }, 0));
+            /* à venir : tout ce qui n'est pas encore déduit (l'échéance du mois non validée en premier) */
+            var aVenir = E.filter(function (e) { return !e.ok && e.m >= mois; });
+            var reste = r.restNet, ech = [];
+            aVenir.forEach(function (e) { if (reste <= 0.5) return; var v = Math.min(e.v, reste); ech.push({ m: e.m, v: v, nonVal: e.m === mois }); reste -= v; });
+            lignes.push({ a: a, nat: "Prêt", r: r, mens: parseFloat(a.montantMensuel || a.mensualite) || 0, ech: ech, deja: deja, payes: payes });
           } else {
-            /* acompte : seulement s'il reste à déduire sur un mois à venir */
             if (!(md > mois)) return;
-            ech.push({ m: md, v: r.restNet });
-            lignes.push({ a: a, nat: "Acompte", r: r, mens: 0, ech: ech, deja: (a.rembourse || 0) });
+            lignes.push({ a: a, nat: "Acompte", r: r, mens: 0, ech: [{ m: md, v: r.restNet }], deja: parseFloat(a.rembourse) || 0, payes: [] });
           }
           total += r.restNet;
         });
-        var h = '<div class="section-title" style="margin-top:16px">SITUATION DES DETTES APRÈS CE BULLETIN (ENCOURS)</div>';
+        var h = "";
+        try {
+          var _eidR = apAll && apAll[0] && apAll[0].employee_id;
+          if (window.__bulRepEmp) _eidR = window.__bulRepEmp;
+          var _rR = _eidR ? getReportRec(_eidR, mois) : null;
+          if (_rR && parseFloat(_rR.montant)) {
+            var _vR = parseFloat(_rR.montant);
+            h += '<div style="margin:10px 0;padding:7px 10px;border:1px solid #fed7aa;border-left:4px solid #f97316;background:#fff7ed;font-size:11px"><b>Report de ' + escH(_bulMoisCourt(_bulMoisSuiv(mois, -1))) + ' :</b> ' + (_vR < 0 ? "<b style=\"color:#b91c1c\">− " + fmt(-_vR) + " F retenu</b> sur ce bulletin (le salarié devait cette somme)" : "<b style=\"color:#15803d\">+ " + fmt(_vR) + " F ajouté</b> sur ce bulletin (dû au salarié)") + (_rR.note ? " — " + escH(_rR.note) : "") + "</div>";
+          }
+        } catch (eRR) {}
+        h += '<div class="section-title" style="margin-top:16px">SITUATION DES DETTES APRÈS CE BULLETIN (ENCOURS)</div>';
         if (!lignes.length) {
           return h + '<div style="padding:8px 10px;border:1px solid #bbf7d0;background:#f0fdf4;font-weight:700;color:#166534">Aucune dette en cours envers la société après ce bulletin.</div>';
         }
@@ -40488,30 +40666,33 @@ function printCongeIndividuel(empId) {
         lignes.forEach(function (l) {
           var plan;
           if (l.ech.length) {
-            var vals = {}; l.ech.forEach(function (e) { vals[e.v] = (vals[e.v] || 0) + 1; });
             var deb = l.ech[0].m, fin = l.ech[l.ech.length - 1].m;
-            if (l.ech.length === 1) plan = "<b>" + escH(_bulMoisCourt(deb)) + "</b> : " + fmt(l.ech[0].v) + " F";
-            else {
-              plan = "<b>" + l.ech.length + " mois</b>, de <b>" + escH(_bulMoisCourt(deb)) + "</b> à <b>" + escH(_bulMoisCourt(fin)) + "</b>";
-              plan += '<div style="font-size:9px;color:#475569;margin-top:2px">' + l.ech.slice(0, 12).map(function (e) { return escH(_bulMoisCourt(e.m)) + " : " + fmt(e.v); }).join(" · ") + (l.ech.length > 12 ? " …" : "") + "</div>";
-            }
-          } else plan = '<span style="color:#b45309;font-weight:700">Mensualité non fixée — à préciser</span>';
-          h += "<tr><td>" + escH(l.a.date || "-") + "</td><td><b>" + l.nat + "</b></td><td>" + escH(l.a.notes || l.a.motif || "-") + '</td><td style="text-align:right">' + fmt(l.a.montant || 0) + '</td><td style="text-align:right">' + fmt(l.deja) + '</td><td style="text-align:right;font-weight:800;color:#b91c1c">' + fmt(l.r.restNet) + '</td><td style="text-align:right">' + (l.mens > 0 ? fmt(l.mens) : (l.nat === "Acompte" ? "en 1 fois" : "-")) + "</td><td>" + plan + "</td></tr>";
+            plan = l.ech.length === 1 ? "<b>" + escH(_bulMoisCourt(deb)) + "</b> : " + fmt(l.ech[0].v) + " F" : "<b>" + l.ech.length + " mois</b>, de <b>" + escH(_bulMoisCourt(deb)) + "</b> à <b>" + escH(_bulMoisCourt(fin)) + "</b>";
+            if (l.ech.length > 1) plan += '<div style="font-size:9px;color:#475569;margin-top:2px;line-height:1.5">' + l.ech.map(function (e) { return escH(_bulMoisCourt(e.m)) + " : " + fmt(e.v) + (e.nonVal ? ' <span style="color:#b45309">(non validé ce mois)</span>' : ""); }).join(" · ") + "</div>";
+          } else plan = '<span style="color:#b45309;font-weight:700">Mensualité non fixée — à préciser dans Acomptes & Prêts (sinon rien n’est retenu)</span>';
+          var dejaH = fmt(l.deja);
+          if (l.payes && l.payes.length) dejaH += '<div style="font-size:9px;color:#475569;line-height:1.5">' + l.payes.map(function (e) { return escH(_bulMoisCourt(e.m)) + " : " + fmt(e.v); }).join("<br>") + "</div>";
+          else if (l.nat === "Prêt") dejaH += '<div style="font-size:9px;color:#94a3b8">aucun mois déduit</div>';
+          h += "<tr><td>" + escH(fmtDate(l.a.date)) + "</td><td><b>" + l.nat + "</b></td><td>" + escH(l.a.notes || l.a.motif || "-") + '</td><td style="text-align:right">' + fmt(l.a.montant || 0) + '</td><td style="text-align:right">' + dejaH + '</td><td style="text-align:right;font-weight:800;color:#b91c1c">' + fmt(l.r.restNet) + '</td><td style="text-align:right">' + (l.mens > 0 ? fmt(l.mens) : (l.nat === "Acompte" ? "en 1 fois" : "-")) + "</td><td>" + plan + "</td></tr>";
         });
         h += '<tr style="background:#fef2f2;font-weight:900"><td colspan="5" style="text-align:right">TOTAL DES DETTES ENVERS LA SOCIÉTÉ</td><td style="text-align:right;color:#b91c1c">' + fmt(total) + ' F</td><td colspan="2"></td></tr>';
         h += "</tbody></table>";
-        /* Prochains mois : total à retenir */
         var parMois = {};
         lignes.forEach(function (l) { l.ech.forEach(function (e) { parMois[e.m] = (parMois[e.m] || 0) + e.v; }); });
-        var ms = Object.keys(parMois).sort().slice(0, 6);
+        var ms = Object.keys(parMois).sort();
         if (ms.length) {
-          h += '<div style="margin-top:6px;padding:6px 10px;border:1px solid #fde68a;background:#fffbeb;font-size:10px"><b>Retenues prévues sur les prochains bulletins :</b> ' + ms.map(function (m) { return escH(_bulMoisCourt(m)) + " = <b>" + fmt(parMois[m]) + " F</b>"; }).join(" · ") + "</div>";
+          h += '<div style="margin-top:6px;padding:6px 10px;border:1px solid #fde68a;background:#fffbeb;font-size:10px;line-height:1.6"><b>Retenues prévues sur les prochains bulletins (' + ms.length + ' mois, jusqu’à ' + escH(_bulMoisCourt(ms[ms.length - 1])) + ') :</b> ' + ms.map(function (m) { return escH(_bulMoisCourt(m)) + " = <b>" + fmt(parMois[m]) + " F</b>"; }).join(" · ") + "</div>";
         }
         return h;
       }
-      /* ===== Impression : UN seul bouton, petites questions =====
-         1) quoi : le bulletin affiché, ou tous ceux du mois (selon filtres)
-         2) joindre le pointage ? les acomptes & prêts ? (choix mémorisés) */
+      /* Nom explicite du document (= nom du fichier PDF enregistré) :
+         « Bulletin de paie - KANGA Kouamé - Octobre 2026 ». */
+      function bulNomFichier(quoi, emp, mois) {
+        var per = mois || "";
+        try { per = new Date(mois + "-01T00:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }); per = per.charAt(0).toUpperCase() + per.slice(1); } catch (e) {}
+        var nom = emp ? ((emp.nom || "") + " " + (emp.prenoms || "")).trim() : "";
+        return [quoi, nom, per].filter(Boolean).join(" - ");
+      }
       function bulImprimerAssistant() {
         var mois = (document.getElementById("paie-mois") || {}).value || "";
         if (!mois) return toast("Choisissez d'abord le mois", "error");
@@ -40560,6 +40741,7 @@ function printCongeIndividuel(empId) {
           /* page trop vide : on aère les lignes (et grossit un peu le texte) pour remplir la feuille A4 */
           "var n=b.querySelectorAll('tr').length||1;var lib=H-h-6;if(lib<20)return;var fs=lib/n>14?10.5:9.5;b.style.setProperty('--fs',fs+'px');var h2=b.getBoundingClientRect().height;lib=H-h2-6;" +
           "var pad=Math.max(0,Math.min(9,lib/n/2));b.style.setProperty('--pad',pad.toFixed(1)+'px');var k=0;while(b.getBoundingClientRect().height>H&&k<20){pad=Math.max(0,pad-0.5);b.style.setProperty('--pad',pad.toFixed(1)+'px');k++;}});" +
+          "document.querySelectorAll('.annexe').forEach(function(b){b.style.removeProperty('--fit');var h=b.getBoundingClientRect().height;if(h>H)b.style.setProperty('--fit',Math.max(0.5,H/h).toFixed(3));});" +
           "document.documentElement.classList.remove('mesure');" +
           "document.querySelectorAll('.page-break').forEach(function(pb){var n=pb.nextElementSibling;while(n&&!(n.textContent||'').trim()&&!n.querySelector('img,table'))n=n.nextElementSibling;if(!n)pb.remove();});}catch(e){}}" +
           "if(document.readyState==='complete')fit();else window.addEventListener('load',fit);setTimeout(fit,400);window.addEventListener('beforeprint',fit);})();</scr" + "ipt>";
@@ -40626,6 +40808,7 @@ function printCongeIndividuel(empId) {
 h += ".bulletin-page{position:relative}.bulletin-page>*{position:relative}.bulletin-page>.bul-fili{position:absolute;left:0;right:0;top:220px;height:520px;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:4;overflow:hidden}.bul-fili img{max-width:62%;max-height:440px;object-fit:contain;filter:grayscale(1);opacity:.08;-webkit-print-color-adjust:exact;print-color-adjust:exact}.bul-fili span{font:italic 700 150px/1 Georgia,'Times New Roman',serif;letter-spacing:.06em;color:rgba(15,23,42,.07);transform:rotate(-12deg);white-space:nowrap}.header{border-bottom:2px solid #0f172a!important}.net{border-left:5px solid #0f172a!important}";
 h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important;color:#1e3a8a!important;font-weight:800;border-top:1.5px solid #1e293b}tr.tt td{background:#1e293b!important;color:#fff!important;font-weight:900!important}.hd-logo{max-width:210px!important;max-height:92px!important;object-fit:contain;display:block}.bul-titre{font-size:15px!important;color:#0f172a!important;letter-spacing:.08em;font-weight:900;margin:0}.bul-mois{display:inline-block;margin-top:5px;padding:3px 12px;border-radius:999px;background:#fff7ed;border:1.5px solid #f97316;color:#9a3412!important;font-weight:800;font-size:10.5px;letter-spacing:.04em;-webkit-print-color-adjust:exact;print-color-adjust:exact}";
         h += "html.mesure body{width:194mm!important;padding:0!important;font-size:11px!important}html.mesure .pbar{display:none!important}html.mesure table{table-layout:fixed;word-break:break-word}html.mesure th,html.mesure td{font-size:9.5px!important;padding:3px 5px!important}html.mesure .bulletin-page td{padding-top:calc(3px + var(--pad,0px))!important;padding-bottom:calc(3px + var(--pad,0px))!important;font-size:var(--fs,9.5px)!important}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.bulletin-page{zoom:var(--fit,1)}.bulletin-page td{padding-top:calc(3px + var(--pad,0px))!important;padding-bottom:calc(3px + var(--pad,0px))!important;font-size:var(--fs,9.5px)!important}}";
+        h += "th,td{border-color:#cbd5e1!important}thead th{background:#1e293b!important;color:#fff!important;border-color:#334155!important}.bul-infos-p{border:1px solid #e2e8f0!important;border-left:4px solid #f97316!important;border-radius:6px;background:#f8fafc;padding:6px 10px;line-height:1.7}.bul-infos-p div{border:none!important;padding:0 6px!important}.annexe{position:relative;break-before:page;page-break-before:always}.annexe-tete{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0f172a;padding-bottom:6px;margin-bottom:8px;font-size:12px}.annexe-tete b{font-size:14px}.annexe-tete span{color:#9a3412;font-weight:800}@media print{.annexe{zoom:var(--fit,1)}}";
         h += "@media print{.pbar{display:none!important}}";
         h += "</style></head><body>";
         h += bulPrintBar();
@@ -40669,7 +40852,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             "</div></div></div>";
           if (isExt) {
             h +=
-              '<div style="border:1px solid #000;margin-bottom:10px;font-size:11px">' +
+              '<div class="bul-infos-p" style="border:1px solid #000;margin-bottom:10px;font-size:11px">' +
               '<div style="display:flex;border-bottom:1px solid #000"><div style="flex:1;padding:4px 6px;border-right:1px solid #000"><strong>Nom:</strong> ' +
               escH(emp.nom) +
               " " +
@@ -40685,7 +40868,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
               "</div></div></div>";
           } else {
             h +=
-              '<div style="border:1px solid #000;margin-bottom:10px;font-size:11px">' +
+              '<div class="bul-infos-p" style="border:1px solid #000;margin-bottom:10px;font-size:11px">' +
               '<div style="display:flex;border-bottom:1px solid #000"><div style="flex:1;padding:4px 6px;border-right:1px solid #000"><strong>Matricule:</strong> ' +
               escH(emp.matricule) +
               '</div><div style="flex:1;padding:4px 6px"><strong>Nom:</strong> ' +
@@ -40857,11 +41040,13 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
                 var rest = _niB.rest;
                 var deduit = _niB.deduit;
                 var restNet = _niB.restNet;
-                h += "<tr><td>" + escH(a.date || "-") + "</td><td>" + escH(natB === "pret" ? "Pr\u00eat" : (natB === "solde" ? "Solde" : "Acompte")) + "</td><td>" + escH(a.notes || a.motif || "-") + '</td><td style="text-align:right;font-weight:700">' + fmt(a.montant) + '</td><td style="text-align:right;font-weight:700;color:#dc2626">' + (deduit > 0 ? fmt(deduit) : "-") + '</td><td style="text-align:right">' + fmt(a.rembourse || 0) + '</td><td style="text-align:right;font-weight:700">' + fmt(restNet) + "</td></tr>";
+                h += "<tr><td>" + escH(fmtDate(a.date)) + "</td><td>" + escH(natB === "pret" ? "Pr\u00eat" : (natB === "solde" ? "Solde" : "Acompte")) + "</td><td>" + escH(a.notes || a.motif || "-") + '</td><td style="text-align:right;font-weight:700">' + fmt(a.montant) + '</td><td style="text-align:right;font-weight:700;color:#dc2626">' + (deduit > 0 ? fmt(deduit) : "-") + '</td><td style="text-align:right">' + fmt(a.rembourse || 0) + '</td><td style="text-align:right;font-weight:700">' + fmt(restNet) + "</td></tr>";
               });
               h += "</tbody></table>";
-              try { h += bulDettesSituationHtml(apListB, mois); } catch (eDSB) {}
             }
+            window.__bulRepEmp = emp.id;
+            try { h += bulDettesSituationHtml(apListB, mois); } catch (eDSB) {}
+            window.__bulRepEmp = null;
           }
         });
         h += "<script>window.onload=function(){try{if(window.matchMedia&&window.matchMedia('(pointer:coarse)').matches)return;}catch(e){}try{window.print();}catch(e2){}}<\/script>";
@@ -40893,7 +41078,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var w = window.open("", "_blank", "width=1000,height=800");
         if (!w) { toast("Popup bloquée — autorisez les popups pour ce site puis réessayez", "error"); return; }
         var h =
-          '<!DOCTYPE html><html><head><meta charset="UTF-8"><title></title>';
+          '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escH(bulNomFichier((empCategorie(emp) !== "titulaire" ? "Rémunération" : "Bulletin de paie"), emp, mois)) + '</title>';
         h +=
           "<style>body{font-family:sans-serif;padding:14px 20px;color:#1e293b;font-size:13px}";
         h += "h1,h2,h3{margin:0}";
@@ -40912,6 +41097,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
 h += ".bulletin-page{position:relative}.bulletin-page>*{position:relative}.bulletin-page>.bul-fili{position:absolute;left:0;right:0;top:220px;height:520px;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:4;overflow:hidden}.bul-fili img{max-width:62%;max-height:440px;object-fit:contain;filter:grayscale(1);opacity:.08;-webkit-print-color-adjust:exact;print-color-adjust:exact}.bul-fili span{font:italic 700 150px/1 Georgia,'Times New Roman',serif;letter-spacing:.06em;color:rgba(15,23,42,.07);transform:rotate(-12deg);white-space:nowrap}.header{border-bottom:2px solid #0f172a!important}.net{border-left:5px solid #0f172a!important}";
 h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important;color:#1e3a8a!important;font-weight:800;border-top:1.5px solid #1e293b}tr.tt td{background:#1e293b!important;color:#fff!important;font-weight:900!important}.hd-logo{max-width:210px!important;max-height:92px!important;object-fit:contain;display:block}.bul-titre{font-size:15px!important;color:#0f172a!important;letter-spacing:.08em;font-weight:900;margin:0}.bul-mois{display:inline-block;margin-top:5px;padding:3px 12px;border-radius:999px;background:#fff7ed;border:1.5px solid #f97316;color:#9a3412!important;font-weight:800;font-size:10.5px;letter-spacing:.04em;-webkit-print-color-adjust:exact;print-color-adjust:exact}";
         h += "html.mesure body{width:194mm!important;padding:0!important;font-size:11px!important}html.mesure .pbar{display:none!important}html.mesure table{table-layout:fixed;word-break:break-word}html.mesure th,html.mesure td{font-size:9.5px!important;padding:3px 5px!important}html.mesure .bulletin-page td{padding-top:calc(3px + var(--pad,0px))!important;padding-bottom:calc(3px + var(--pad,0px))!important;font-size:var(--fs,9.5px)!important}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.bulletin-page{zoom:var(--fit,1)}.bulletin-page td{padding-top:calc(3px + var(--pad,0px))!important;padding-bottom:calc(3px + var(--pad,0px))!important;font-size:var(--fs,9.5px)!important}}";
+        h += "th,td{border-color:#cbd5e1!important}thead th{background:#1e293b!important;color:#fff!important;border-color:#334155!important}.bul-infos-p{border:1px solid #e2e8f0!important;border-left:4px solid #f97316!important;border-radius:6px;background:#f8fafc;padding:6px 10px;line-height:1.7}.bul-infos-p div{border:none!important;padding:0 6px!important}.annexe{position:relative;break-before:page;page-break-before:always}.annexe-tete{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0f172a;padding-bottom:6px;margin-bottom:8px;font-size:12px}.annexe-tete b{font-size:14px}.annexe-tete span{color:#9a3412;font-weight:800}@media print{.annexe{zoom:var(--fit,1)}}";
         h += "@media print{.pbar{display:none!important}}";
         h += "</style></head><body>";
         h += bulPrintBar();
@@ -40977,7 +41163,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             "j</td></tr></table>";
         } else {
           h +=
-            '<div style="border:1px solid #000;margin-bottom:10px;font-size:11px">' +
+            '<div class="bul-infos-p" style="border:1px solid #000;margin-bottom:10px;font-size:11px">' +
             '<div style="display:flex;border-bottom:1px solid #000"><div style="flex:1;padding:4px 6px;border-right:1px solid #000"><strong>Matricule:</strong> ' +
             escH(emp.matricule) +
             '</div><div style="flex:1;padding:4px 6px"><strong>Nom:</strong> ' +
@@ -41199,7 +41385,8 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         h += "</div>";
         /* Annexes (pointage, panier, acomptes) toujours sur la page suivante :
            le bulletin reste seul sur sa page A4. */
-        h += '<div class="page-break"></div>';
+
+        var _annTete = function (quoi) { return '<div class="annexe-tete"><div><b>' + escH(quoi) + '</b><br>' + escH((emp.matricule ? emp.matricule + " - " : "") + (emp.nom || "") + " " + (emp.prenoms || "")) + (emp.fonction ? " · " + escH(emp.fonction) : "") + '</div><span>' + escH(period) + '</span></div>'; };
 
         /* ===== DÉTAIL ACOMPTES & PRÊTS (dernière page, après pointage) ===== */
         var hAP = "";
@@ -41223,7 +41410,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             return p && String(p.employee_id) === String(emp.id) && String(p.moisDeduction || '') === String(mois);
           });
           if (panListEmp.length > 0) {
-            h += ((_hasPTprint || _hasMontPrint) ? '<div class="page-break"></div>' : '');
+            h += '';
             h += '<div class="section-title">PRIME DE PANIER VERSÉE EN CAISSE — PÉRIODE ' +
               escH(_moisCourtFr(mois).toUpperCase()) + '</div>';
             h += '<table><thead><tr><th>Date</th><th>Type</th><th>Provenance</th><th>Moyen</th><th>Par qui</th><th>Observation</th>' +
@@ -41244,7 +41431,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             h += '</tbody></table>';
           }
           if (apListEmp.length > 0) {
-            h += ((_hasPTprint || _hasMontPrint) ? '<div class="page-break"></div>' : '');
+            h += '';
             h +=
               '<div class="section-title">D\u00c9TAIL DES ACOMPTES & PR\u00caTS \u2014 P\u00c9RIODE ' +
               escH(_moisCourtFr(mois).toUpperCase()) +
@@ -41259,7 +41446,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
               var restNet = _ni.restNet;
               h +=
                 "<tr><td>" +
-                escH(a.date || "-") +
+                escH(fmtDate(a.date)) +
                 "</td><td>" +
                 escH(natD === "pret" ? "Pr\u00eat" : (natD === "solde" ? "Solde" : "Acompte")) +
                 "</td><td>" +
@@ -41271,7 +41458,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
                       : "-",
                 ) +
                 "</td><td>" +
-                escH(a.moyen || "-") +
+                _apMoyenTxHtml(a) +
                 "</td><td>" +
                 escH(a.executant || a.remettant || "-") +
                 "</td><td>" +
@@ -41279,7 +41466,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
                 '</td><td style="text-align:right;font-weight:700">' +
                 fmt(a.montant) +
                 '</td><td style="text-align:right;font-weight:700;color:#dc2626">' +
-                (deduit > 0 ? fmt(deduit) : "-") +
+                (deduit > 0 ? fmt(deduit) : (_ni.aValider > 0 ? '<span style="color:#b45309;font-weight:600;font-size:10px">non validé<br>(' + fmt(_ni.aValider) + ' non déduit)</span>' : "-")) +
                 '</td><td style="text-align:right">' +
                 fmt(a.rembourse || 0) +
                 '</td><td style="text-align:right;font-weight:700">' +
@@ -41287,9 +41474,11 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
                 "</td></tr>";
             });
             h += "</tbody></table>";
-            /* --- Situation complète des dettes + échéancier prévu --- */
-            try { h += bulDettesSituationHtml(apListEmpAll, mois); } catch (eDS) {}
           }
+          /* --- Report + situation complète des dettes + échéancier prévu (même sans pièce ce mois) --- */
+          window.__bulRepEmp = emp.id;
+          try { h += bulDettesSituationHtml(apListEmpAll, mois); } catch (eDS) {}
+          window.__bulRepEmp = null;
           hAP = h; h = hSaveAP;
         }
 
@@ -41310,7 +41499,8 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
               if (hJ + hN > 0) _joursPp++;
               if (p.faute_societe) _fauteSocP++;
             });
-            h += '<div class="section-title">R\u00c9SUM\u00c9 DU POINTAGE - ' + mois + '</div>';
+            h += '<div class="annexe">' + bulFiligraneHtml(soc.nom || "", soc.logo) + _annTete("Pointage du mois");
+            h += '<div class="section-title">R\u00c9SUM\u00c9 DU POINTAGE - ' + escH(period) + '</div>';
             h += '<div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px;font-size:10px">';
             h += '<div style="padding:4px 8px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px"><strong>Jours enregistr\u00e9s:</strong> ' + ptsEmp.length + '</div>';
             h += '<div style="padding:4px 8px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px"><strong>Pr\u00e9sent(s):</strong> ' + _joursPp + ' jour(s)</div>';
@@ -41347,7 +41537,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
               var fauteMark = p.faute_societe ? ' style="background:#fef2f2"' : '';
               h +=
                 "<tr" + fauteMark + "><td>" +
-                escH(p.date) +
+                escH(fmtDate(p.date)) +
                 "</td><td>" +
                 jours[dow] +
                 (p.faute_societe ? ' <span style="color:#dc2626;font-size:8px">🏢</span>' : "") +
@@ -41381,7 +41571,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
               'h</td><td style="text-align:right">' +
               ptFmtDec((tHJ + tHN)) +
               "h</td></tr>";
-            h += "</tbody></table>";
+            h += "</tbody></table></div>";
           }
         }
         /* ===== DÉTAIL PRODUCTION MONTAGE ===== */
@@ -41390,9 +41580,10 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           return p.employee_id === emp.id && p && p.date && p.date.indexOf(mois) === 0;
         });
         if (ams.length > 0 && ptMont.length > 0) {
+          h += '<div class="annexe">' + bulFiligraneHtml(soc.nom || "", soc.logo) + _annTete("Production (montage)");
           h +=
             '<div class="section-title">PRODUCTION (MONTAGE) - ' +
-            mois +
+            escH(period) +
             "</div>";
           h += "<table><thead><tr><th>Date</th>";
           for (var a = 0; a < ams.length; a++)
@@ -41415,7 +41606,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           var dTotal = 0;
           for (var dk in byDate) {
             var dayTot = 0;
-            h += "<tr><td>" + escH(dk) + "</td>";
+            h += "<tr><td>" + escH(fmtDate(dk)) + "</td>";
             for (var a2 = 0; a2 < ams.length; a2++) {
               var q = byDate[dk][ams[a2].code] || 0;
               var val = q * ams[a2].prix;
@@ -41443,10 +41634,10 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             '<td style="text-align:right;color:#7c3aed">' +
             fmt(dTotal) +
             " F</td></tr>";
-          h += "</tbody></table>";
+          h += "</tbody></table></div>";
         }
 
-        h += hAP;
+        if (hAP) h += '<div class="annexe">' + bulFiligraneHtml(soc.nom || "", soc.logo) + _annTete("Acomptes, prêts et dettes") + hAP + "</div>";
 
         h += bulPrintFitScript();
         h += "</body></html>";
