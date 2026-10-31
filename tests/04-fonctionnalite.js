@@ -2842,7 +2842,7 @@ attenduPrefixe: 'OK'
       var d = csApTypeEtLibelleCreation('pret', 'SOLDE_SALAIRE', 'KOFFI');
       (a.apType === 'solde' && a.libelle === 'Solde indemnité : GAHIE'
         && b.apType === 'solde' && b.libelle === 'Solde salaire : KOFFI'
-        && c.apType === 'acompte' && c.libelle === 'Acompte employé : ZOH'
+        && c.apType === 'acompte' && c.libelle === 'ACOMPTE SALAIRE : ZOH'
         && d.apType === 'pret' && d.libelle === 'Prêt employé : KOFFI')
         ? 'OK : SOLDE_INDEMNITE->Solde indemnité/solde, ACOMPTE_INDEMNITE inchange, pret touche'
         : 'ECHEC ' + JSON.stringify([a, b, c, d])
@@ -2991,7 +2991,7 @@ attenduPrefixe: 'OK'
       var ops2 = getOperationsCaisse();
       var lib = null, tp = null;
       for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opR1') { lib = ops2[i].libelle; tp = ops2[i].apType; } }
-      (r && r.converties === 1 && tp === 'acompte' && lib === 'Acompte employé : GAHIE/Mois de Septembre 2026')
+      (r && r.converties === 1 && tp === 'acompte' && lib === 'ACOMPTE SALAIRE : GAHIE/Mois de Septembre 2026')
         ? 'OK : revenue en acompte, mois garde'
         : 'ECHEC lib=' + lib + ' type=' + tp
     `,

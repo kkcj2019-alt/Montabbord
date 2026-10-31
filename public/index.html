@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-383';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-10-31-384';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -22200,7 +22200,72 @@ function _corrigerMoisPieces() {
 /* Correction des libelles de soldes collectifs ou le nom d'un employe
    a ete duplique sur toute la piece pour tous les beneficiaires (ex: KANGA).
    Retablit le nom propre de chaque beneficiaire dans op.libelle et acompte.motif. */
+/* ===== ACOMPTE SALAIRE : code « ACOMPTE-SAL », libellé uniforme =====
+   Code caisse « ACOMPTE » -> « ACOMPTE-SAL » (libellé du code « ACOMPTE
+   SALAIRE »). Toutes les pièces d'acompte sur salaire déjà saisies passent au
+   nouveau code et à un libellé uniforme « ACOMPTE SALAIRE : NOM/Mois de … ».
+   Un libellé personnalisé (autre texte) garde son texte, seul le code change.
+   Idempotent : relancé à chaque chargement / synchro, ne touche rien s'il n'y
+   a plus rien à corriger. Les acomptes d'indemnité et les soldes ne bougent pas. */
+function _migrerCodeAcompteSal() {
+  var codes = []; try { codes = getCodesCaisse() || []; } catch (e) { return 0; }
+  var now = Date.now(), chgCodes = false;
+  var cSal = null, cOld = [];
+  codes.forEach(function (c) { if (!c) return; var u = String(c.code || '').toUpperCase().trim(); if (u === 'ACOMPTE-SAL') cSal = cSal || c; else if (u === 'ACOMPTE') cOld.push(c); });
+  if (!cSal && cOld.length) { cSal = cOld.shift(); cSal.code = 'ACOMPTE-SAL'; chgCodes = true; }
+  if (cSal && cSal.libelle !== 'ACOMPTE SALAIRE') { cSal.libelle = 'ACOMPTE SALAIRE'; chgCodes = true; }
+  var anciensIds = {}; cOld.forEach(function (c) { anciensIds[c.id] = true; });
+  if (cOld.length) { codes = codes.filter(function (c) { return !(c && anciensIds[c.id]); }); chgCodes = true; }
+  if (chgCodes) {
+    if (cSal) cSal.updatedAt = now;
+    DB.set('mdb_codesCaisse', codes);
+    try { _dirtyKeys['mdb_codesCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e1) {}
+  }
+  if (!cSal) return 0;
+  var ops = []; try { ops = getOperationsCaisse() || []; } catch (e2) { return 0; }
+  var emps = {}; try { (getEmployes() || []).forEach(function (e) { if (e && e.id) emps[e.id] = e; }); } catch (e3) {}
+  var aps = []; try { aps = dbArr('mdb_acomptesPrets') || []; } catch (e4) {}
+  var apParOp = {}; aps.forEach(function (a) { if (a && a.caisseOpId) apParOp[a.caisseOpId] = a; });
+  var RE_STD = /^\s*(ACOMPTE\s*\/\s*SALAIRE|ACOMPTE\s+SALAIRE|Acompte\s+employé\s*:|Acompte\s+sur\s+salaire)/i;
+  var nOps = 0, nAp = 0;
+  ops.forEach(function (op) {
+    if (!op) return;
+    var u = String(op.code || '').toUpperCase().trim();
+    var lib = String(op.libelle || '');
+    if (op.apType === 'solde' || /^SOLDE/.test(u) || u === 'ACOMPTE_INDEMNITE' || /indemnit/i.test(lib) || /^\s*Solde/i.test(lib)) return;
+    var estAc = u === 'ACOMPTE' || u === 'ACOMPTE-SAL' || (op.codeId && (op.codeId === cSal.id || anciensIds[op.codeId])) ||
+      (!u && (op.apType === 'acompte' || apParOp[op.id]) && RE_STD.test(lib));
+    if (!estAc) return;
+    var avant = JSON.stringify([op.code, op.codeId, op.libelle]);
+    op.code = 'ACOMPTE-SAL'; op.codeId = cSal.id;
+    if (RE_STD.test(lib)) {
+      var ap = apParOp[op.id] || null;
+      var eid = op.beneficiaireId && emps[op.beneficiaireId] ? op.beneficiaireId : (ap && ap.employeId && emps[ap.employeId] ? ap.employeId : '');
+      var nom = '';
+      if (eid) { var e = emps[eid]; nom = (((e.nom || '') + ' ' + (e.prenoms || '')).trim()) || e.nom || ''; }
+      else if (op.beneficiaireNom) nom = String(op.beneficiaireNom).trim();
+      else if (ap && ap.employeNom) nom = String(ap.employeNom).trim();
+      else { var mN = lib.match(/^\s*(?:Acompte\s+employé|ACOMPTE\s+SALAIRE)\s*:\s*([^\/]+)/i); if (mN) nom = mN[1].trim(); }
+      var mSuf = lib.match(/\/Mois de [^\/]+$/i);
+      var mois = '';
+      if (!mSuf) {
+        mois = (ap && /^\d{4}-\d{2}/.test(ap.moisDeduction || '')) ? String(ap.moisDeduction).slice(0, 7) : (/^\d{4}-\d{2}$/.test(op.apMoisDeduction || '') ? op.apMoisDeduction : String(op.date || '').slice(0, 7));
+      }
+      var base = 'ACOMPTE SALAIRE' + (nom ? ' : ' + nom : '');
+      var neuf = mSuf ? base + mSuf[0] : (/^\d{4}-\d{2}$/.test(mois) ? csPeriodeBuildLibelle(base, mois) : base);
+      if (neuf !== lib) {
+        op.libelle = neuf;
+        if (ap && (!ap.motif || RE_STD.test(String(ap.motif)) || ap.motif === lib) && ap.motif !== neuf) { ap.motif = neuf; ap.updatedAt = now; nAp++; }
+      }
+    }
+    if (JSON.stringify([op.code, op.codeId, op.libelle]) !== avant) { op.updatedAt = now; nOps++; }
+  });
+  if (nOps) { DB.set('mdb_operationsCaisse', ops); try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e5) {} }
+  if (nAp) { DB.set('mdb_acomptesPrets', aps); try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e6) {} }
+  return nOps;
+}
 function _corrigerLibellesSoldesCollectifs() {
+  try { _migrerCodeAcompteSal(); } catch (eMAS) { try { console.warn('[ACOMPTE-SAL]', eMAS); } catch (e0) {} }
   var ops = [];
   try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
   var employes = [];
@@ -24460,7 +24525,7 @@ function saveAcomptePret(id) {
 opsSync[osi].moisManuel = true;
           opsSync[osi].apDureeMois = (type === 'pret' ? duree : 0);
           opsSync[osi].apMontantMensuel = montantMensuel;
-          opsSync[osi].libelle = (type === 'acompte' ? 'Acompte employé : ' : 'Prêt employé : ') + employeNom;
+          opsSync[osi].libelle = (type === 'acompte' ? 'ACOMPTE SALAIRE : ' : 'Prêt employé : ') + employeNom;
           _opsTouched = true;
           break;
         }
@@ -24502,7 +24567,7 @@ opsSync[osi].moisManuel = true;
       numeroPiece = generatePieceNumber(defaultCaisseId, getToday());
       caisseOpId = opId;
       var ops = getOperationsCaisse();
-      ops.push({id: opId, numeroPiece: numeroPiece, date: getToday(), heure: '', codeId: '', libelle: type === 'acompte' ? 'Acompte employ\u00e9 : ' + employeNom : 'Pr\u00eat employ\u00e9 : ' + employeNom, montant: montant, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', numeroTransaction: '', beneficiaireType: 'employe', beneficiaireId: employeId, beneficiaireNom: employeNom, tiers: motif || notes, observations: motif || notes, remettant: employeNom, executant: executant, imprime: false, montantCharge: 0, caisseId: defaultCaisseId, reversed: false, acomptePretId: data.id, apType: type});
+      ops.push({id: opId, numeroPiece: numeroPiece, date: getToday(), heure: '', codeId: '', libelle: type === 'acompte' ? 'ACOMPTE SALAIRE : ' + employeNom : 'Pr\u00eat employ\u00e9 : ' + employeNom, montant: montant, sens: 'sortie', moyenPaiement: 'Esp\u00e8ce', numeroTransaction: '', beneficiaireType: 'employe', beneficiaireId: employeId, beneficiaireNom: employeNom, tiers: motif || notes, observations: motif || notes, remettant: employeNom, executant: executant, imprime: false, montantCharge: 0, caisseId: defaultCaisseId, reversed: false, acomptePretId: data.id, apType: type});
       DB.set('mdb_operationsCaisse', ops);
     }
     data.caisseOpId = caisseOpId;
@@ -25373,7 +25438,7 @@ function csApTypeEtLibelleCreation(type, code, empNom) {
   if (type === 'acompte' && (c === 'SOLDE_SALAIRE' || c === 'SOLDE_INDEMNITE')) {
     return { apType: 'solde', libelle: (c === 'SOLDE_SALAIRE' ? 'Solde salaire : ' : 'Solde indemnit\u00e9 : ') + empNom };
   }
-  return { apType: type, libelle: (type === 'acompte' ? 'Acompte employ\u00e9 : ' : 'Pr\u00eat employ\u00e9 : ') + empNom };
+  return { apType: type, libelle: (type === 'acompte' ? 'ACOMPTE SALAIRE : ' : 'Pr\u00eat employ\u00e9 : ') + empNom };
 }
 function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdParam, masterOpIdParam) {
   var typeEl = document.getElementById('apcType') || document.getElementById('apType') || document.getElementById('csType');
@@ -25472,8 +25537,11 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
   if (cshEl && cshEl.value) apCodeId = cshEl.value;
   if (!apCodeId && masterOp && masterOp.codeId) apCodeId = masterOp.codeId;
   var allCodes = getCodesCaisse();
+  if (!apCodeId && type === 'acompte') {
+    for (var _acs = 0; _acs < allCodes.length && !apCodeId; _acs++) { var _cu = String(allCodes[_acs].code || '').toUpperCase(); if (_cu === 'ACOMPTE-SAL' || _cu === 'ACOMPTE') apCodeId = allCodes[_acs].id; }
+  }
   if (!apCodeId) {
-    var wantCode = type === 'acompte' ? 'ACOMPTE' : 'PRET';
+    var wantCode = type === 'acompte' ? 'ACOMPTE-SAL' : 'PRET';
     var searchNeedle = _stripAccents(type === 'acompte' ? 'acompte' : 'pret');
     for (var aci = 0; aci < allCodes.length; aci++) {
       if (_stripAccents(((allCodes[aci].nom || '') + ' ' + (allCodes[aci].libelle || '') + ' ' + (allCodes[aci].code || ''))).toLowerCase().indexOf(searchNeedle) !== -1) { apCodeId = allCodes[aci].id; break; }
@@ -25482,7 +25550,7 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
       for (var aci2 = 0; aci2 < allCodes.length; aci2++) { if ((allCodes[aci2].code || '').toUpperCase() === wantCode) { apCodeId = allCodes[aci2].id; break; } }
     }
     if (!apCodeId && wantCode) {
-      var newC = {id: DB.genId(), code: wantCode, libelle: type === 'acompte' ? 'Acompte sur salaire' : 'Pr\u00eat sur salaire', sens: 'sortie', montantDefaut: 0, pinned: false};
+      var newC = {id: DB.genId(), code: wantCode, libelle: type === 'acompte' ? 'ACOMPTE SALAIRE' : 'Pr\u00eat sur salaire', sens: 'sortie', montantDefaut: 0, pinned: false};
       allCodes.push(newC); DB.set('mdb_codesCaisse', allCodes); apCodeId = newC.id;
     }
   }
@@ -25541,6 +25609,12 @@ function saveAcomptePretCollectif(skipCount, caisseIdParam, dateParam, groupeIdP
       var _crea = (typeof csApTypeEtLibelleCreation === 'function') ? csApTypeEtLibelleCreation(type, apCodeLabel, empNom) : { apType: type, libelle: (type === 'acompte' ? 'Acompte employ\u00e9 : ' : 'Pr\u00eat employ\u00e9 : ') + empNom };
       var opLib = _crea.libelle;
       var opApType = _crea.apType;
+      /* Acompte salaire : nom complet + mois (« ACOMPTE SALAIRE : NOM/Mois de Octobre 2026 ») */
+      if (opApType === 'acompte' && /^ACOMPTE SALAIRE : /.test(opLib)) {
+        var _nomC = emp ? (((emp.nom || '') + (emp.prenoms ? ' ' + emp.prenoms : '')).trim() || empNom) : empNom;
+        opLib = 'ACOMPTE SALAIRE : ' + _nomC;
+        if (/^\d{4}-\d{2}$/.test(moisDed2 || '')) opLib = csPeriodeBuildLibelle(opLib, moisDed2);
+      }
       if (opRow) {
         opRow.date = rowDate;
         opRow.montant = montant2;
@@ -26322,7 +26396,7 @@ window.savePoolRepartition = function() {
     var newOpId = DB.genId();
     var newApId = DB.genId();
 
-    var opLib = (item.type === 'pret' ? 'Prêt employé : ' : 'Acompte employé : ') + item.empNom;
+    var opLib = (item.type === 'pret' ? 'Prêt employé : ' : 'ACOMPTE SALAIRE : ') + item.empNom;
     if (item.moisDed) opLib = csEnsurePeriodeLibelle(opLib, item.moisDed);
 
     var dureeEmp = item.type === 'pret' ? (parseInt(item.duree, 10) || 1) : 0;
@@ -43583,12 +43657,13 @@ function setQuickType(type) {
     var found = null;
     for (var i = 0; i < codes.length; i++) {
       var ciSearch = _stripAccents(((codes[i].nom || '') + ' ' + (codes[i].libelle || '') + ' ' + (codes[i].code || ''))).toLowerCase();
-      if (ciSearch.indexOf(searchNorm) !== -1) { found = codes[i]; break; }
+      if (ciSearch.indexOf(searchNorm) !== -1 && !(type !== 'pret' && /INDEMNIT/i.test(String(codes[i].code || '')))) { found = codes[i]; break; }
     }
+    if (type !== 'pret') { for (var _ia = 0; _ia < codes.length; _ia++) { var _cua = String(codes[_ia].code || '').toUpperCase(); if (_cua === 'ACOMPTE-SAL' || _cua === 'ACOMPTE') { found = codes[_ia]; break; } } }
     // Si aucun code trouvé, créer automatiquement le code manquant pour éviter libellé vide / code vide
     if (!found) {
-      var newCode = type === 'pret' ? 'PRET' : 'ACOMPTE';
-      var newLib = type === 'pret' ? 'Pr\u00eat sur salaire' : 'Acompte sur salaire';
+      var newCode = type === 'pret' ? 'PRET' : 'ACOMPTE-SAL';
+      var newLib = type === 'pret' ? 'Pr\u00eat sur salaire' : 'ACOMPTE SALAIRE';
       // vérifier si un code avec ce code exact existe déjà (sans accent)
       for (var k=0;k<codes.length;k++){ if(((codes[k].code||'').toUpperCase()===newCode)){ found=codes[k]; break; } }
       if (!found){
@@ -43603,8 +43678,8 @@ function setQuickType(type) {
       // corriger un code existant incomplet (code vide ou libellé vide)
       var needFix=false;
       if (!found.code || !found.libelle){
-        if (!found.code) { found.code = type==='pret' ? 'PRET' : 'ACOMPTE'; needFix=true; }
-        if (!found.libelle) { found.libelle = type==='pret' ? 'Pr\u00eat sur salaire' : 'Acompte sur salaire'; needFix=true; }
+        if (!found.code) { found.code = type==='pret' ? 'PRET' : 'ACOMPTE-SAL'; needFix=true; }
+        if (!found.libelle) { found.libelle = type==='pret' ? 'Pr\u00eat sur salaire' : 'ACOMPTE SALAIRE'; needFix=true; }
         if (needFix){ DB.set('mdb_codesCaisse', codes); try{ _dirtyKeys['mdb_codesCaisse']=true; persistPendingSync(); schedulePush(); }catch(e){} }
       }
       var codeHidden = document.getElementById('csCode');
@@ -44286,6 +44361,26 @@ function saveCaisse(id, asDraft) {
       if (_libSyncSolde) _libSyncSolde.value = libelle;
     }
   }
+  /* ACOMPTE SALAIRE (code ACOMPTE-SAL) versé à un employé : libellé uniforme
+     « ACOMPTE SALAIRE : NOM PRÉNOMS/Mois de … » (code + nom + mois). Un
+     libellé personnalisé (autre texte) est laissé tel quel. */
+  try {
+    if (typeOp === 'acompte' && !_soldeDetect && beneficiaireVal.indexOf('emp_') === 0) {
+      var _codeAcS = '';
+      try { (getCodesCaisse() || []).forEach(function (c0) { if (c0 && c0.id === codeId) _codeAcS = String(c0.code || '').toUpperCase(); }); } catch (eCA) {}
+      if (!_codeAcS) _codeAcS = String(codeInputVal || '').toUpperCase();
+      var _libBase = String(libelle || '').replace(/\/Mois[^\/]*$/i, '').trim();
+      if ((_codeAcS === 'ACOMPTE-SAL' || _codeAcS === 'ACOMPTE') && (!_libBase || /^(ACOMPTE\s*\/?\s*SALAIRE|Acompte employ\u00e9|Acompte sur salaire)\b/i.test(_libBase))) {
+        var _empAc = null; (getEmployes() || []).forEach(function (e0) { if (e0 && 'emp_' + e0.id === beneficiaireVal) _empAc = e0; });
+        if (_empAc) {
+          var _nomAc = ((_empAc.nom || '') + ' ' + (_empAc.prenoms || '')).trim() || _empAc.nom || '';
+          var _moisAc = /^\d{4}-\d{2}$/.test(_apMoisPourLibelle || '') ? _apMoisPourLibelle : String(fullDate || '').slice(0, 7);
+          libelle = csPeriodeBuildLibelle('ACOMPTE SALAIRE : ' + _nomAc, _moisAc);
+          var _libSyncAc = document.getElementById('csLibelleContainerInput'); if (_libSyncAc) _libSyncAc.value = libelle;
+        }
+      }
+    }
+  } catch (eLibAc) {}
   if (!canUserAccessCaisse(currentUser, caisseId)) { toast('Vous ne pouvez enregistrer que dans une caisse qui vous est autoris\u00e9e', 'error'); return; }
   if (typeOp === 'transfert') {
     if (montant <= 0) { toast('Le montant est obligatoire', 'error'); return; }
@@ -45114,7 +45209,7 @@ function csLibelleSolde(o, moisForce) {
   var prefix = 'Solde : ';
   if (code.indexOf('INDEMNITE') !== -1) prefix = 'Solde indemnit\u00e9 : ';
   else if (code.indexOf('SALAIRE') !== -1) prefix = 'Solde salaire : ';
-  var m = lib.match(/^\s*Acompte employ\u00e9\s*:\s*(.*)$/i);
+  var m = lib.match(/^\s*Acompte employ\u00e9\s*:\s*(.*)$/i) || lib.match(/^\s*ACOMPTE\s+SALAIRE\s*:\s*(.*)$/i);
   var base = '';
   if (m) base = prefix + (m[1] || '').trim();
   else if (/^\s*Acompte/i.test(lib)) base = lib.replace(/^\s*Acompte/i, 'Solde');
@@ -45153,7 +45248,7 @@ function csLibelleAcompte(o, moisForce) {
   var lib = String((o && o.libelle) || '');
   var base = '';
   var mm = lib.match(/^\s*Solde indemnit\u00e9\s*:\s*(.*)$/i) || lib.match(/^\s*Solde salaire\s*:\s*(.*)$/i) || lib.match(/^\s*Solde\s*:\s*(.*)$/i);
-  if (mm) base = 'Acompte employ\u00e9 : ' + (mm[1] || '').trim();
+  if (mm) base = 'ACOMPTE SALAIRE : ' + (mm[1] || '').trim();
   else if (/^\s*Solde/i.test(lib)) base = lib.replace(/^\s*Solde/i, 'Acompte');
   else if (!(/^\d{4}-\d{2}$/.test(moisForce || ''))) return lib;
   else base = lib;
