@@ -7921,6 +7921,10 @@ function payeObj(key) {
               typeof data[PAYE_KEY] === "object" &&
               !Array.isArray(data[PAYE_KEY]);
             applyCloudSnapshot(data);
+            /* Recalculer les libelles individuels APRES le snapshot : sinon les
+               libelles globaux du cloud (« Solde salaire : KANGA/... ») revenaient
+               et masquaient le vrai beneficiaire de chaque ligne. */
+            try { _payeCorrigerLibellesSoldes(); } catch (eCLSPull) {}
             payeBootstrapping = false;
             try {
               _purgeOrphanAcomptesP();
@@ -8007,6 +8011,9 @@ function payeObj(key) {
         var prevEmps = "";
         try { prevEmps = JSON.stringify(payeArr("mdb_employes")); } catch (ePE0) {}
         _payeRecvSharedKeys(data || {});
+        /* Chaque snapshot recu peut reimposer les anciens libelles de soldes :
+           on retablit le nom du beneficiaire reel de chaque ligne. */
+        try { _payeCorrigerLibellesSoldes(); } catch (eCLSRt) {}
         var _cur = DB.getMain(PAYE_KEY) || {};
         var _inc =
           data &&
@@ -8331,6 +8338,14 @@ window._payeVuTs = ts;
           for (var e = 0; e < employes.length; e++) {
             if (employes[e] && employes[e].id) empMap[employes[e].id] = employes[e];
           }
+          /* Ligne acompte/solde rattachee a la piece : source fiable du nom
+             quand l'ancienne piece n'a plus de beneficiaire. */
+          var apParOpIdP = {};
+          try {
+            (payeArr("mdb_acomptesPrets") || []).forEach(function (aIdx) {
+              if (aIdx && aIdx.caisseOpId) apParOpIdP[aIdx.caisseOpId] = aIdx;
+            });
+          } catch (eApIdxP) {}
           var fixedOps = 0;
           for (var i = 0; i < ops.length; i++) {
             var op = ops[i];
@@ -8347,13 +8362,31 @@ window._payeVuTs = ts;
             }
             var isSolde = (op.code === 'SOLDE_SALAIRE' || op.code === 'SOLDE_INDEMNITE' || op.apType === 'solde' || (op.libelle && /^Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9?]|tout\s*compte)?\s*:/i.test(op.libelle)));
             if (!isSolde) continue;
+            /* Nom fiable : beneficiaireId, sinon la ligne acompte/solde liee a
+               la piece. op.beneficiaireNom n'est utilise qu'en dernier recours :
+               c'est lui qui portait le nom duplique et bloquait la correction. */
             var empNom = '';
+            var _empIdFiableP = '';
+            var _apLieP = apParOpIdP[op.id] || null;
             if (op.beneficiaireId && empMap[op.beneficiaireId]) {
-              var empObj = empMap[op.beneficiaireId];
-              empNom = ((empObj.nom || '') + (empObj.prenoms ? ' ' + empObj.prenoms : '')).trim() || empObj.nom || '';
+              _empIdFiableP = op.beneficiaireId;
+            } else if (_apLieP && _apLieP.employeId && empMap[_apLieP.employeId]) {
+              _empIdFiableP = _apLieP.employeId;
+              if (!op.beneficiaireId) { op.beneficiaireId = _empIdFiableP; op.beneficiaireType = 'employe'; fixedOps++; }
             }
-            if (!empNom && op.beneficiaireNom) empNom = String(op.beneficiaireNom).trim();
+            if (_empIdFiableP) {
+              var empObj = empMap[_empIdFiableP];
+              empNom = ((empObj.nom || '') + (empObj.prenoms ? ' ' + empObj.prenoms : '')).trim() || empObj.nom || '';
+            } else if (op.beneficiaireNom) {
+              empNom = String(op.beneficiaireNom).trim();
+            } else if (_apLieP && _apLieP.employeNom) {
+              empNom = String(_apLieP.employeNom).trim();
+              if (!op.beneficiaireNom) { op.beneficiaireNom = empNom; fixedOps++; }
+            }
             if (!empNom) continue;
+            if (_empIdFiableP && op.beneficiaireNom && String(op.beneficiaireNom).trim().toUpperCase() !== empNom.toUpperCase()) {
+              op.beneficiaireNom = empNom; fixedOps++;
+            }
 
             var curLib = String(op.libelle || '').trim();
             var m = curLib.match(/^(Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)(\/.*)?$/i);

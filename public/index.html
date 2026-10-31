@@ -7406,6 +7406,12 @@ function loadCloudData(uid, callback) {
     _loadingCloud = false;
     _receivingSnapshot = false;
     try { mdbMigrateUserHashes(); } catch (eMH2) {}
+    /* Les libelles individuels des soldes doivent etre recalcules APRES
+       l'application du snapshot cloud. Appelee seulement a l'init, la
+       correction etait ensuite ecrasee par les libelles du cloud (toutes les
+       lignes d'une piece collective ressortaient au nom du dernier
+       beneficiaire, ex. « Solde salaire : KANGA/... »). */
+    try { _corrigerLibellesSoldesCollectifs(); } catch (eCLSLoad) {}
     if (callback) callback();
   }
   setTimeout(finish, 15000);
@@ -22185,6 +22191,17 @@ function _corrigerLibellesSoldesCollectifs() {
   for (var e = 0; e < employes.length; e++) {
     if (employes[e] && employes[e].id) empMap[employes[e].id] = employes[e];
   }
+  /* Index des lignes acompte/solde rattachees a une piece de caisse : quand
+     l'ancienne piece ne porte ni beneficiaireId ni beneficiaireNom (saisie
+     « libre »), c'est la seule source fiable du nom de l'employe. */
+  var apParOpId = {};
+  try {
+    var _apIdx = dbArr('mdb_acomptesPrets') || [];
+    for (var _ai = 0; _ai < _apIdx.length; _ai++) {
+      var _aIdx = _apIdx[_ai];
+      if (_aIdx && _aIdx.caisseOpId) apParOpId[_aIdx.caisseOpId] = _aIdx;
+    }
+  } catch (eApIdx) {}
 
   var fixed = 0;
   for (var i = 0; i < ops.length; i++) {
@@ -22204,15 +22221,34 @@ function _corrigerLibellesSoldesCollectifs() {
     var isSolde = (op.code === 'SOLDE_SALAIRE' || op.code === 'SOLDE_INDEMNITE' || op.apType === 'solde' || (op.libelle && /^Solde\s*(?:de\s+)?(?:salaire|indemnit[eé?]|tout\s*compte)?\s*:/i.test(op.libelle)));
     if (!isSolde) continue;
 
+    /* Nom fiable : beneficiaireId, sinon la ligne acompte/solde rattachee a la
+       piece. On ne se fie a op.beneficiaireNom QUE si aucune de ces deux
+       sources n'existe : c'est lui qui portait le nom duplique (« KANGA » sur
+       toutes les lignes) et empechait toute correction. */
     var empNom = '';
+    var _empIdFiable = '';
+    var _apLie = apParOpId[op.id] || null;
     if (op.beneficiaireId && empMap[op.beneficiaireId]) {
-      var empObj = empMap[op.beneficiaireId];
-      empNom = ((empObj.nom || '') + (empObj.prenoms ? ' ' + empObj.prenoms : '')).trim() || empObj.nom || '';
+      _empIdFiable = op.beneficiaireId;
+    } else if (_apLie && _apLie.employeId && empMap[_apLie.employeId]) {
+      _empIdFiable = _apLie.employeId;
+      if (!op.beneficiaireId) { op.beneficiaireId = _empIdFiable; op.beneficiaireType = 'employe'; fixed++; }
     }
-    if (!empNom && op.beneficiaireNom) {
+    if (_empIdFiable) {
+      var empObj = empMap[_empIdFiable];
+      empNom = ((empObj.nom || '') + (empObj.prenoms ? ' ' + empObj.prenoms : '')).trim() || empObj.nom || '';
+    } else if (op.beneficiaireNom) {
       empNom = String(op.beneficiaireNom).trim();
+    } else if (_apLie && _apLie.employeNom) {
+      empNom = String(_apLie.employeNom).trim();
+      if (!op.beneficiaireNom) { op.beneficiaireNom = empNom; fixed++; }
     }
     if (!empNom) continue;
+    /* Colonne « Bénéficiaire » incoherente avec le nom fiable : la corriger
+       aussi, sinon l'ecran affiche encore l'ancien nom a cote du bon libelle. */
+    if (_empIdFiable && op.beneficiaireNom && String(op.beneficiaireNom).trim().toUpperCase() !== empNom.toUpperCase()) {
+      op.beneficiaireNom = empNom; fixed++;
+    }
 
     var curLib = String(op.libelle || '').trim();
     var m = curLib.match(/^(Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)(\/.*)?$/i);
@@ -43311,6 +43347,14 @@ function onStaticCodeSelect(item) {
     var _tPan = document.getElementById('csType');
     if (_tPan) { _tPan.value = 'employe'; toggleBeneficiaire(); }
   }
+  /* Code SOLDE (salaire / indemnité) : versé à UN employé — afficher le champ
+     Bénéficiaire. Sinon Type=Libre le masque et le libellé conservait le nom
+     d'une saisie précédente (toutes les lignes au nom du même bénéficiaire). */
+  var _codeSoldeSel = String(item.code || '').toUpperCase().trim();
+  if (_codeSoldeSel === 'SOLDE_SALAIRE' || _codeSoldeSel === 'SOLDE_INDEMNITE') {
+    var _tSolde = document.getElementById('csType');
+    if (_tSolde) { _tSolde.value = 'employe'; toggleBeneficiaire(); }
+  }
   updatePeriodeVisibility();
   updateCollectifVisibility();
 }
@@ -43336,6 +43380,13 @@ function onStaticLibelleSelect(item) {
   if (montantEl && item.montantDefaut && parseSep(montantEl.value) === 0) montantEl.value = fmtSep(item.montantDefaut);
   autoDetectBenefType(item.libelle || '');
   autoDetectAPType(item.libelle || '');
+  /* Code SOLDE : le solde est versé à un employé — forcer le type Employé et
+     afficher le champ Bénéficiaire (sinon le nom reste celui d'avant). */
+  var _codeSoldeLib = String(item.code || '').toUpperCase().trim();
+  if (_codeSoldeLib === 'SOLDE_SALAIRE' || _codeSoldeLib === 'SOLDE_INDEMNITE') {
+    var _tSoldeLib = document.getElementById('csType');
+    if (_tSoldeLib) { _tSoldeLib.value = 'employe'; toggleBeneficiaire(); }
+  }
   updatePeriodeVisibility();
   updateCollectifVisibility();
 }
@@ -44114,6 +44165,42 @@ function saveCaisse(id, asDraft) {
   var tiers = document.getElementById('csTiers') ? document.getElementById('csTiers').value.trim() : '';
   var remettant = document.getElementById('csRemettantContainerHidden') ? document.getElementById('csRemettantContainerHidden').value : '';
   var executant = document.getElementById('csExecutant') ? document.getElementById('csExecutant').value.trim() : '';
+  /* Code SOLDE (salaire / indemnité) hors remise collective : le solde est
+     versé à UN employé. Sans ce garde-fou, le type restait « Libre » : le
+     bénéficiaire était effacé et le libellé gardait le nom d'une saisie
+     précédente (« Solde salaire : KANGA » recopié sur toutes les lignes). */
+  var _soldeDetect = false;
+  var _soldeCodeObj = null;
+  try { _soldeCodeObj = csSoldeCodeSelected(); } catch (eSoldeSel) {}
+  if (_soldeCodeObj && String(_soldeCodeObj.code || '').toUpperCase() === 'ACOMPTE_INDEMNITE') _soldeCodeObj = null;
+  _soldeDetect = !!_soldeCodeObj;
+  if (_soldeDetect) {
+    if (beneficiaireVal.indexOf('emp_') !== 0) {
+      var _tSoldeSel = document.getElementById('csType');
+      if (_tSoldeSel) { _tSoldeSel.value = 'employe'; toggleBeneficiaire(); }
+      toast('Solde : choisissez l\u2019employ\u00e9 b\u00e9n\u00e9ficiaire (champ B\u00e9n\u00e9ficiaire)', 'error');
+      return;
+    }
+    /* Circuit acompte : c'est lui qui enregistre le mois de déduction. La
+       nature « solde » reste portée par le code (SOLDE_SALAIRE/INDEMNITE). */
+    if (typeOp !== 'pret') typeOp = 'acompte';
+    /* Mois de la période choisi dans le formulaire (colonne Période), et non
+       le mois courant par défaut du champ de déduction. */
+    var _moisPeriodeSolde = (document.getElementById('csPeriodeMois') || {}).value || '';
+    if (/^\d{4}-\d{2}$/.test(_moisPeriodeSolde)) _apMoisPourLibelle = _moisPeriodeSolde;
+    var _empSolde = null, _empSoldeList = getEmployes();
+    for (var _esl = 0; _esl < _empSoldeList.length; _esl++) {
+      if ('emp_' + _empSoldeList[_esl].id === beneficiaireVal) { _empSolde = _empSoldeList[_esl]; break; }
+    }
+    if (_empSolde) {
+      var _nomSolde = (((_empSolde.nom || '') + ' ' + (_empSolde.prenoms || '')).trim() || _empSolde.nom || '');
+      var _isIndemSolde = (String(_soldeCodeObj.code || '').toUpperCase() === 'SOLDE_INDEMNITE') || /indemnit/i.test(String(libelle || ''));
+      var _baseSolde = (_isIndemSolde ? 'Solde indemnit\u00e9 : ' : 'Solde salaire : ') + _nomSolde;
+      libelle = csEnsurePeriodeLibelle(_baseSolde, _apMoisPourLibelle);
+      var _libSyncSolde = document.getElementById('csLibelleContainerInput');
+      if (_libSyncSolde) _libSyncSolde.value = libelle;
+    }
+  }
   if (!canUserAccessCaisse(currentUser, caisseId)) { toast('Vous ne pouvez enregistrer que dans une caisse qui vous est autoris\u00e9e', 'error'); return; }
   if (typeOp === 'transfert') {
     if (montant <= 0) { toast('Le montant est obligatoire', 'error'); return; }
