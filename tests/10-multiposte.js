@@ -4,7 +4,7 @@
    Synchro blindee : deux (ou trois) postes qui travaillent en meme temps
    sur le MEME dossier ne doivent jamais s'ecraser.
 
-   On charge le VRAI adaptateur public/supabase-sdk/mdb-supabase.js une fois
+   On charge le VRAI adaptateur public/cloud-sdk/mdb-d1.js une fois
    PAR POSTE (chacun avec son propre localStorage), tous branches sur le meme
    faux serveur en memoire, qui reproduit le comportement reel qui compte :
    ecriture conditionnelle (compare-and-set sur updated_at), insertion qui
@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const ADAPTATEUR = path.join(__dirname, '..', 'public', 'supabase-sdk', 'mdb-supabase.js');
+const ADAPTATEUR = path.join(__dirname, '..', 'public', 'cloud-sdk', 'mdb-d1.js');
 
 function creerServeur() {
   const tables = { enterprises: [], enterprise_data: [] };
@@ -147,8 +147,7 @@ function creerPoste(serveur, tombstones) {
   const stock = {};
   if (tombstones) stock.mdb_tombstones = JSON.stringify(tombstones);
   const bac = {
-    supabase: { createClient: function () { return serveur.client(); } },
-    window: {},
+    window: { __MDB_TEST_CLIENT__: serveur.client() },
     localStorage: {
       getItem: function (k) { return Object.prototype.hasOwnProperty.call(stock, k) ? stock[k] : null; },
       setItem: function (k, v) { stock[k] = String(v); },
@@ -159,7 +158,7 @@ function creerPoste(serveur, tombstones) {
     Promise: Promise, Date: Date, JSON: JSON, Object: Object, Math: Math, Array: Array, String: String,
     Number: Number, Error: Error, parseInt: parseInt, isNaN: isNaN, RegExp: RegExp
   };
-  vm.runInNewContext(fs.readFileSync(ADAPTATEUR, 'utf8'), bac, { filename: 'mdb-supabase.js' });
+  vm.runInNewContext(fs.readFileSync(ADAPTATEUR, 'utf8'), bac, { filename: 'mdb-d1.js' });
   const ad = bac.window.__MDB_ADAPTER__;
   const doc = function () { return ad.collection('enterprises').doc('E1'); };
   return {

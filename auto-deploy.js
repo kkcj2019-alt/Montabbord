@@ -23,7 +23,7 @@ catch (e2) {
   if (fs.existsSync(path.join(NODEJS, 'node.exe'))) process.env.PATH = NODEJS + ';' + process.env.PATH;
 }
 var DEBOUNCE_MS = 90 * 1000;
-var IGNORE = ['node_modules', '.git', '.firebase', 'supabase-migration', 'firestore-export-fresh.json', 'backups'];
+var IGNORE = ['node_modules', '.git', '.wrangler', 'backups'];
 var timer = null;
 var deploying = false;
 var lastDeployEnd = Date.now();
@@ -47,32 +47,47 @@ function watched(p) {
   return true;
 }
 
-/* Miroir Git : recupere la derniere sauvegarde cloud (Supabase) dans backups/latest.json */
-var SB_URL = 'pywacfwhwsvidkhqsjqv.supabase.co';
-var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5d2FjZndod3N2aWRraHFzanF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczMDMyMTksImV4cCI6MjEwMjg3OTIxOX0.wmt5vKo189wxQ9loIYprj8PE-Xd3y0Xs_-n61UJjbls';
-function fetchLatestBackupToRepo(done) {
+/* Miroir Git : recupere la derniere sauvegarde cloud (Cloudflare D1 via /api/backup) */
+var CF_API = 'montabbord.pages.dev';
+var CF_ENT = '1aWBeqTjy3Q1glGMFtxOT1o2vwq2'; /* identifiant de l'entreprise */
+function cfGetJson(pathname, cb) {
   try {
     var https = require('https');
-    var opts = { hostname: SB_URL, path: '/rest/v1/backups?select=ts,data&order=ts.desc&limit=1', headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY }, timeout: 15000 };
+    var opts = { hostname: CF_API, path: pathname, headers: { 'Accept': 'application/json' }, timeout: 15000 };
     var req = https.get(opts, function(res) {
       var buf = '';
       res.on('data', function(ch) { buf += ch; });
-      res.on('end', function() {
-        try {
-          var rows = JSON.parse(buf);
-          if (Array.isArray(rows) && rows.length && rows[0].data) {
-            var dir = path.join(ROOT, 'backups');
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-            var f = path.join(dir, 'latest.json');
-            var out = JSON.stringify({ ts: rows[0].ts, savedAt: new Date().toISOString(), data: rows[0].data });
-            if (!fs.existsSync(f) || fs.readFileSync(f, 'utf8') !== out) { fs.writeFileSync(f, out); console.log('[backup] latest.json mis a jour'); }
-          }
-        } catch (eP) {}
+      res.on('end', function() { cb(null, buf); });
+    });
+    req.on('error', function(e) { cb(e); });
+    req.setTimeout(16000, function() { req.destroy(); cb(new Error('timeout')); });
+  } catch (e) { cb(e); }
+}
+function fetchLatestBackupToRepo(done) {
+  try {
+    cfGetJson('/api/backup?enterprise_id=' + encodeURIComponent(CF_ENT), function(e, buf) {
+      if (e) return done();
+      var liste = [];
+      try { liste = (JSON.parse(buf) || {}).backups || []; } catch (eL) { liste = []; }
+      if (!liste.length || !liste[0].ts) return done();
+      var ts = liste[0].ts;
+      cfGetJson('/api/backup?enterprise_id=' + encodeURIComponent(CF_ENT) + '&ts=' + encodeURIComponent(ts), function(e2, buf2) {
+        if (!e2) {
+          try {
+            var rep = JSON.parse(buf2) || {};
+            var bkp = rep.backup;
+            if (bkp && bkp.data) {
+              var dir = path.join(ROOT, 'backups');
+              if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+              var f = path.join(dir, 'latest.json');
+              var out = JSON.stringify({ ts: bkp.ts, savedAt: new Date().toISOString(), data: bkp.data });
+              if (!fs.existsSync(f) || fs.readFileSync(f, 'utf8') !== out) { fs.writeFileSync(f, out); console.log('[backup] latest.json mis a jour'); }
+            }
+          } catch (eP) {}
+        }
         done();
       });
     });
-    req.on('error', function() { done(); });
-    req.setTimeout(16000, function() { req.destroy(); done(); });
   } catch (eFB) { done(); }
 }
 

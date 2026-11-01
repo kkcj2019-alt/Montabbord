@@ -1,8 +1,9 @@
 /* ============================================================================
-   MDB-SUPABASE.JS — Adaptateur Firestore -> Supabase pour MONTABBORD
+   MDB-SUPABASE.JS — Adaptateur Firestore -> Cloudflare D1 pour MONTABBORD
+   (le nom du fichier est conservé pour ne pas casser les pages/tests).
    Expose une API compatible avec le sous-ensemble Firestore utilisé par l'app,
-   adossé à PostgreSQL/Supabase. La logique métier reste inchangée.
-   DECOUPAGE (anti timeouts 57014) : le document enterprises n'est plus UN
+   adossé à la base Cloudflare D1 via les Pages Functions /api/*.
+   DECOUPAGE (anti timeouts) : le document enterprises n'est plus UN
    gros jsonb — chaque rubrique est une petite ligne de enterprise_data
    (mdb_paye / mdb_production decoupes par section). Interface inchangee.
    ============================================================================ */
@@ -508,12 +509,16 @@
      En environnement de TEST (VM sans fetch), on laisse le faux serveur
      Supabase fourni par la suite de tests prendre la main — sinon toute
      la suite échoue sur « fetch is not defined » et ne teste plus rien. */
+  /* Environnement de TEST (VM sans fetch, ex. tests/06-split.js) : le client
+     de test est fourni via window.__MDB_TEST_CLIENT__. Dans le navigateur,
+     c'est TOUJOURS le client Cloudflare D1 qui est utilisé. */
   var sb = new D1Client();
-  if (typeof fetch !== 'function' && typeof supabase !== 'undefined' && supabase && typeof supabase.createClient === 'function') {
-    try { sb = supabase.createClient('', ''); } catch (eSB) {}
+  if (typeof fetch !== 'function' && typeof window !== 'undefined' && window.__MDB_TEST_CLIENT__) {
+    try { sb = window.__MDB_TEST_CLIENT__; } catch (eSB) {}
   }
   window.SB_CLIENT = sb;
   if (typeof window !== 'undefined') {
+    /* Compatibilité : certaines pages historiques appellent createClient(). */
     if (!window.supabase) window.supabase = {};
     window.supabase.createClient = function () { return sb; };
   }

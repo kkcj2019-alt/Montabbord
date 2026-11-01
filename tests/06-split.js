@@ -5,7 +5,7 @@
    au lieu du dossier entier (2,5 Mo) dans enterprises.data.
 
    On stubbe le client Supabase (en memoire) et on charge le VRAI
-   adaptateur public/supabase-sdk/mdb-supabase.js dans un contexte isole.
+   adaptateur public/cloud-sdk/mdb-d1.js dans un contexte isole.
    Puis on controle le VRAI production.html (helpers de transport).
 
    Etape asynchrone : run() rend une promesse (supportee par run.js).
@@ -15,7 +15,7 @@ const path = require('path');
 const vm = require('vm');
 const { chargerApp, storeRealiste } = require('./lib/sandbox.js');
 
-const ADAPTATEUR = path.join(__dirname, '..', 'public', 'supabase-sdk', 'mdb-supabase.js');
+const ADAPTATEUR = path.join(__dirname, '..', 'public', 'cloud-sdk', 'mdb-d1.js');
 
 /* ---------- Faux Supabase en memoire ---------- */
 function creerFauxSupabase(tables, options) {
@@ -162,8 +162,7 @@ function creerFauxSupabase(tables, options) {
 
 function chargerAdaptateur(faux) {
   const bac = {
-    supabase: { createClient: function () { return faux.client; } },
-    window: {},
+    window: { __MDB_TEST_CLIENT__: faux.client },
     console: console,
     setTimeout: setTimeout,
     clearTimeout: clearTimeout,
@@ -174,7 +173,7 @@ function chargerAdaptateur(faux) {
     Math: Math
   };
   const code = fs.readFileSync(ADAPTATEUR, 'utf8');
-  vm.runInNewContext(code, bac, { filename: 'mdb-supabase.js' });
+  vm.runInNewContext(code, bac, { filename: 'mdb-d1.js' });
   return bac.window.__MDB_ADAPTER__;
 }
 
@@ -354,7 +353,7 @@ async function run(rapport) {
   try {
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'supabase-sdk', 'mdb-supabase.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'cloud-sdk', 'mdb-d1.js'), 'utf8');
     /* Le bloc writeEnterpriseSplit(...).catch ne doit remettre _splitOK a
        false QUE si la table est reellement absente, et PROPAGER l'erreur
        sinon. C'etait la cause du « synchro en attente » permanent : un seul

@@ -113,8 +113,8 @@ mockWindow.fetch = async function(url, opts) {
   return { ok: true, json: async () => ({}) };
 };
 
-// Load mdb-supabase.js into VM context
-const adapterCode = fs.readFileSync(path.join(__dirname, '../public/supabase-sdk/mdb-supabase.js'), 'utf8');
+// Load mdb-d1.js into VM context
+const adapterCode = fs.readFileSync(path.join(__dirname, '../public/cloud-sdk/mdb-d1.js'), 'utf8');
 const context = vm.createContext(mockWindow);
 vm.runInContext(adapterCode, context);
 

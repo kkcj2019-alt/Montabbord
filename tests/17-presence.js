@@ -170,7 +170,7 @@ function run(rapport) {
   const idx = fs.readFileSync(path.join(pub, 'index.html'), 'utf8');
   const prod = fs.readFileSync(path.join(pub, 'production.html'), 'utf8');
   const pay = fs.readFileSync(path.join(pub, 'paye.html'), 'utf8');
-  const sdk = fs.readFileSync(path.join(pub, 'supabase-sdk', 'mdb-supabase.js'), 'utf8');
+  const sdk = fs.readFileSync(path.join(pub, 'cloud-sdk', 'mdb-d1.js'), 'utf8');
   const m1 = idx.match(/_pushTimer = setTimeout\(pushToCloud, (\d+)\);\s*\}/);
   const m2 = prod.match(/_prodPushT = setTimeout\(prodPushNow, (\d+)\)/);
   const m3 = pay.match(/\}, force \? 300 : (\d+)\);/);
