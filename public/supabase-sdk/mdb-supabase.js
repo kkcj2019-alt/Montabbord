@@ -865,6 +865,11 @@
     if (cle === 'mdb_acomptesPrets') {
       try {
         var ops = JSON.parse(localStorage.getItem('mdb_operationsCaisse') || '[]'), vivOps = {};
+        /* Doublons deja elimines par la deduplication : ils restent supprimes
+           meme si leur piece de caisse existe (sinon le serveur les gardait et
+           la synchro bouclait toutes les 2 s). */
+        var dedupIds = {};
+        try { dedupIds = JSON.parse(localStorage.getItem('mdb_acomptesPrets_dedup') || '{}') || {}; } catch (eDD) {}
         var natAP = function (o) {
           var t = String(o.apType || '');
           if (t === 'acompte' || t === 'pret' || t === 'solde') return true;
@@ -874,9 +879,10 @@
         if (Array.isArray(ops)) ops.forEach(function (o) {
           if (!o || o.reversed || !natAP(o)) return;
           if (o.id) vivOps[o.id] = true;
-          if (o.acomptePretId && out[o.acomptePretId]) delete out[o.acomptePretId];
+          if (o.acomptePretId && out[o.acomptePretId] && !dedupIds[String(o.acomptePretId)]) delete out[o.acomptePretId];
         });
         Object.defineProperty(out, '__liveOps', { value: vivOps, enumerable: false });
+        Object.defineProperty(out, '__dedup', { value: dedupIds, enumerable: false });
       } catch (e4) {}
     }
     return out;
@@ -960,8 +966,9 @@
       x = fresh[i]; id = idOf(x);
       if (iM[id]) continue;
       b = bM[id];
-      if (b === undefined) { if (!tomb[id] || (x && x.caisseOpId && tomb.__liveOps && tomb.__liveOps[x.caisseOpId])) out.push(x); }      /* ajoute par un autre poste */
-      else if (sjson(x) !== sjson(b)) out.push(x);              /* je l'ai supprimee mais un autre l'a modifiee : on garde */
+      var _ded = !!(tomb.__dedup && id && tomb.__dedup[String(id)]);
+      if (b === undefined) { if (!tomb[id] || (x && x.caisseOpId && tomb.__liveOps && tomb.__liveOps[x.caisseOpId] && !_ded)) out.push(x); }      /* ajoute par un autre poste */
+      else if (!_ded && sjson(x) !== sjson(b)) out.push(x);              /* je l'ai supprimee mais un autre l'a modifiee : on garde */
       else if (LISTES_A_SUPPRESSION_EXPLICITE[cle] && !tomb[id]) out.push(x); /* absente sans suppression volontaire : on garde */
       /* sinon : je l'ai supprimee, personne d'autre n'y a touche -> supprimee */
     }
@@ -1039,11 +1046,15 @@
   function ecrireLigneSure(uid, ligne, lignes, pre) {
     var cle = ligne.cle, bk = bkey(uid, cle), tomb = tombSet(uid, cle, lignes);
     var baseAvant = _rowBase[bk];
-    var inc = baseAvant ? guardMass(cle, ligne.data, baseAvant.json, tomb) : ligne.data;
+    /* Restauration « Remplacer tout » en cours : ce poste est la reference.
+       On ecrit sa copie TELLE QUELLE (pas de fusion 3 points, pas de
+       garde-fou de masse), sinon l'ancien contenu du serveur revenait. */
+    var _autoritaire = recentReset();
+    var inc = (!_autoritaire && baseAvant) ? guardMass(cle, ligne.data, baseAvant.json, tomb) : ligne.data;
     /* Listes a suppression explicite : une ligne que j'avais deja envoyee et
        qui manque maintenant SANS pierre tombale vient d'une copie perimee
        (autre onglet) -> on la renvoie au lieu de l'effacer du serveur. */
-    if (baseAvant && LISTES_A_SUPPRESSION_EXPLICITE[cle] && Array.isArray(inc)) {
+    if (!_autoritaire && baseAvant && LISTES_A_SUPPRESSION_EXPLICITE[cle] && Array.isArray(inc)) {
       try {
         var bA = JSON.parse(baseAvant.json);
         if (Array.isArray(bA) && allIdArr(bA) && allIdArr(inc)) {
@@ -1071,7 +1082,7 @@
           return inserer(uid, cle, inc).then(function (r) { if (r.ok) return reussi(r, inc, inc); return conflit(n + 1); });
         }
         var base = baseAvant ? JSON.parse(baseAvant.json) : null;
-        var merged = merge3(inc, base, fr.data, tomb, cle, 0);
+        var merged = _autoritaire ? inc : merge3(inc, base, fr.data, tomb, cle, 0);
         /* Rien a changer sur le serveur (cas courant a l'ouverture) : on note la base, sans ecrire */
         if (sjson(merged) === sjson(fr.data)) { reussi({ ts: fr.updated_at }, inc, merged); return; }
         return majConditionnelle(uid, cle, merged, fr.updated_at).then(function (r) {
@@ -1084,7 +1095,7 @@
       /* Si notre derniere ecriture etait une fusion, le serveur contient aussi les
          lignes des autres postes : on refusionne localement pour ne pas les retirer. */
       var aEnvoyer = inc;
-      if (baseAvant.srv) {
+      if (!_autoritaire && baseAvant.srv) {
         try { aEnvoyer = merge3(inc, JSON.parse(baseAvant.json), JSON.parse(baseAvant.srv), tomb, cle, 0); } catch (eM) { return conflit(0); }
       }
       return majConditionnelle(uid, cle, aEnvoyer, baseAvant.ts).then(function (r) {

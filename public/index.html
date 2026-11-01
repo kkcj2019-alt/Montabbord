@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-10-31-405';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-01-406';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -1595,7 +1595,7 @@ try{(function(){var b=document.createElement('button');b.id='hdrFiltersToggle';b
 </div>
 </div>
 
-<script src="supabase-sdk/mdb-supabase.js?v=20261030-d11"></script>
+<script src="supabase-sdk/mdb-supabase.js?v=20261101-d12"></script>
 <script src="vendor/xlsx.full.min.js" defer></script>
 <script src="vendor/pdf.min.js" defer></script>
 <script src="vendor/mammoth.browser.min.js" defer></script>
@@ -2592,6 +2592,16 @@ function pushToCloud() {
   _cloudP.then(function(doc) {
     var cloud = (doc && doc.exists) ? doc.data() : {};
     var data = {};
+    /* Remplacement autoritaire (bouton « Remplacer tout » d'une restauration,
+       ou restauration depuis une sauvegarde locale) : pendant 10 minutes, ce
+       poste ne refusionne PLUS l'ancien cloud — il envoie sa copie telle quelle.
+       Sans ce drapeau, l'union additive ramenait les lignes perimees et le
+       remplacement etait annule quelques secondes plus tard. */
+    var _resetAuth = false;
+    try {
+      var _trA = getTombstones() || {};
+      _resetAuth = !!(_trA.__resetAt && (Date.now() - _trA.__resetAt) < 10 * 60 * 1000);
+    } catch (eRA) {}
     for (var i = 0; i < batch.length; i++) {
       var k = batch[i];
       var lv = DB.get(k);
@@ -2605,7 +2615,7 @@ function pushToCloud() {
          un cloud PLEIN. Seule une suppression deliberee couvrant tout
          (tombstones) peut envoyer du vide. Sans ca, un appareil au stockage
          vide/reinitialise effacait les donnees de tous les autres postes. */
-      if ((Array.isArray(lv) || (lv && typeof lv === 'object')) && _syncEstVide(lv) && !_syncEstVide(cloud[k])) {
+      if ((Array.isArray(lv) || (lv && typeof lv === 'object')) && _syncEstVide(lv) && !_syncEstVide(cloud[k]) && !_resetAuth) {
         var _delib = false;
         try {
           if (Array.isArray(cloud[k])) {
@@ -2656,14 +2666,14 @@ function pushToCloud() {
         /* Employés : latest-wins (un onglet périmé ne réimpose plus ses vieilles fiches au cloud). */
         /* Autres tableaux : union additive (cle metier, id, signature) — les
            lignes cloud sans id ne sont plus abandonnees a la poussee. */
-        var mergedArr = (k === 'mdb_employes') ? mergeEmployesPreferRecent(lv, base) : syncUnionTableaux(lv, base);
+        var mergedArr = _resetAuth ? lv : ((k === 'mdb_employes') ? mergeEmployesPreferRecent(lv, base) : syncUnionTableaux(lv, base));
         data[k] = _syncFiltreTombstonesGenerique(k, mergedArr);
       } else if (lv && typeof lv === 'object' && !Array.isArray(lv) && cloud[k] && typeof cloud[k] === 'object' && !Array.isArray(cloud[k])) {
         /* Objet partage (mdb_paye, mdb_production) : NE JAMAIS renvoyer la copie
            locale en bloc. L'app principale peut etre perimee (module Paie ou
            Exploitation ouverts a cote) : remplacer alors l'objet entier effacait
            le pointage deja synchronise. On fusionne section par section. */
-        data[k] = (k === 'mdb_production' && typeof iProdFusionAvantEnvoi === 'function')
+        data[k] = _resetAuth ? lv : (k === 'mdb_production' && typeof iProdFusionAvantEnvoi === 'function')
           ? iProdFusionAvantEnvoi(cloud[k], lv)
           : mergeObjetPartage(cloud[k], lv);
         /* Codes d'articles supprimes / leves : la date la plus recente gagne
@@ -3843,6 +3853,11 @@ function pruneTombstones() {
 function stripTombstoned(entityKey, arr) {
   var t = getTombstones()[entityKey];
   if (!t || !Array.isArray(arr)) return arr;
+  /* Doublons d'acomptes/prets supprimes par la deduplication : ils doivent
+     rester supprimes MEME si leur piece de caisse existe (protection
+     « acompte vivant » plus bas). Sans cette priorite, le nuage renvoyait les
+     13 copies a chaque synchro et la deduplication tournait en boucle. */
+  var _ddDoublons = (entityKey === 'mdb_acomptesPrets') ? _apDedupSet() : null;
   /* Acomptes/prets : tant que leur piece de caisse existe, une suppression
      memorisee (souvent faite automatiquement par un nettoyage qui ne voyait pas
      encore la piece) ne doit pas les effacer. Meme regle que la Paie : sans
@@ -3866,11 +3881,25 @@ function stripTombstoned(entityKey, arr) {
   for (var i = 0; i < arr.length; i++) {
     var r = arr[i];
     if (r && r.id && t[r.id]) {
-      if (!(_liveOp && ((r.caisseOpId && _liveOp[r.caisseOpId]) || _liveAp[r.id]))) continue;
+      if (!(_ddDoublons && _ddDoublons[r.id]) && !(_liveOp && ((r.caisseOpId && _liveOp[r.caisseOpId]) || _liveAp[r.id]))) continue;
     }
     out.push(r);
   }
   return out;
+}
+/* ===== Doublons d'acomptes/prets deja supprimes par la deduplication =====
+   Memoire locale (id -> date) prioritaire sur la protection « la piece de
+   caisse existe encore ». Empeche le nuage / une autre copie de ramener les
+   copies deja eliminees (boucle dedup <-> push <-> pull toutes les 2 s). */
+var AP_DEDUP_KEY = 'mdb_acomptesPrets_dedup';
+function _apDedupSet() {
+  try { return JSON.parse(localStorage.getItem(AP_DEDUP_KEY) || '{}') || {}; } catch (e) { return {}; }
+}
+function _apDedupAjouter(ids) {
+  if (!ids || !ids.length) return;
+  var d = _apDedupSet(), now = Date.now(), ch = false;
+  for (var i = 0; i < ids.length; i++) { if (ids[i] && !d[ids[i]]) { d[ids[i]] = now; ch = true; } }
+  if (ch) { try { localStorage.setItem(AP_DEDUP_KEY, JSON.stringify(d)); } catch (e) {} }
 }
 /* Filtre tombstone GENERIQUE (reception + poussee) : applique TOUS les
    mecanismes de suppression connus au lieu de 2-3 cles en dur. Sans ca,
@@ -7498,6 +7527,15 @@ entRef.get().then(function(doc) {
          (saturation), un push fusionnait depuis un cloud périmé et effaçait
          les lignes des autres postes. */
       try { window._lastCloudData = data; window._lastCloudAt = Date.now(); } catch(eLCD) {}
+      /* Remplacement autoritaire en cours (restauration « Remplacer tout ») :
+         la copie LOCALE fait foi. Sans ce garde-fou, le rechargement
+         réunionnait le cloud encore périmé et les anciennes lignes
+         revenaient quelques secondes après le remplacement. */
+      var _resetAuthLoad = false;
+      try {
+        var _trL = getTombstones() || {};
+        _resetAuthLoad = !!(_trL.__resetAt && (Date.now() - _trL.__resetAt) < 10 * 60 * 1000);
+      } catch (eRAL) {}
       var cloudEnt = (data['mdb_entreprise'] && typeof data['mdb_entreprise'] === 'object') ? data['mdb_entreprise'] : data;
       var localEnt = DB.get('mdb_entreprise') || {};
       if (typeof localEnt !== 'object' || Array.isArray(localEnt)) localEnt = {};
@@ -7602,7 +7640,7 @@ entRef.get().then(function(doc) {
           /* Merge array data: cloud wins for an existing ID, local-only rows survive. */
           if (Array.isArray(val) && Array.isArray(localData) && localData.length > 0 && val.length > 0 && key.indexOf('mdb_') === 0 && key !== 'mdb_actif') {
              var _lgAv = window.__mdbLocalGagne || 0;
-             var merged = (key === 'mdb_employes') ? mergeEmployesPreferRecent(localData, val) : mergeArraysPreferCloud(localData, val);
+             var merged = (_resetAuthLoad && _dirtyKeys[key]) ? localData.slice() : ((key === 'mdb_employes') ? mergeEmployesPreferRecent(localData, val) : mergeArraysPreferCloud(localData, val));
              if ((window.__mdbLocalGagne || 0) !== _lgAv) { window.__mdbAPousser = window.__mdbAPousser || {}; window.__mdbAPousser[key] = true; }
              if (key === 'mdb_operationsCaisse') merged = removeDeletedOperations(merged);
              if (key === 'mdb_acomptesPrets') merged = stripTombstoned(key, merged);
@@ -7626,6 +7664,10 @@ entRef.get().then(function(doc) {
             if (Object.keys(_mc2).length) DB.set(key, _mc2); else if (val && typeof val === 'object') DB.set(key, val);
            } else if (key === 'mdb_actif') {
             DB.set(key, (val && val.rubriques) ? val : {rubriques:[]});
+          } else if (_resetAuthLoad && _dirtyKeys[key]) {
+            /* Remplacement autoritaire pas encore envoyé : on garde la copie
+               locale, le cloud encore périmé ne doit rien réimposer. */
+            continue;
           } else {
             /* Objet partage : fusion section par section (local gagne en
                conflit) plutot que remplacement en bloc — une copie cloud
@@ -7739,9 +7781,21 @@ function startRealtimeSync(uid) {
     _receivingSnapshot = true;
     try {
     var changed = false;
+    /* Remplacement autoritaire en cours : le local fait foi, on n'absorbe pas
+       un cloud encore périmé (sinon les lignes remplacées revenaient). */
+    var _resetAuthRT = false;
+    try {
+      var _trRT = getTombstones() || {};
+      _resetAuthRT = !!(_trRT.__resetAt && (Date.now() - _trRT.__resetAt) < 10 * 60 * 1000);
+    } catch (eRART) {}
     for (var i = 0; i < DATA_KEYS.length; i++) {
       var key = DATA_KEYS[i];
       if (data[key] === undefined || data[key] === null) continue;
+      /* Remplacement autoritaire : tant que notre remplacement n'est pas
+         encore parti au cloud, une clé sale ne se laisse pas réunionner avec
+         l'ancien contenu (sinon les lignes remplacées revenaient). Dès que
+         l'envoi est passé la clé redevient propre et la synchro normale reprend. */
+      if (_resetAuthRT && _dirtyKeys[key]) continue;
       /* Cle sale = saisie locale pas encore poussee : avant on IGNORAIT le
          distant, donc si le push restait bloque la page divergeait pour
          toujours. Maintenant on FUSIONNE (union additive, le local gagne en
@@ -8213,14 +8267,31 @@ function confirmImportReplace() {
   closeImportAuthModal();
   if (!window.confirm('\u00c9CRASER toutes les donn\u00e9es ?\n\nDate : ' + backup._exportDate + '\n\nATTENTION : toutes les donn\u00e9es actuelles seront remplac\u00e9es.')) return;
   var countOps = 0;
-  for (var i = 0; i < DATA_KEYS.length; i++) {
-    if (backup[DATA_KEYS[i]] !== undefined && backup[DATA_KEYS[i]] !== null) {
-      localStorage.setItem(DATA_KEYS[i], JSON.stringify(backup[DATA_KEYS[i]]));
-      markDirty(DATA_KEYS[i]);
-      if (DATA_KEYS[i] === 'mdb_operationsCaisse') countOps = backup[DATA_KEYS[i]].length;
+  /* Passe par DB.set (et non localStorage brut) : le cache mémoire est mis à
+     jour, sinon l'écran continuait d'afficher les données AVANT remplacement. */
+  window._restoringBackup = true;
+  try {
+    for (var i = 0; i < DATA_KEYS.length; i++) {
+      if (backup[DATA_KEYS[i]] !== undefined && backup[DATA_KEYS[i]] !== null) {
+        DB.set(DATA_KEYS[i], backup[DATA_KEYS[i]]);
+        markDirty(DATA_KEYS[i]);
+        if (DATA_KEYS[i] === 'mdb_operationsCaisse') countOps = backup[DATA_KEYS[i]].length;
+      }
     }
-  }
-  toast(countOps + ' op\u00e9rations restaur\u00e9es', 'success');
+  } finally { window._restoringBackup = false; }
+  /* REMPLACEMENT AUTORITAIRE : le backup devient la vérité.
+     - __resetAt : annule les suppressions mémorisées et fait que la poussée
+       REMPLACE le cloud au lieu de le refusionner (l'union additive ramenait
+       les vieilles lignes, d'où les données « déjà travaillées » qui
+       revenaient quelques secondes après le remplacement) ;
+     - mdb_sync_allow_mass : autorise l'envoi d'une liste qui perd beaucoup de
+       lignes (garde-fou « écriture de masse »), indispensable ici. */
+  try {
+    DB.set(TOMBSTONE_KEY, { __resetAt: Date.now() });
+    localStorage.setItem('mdb_sync_allow_mass', String(Date.now()));
+    markDirty(TOMBSTONE_KEY);
+  } catch (eRS) {}
+  toast(countOps + ' opérations restaurées', 'success');
   pushToCloud();
   if (currentPage) navigateTo(currentPage);
 }
@@ -8251,7 +8322,11 @@ function confirmImportMerge() {
     var DEL_LIST_FOR_KEY = {'mdb_bl':'mdb_deletedBLs','mdb_factures':'mdb_deletedFactures','mdb_proformas':'mdb_deletedProformas','mdb_tauxPerteJour':'mdb_deletedTauxPerte','mdb_stocks':'mdb_deletedStocks'};
     var delIdsCache = {};
     function itemSupprime(key, id, fp) {
-      var t = tomb[key] || {};
+      /* tomb peut valoir null : la boucle « objet » de la fusion reutilise le
+         meme nom de variable (voir `tombPtSec` plus bas). Sans ce garde-fou,
+         la restauration plantait : « Cannot read properties of null
+         (reading 'mdb_fournisseurs') ». */
+      var t = (tomb && tomb[key]) || {};
       if (id && t[id]) return true;
       if (key === 'mdb_operationsCaisse') {
         if (id && delOpIds[id]) return true;
@@ -8451,11 +8526,15 @@ function confirmImportMerge() {
           var iv = incoming[sk], ev = exObj[sk];
           if (Array.isArray(iv) && Array.isArray(ev)) {
             var avant = stats.added + stats.updated;
-            var tomb = null;
-            try { if ((sk === 'pointage' || sk === 'pointageMontage') && typeof _mdbTombPtSet === 'function') tomb = _mdbTombPtSet([].concat(exObj[sk + '_tombstones'] || [], iv === incoming[sk] ? (incoming[sk + '_tombstones'] || []) : [])); } catch (eTo) {}
+            /* NE PAS reutiliser le nom `tomb` : il est declare plus haut dans
+               confirmImportMerge et porte les pierres tombales de la fusion.
+               Avant, cette affectation `var tomb = null` ecrasait ce tableau
+               pour toutes les cles suivantes -> itemSupprime plantait. */
+            var tombPtSec = null;
+            try { if ((sk === 'pointage' || sk === 'pointageMontage') && typeof _mdbTombPtSet === 'function') tombPtSec = _mdbTombPtSet([].concat(exObj[sk + '_tombstones'] || [], iv === incoming[sk] ? (incoming[sk + '_tombstones'] || []) : [])); } catch (eTo) {}
             var _tsEx = (key === 'mdb_production') ? (parseFloat(exObj.__prodUpdatedAt) || 0) : 0;
             var _tsIn = (key === 'mdb_production') ? (parseFloat(incoming.__prodUpdatedAt) || 0) : 0;
-            var res = fusionTab(key + '.' + sk, ev, iv, stats, tomb, _tsEx, _tsIn);
+            var res = fusionTab(key + '.' + sk, ev, iv, stats, tombPtSec, _tsEx, _tsIn);
             if (stats.added + stats.updated > avant) { exObj[sk] = res; objChange = true; }
           } else if (_vide(ev) && !_vide(iv)) {
             exObj[sk] = iv; objChange = true; stats.added++;
@@ -21921,6 +22000,9 @@ function _dedupliquerAcomptesPrets() {
     if (typeof addTombstones === 'function' && removedIds.length > 0) {
       try { addTombstones('mdb_acomptesPrets', removedIds); } catch (eAT) {}
     }
+    /* Marque ces copies comme « doublons éliminés » : prioritaire sur la
+       protection « la pièce de caisse existe », sinon le cloud les ramenait. */
+    try { _apDedupAjouter(removedIds); } catch (eDD) {}
     try {
       _dirtyKeys['mdb_acomptesPrets'] = true;
       persistPendingSync();
@@ -23106,6 +23188,21 @@ function _apGrouperPrets(nbCol) {
   });
 }
 function renderAcomptesPrets() {
+  /* Les fonctions partagees apsh* sont definies PLUS BAS dans la page (bloc
+     identique a la Paie). Au tout premier rendu (startAuth synchrone), elles
+     peuvent ne pas encore exister -> avant, la page affichait
+     « apshMatriceHtml is not defined » puis retombait sur l'Index. On re-rend
+     des que le bloc est charge. */
+  if (typeof window.apshStatsHtml !== 'function' || typeof window.apshResumeMois !== 'function' ||
+      typeof window.apshMoisHtml !== 'function' || typeof window.apshMatriceHtml !== 'function') {
+    clearTimeout(window._apshReadyTimer);
+    window._apshReadyTimer = setTimeout(function () {
+      try { if (currentPage === 'acomptesPrets') navigateTo('acomptesPrets'); } catch (eAPSH) {}
+    }, 300);
+    var _cAPSH = document.getElementById('content');
+    if (_cAPSH) _cAPSH.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center;color:var(--gray-500)">Chargement des acomptes et prêts…</div>';
+    return;
+  }
   // Nettoyage orphelins générique avant chaque rendu du module acomptes.
   try{ _purgeOrphanAcomptes(); }catch(e){}
   // Repose les liens retour manquants AVANT le nettoyeur : sinon une ligne
