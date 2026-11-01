@@ -958,7 +958,7 @@
       if (f !== undefined && b !== undefined) {
         if (sjson(x) !== sjson(b)) out.push(x);               /* j'ai modifie : ma version */
         else out.push(f);                                       /* je n'y ai pas touche : version du serveur */
-      } else if (f !== undefined) out.push(x);                  /* ajoute des deux cotes : la mienne */
+      } else if (f !== undefined) out.push(plusRecent(x, f));    /* ajoute des deux cotes sans base : la plus recente gagne */
       else if (b !== undefined) { if (sjson(x) !== sjson(b)) out.push(x); /* un autre l'a supprimee ; je l'ai modifiee : je la garde */ }
       else out.push(x);                                         /* mon ajout */
     }
@@ -973,6 +973,24 @@
       /* sinon : je l'ai supprimee, personne d'autre n'y a touche -> supprimee */
     }
     return out;
+  }
+  /* Horodatage d'une ligne (meme sources que l'appli : _maj pose par DB.set,
+     updatedAt / updated_at / modifieLe poses par les ecrans). */
+  function majDe(r) {
+    if (!r || typeof r !== 'object') return 0;
+    var t = +r._maj; t = isFinite(t) && t > 0 ? t : 0;
+    var u = r.updatedAt !== undefined ? r.updatedAt : (r.updated_at !== undefined ? r.updated_at : r.modifieLe);
+    var v = (typeof u === 'number') ? u : Date.parse(u);
+    if (!isFinite(v) || v > 4102444800000) v = 0;
+    return Math.max(t, v || 0);
+  }
+  /* Sans base commune, on garde la version LA PLUS RECENTE. Avant, la copie
+     locale gagnait toujours : un poste reste longtemps eteint ecrasait le
+     cloud avec ses vieilles lignes des son redemarrage. */
+  function plusRecent(a, b) {
+    var ma = majDe(a), mb = majDe(b);
+    if (ma === mb) return a; /* date inconnue ou egale : comportement historique */
+    return ma > mb ? a : b;
   }
   function merge3(inc, base, fresh, tomb, name, depth) {
     if (/tombstone/i.test(name || '')) return mergeTomb(inc, fresh);
