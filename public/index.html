@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-01-407';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-01-408';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -21953,6 +21953,20 @@ function _csDedupliquerCollectif() {
   try { console.log('Dédoublonnage caisse : ' + removed + ' ligne(s) collective(s) en double supprimée(s)'); } catch (e3) {}
   return removed;
 }
+/* Signature métier UNIQUE d'une ligne acompte/prêt, partagée par la
+   déduplication ET la reconstitution depuis la caisse. Deux lignes de même
+   signature sont LA MÊME opération : sans règle commune, l'une était
+   supprimée comme doublon puis recréée par la réconciliation — d'où
+   l'aller-retour « doublon supprimé / restauré depuis la caisse ». */
+function _apSignatureLigne(a) {
+  if (!a || typeof a !== 'object') return '';
+  var piece = String(a.numeroPiece || '').trim().toUpperCase();
+  var emp = String(a.employeId || a.employee_id || a.employeNom || a.employe_nom || '').trim().toLowerCase();
+  var type = String(a.type || 'acompte').trim().toLowerCase();
+  var mnt = Math.round((parseFloat(a.montant) || 0) * 100);
+  if (!piece || piece === '-' || piece === '\u2014' || !emp || !(mnt > 0)) return '';
+  return 'PC:' + piece + ':' + emp + ':' + type + ':' + mnt;
+}
 function _dedupliquerAcomptesPrets() {
   var rawList = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_acomptesPrets', dbArr('mdb_acomptesPrets')) : dbArr('mdb_acomptesPrets');
   var list = rawList || [];
@@ -21960,6 +21974,7 @@ function _dedupliquerAcomptesPrets() {
   var seenKeys = {};
   var kept = [];
   var removedIds = [];
+  var keptPour = {}; /* id supprimé -> id conservé (pour réparer les liens caisse) */
   for (var i = 0; i < list.length; i++) {
     var a = list[i];
     if (!a || !a.id) continue;
@@ -21968,9 +21983,10 @@ function _dedupliquerAcomptesPrets() {
     var npKey = String(a.numeroPiece || '').trim().toUpperCase();
     var key = '';
     /* Déduplication par signature métier : même pièce valide, même employé, même type, même montant */
-    if (npKey && npKey !== '-' && npKey !== '—' && empKey && mntInt > 0) {
+    key = _apSignatureLigne(a);
+    if (!key && npKey && npKey !== '-' && npKey !== '\u2014' && empKey && mntInt > 0) {
       key = 'PC:' + npKey + ':' + empKey + ':' + (a.type || 'acompte') + ':' + mntInt;
-    } else if (a.caisseOpId && empKey) {
+    } else if (!key && a.caisseOpId && empKey) {
       key = 'OP:' + String(a.caisseOpId).trim() + ':' + empKey;
     }
     if (key) {
@@ -21989,6 +22005,7 @@ function _dedupliquerAcomptesPrets() {
           existing.echeances = a.echeances;
         }
         removedIds.push(toDiscardId);
+        if (existing && existing.id && toDiscardId) keptPour[toDiscardId] = existing.id;
         continue;
       }
       seenKeys[key] = a;
@@ -22003,6 +22020,26 @@ function _dedupliquerAcomptesPrets() {
     /* Marque ces copies comme « doublons éliminés » : prioritaire sur la
        protection « la pièce de caisse existe », sinon le cloud les ramenait. */
     try { _apDedupAjouter(removedIds); } catch (eDD) {}
+    /* Les pièces de caisse qui pointaient vers une copie supprimée pointent
+       maintenant vers la ligne CONSERVÉE. Sans cette réparation, le lien était
+       mort : la réconciliation recréait une ligne, la déduplication la
+       re-supprimait → « doublon supprimé » / « restauré » en boucle sur la
+       même pièce (ex. KKCJ2610230). */
+    try {
+      var _opsRe = dbArr('mdb_operationsCaisse') || [];
+      var _nRe = 0;
+      for (var _or = 0; _or < _opsRe.length; _or++) {
+        var _opRe = _opsRe[_or];
+        if (_opRe && _opRe.acomptePretId && keptPour[_opRe.acomptePretId]) {
+          _opRe.acomptePretId = keptPour[_opRe.acomptePretId];
+          _nRe++;
+        }
+      }
+      if (_nRe) {
+        DB.set('mdb_operationsCaisse', _opsRe);
+        try { _dirtyKeys['mdb_operationsCaisse'] = true; } catch (eDr) {}
+      }
+    } catch (eRe) {}
     try {
       _dirtyKeys['mdb_acomptesPrets'] = true;
       persistPendingSync();
@@ -22603,10 +22640,17 @@ function _relierAcomptesPrets() {
   try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
   var list = [];
   try { list = dbArr('mdb_acomptesPrets') || []; } catch (e2) { return 0; }
+  /* Ids réellement présents : un lien vers une ligne supprimée est MORT. */
+  var _idsVivants = {};
+  for (var z = 0; z < list.length; z++) { if (list[z] && list[z].id) _idsVivants[list[z].id] = true; }
   var fixed = 0;
   for (var i = 0; i < ops.length; i++) {
     var o = ops[i];
-    if (!o || !o.id || o.acomptePretId) continue;
+    if (!o || !o.id) continue;
+    /* Lien vivant -> rien à faire. Lien mort -> on le répare plus bas au lieu
+       de sauter la pièce (sinon la réconciliation recréait une ligne, que la
+       déduplication supprimait : boucle « doublon / restauré »). */
+    if (o.acomptePretId && _idsVivants[o.acomptePretId]) continue;
     var nat = (typeof _apNatureOp === 'function') ? _apNatureOp(o) : (o.apType || '');
     /* Nature INCONNUE (apType/code perdu dans une fusion cloud partielle) :
        le lien explicite ligne.caisseOpId === o.id suffit a prouver le
@@ -22681,9 +22725,26 @@ function _reconcileAcomptesPretsFromCaisse() {
         existingMatch = list[li]; break;
       }
     }
+    /* MÊMES règles d'identité que la déduplication : si une ligne équivalente
+       existe (même pièce, même employé, même type, même montant, quelle que
+       soit l'orthographe/majuscule), on la RATTACHE au lieu d'en créer une
+       copie. Avant, cette copie était supprimée au rendu suivant par la
+       déduplication, puis recréée ici : aller-retour « doublon supprimé /
+       restauré » et échéances de prêt qui revenaient à valider (KKCJ2610230). */
+    if (!existingMatch) {
+      var _sigOp = _apSignatureLigne({ numeroPiece: op.numeroPiece, employeId: _emp.id, type: t, montant: parseFloat(op.montant) || 0 });
+      if (_sigOp) {
+        for (var lsm = 0; lsm < list.length; lsm++) {
+          if (list[lsm] && _apSignatureLigne(list[lsm]) === _sigOp) { existingMatch = list[lsm]; break; }
+        }
+      }
+    }
     if (existingMatch) {
       if (!existingMatch.caisseOpId) existingMatch.caisseOpId = op.id;
-      if (!op.acomptePretId) op.acomptePretId = existingMatch.id;
+      /* Lien mort (la ligne pointée a été supprimée/dédupliquée) : on le
+         repointe vers la ligne réellement conservée. */
+      if (!op.acomptePretId || op.acomptePretId !== existingMatch.id) op.acomptePretId = existingMatch.id;
+      linkedIds['A:' + existingMatch.id] = true;
       continue;
     }
     /* Mois de déduction = mois SAISI s'il diffère de la saisie (choix délibéré),
