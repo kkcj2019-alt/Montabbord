@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-01-412';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-01-413';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -35756,6 +35756,24 @@ function renderCaisseOps() {
   if (!html) html = '<tr><td colspan="15" style="padding:40px;text-align:center;color:var(--gray-400);border:1px solid #e5e7eb">Aucune op\u00e9ration pour cette p\u00e9riode' + (_caisseDbgTotal>0 ? ' ('+_caisseDbgTotal+' au total, '+_caisseDbgMatch+' pour cette caisse — changez la p\u00e9riode ou cochez \u00ab Toutes caisses \u00bb)' : '') + '</td></tr>';
   tbody.innerHTML = html;
 }
+/* Une ligne « frais liés » (créée par une remise collective) ne doit pas être
+   comptée en plus : les frais sont déjà portés par le champ `frais` de chaque
+   ligne. Sans cette règle unique, le solde de début d'un mois ne correspondait
+   pas au solde de fin du mois précédent (les frais étaient comptés une fois
+   dans un sens et deux fois dans l'autre). */
+function _csEstLigneFrais(o) {
+  if (!o) return false;
+  if (o.fraisLiaison === true) return true;
+  return !!(o.linkedOpId && o.libelle && String(o.libelle).indexOf('Frais') === 0);
+}
+/* Montant net d'une opération pour le solde : entrée = +montant ;
+   sortie = -(montant + frais). */
+function _csNetOp(o) {
+  if (!o) return 0;
+  var m = parseFloat(o.montant) || 0;
+  if (o.sens === 'entree') return m;
+  return -(m + (parseFloat(o.frais) || 0));
+}
 /* ===== Ancrages de solde d'une caisse (un par inventaire) =====
    Chaque inventaire est un ancrage : le montant compté vaut au DÉBUT de sa
    date. Le solde à une date = dernier ancrage <= date + opérations
@@ -35811,11 +35829,12 @@ function _csSoldeCaisseA(c, ops, dateRef, exclureJourRef) {
     if (!o || o.brouillon) continue;
     if (!isTransfertApprouve(o)) continue;
     if (o.caisseId !== c.id) continue;
+    if (_csEstLigneFrais(o)) continue;
     var d = String(o.date || '');
     if (exclureJourRef) { if (d && d >= dateRef) continue; }
     else if (dateRef && d > dateRef) continue;
     if (base && (A.debutJour ? d < base : d <= base)) continue;
-    if (o.sens === 'entree') s += o.montant || 0; else s -= o.montant || 0;
+    s += _csNetOp(o);
   }
   return s;
 }
@@ -35994,6 +36013,7 @@ function viewCaisseDetail(caisseId) {
   for (var ti = 0; ti < caisseOps.length; ti++) {
     var top = caisseOps[ti];
     if (top.brouillon || !isTransfertApprouve(top)) continue;
+    if (_csEstLigneFrais(top)) continue;
     if (top.sens === 'entree') totRecettes += (top.montant || 0);
     else { totDepenses += (top.montant || 0); totFrais += (top.frais || 0); }
   }
@@ -36093,7 +36113,7 @@ function viewCaisseDetail(caisseId) {
     var soldeAffiche = '';
     if (!o.brouillon && isTransfertApprouve(o)) {
       var _applique = !_ancDate || (_ancDebut ? _dOp >= _ancDate : _dOp > _ancDate);
-      if (_applique || isBeforeAncre) {
+      if ((_applique || isBeforeAncre) && !_csEstLigneFrais(o)) {
         if (o.sens === 'entree') running += (o.montant || 0);
         else running -= ((o.montant || 0) + (o.frais || 0));
       }
@@ -36651,7 +36671,16 @@ function renderCaisseIn(el) {
   }
   /* Solde au DÉBUT de la période (ancrages datés + opérations postérieures). */
   var _csDateDebut = (rangeActive && rangeFrom) ? rangeFrom : (prefix + '-01');
-  var soldeBefore = _caisseObjIn ? _csSoldeAvant(_caisseObjIn, allOps, _csDateDebut) : caisseSoldeInitial;
+  var soldeBefore = 0;
+  if (window._seeAllCaisses) {
+    (allCaisses || []).forEach(function (cx) {
+      try { if (canSeeAll || canUserAccessCaisse(currentUser, cx.id)) soldeBefore += _csSoldeAvant(cx, allOps, _csDateDebut); } catch (eAll) {}
+    });
+  } else if (_caisseObjIn) {
+    soldeBefore = _csSoldeAvant(_caisseObjIn, allOps, _csDateDebut);
+  } else {
+    soldeBefore = caisseSoldeInitial;
+  }
   var soldeFin = soldeBefore + totalEntrees - totalSorties - totalFraisMois;
 
   /* Stats du mois */
