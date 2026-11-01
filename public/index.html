@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-01-410';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-01-411';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -35161,12 +35161,14 @@ function renderTresorerie() {
     tabs = [
       {key:'caisse', label:'Enregistrement caisse'},
       {key:'caisses', label:'Gestion des caisses'},
-      {key:'vue', label:'Vue d\'ensemble'},
-      {key:'reglements', label:'R\u00e9glements'},
       {key:'codes', label:'Codes caisse'},
       {key:'modeles', label:'Mod\u00e8les de saisie'}
     ];
   }
+  /* Onglets « Vue d'ensemble » et « Règlements » supprimés : ils faisaient
+     doublon avec les autres modules (tableau de bord, facturation). Un onglet
+     mémorisé sur l'un d'eux revient sur « Enregistrement caisse ». */
+  if (_tresorerieTab === 'vue' || _tresorerieTab === 'reglements') _tresorerieTab = 'caisse';
   var pageTitle = _tresorerieContext === 'banque' ? 'Banque' : 'Caisse';
   var html = '<div class="section"><div class="section-header"><h3>' + pageTitle + '</h3></div>';
   /* Période unique : barre haute fixe de l'app (messagerie) ; plus de doublon ici */
@@ -35659,8 +35661,8 @@ function renderCaisseOps() {
   var canSeeAll = hasCaisseCentralisee();
   var myCaisseId = currentUser && currentUser.caisseId ? currentUser.caisseId : '';
   var allCaisses = getCaisses() || [];
-  var caisseSoldeInitial = 0, caisseSoldeInitialDate = '', caisseNom = '', caisseAgentNom = '';
-  for (var csi = 0; csi < allCaisses.length; csi++) { if (allCaisses[csi].id === myCaisseId) { caisseSoldeInitial = allCaisses[csi].soldeInitial || 0; caisseSoldeInitialDate = allCaisses[csi].soldeInitialDate || ''; caisseNom = allCaisses[csi].nom; caisseAgentNom = allCaisses[csi].agentNom || ''; break; } }
+  var caisseSoldeInitial = 0, caisseSoldeInitialDate = '', caisseSoldeDebutJour = false, caisseNom = '', caisseAgentNom = '';
+  for (var csi = 0; csi < allCaisses.length; csi++) { if (allCaisses[csi].id === myCaisseId) { caisseSoldeInitial = allCaisses[csi].soldeInitial || 0; caisseSoldeInitialDate = allCaisses[csi].soldeInitialDate || ''; caisseSoldeDebutJour = allCaisses[csi].soldeDebutJour === true; caisseNom = allCaisses[csi].nom; caisseAgentNom = allCaisses[csi].agentNom || ''; break; } }
   var prefix = window._csSelYear + '-' + window._csSelMonth;
   var ops = [], opsBefore = [];
   var allOpsCache = getOperationsCaisse();
@@ -35690,7 +35692,7 @@ function renderCaisseOps() {
   var soldeBefore = caisseSoldeInitial;
   for (var bi = 0; bi < opsBefore.length; bi++) {
     if (opsBefore[bi].linkedOpId && opsBefore[bi].libelle && opsBefore[bi].libelle.indexOf('Frais') === 0) continue;
-    if (caisseSoldeInitialDate && (opsBefore[bi].date || '') <= caisseSoldeInitialDate) continue;
+    if (!_csOpApresAncre({ soldeInitialDate: caisseSoldeInitialDate, soldeDebutJour: caisseSoldeDebutJour }, opsBefore[bi].date)) continue;
     if (!isTransfertApprouve(opsBefore[bi])) continue;
     if (opsBefore[bi].sens === 'entree') soldeBefore += opsBefore[bi].montant || 0;
     else { soldeBefore -= opsBefore[bi].montant || 0; soldeBefore -= opsBefore[bi].frais || 0; }
@@ -35757,15 +35759,27 @@ function renderCaisseOps() {
 }
 /* Solde d'une caisse : solde à la date indiquée + opérations POSTÉRIEURES à cette date
    (si une date est définie, les opérations du jour même et antérieures sont déjà incluses dans le solde) */
+/* Une opération est-elle POSTÉRIEURE à l'ancre de solde de la caisse ?
+   - ancre d'INVENTAIRE (soldeDebutJour) : le montant compté vaut au DÉBUT de
+     la date → les opérations de ce jour-là comptent (ex. inventaire au 31/10
+     = 10 F : « au 31/10 au matin, le solde était de 10 F ») ;
+   - ancre du FORMULAIRE caisse (comportement historique) : les opérations du
+     jour sont déjà comprises dans le solde saisi. */
+function _csOpApresAncre(c, dateOp) {
+  var d0 = (c && c.soldeInitialDate) || '';
+  if (!d0) return true;
+  var d = String(dateOp || '');
+  if (!d) return false;
+  return (c.soldeDebutJour === true) ? (d >= d0) : (d > d0);
+}
 function calcSoldeCaisse(c, ops) {
   var s = c.soldeInitial || 0;
-  var d0 = c.soldeInitialDate || '';
   for (var j = 0; j < ops.length; j++) {
     var o = ops[j];
     if (o.brouillon) continue;
     if (!isTransfertApprouve(o)) continue;
     if (o.caisseId !== c.id) continue;
-    if (d0 && (o.date || '') <= d0) continue;
+    if (!_csOpApresAncre(c, o.date)) continue;
     if (o.sens === 'entree') s += o.montant || 0; else s -= o.montant || 0;
   }
   return s;
@@ -35826,7 +35840,7 @@ function renderCaissesIn(el) {
     }
     html += '</div></div>';
     html += '<div style="padding:8px 0;font-size:13px;color:var(--gray-600)">Agent : <strong>' + escH(ca.agentNom || '-') + '</strong> &nbsp;|&nbsp; Op\u00e9rations non revers\u00e9es : <strong>' + nbNonReverse + '</strong>';
-    if ((ca.soldeInitial || 0) !== 0 || ca.soldeInitialDate) html += ' &nbsp;|&nbsp; Solde ' + (ca.soldeInitialDate ? 'au ' + fmtDate(ca.soldeInitialDate) : 'initial') + ' : <strong>' + fmtMoney(ca.soldeInitial || 0) + '</strong>';
+    if ((ca.soldeInitial || 0) !== 0 || ca.soldeInitialDate) html += ' &nbsp;|&nbsp; Solde ' + (ca.soldeInitialDate ? (ca.soldeDebutJour ? 'd\u00e9but du ' : 'au ') + fmtDate(ca.soldeInitialDate) : 'initial') + ' : <strong>' + fmtMoney(ca.soldeInitial || 0) + '</strong>';
     if (nbNonReverse > 0) html += ' &nbsp; <button class="btn btn-sm btn-primary" onclick="reverserCaisse(\'' + ca.id + '\')">Reverser dans la caisse g\u00e9n\u00e9rale</button>';
     html += '</div></div>';
   }
@@ -35901,7 +35915,11 @@ function saveCaisseGestion(id) {
   var soldeInitial = cgEl ? (parseFloat(cgEl.value) || 0) : (existing ? (existing.soldeInitial || 0) : 0);
   var soldeInitialDate = cgDateEl ? cgDateEl.value : (existing ? (existing.soldeInitialDate || '') : '');
   if (id && existing) {
+    var _chgAncre = (parseFloat(soldeInitial) !== parseFloat(existing.soldeInitial || 0)) || (String(soldeInitialDate || '') !== String(existing.soldeInitialDate || ''));
     existing.nom = nom; existing.agentId = agentId; existing.agentNom = agentNom; existing.type = type; existing.soldeInitial = soldeInitial; existing.soldeInitialDate = soldeInitialDate;
+    /* Saisie manuelle : on revient à la règle historique (opérations du jour
+       déjà comprises). L'ancrage « début de journée » est réservé à l'inventaire. */
+    if (_chgAncre) existing.soldeDebutJour = false;
   } else if (!id) { caisses.push({id:DB.genId(), nom:nom, agentId:agentId, agentNom:agentNom, type:type, soldeInitial:soldeInitial, soldeInitialDate:soldeInitialDate}); }
   DB.set('mdb_caisses', caisses);
   closeModal();
@@ -35936,7 +35954,7 @@ function viewCaisseDetail(caisseId) {
   for (var ti = 0; ti < caisseOps.length; ti++) {
     var top = caisseOps[ti];
     if (top.brouillon || !isTransfertApprouve(top)) continue;
-    if (dateAncre && (top.date || '') <= dateAncre) continue;
+    if (!_csOpApresAncre(c, top.date)) continue;
     if (top.sens === 'entree') totRecettes += (top.montant || 0);
     else { totDepenses += (top.montant || 0); totFrais += (top.frais || 0); }
   }
@@ -36006,12 +36024,12 @@ function viewCaisseDetail(caisseId) {
         ? '<span class="badge" style="background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;font-size:10px;padding:2px 8px;border-radius:999px;font-weight:700">Reversé</span>'
         : '<span class="badge" style="background:#f1f5f9;color:#64748b;border:1px solid #cbd5e1;font-size:10px;padding:2px 8px;border-radius:999px;font-weight:600">En attente</span>');
     var fraisDisplay = (o.frais && o.frais > 0) ? fmtMoney(o.frais) : '-';
-    var isBeforeAncre = dateAncre && (o.date || '') <= dateAncre;
+    var isBeforeAncre = dateAncre && !_csOpApresAncre(c, o.date);
 
     /* Ligne ancre insérée chronologiquement */
     if (dateAncre && !ancreShown && !isBeforeAncre) {
       ancreShown = true;
-      html += '<tr style="background:#e0f2fe;border-top:2px solid #0284c7;border-bottom:2px solid #0284c7"><td colspan="10" style="padding:9px 14px;font-size:12px;color:#0369a1;font-weight:800">⚓ Solde de départ au ' + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA (les opérations ci-dessus sont incluses dans ce solde)</td>';
+      html += '<tr style="background:#e0f2fe;border-top:2px solid #0284c7;border-bottom:2px solid #0284c7"><td colspan="10" style="padding:9px 14px;font-size:12px;color:#0369a1;font-weight:800">⚓ Solde de départ ' + (c && c.soldeDebutJour ? 'au début du ' : 'au ') + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA (les opérations ci-dessus sont incluses dans ce solde)</td>';
       html += '<td style="text-align:right;font-weight:800;color:#0369a1;padding:9px 12px;white-space:nowrap;font-variant-numeric:tabular-nums">' + fmtMoney(soldeAncre) + '</td></tr>';
     }
 
@@ -36024,7 +36042,7 @@ function viewCaisseDetail(caisseId) {
       var tmpRunHist = 0;
       for (var bj = 0; bj <= k; bj++) {
         var bop2 = caisseOps[bj];
-        if (!bop2.brouillon && isTransfertApprouve(bop2) && (bop2.date || '') <= dateAncre) {
+        if (!bop2.brouillon && isTransfertApprouve(bop2) && !_csOpApresAncre(c, bop2.date)) {
           if (bop2.sens === 'entree') tmpRunHist += (bop2.montant || 0);
           else tmpRunHist -= ((bop2.montant || 0) + (bop2.frais || 0));
         }
@@ -36055,7 +36073,7 @@ function viewCaisseDetail(caisseId) {
   }
 
   if (dateAncre && !ancreShown) {
-    html += '<tr style="background:#e0f2fe;border-top:2px solid #0284c7"><td colspan="10" style="padding:9px 14px;font-size:12px;color:#0369a1;font-weight:800">⚓ Solde de départ au ' + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA</td>';
+    html += '<tr style="background:#e0f2fe;border-top:2px solid #0284c7"><td colspan="10" style="padding:9px 14px;font-size:12px;color:#0369a1;font-weight:800">⚓ Solde de départ ' + (c && c.soldeDebutJour ? 'au début du ' : 'au ') + fmtDate(dateAncre) + ' : ' + fmtMoney(soldeAncre) + ' FCFA</td>';
     html += '<td style="text-align:right;font-weight:800;color:#0369a1;padding:9px 12px;white-space:nowrap;font-variant-numeric:tabular-nums">' + fmtMoney(soldeAncre) + '</td></tr>';
   }
 
@@ -36131,8 +36149,8 @@ function openCaisseInventaire(caisseId) {
   var soldeTheo = calcSoldeCaisse(c, getOperationsCaisse());
   var html = '<div class="form-group"><label>Caisse</label><input type="text" value="' + escH(c.nom) + '" disabled></div>';
   html += '<div class="form-group"><label>Date de l\'inventaire</label><input type="date" id="ciDate" value="' + getToday() + '"></div>';
-  html += '<div class="form-group"><label>Solde th\u00e9orique (FCFA)</label><input type="text" value="' + fmtMoney(soldeTheo) + '" disabled></div>';
-  html += '<div class="form-group"><label>Montant compt\u00e9 en caisse (FCFA) *</label><input type="number" id="ciSolde" value="' + (soldeTheo || 0) + '"><small style="display:block;color:var(--gray-500);margin-top:4px">\u00c9cart = montant compt\u00e9 \u2212 solde th\u00e9orique. L\'historique des op\u00e9rations n\'est pas modifi\u00e9.</small></div>';
+  html += '<div class="form-group"><label>Solde calcul\u00e9 par l\'application (FCFA)</label><input type="text" value="' + fmtMoney(soldeTheo) + '" disabled></div>';
+  html += '<div class="form-group"><label>Montant r\u00e9el compt\u00e9 en caisse (FCFA) *</label><input type="number" id="ciSolde" value="' + (soldeTheo || 0) + '"><small style="display:block;color:var(--gray-500);margin-top:4px">Ce montant devient le <b>solde r\u00e9el au d\u00e9but de la date indiqu\u00e9e</b> : si vous saisissez le 31/10 \u2192 10, cela signifie qu\'au 31/10 au matin le solde \u00e9tait de 10. Les op\u00e9rations de ce jour-l\u00e0 et des suivants s\'ajoutent ensuite. L\'\u00e9cart avec le calcul est conserv\u00e9 comme information.</small></div>';
   html += '<div class="form-group"><label>Observations (facultatif)</label><textarea id="ciNote" rows="3" style="width:100%"></textarea></div>';
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-primary" onclick="saveCaisseInventaire(\'' + caisseId + '\')">Valider l\'inventaire</button>';
@@ -36146,28 +36164,64 @@ function saveCaisseInventaire(caisseId) {
   var noteEl = document.getElementById('ciNote');
   var note = noteEl ? String(noteEl.value || '').trim() : '';
   var caisses = getCaisses();
-  var c = null;
-  for (var i = 0; i < caisses.length; i++) { if (caisses[i].id === caisseId) { c = caisses[i]; break; } }
+  var c = null, cIdx = -1;
+  for (var i = 0; i < caisses.length; i++) { if (caisses[i].id === caisseId) { c = caisses[i]; cIdx = i; break; } }
   if (!c) return;
   var soldeTheo = calcSoldeCaisse(c, getOperationsCaisse());
   var maintenant = new Date();
   var heure = (maintenant.getHours() < 10 ? '0' : '') + maintenant.getHours() + ':' + (maintenant.getMinutes() < 10 ? '0' : '') + maintenant.getMinutes();
   var auteur = currentUser ? (currentUser.nom || currentUser.matricule || '-') : '-';
+  var dInv = date || getToday();
   var liste = getCaisseInventaires();
-  liste.push({ id: DB.genId(), caisseId: caisseId, date: date || getToday(), soldeTheo: soldeTheo, soldeReel: soldeReel, ecart: soldeReel - soldeTheo, auteur: auteur, heure: heure, note: note });
+  /* L'inventaire est un SOLDE RÉEL : le montant compté devient le solde de la
+     caisse au DÉBUT de la date choisie (ex. 31/10 + 10 F => au 31/10 au matin
+     le solde était de 10 F). Les opérations de ce jour et des suivants
+     s'ajoutent ensuite. On mémorise l'ancien ancrage pour pouvoir annuler. */
+  var ancien = { solde: c.soldeInitial || 0, date: c.soldeInitialDate || '', debutJour: c.soldeDebutJour === true };
+  liste.push({
+    id: DB.genId(), caisseId: caisseId, date: dInv, soldeTheo: soldeTheo, soldeReel: soldeReel,
+    ecart: soldeReel - soldeTheo, auteur: auteur, heure: heure, note: note,
+    ancrage: true, ancienSolde: ancien.solde, ancienneDate: ancien.date, ancienDebutJour: ancien.debutJour
+  });
   DB.set('mdb_caisseInventaires', liste);
   markDirty('mdb_caisseInventaires');
+  caisses[cIdx].soldeInitial = soldeReel;
+  caisses[cIdx].soldeInitialDate = dInv;
+  caisses[cIdx].soldeDebutJour = true;
+  caisses[cIdx].soldeInitialAuteur = auteur;
+  DB.set('mdb_caisses', caisses);
+  markDirty('mdb_caisses');
   closeModal();
   var ecart = soldeReel - soldeTheo;
-  toast(ecart === 0 ? 'Inventaire enregistr\u00e9 \u2014 caisse conforme' : 'Inventaire enregistr\u00e9 \u2014 \u00e9cart : ' + fmtMoney(ecart) + ' FCFA');
+  toast('Inventaire enregistré — solde réel au ' + fmtDate(dInv) + ' (matin) : ' + fmtMoney(soldeReel) +
+    (ecart === 0 ? '' : ' · écart constaté : ' + fmtMoney(ecart)) + ' FCFA', ecart === 0 ? 'success' : 'info');
   renderCaissesIn(document.getElementById('tresorerieContent'));
 }
 function deleteCaisseInventaire(invId) {
   if (!window.confirm('Supprimer cet inventaire de caisse ?')) return;
-  var liste = getCaisseInventaires().filter(function (r) { return r.id !== invId; });
+  var liste = getCaisseInventaires();
+  var inv = null;
+  for (var i = 0; i < liste.length; i++) { if (liste[i] && liste[i].id === invId) { inv = liste[i]; break; } }
+  liste = liste.filter(function (r) { return r.id !== invId; });
   DB.set('mdb_caisseInventaires', liste);
   markDirty('mdb_caisseInventaires');
-  toast('Inventaire supprim\u00e9');
+  /* Si cet inventaire était celui qui fixait le solde actuel, on remet
+     l'ancrage précédent (sinon le solde restait « figé » sur un comptage
+     supprimé). */
+  try {
+    if (inv && inv.ancrage) {
+      var caisses = getCaisses(), c = null, cIdx = -1;
+      for (var j = 0; j < caisses.length; j++) { if (caisses[j].id === inv.caisseId) { c = caisses[j]; cIdx = j; break; } }
+      if (c && c.soldeInitialDate === inv.date && (parseFloat(c.soldeInitial) || 0) === (parseFloat(inv.soldeReel) || 0)) {
+        caisses[cIdx].soldeInitial = parseFloat(inv.ancienSolde) || 0;
+        caisses[cIdx].soldeInitialDate = inv.ancienneDate || '';
+        caisses[cIdx].soldeDebutJour = inv.ancienDebutJour === true;
+        DB.set('mdb_caisses', caisses);
+        markDirty('mdb_caisses');
+      }
+    }
+  } catch (eR) {}
+  toast('Inventaire supprimé');
   renderTresorerieActiveTab();
 }
 /* Historique des inventaires d'une caisse, pour la vue D\u00e9tails. */
@@ -36176,6 +36230,7 @@ function renderCaisseInventairesHtml(caisseId) {
   liste.sort(function (a, b) { return (b.date || '').localeCompare(a.date || ''); });
   var h = '<div class="section"><div class="section-header"><h3>Inventaires de caisse</h3>';
   h += '<button class="btn btn-sm btn-primary" onclick="openCaisseInventaire(\'' + caisseId + '\')">+ Faire un inventaire</button></div>';
+  h += '<div style="padding:8px 16px;font-size:11.5px;color:#475569;border-bottom:1px solid var(--gray-200)">Le montant compté d\'un inventaire devient le <b>solde réel au début de sa date</b> : « 31/10 → 10 » signifie qu\'au 31/10 au matin le solde était de 10 ; les opérations de ce jour et des suivants s\'ajoutent ensuite.</div>';
   if (liste.length === 0) {
     h += '<div class="section-body text-muted" style="padding:20px">Aucun inventaire enregistr\u00e9 pour cette caisse.</div></div>';
     return h;
@@ -36397,10 +36452,11 @@ function renderCaisseIn(el) {
   }
   var caisseSoldeInitial = 0;
   var caisseSoldeInitialDate = '';
+  var caisseSoldeDebutJour = false;
   var caisseNom = '';
   var caisseAgentNom = '';
   var _viewCaisseId = caisseTargetId || myCaisseId;
-  for (var csi = 0; csi < allCaisses.length; csi++) { if (allCaisses[csi].id === _viewCaisseId) { caisseSoldeInitial = allCaisses[csi].soldeInitial || 0; caisseSoldeInitialDate = allCaisses[csi].soldeInitialDate || ''; caisseNom = allCaisses[csi].nom; caisseAgentNom = allCaisses[csi].agentNom || ''; break; } }
+  for (var csi = 0; csi < allCaisses.length; csi++) { if (allCaisses[csi].id === _viewCaisseId) { caisseSoldeInitial = allCaisses[csi].soldeInitial || 0; caisseSoldeInitialDate = allCaisses[csi].soldeInitialDate || ''; caisseSoldeDebutJour = allCaisses[csi].soldeDebutJour === true; caisseNom = allCaisses[csi].nom; caisseAgentNom = allCaisses[csi].agentNom || ''; break; } }
   // Si vue = Toutes, cumuler les soldes initiaux des caisses accessibles et garder le nom
   if (window._seeAllCaisses) {
     caisseSoldeInitial = 0;
@@ -36548,7 +36604,7 @@ function renderCaisseIn(el) {
   var soldeBefore = caisseSoldeInitial;
   for (var bi = 0; bi < opsBefore.length; bi++) {
     if (opsBefore[bi].linkedOpId && opsBefore[bi].libelle && opsBefore[bi].libelle.indexOf('Frais') === 0) continue;
-    if (caisseSoldeInitialDate && (opsBefore[bi].date || '') <= caisseSoldeInitialDate) continue;
+    if (!_csOpApresAncre({ soldeInitialDate: caisseSoldeInitialDate, soldeDebutJour: caisseSoldeDebutJour }, opsBefore[bi].date)) continue;
     if (!isTransfertApprouve(opsBefore[bi])) continue;
     if (opsBefore[bi].sens === 'entree') soldeBefore += opsBefore[bi].montant || 0;
     else { soldeBefore -= opsBefore[bi].montant || 0; soldeBefore -= opsBefore[bi].frais || 0; }
@@ -48581,14 +48637,15 @@ function printPeriodeCaissePDF() {
   /* Solde avant la p\u00e9riode (reports) */
   var soldeBefore = 0;
   var initDate = '';
+  var _csCaisseAnc = null;
   if (selCaisseId && selCaisseId !== 'all') {
     var caisses = getCaisses();
-    for (var csi = 0; csi < caisses.length; csi++) { if (caisses[csi].id === selCaisseId) { soldeBefore = caisses[csi].soldeInitial || caisses[csi].soldeManuel || 0; initDate = caisses[csi].soldeInitialDate || ''; break; } }
+    for (var csi = 0; csi < caisses.length; csi++) { if (caisses[csi].id === selCaisseId) { _csCaisseAnc = caisses[csi]; soldeBefore = caisses[csi].soldeInitial || caisses[csi].soldeManuel || 0; initDate = caisses[csi].soldeInitialDate || ''; break; } }
   }
   for (var obi = 0; obi < allOps.length; obi++) {
     var ob = allOps[obi];
     if (ob.date >= dateFrom) break;
-    if (initDate && ob.date <= initDate) continue;
+    if (_csCaisseAnc && !_csOpApresAncre(_csCaisseAnc, ob.date)) continue;
     if (ob.linkedOpId && ob.libelle && ob.libelle.indexOf('Frais') === 0) continue;
     if (ob.brouillon) continue;
     if (selCaisseId && selCaisseId !== 'all' && ob.caisseId !== selCaisseId) continue;
