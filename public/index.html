@@ -27,7 +27,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-01-408';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-01-409';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>
 (function(){
 function _mdbVerGt(a,b){var pa=String(a).split('-'),pb=String(b).split('-');for(var i=0;i<Math.max(pa.length,pb.length);i++){var xa=parseInt(pa[i]||'0',10),xb=parseInt(pb[i]||'0',10);if(isNaN(xa))xa=0;if(isNaN(xb))xb=0;if(xa!==xb)return xa>xb;}return false;}
@@ -21953,6 +21953,63 @@ function _csDedupliquerCollectif() {
   try { console.log('Dédoublonnage caisse : ' + removed + ' ligne(s) collective(s) en double supprimée(s)'); } catch (e3) {}
   return removed;
 }
+/* ===== Alertes « répartition déséquilibrée » : recalcul sur les données ACTUELLES =====
+   Une alerte était mémorisée au moment de l'enregistrement d'une remise
+   collective et n'était retirée que si on ré-enregistrait CETTE pièce. Après
+   une déduplication / une fusion / une restauration, elle pouvait donc rester
+   affichée alors que la pièce était redevenue juste (ou avec des chiffres
+   périmés). On la recalcule à chaque affichage de la Caisse. */
+function _csRafraichirAlertesRepartition() {
+  var alrtes = dbObj('mdb_alertesRepartition');
+  var ks = [];
+  try { ks = Object.keys(alrtes || {}); } catch (eK) { return false; }
+  if (!ks.length) return false;
+  var ops = [];
+  try { ops = getOperationsCaisse() || []; } catch (e) { return false; }
+  var list = [];
+  try { list = dbArr('mdb_acomptesPrets') || []; } catch (e2) {}
+  var changed = false;
+  for (var i = 0; i < ks.length; i++) {
+    var gid = ks[i], al = alrtes[gid];
+    if (!gid || !al) continue;
+    var grp = [];
+    for (var g = 0; g < ops.length; g++) {
+      var o = ops[g];
+      if (o && o.groupeId === gid && !o.fraisLiaison && !o.reversed) grp.push(o);
+    }
+    if (!grp.length) { delete alrtes[gid]; changed = true; continue; }
+    var pieceTotal = 0, k;
+    for (k = 0; k < grp.length; k++) pieceTotal += parseFloat(grp[k].montant) || 0;
+    var total = 0;
+    for (k = 0; k < list.length; k++) {
+      var a = list[k];
+      if (a && a.groupeId === gid) total += parseFloat(a.montant) || 0;
+    }
+    var ecart = Math.round((pieceTotal - total) * 100) / 100;
+    if (!(pieceTotal > 0) || Math.abs(ecart) < 0.01) { delete alrtes[gid]; changed = true; continue; }
+    if (al.pieceTotal !== pieceTotal || al.total !== total || al.ecart !== ecart) {
+      alrtes[gid] = {
+        groupeId: gid,
+        numeroPiece: al.numeroPiece || (grp[0] && grp[0].numeroPiece) || '',
+        pieceTotal: pieceTotal, total: total, ecart: ecart
+      };
+      changed = true;
+    }
+  }
+  if (changed) { try { DB.set('mdb_alertesRepartition', alrtes); markDirty('mdb_alertesRepartition'); } catch (e3) {} }
+  return changed;
+}
+/* Ouvre l'éditeur de remise collective de la pièce signalée, pour répartir
+   le reliquat (l'alerte était purement informative auparavant). */
+function _csOuvrirAlerteRepartition(gid) {
+  var ops = [];
+  try { ops = getOperationsCaisse() || []; } catch (e) {}
+  var op = null, i;
+  for (i = 0; i < ops.length; i++) { if (ops[i] && ops[i].groupeId === gid && !ops[i].fraisLiaison) { op = ops[i]; break; } }
+  if (!op) { for (i = 0; i < ops.length; i++) { if (ops[i] && ops[i].groupeId === gid) { op = ops[i]; break; } } }
+  if (!op) { try { toast('Pièce de remise collective introuvable', 'error'); } catch (e2) {} return; }
+  try { openRepartitionCollectif(op.id); } catch (e3) { try { toast('Impossible d\u2019ouvrir la pièce', 'error'); } catch (e4) {} }
+}
 /* Signature métier UNIQUE d'une ligne acompte/prêt, partagée par la
    déduplication ET la reconstitution depuis la caisse. Deux lignes de même
    signature sont LA MÊME opération : sans règle commune, l'une était
@@ -36543,6 +36600,7 @@ function renderCaisseIn(el) {
       + '<span>\uD83D\uDD0E ' + escH(window._csRangeLabel) + ' \u2014 tableau et totaux filtr\u00e9s sur cette plage' + _hiddenMsg + '</span>'
       + '<button class="btn btn-outline btn-sm" onclick="resetHdrPeriod()" style="font-size:10px;padding:2px 8px">Tout afficher (reset plage)</button></div>';
   }
+  try { _csRafraichirAlertesRepartition(); } catch (eARr) {}
   var alrtesRep = dbObj('mdb_alertesRepartition');
   var disEqAlerte = null;
   for (var _ak2 in alrtesRep) {
@@ -36551,6 +36609,7 @@ function renderCaisseIn(el) {
   if (disEqAlerte) {
     html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding:10px 12px;background:#fef2f2;border:2px solid #dc2626;border-radius:var(--radius);font-size:12px">';
     html += '<span style="font-size:16px">&#9888;&#65039;</span><div><strong style="color:#b91c1c">R\u00e9partition d\u00e9s\u00e9quilibr\u00e9e :</strong><span style="color:#7f1d1d"> une remise d\u2019acomptes/pr\u00eats n\u2019\u00e9gale pas son montant donn\u00e9 (pi\u00e8ce ' + escH(disEqAlerte.numeroPiece || '-') + ' \u2014 ' + fmtMoney(disEqAlerte.pieceTotal || 0) + ' donn\u00e9s / ' + fmtMoney(disEqAlerte.total || 0) + ' r\u00e9partis). Ouvrez la pi\u00e8ce et r\u00e9partissez le reliquat pour r\u00e9\u00e9quilibrer.</span></div>';
+    html += '<button class="btn btn-sm" onclick="_csOuvrirAlerteRepartition(\'' + escH(disEqAlerte.groupeId || '') + '\')" style="margin-left:auto;white-space:nowrap;background:#dc2626;color:#fff;border:none;font-weight:700">\uD83D\uDD27 R\u00e9partir le reliquat</button>';
     html += '</div>';
   }
   html += '<div class="cs-mob-row cs-mob-kpis" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
