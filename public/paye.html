@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-397';
+      window.__APP_VERSION = '2026-11-02-398';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -10511,9 +10511,20 @@ function renderPrimeEmpMatrix() {
         try {
           var rawList = _payeStripTombstoned("mdb_acomptesPrets", payeArr("mdb_acomptesPrets")) || [];
           if (!rawList.length) return 0;
-          var seenKeys = {};
-          var kept = [];
-          var removedIds = [];
+          var opsAll = payeArr("mdb_operationsCaisse") || [];
+          var seenKeys = {}, kept = [], removedIds = [], seenRemoved = {};
+          var pushRemoved = function (a, keep) {
+            if (!a || !a.id || seenRemoved[a.id]) return;
+            if (keep) {
+              if (a.valide && !keep.valide) { keep.valide = true; keep.valideLe = a.valideLe; }
+              if (a.preleve && !keep.preleve) { keep.preleve = true; keep.moisPreleve = a.moisPreleve; }
+              if ((a.montantRembourse || 0) > (keep.montantRembourse || 0)) keep.montantRembourse = a.montantRembourse;
+              if (a.caisseOpId && !keep.caisseOpId) keep.caisseOpId = a.caisseOpId;
+            }
+            seenRemoved[a.id] = true;
+            removedIds.push(a.id);
+          };
+          /* Passe 1 : m\u00eame pi\u00e8ce / m\u00eame lot + m\u00eame montant */
           for (var i = 0; i < rawList.length; i++) {
             var a = rawList[i];
             if (!a || !a.id) continue;
@@ -10522,9 +10533,6 @@ function renderPrimeEmpMatrix() {
             var npKey = String(a.numeroPiece || "").trim().toUpperCase();
             var dateK = String(a.date || "").slice(0, 10);
             var moisK = String(a.moisDeduction || a.date || "").slice(0, 7);
-            /* Remise collective : UNE seule ligne par employ\u00e9 + date + montant,
-               m\u00eame si le lot a \u00e9t\u00e9 enregistr\u00e9 sous DEUX num\u00e9ros de pi\u00e8ce
-               diff\u00e9rents (c'est ce qui affichait 15 000 deux fois). */
             var isColl = !!(a.groupeId || a.origine === "collectif");
             var key = "";
             if (isColl && empKey && mntInt > 0 && dateK) {
@@ -10534,27 +10542,54 @@ function renderPrimeEmpMatrix() {
             } else if (a.caisseOpId && empKey) {
               key = "OP:" + String(a.caisseOpId).trim() + ":" + empKey;
             }
-            if (key) {
-              if (seenKeys[key]) {
-                var existing = seenKeys[key];
-                var toDiscardId = a.id;
-                if (a.valide && !existing.valide) { existing.valide = true; existing.valideLe = a.valideLe; }
-                if (a.preleve && !existing.preleve) { existing.preleve = true; existing.moisPreleve = a.moisPreleve; }
-                if ((a.montantRembourse || 0) > (existing.montantRembourse || 0)) {
-                  existing.montantRembourse = a.montantRembourse;
-                }
-                if (a.caisseOpId && !existing.caisseOpId) existing.caisseOpId = a.caisseOpId;
-                if (a.statut === "rembourse" && existing.statut !== "rembourse") existing.statut = "rembourse";
-                if (a.echeances && a.echeances.length && (!existing.echeances || !existing.echeances.length)) {
-                  existing.echeances = a.echeances;
-                }
-                removedIds.push(toDiscardId);
-                continue;
-              }
-              seenKeys[key] = a;
-            }
+            if (key && seenKeys[key]) { pushRemoved(a, seenKeys[key]); continue; }
+            if (key) seenKeys[key] = a;
             kept.push(a);
           }
+          /* Passe 2 : m\u00eame employ\u00e9 + m\u00eame date + m\u00eame type (acompte collectif),
+             m\u00eame si les MONTANTS diff\u00e8rent (ex. ancien 20 000 rest\u00e9 \u00e0 c\u00f4t\u00e9 du
+             25 000 corrig\u00e9) ou si les num\u00e9ros de pi\u00e8ce diff\u00e8rent. On garde la
+             ligne dont le montant correspond \u00e0 une pi\u00e8ce de caisse du jour. */
+          var byDay = {};
+          kept.forEach(function (x) {
+            if (!x || x.type === "pret" || !(x.groupeId || x.origine === "collectif")) return;
+            var d = String(x.date || "").slice(0, 10);
+            if (!d) return;
+            var k = String(x.employeId || x.employeNom || "").trim().toLowerCase() + "|" + d + "|" + (x.type || "acompte");
+            (byDay[k] = byDay[k] || []).push(x);
+          });
+          var remove2 = {};
+          Object.keys(byDay).forEach(function (k) {
+            var L = byDay[k];
+            if (L.length < 2) return;
+            var parts = k.split("|");
+            var eid = parts[0], dRef = parts[1];
+            var amounts = {};
+            opsAll.forEach(function (o) {
+              if (!o || o.reversed) return;
+              if (String(o.beneficiaireId || "").trim().toLowerCase() !== eid) return;
+              if (String(o.date || "").slice(0, 10) !== dRef) return;
+              var code = String(o.code || "") + " " + String(o.libelle || "") + " " + String(o.apType || "");
+              if (!/^(ACOMPTE|AVANCE)/i.test(String(o.code || "")) && !/acompte|avance/i.test(code)) return;
+              if (/solde/i.test(code)) return;
+              amounts[Math.round((parseFloat(o.montant) || 0) * 100)] = true;
+            });
+            var hasAmt = Object.keys(amounts).length > 0;
+            var keepByAmt = {}, keepers = [];
+            L.forEach(function (x) {
+              var am = Math.round((parseFloat(x.montant) || 0) * 100);
+              if (hasAmt && !amounts[am]) { remove2[x.id] = true; return; }
+              if (keepByAmt[am]) { remove2[x.id] = true; return; }
+              keepByAmt[am] = true; keepers.push(x);
+            });
+            if (!keepers.length) {
+              var latest = L.slice().sort(function (p, q) { return (q.updatedAt || 0) - (p.updatedAt || 0); })[0];
+              keepers = [latest];
+              L.forEach(function (x) { if (x !== latest) remove2[x.id] = true; });
+            }
+            L.forEach(function (x) { if (remove2[x.id]) pushRemoved(x, keepers[0]); });
+          });
+          if (Object.keys(remove2).length) kept = kept.filter(function (x) { return !remove2[x.id]; });
           if (removedIds.length > 0) {
             console.log("[Paye] D\u00e9duplication acomptes/pr\u00eats : " + removedIds.length + " doublon(s) retir\u00e9(s)");
             /* saveAPList n'existe pas dans cette appli : l'appel levait une
