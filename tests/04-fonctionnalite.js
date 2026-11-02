@@ -13796,8 +13796,8 @@ function run(rapport) {
       && fsSeo.statSync(pathSeo.join(pub, 'logo-512.png')).size > 1000
       && fsSeo.existsSync(pathSeo.join(pub, 'favicon.png'))
       && fsSeo.statSync(pathSeo.join(pub, 'favicon.png')).size > 100;
-    const okOg = idxSeo.indexOf('property="og:image" content="https://montabbord.web.app/logo-512.png"') !== -1
-      && vitSeo.indexOf('property="og:image" content="https://montabbord.web.app/logo-512.png"') !== -1;
+    const okOg = idxSeo.indexOf('property="og:image" content="https://montabbord.pages.dev/logo-512.png"') !== -1
+      && vitSeo.indexOf('property="og:image" content="https://montabbord.pages.dev/logo-512.png"') !== -1;
     const okFavicon = idxSeo.indexOf('rel="icon" type="image/png" href="/favicon.png"') !== -1
       && vitSeo.indexOf('rel="icon" type="image/png" href="/favicon.png"') !== -1;
     const okNoindex = ['production.html', 'paye.html', 'fusion.html', 'restaurer.html'].every((f) => rd(f).indexOf('name="robots" content="noindex, nofollow"') !== -1);
@@ -13808,7 +13808,7 @@ function run(rapport) {
         && sm.indexOf('production.html') === -1
         && sm.indexOf('restaurer.html') === -1;
     })();
-    const okRobots = rd('robots.txt').indexOf('Sitemap: https://montabbord.web.app/sitemap.xml') !== -1;
+    const okRobots = rd('robots.txt').indexOf('Sitemap: https://montabbord.pages.dev/sitemap.xml') !== -1;
     if (okImages && okOg && okFavicon && okNoindex && okSitemap && okRobots) {
       rapport.ok('SEO : og:image + favicon, pages internes en noindex, sitemap/robots limités aux pages publiques');
     } else {
