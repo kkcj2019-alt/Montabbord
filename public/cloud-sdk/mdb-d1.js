@@ -13,9 +13,7 @@
   /* ========================================================================
      CLOUDFLARE D1 ADAPTER (Bypasses Supabase, 100% Free, 0 FCFA/mo)
      ======================================================================== */
-  var API_ROOT = (typeof window !== 'undefined' && window.location && window.location.origin && window.location.origin.indexOf('http') === 0)
-    ? ''
-    : 'https://montabbord.pages.dev';
+  var API_ROOT = (typeof window !== 'undefined' && window.__MDB_API_ROOT) ? window.__MDB_API_ROOT : '';
 
   function d1Fetch(endpoint, options) {
     options = options || {};
