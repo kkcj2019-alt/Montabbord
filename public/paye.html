@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-419';
+      window.__APP_VERSION = '2026-11-02-420';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -31811,6 +31811,10 @@ if (normalHours > 173.33) {
         }
         /* Transport : basé sur les cases cochées transport_paid (défaut = true si jornalier/présent) — faute société = transport non payé */
         var transportDays = 0;
+        /* Jours réellement travaillés (montage ou heures réelles), hors
+           absences (réelles ou faute entreprise). Sert au taux de présence :
+           173,33 h − 8 h par jour non travaillé. */
+        var workedDaysR = 0;
         for (var d2 = 1; d2 <= daysInMonth; d2++) {
           var dk2 = mois + "-" + (d2 < 10 ? "0" : "") + d2;
           var dow2 = (new Date(year, mIdx, d2).getDay() + 6) % 7;
@@ -31819,6 +31823,13 @@ if (normalHours > 173.33) {
             return p.date === dk2;
           });
           if (isRendement) {
+            var _hasWorkR = montageDaysSet[dk2] === true || (rec2 && (parseHeure(rec2.h_j_manual) > 0 || parseHeure(rec2.h_n_manual) > 0));
+            var _isAbsR = rec2 && (rec2.faute_societe === true || rec2.paye_sans_travail === true || rec2.absent_paye === true);
+            var _isFer2 = false;
+            try { _isFer2 = ptEstFerie(year, mIdx, d2) === true; } catch (eF2) {}
+            /* Férié chômé = jour payé, pas une absence : il ne réduit pas le
+               taux de présence. */
+            if ((_hasWorkR && !_isAbsR) || (_isFer2 && !_isAbsR)) workedDaysR++;
             /* Monteur : un jour explicitement décoché « transport payé » ne
                compte JAMAIS, même s'il y a eu du montage ou des heures
                (jour non payé / absence non indemnisée). */
@@ -31830,7 +31841,7 @@ if (normalHours > 173.33) {
               (rec2.faute_societe === true || rec2.paye_sans_travail === true || rec2.absent_paye === true) &&
               rec2.transport_faute !== true
             ) continue;
-            if (montageDaysSet[dk2] === true || (rec2 && (parseHeure(rec2.h_j_manual) > 0 || parseHeure(rec2.h_n_manual) > 0))) transportDays++;
+            if (_hasWorkR) transportDays++;
             continue;
           }
           /* Faute (entreprise) = pas de déplacement, donc pas de transport —
@@ -31860,6 +31871,8 @@ if (normalHours > 173.33) {
           hs100: hs100,
           transport: transport,
           transportDays: transportDays,
+          workedDaysR: workedDaysR,
+          joursNonTravailles: isRendement ? Math.max(0, businessDays - workedDaysR) : 0,
           daysPresent: daysPresent,
           businessDays: businessDays,
           businessPresent: businessPresent,
@@ -31943,20 +31956,23 @@ if (normalHours > 173.33) {
         var ratioBase = ratioH;
         var heuresTravail = heuresEff;
         var heuresTravailFmt = heuresEffFmt;
+        var heuresBaseFmt = heuresEffFmt;
         if (emp.rendement === true) {
-          /* Règle simple : heures de sursalaire / primes = 8 h × nombre de
-             JOURS OUVRÉS réellement travaillés (montage ou heures indiquées).
-             Le salaire catégoriel, lui, ne prend que les heures indiquées. */
+          /* Monteur au rendement : DEUX taux distincts.
+             - éléments de salaire (base, sursalaire, responsabilité…) :
+               heures RÉELLEMENT INDIQUÉES / 173,33 (0 sur un jour de montage
+               sans heures) ;
+             - éléments liés à la présence (salissure, déplacement, tenue,
+               caisse…) : 173,33 h − 8 h par jour ouvré NON travaillé
+               (absence réelle ou faute entreprise), plafonné à 173,33 h. */
           var _hBaseR = Math.max(0, stats.normalHours || 0);
-          /* Jours RÉELLEMENT travaillés = jours de transport retenus (montage
-             ou heures), hors absences non payées et hors cases « transport »
-             décochées. Un jour sans travail ne compte pas. */
-          var _joursTravR = Math.max(0, stats.transportDays != null ? stats.transportDays : (stats.businessPresent || 0));
-          var _hTravR = Math.min(173.33, 8 * _joursTravR);
+          var _joursNonTravR = Math.max(0, stats.joursNonTravailles || 0);
+          var _hTravR = Math.max(0, Math.min(173.33, 173.33 - 8 * _joursNonTravR));
           ratioBase = Math.min(1, _hBaseR / 173.33);
           ratioH = Math.min(1, _hTravR / 173.33);
           heuresTravail = _hTravR;
           heuresTravailFmt = _hTravR.toFixed(2).replace(".", ",") + "h";
+          heuresBaseFmt = _hBaseR.toFixed(2).replace(".", ",") + "h";
         }
         /* Journaliers & externes : pas de CNPS, pas d'imp\u00f4ts (ITS/CMU), pas d'avantages.
            Journalier = taux journalier x jours point\u00e9s. Externe = montant forfaitaire. */
@@ -32264,7 +32280,7 @@ if (normalHours > 173.33) {
             var _catAnc = null;
             try { _catAnc = (getCategories() || []).find(function (c) { return c && c.code === emp.categorie_id; }) || null; } catch (eCA) {}
             var _baseAnc = (_catAnc && (parseFloat(_catAnc.salaire_min) || 0) > 0) ? parseFloat(_catAnc.salaire_min) : base;
-            var baseReel = Math.round(_baseAnc * ratioH);
+            var baseReel = Math.round(_baseAnc * (emp.rendement === true ? ratioBase : ratioH));
             var anc = Math.round(baseReel * (_tauxAnc * 0.01));
             items.push({
               n: "21",
@@ -32331,12 +32347,15 @@ if (normalHours > 173.33) {
         if (primeRatio < 0) primeRatio = 0;
         if (primeT > 0) {
           // Prime générique : considérée comme salaire, donc au prorata des HEURES effectuées
-          var primeProRata = Math.round(primeT * ratioH);
+          var _ratioPrime = emp.rendement === true ? ratioBase : ratioH;
+          var _heuresPrimeFmt = emp.rendement === true ? heuresBaseFmt : heuresEffFmt;
+          var _pctPrime = Math.round(_ratioPrime * 10000) / 100 + "%";
+          var primeProRata = Math.round(primeT * _ratioPrime);
           items.push({
             n: "25",
             label: "Prime",
             base: primeT,
-            taux: ratioH < 1 ? ratioHpct + " (" + heuresEffFmt + ")" : "",
+            taux: _ratioPrime < 1 ? _pctPrime + " (" + _heuresPrimeFmt + ")" : "",
             gain: primeProRata,
             ret: 0,
           });
@@ -32392,20 +32411,25 @@ if (normalHours > 173.33) {
           // Salissure : prorata jours réellement travaillés comme le transport (même taux)
           if (p.type === "ind_salissure") isProrata = true;
           var _isSalaireLike = p.type === "sursalaire" || p.type === "ind_responsabilite" || p.type === "ind_fonction" || p.type === "ind_representation" || p.type === "custom";
+          /* Monteur au rendement : deux familles de taux.
+             - salaire (sursalaire, responsabilité, fonction, représentation) :
+               heures réelles indiquées ;
+             - présence (salissure, déplacement, tenue, caisse…) :
+               173,33 h − 8 h par jour non travaillé. */
+          var _isSalaryR = emp.rendement === true && p.type !== "custom" && _isSalaireLike;
+          var _isPresenceR = emp.rendement === true && p.type !== "custom" && !_isSalaireLike;
           var _ratioEff = primeRatio;
           if (p.type === "custom") _ratioEff = 1;
-          else if (_isSalaireLike && isProrata) _ratioEff = ratioH;
-          else if (p.type === "ind_salissure") _ratioEff = primeRatio;
+          else if (_isSalaireLike && isProrata) _ratioEff = emp.rendement === true ? ratioBase : ratioH;
+          else if (p.type === "ind_salissure") _ratioEff = emp.rendement === true ? ratioH : primeRatio;
           /* Mode de taux choisi dans la configuration de la prime (prioritaire) */
           var _modeT = p.mode_taux || "";
-          if (_modeT === "heures") { isProrata = true; _ratioEff = ratioH; }
-          else if (_modeT === "jours") { isProrata = true; _ratioEff = primeRatio; }
+          if (_modeT === "heures") { isProrata = true; _ratioEff = emp.rendement === true ? (_isSalaireLike ? ratioBase : ratioH) : ratioH; }
+          else if (_modeT === "jours") { isProrata = true; _ratioEff = emp.rendement === true ? ratioH : primeRatio; }
           else if (_modeT === "fixe") { isProrata = false; _ratioEff = 1; }
-          /* Monteur/rendement : sursalaire, salissure, responsabilité… = 8 h
-             par jour de montage (heures travaillées), jamais 0 même si le
-             salaire catégoriel est à 0. */
-          var _isHourLikeR = emp.rendement === true && p.type !== "custom" && (_isSalaireLike || p.type === "ind_salissure");
-          if (_isHourLikeR) { isProrata = true; _ratioEff = ratioH; }
+          /* Application finale de la règle rendement. */
+          if (_isSalaryR) { isProrata = true; _ratioEff = ratioBase; }
+          else if (_isPresenceR) { isProrata = true; _ratioEff = ratioH; }
           var pm = isProrata ? Math.round(montant * _ratioEff) : montant;
           var _hasPres = ((stats.businessPresent || 0) > 0) || (((stats.hJour || 0) + (stats.hNuit || 0)) > 0);
           /* Sans aucune présence pointée, aucun versement (pour être payé, il faut être pointé).
@@ -32417,20 +32441,21 @@ if (normalHours > 173.33) {
           else if (isProrata && _ratioEff < 1) {
             /* Taux = jours de présence pour les journalières, nombre d'heures pour les salariales */
             if (p.type === "ind_salissure")
-              tauxDisp = _isHourLikeR ? heuresTravailFmt : (stats.transportDays + "/" + stats.businessDays);
-            else if (_isSalaireLike) tauxDisp = _isHourLikeR ? heuresTravailFmt : heuresEffFmt;
-            else tauxDisp = stats.transportDays + "/" + stats.businessDays;
+              tauxDisp = _isPresenceR ? heuresTravailFmt : (stats.transportDays + "/" + stats.businessDays);
+            else if (_isSalaireLike) tauxDisp = _isSalaryR ? heuresBaseFmt : heuresEffFmt;
+            else tauxDisp = _isPresenceR ? heuresTravailFmt : (stats.transportDays + "/" + stats.businessDays);
           } else if (_isSalaireLike) {
             /* Prime forfaitaire non custom : coefficient 1 quand mois complet */
-            if (_hasPres && (_isHourLikeR ? heuresTravail : heuresEff) > 0) tauxDisp = _isHourLikeR ? heuresTravailFmt : heuresEffFmt;
+            if (_hasPres && (_isSalaryR ? _hBaseR : heuresEff) > 0) tauxDisp = _isSalaryR ? heuresBaseFmt : heuresEffFmt;
           }
           /* Toutes les rubriques de l'onglet Éléments de paie apparaissent sur le bulletin :
              un montant vide (0) reste saisissable à l'écran et est masqué à l'impression */
-          if (_isHourLikeR) tauxDisp = heuresTravailFmt;
-          else if (_modeT === "heures") tauxDisp = heuresTravailFmt;
+          if (_isSalaryR) tauxDisp = heuresBaseFmt;
+          else if (_isPresenceR) tauxDisp = heuresTravailFmt;
+          else if (_modeT === "heures") tauxDisp = heuresEffFmt;
           else if (_modeT === "jours") tauxDisp = stats.transportDays + "/" + stats.businessDays;
           else if (_modeT === "fixe") tauxDisp = "1";
-          else if (!tauxDisp) tauxDisp = isProrata ? (_isSalaireLike ? heuresTravailFmt : stats.transportDays + "/" + stats.businessDays) : "1";
+          else if (!tauxDisp) tauxDisp = isProrata ? (_isSalaireLike ? heuresEffFmt : stats.transportDays + "/" + stats.businessDays) : "1";
           items.push({
             n: num,
             label: label,
@@ -32901,7 +32926,7 @@ if (normalHours > 173.33) {
             prets: ap.prets,
             report: repUsed,
             reportLeft: repM - repUsed,
-            prime: Math.round(primeT * ratioH),
+            prime: Math.round(primeT * (emp.rendement === true ? ratioBase : ratioH)),
             transport: stats.transport,
             cmu: cmuCount * 500,
             itsBrut: itsBrut,
