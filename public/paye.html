@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-420';
+      window.__APP_VERSION = '2026-11-02-421';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -20162,10 +20162,24 @@ html +=
       /* Coeur de calcul partagé (modale + récap + fiche).
          isR : rendement → pas de découpage J/N, pas d'intervalle unique implicite. */
       function ptCoreCalc(o) {
-        var jIv = ptIntervals(o.ja, o.jp1, o.jp2, o.jf, !o.isR);
-        var nIv = ptIntervals(o.na, o.np1, o.np2, o.nf, !o.isR);
+        if (o.isR) {
+          /* Rendement : si aucune reprise ET aucune fin 2, le créneau saisi
+             (arrivée → fin 1) est une PRÉSENCE, pas du salaire : 0 h payée.
+             Dès qu'il y a une reprise ou une fin 2, les intervalles travaillés
+             comptent (Fin 1 − Arrivée) + (Fin 2 − Reprise). */
+          var _hasReprise = !!(o.jp2 || o.np2);
+          var _hasFin2 = !!(o.jf || o.nf);
+          var jIvR = [], nIvR = [];
+          if (_hasReprise || _hasFin2) {
+            jIvR = ptIntervals(o.ja, o.jp1, o.jp2, o.jf, false);
+            nIvR = ptIntervals(o.na, o.np1, o.np2, o.nf, false);
+          }
+          var libresR = parseFloat(o.libres) || 0;
+          return {j:0, n:0, r: ptDurIntervals(jIvR) + ptDurIntervals(nIvR) + libresR};
+        }
+        var jIv = ptIntervals(o.ja, o.jp1, o.jp2, o.jf, true);
+        var nIv = ptIntervals(o.na, o.np1, o.np2, o.nf, true);
         var libres = parseFloat(o.libres) || 0;
-        if (o.isR) return {j:0, n:0, r: ptDurIntervals(jIv) + ptDurIntervals(nIv) + libres};
         var s = ptSplitIntervals(jIv.concat(nIv));
         return {j: s.j + libres, n: s.n, r: 0};
       }
@@ -21639,10 +21653,18 @@ html +=
         html += '<div style="font-size:.85rem;font-weight:800;margin:14px 0 8px">Pointage Jour</div>' +
           '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">' +
           peTimeField("pe-ja", "Arrivée", gv("j_arrivee"), dis) +
-          peTimeField("pe-jp1", "Pause début", gv("j_pause"), dis) +
-          peTimeField("pe-jp2", "Pause fin", gv("j_reprise"), dis) +
-          peTimeField("pe-jf", "Départ", gv("j_fin"), dis) +
+          peTimeField("pe-jp1", "Fin 1 / Pause", gv("j_pause"), dis) +
+          peTimeField("pe-jp2", "Reprise", gv("j_reprise"), dis) +
+          peTimeField("pe-jf", "Fin 2 / Départ", gv("j_fin"), dis) +
           '</div>' + legBanner;
+        try {
+          if (ptIsEmpRendement(empId)) {
+            html += '<div style="margin-top:6px;padding:7px 9px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;font-size:.68rem;color:#075985;line-height:1.45">' +
+              '<b>Rendement :</b> Arrivée + <b>Fin 2</b> = présence (0 h de salaire si pas de pause). ' +
+              'Avec pause : <b>Fin 1</b> = fin du 1er créneau, <b>Reprise</b>, <b>Fin 2</b> = fin réelle. ' +
+              'Heures de salaire = (Fin 1 − Arrivée) + (Fin 2 − Reprise).</div>';
+          }
+        } catch (eRh) {}
         html += '<div style="margin-top:10px"><button id="pe-nuit-btn" class="btn btn-sec" onclick="ptEditToggleNuit()" ' + (locked ? "disabled" : "") + ' style="padding:5px 14px;font-size:.75rem;border-radius:14px">' + (nuitOn ? "🌙 Masquer Nuit" : "🌙 Activer Nuit") + '</button></div>' +
           '<div id="pe-nuit-wrap" style="display:' + (nuitOn ? "" : "none") + ';margin-top:8px">' +
           '<div style="font-size:.85rem;font-weight:800;margin:0 0 8px;color:#7c3aed">Pointage Nuit <span style="font-weight:400;font-size:.7rem;color:#666">(la part 21h–05h compte en nuit)</span></div>' +
@@ -31815,6 +31837,29 @@ if (normalHours > 173.33) {
            absences (réelles ou faute entreprise). Sert au taux de présence :
            173,33 h − 8 h par jour non travaillé. */
         var workedDaysR = 0;
+        /* Manque d'heures de présence sur les jours travaillés incomplets :
+           ex. arrivée 8h, fin 14h = 6h de présence → 2h à déduire du taux. */
+        var shortfallR = 0;
+        function _presenceHeuresR(rec) {
+          if (!rec) return 8; /* montage sans pointage : journée pleine */
+          var toM = function (t) {
+            if (!t) return null;
+            var p = String(t).trim().split(":");
+            if (p.length >= 2) return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+            var h = parseFloat(t);
+            return isNaN(h) ? null : h * 60;
+          };
+          var a = toM(rec.j_arrivee);
+          var f = toM(rec.j_fin);
+          var p1 = toM(rec.j_pause);
+          /* Heure de fin réelle : départ final s'il existe, sinon 1re fin. */
+          var e = (f !== null) ? f : p1;
+          if (a === null || e === null) return 8;
+          if (e <= a) e += 1440;
+          var h = (e - a) / 60;
+          if (h < 0) h = 0;
+          return Math.min(8, h);
+        }
         for (var d2 = 1; d2 <= daysInMonth; d2++) {
           var dk2 = mois + "-" + (d2 < 10 ? "0" : "") + d2;
           var dow2 = (new Date(year, mIdx, d2).getDay() + 6) % 7;
@@ -31830,6 +31875,10 @@ if (normalHours > 173.33) {
             /* Férié chômé = jour payé, pas une absence : il ne réduit pas le
                taux de présence. */
             if ((_hasWorkR && !_isAbsR) || (_isFer2 && !_isAbsR)) workedDaysR++;
+            if (_hasWorkR && !_isAbsR) {
+              var _presR = _presenceHeuresR(rec2);
+              if (_presR < 8) shortfallR += (8 - _presR);
+            }
             /* Monteur : un jour explicitement décoché « transport payé » ne
                compte JAMAIS, même s'il y a eu du montage ou des heures
                (jour non payé / absence non indemnisée). */
@@ -31872,6 +31921,7 @@ if (normalHours > 173.33) {
           transport: transport,
           transportDays: transportDays,
           workedDaysR: workedDaysR,
+          shortfallR: shortfallR,
           joursNonTravailles: isRendement ? Math.max(0, businessDays - workedDaysR) : 0,
           daysPresent: daysPresent,
           businessDays: businessDays,
@@ -31967,7 +32017,8 @@ if (normalHours > 173.33) {
                (absence réelle ou faute entreprise), plafonné à 173,33 h. */
           var _hBaseR = Math.max(0, stats.normalHours || 0);
           var _joursNonTravR = Math.max(0, stats.joursNonTravailles || 0);
-          var _hTravR = Math.max(0, Math.min(173.33, 173.33 - 8 * _joursNonTravR));
+          var _shortfallR = Math.max(0, stats.shortfallR || 0);
+          var _hTravR = Math.max(0, Math.min(173.33, 173.33 - 8 * _joursNonTravR - _shortfallR));
           ratioBase = Math.min(1, _hBaseR / 173.33);
           ratioH = Math.min(1, _hTravR / 173.33);
           heuresTravail = _hTravR;
