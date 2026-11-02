@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-416';
+      window.__APP_VERSION = '2026-11-02-417';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -7224,6 +7224,10 @@ function payeObj(key) {
       function _payeRecvSharedKeys(data) {
         _payeApplyingCloud = true;
         try {
+        /* Factures (CA HT) : cache mémoire seule. La paie s'en sert pour la
+           prime « % du CA HT » (directeur, commercial...) sans jamais réécrire
+           la clé mdb_factures dans le stockage partagé. */
+        try { if (data && Array.isArray(data.mdb_factures)) window._payeFacturesCache = data.mdb_factures; } catch (eFacCache) {}
         if (data.mdb_tombstones)
           _payeMergeTombstonesFromCloud(data.mdb_tombstones);
         /* Nomenclature (Index, SOURCE UNIQUE des produits finis) : le cloud
@@ -36367,24 +36371,60 @@ function panierVerserJour() {
       function getMontageCAHT(empId, mois) {
         var exFac = ptPrimeProdExclus(mois, "factures_exclus", empId);
         var exFacEmp = ptFacturesExclusEmploye(empId);
-        var ca = 0;
+        /* 1) CA du montage de l'employé (valeur de sa production) : c'est
+           la base d'un monteur qui a des lignes de montage ce mois. */
+        var caMontage = 0, nbMontage = 0;
         (getPointageMontage() || []).forEach(function (p) {
           if (!p || p.employee_id !== empId) return;
           if (!p.date || String(p.date).indexOf(mois) !== 0) return;
           var fac = String(p.facture || p.facture_id || "").trim().toLowerCase();
-          /* Les factures cochées « hors CA » dans le Journal de vente,
-             puis les exclusions globales / propres à l'employé, ne
-             comptent pas dans le CA servant à la prime. */
           if (fac && ptFactureHorsCA(fac)) return;
           if (fac && (exFac.indexOf(fac) >= 0 || exFacEmp.indexOf(fac) >= 0)) return;
           var q = parseFloat(p.quantite) || 0;
           if (q <= 0) return;
-          /* Prix enregistré sur la ligne, sinon prix effectif. */
           var px = parseFloat(p.prix);
           if (!px || px <= 0) px = ptPrixEffectif(p.article_code, empId, p.date);
-          ca += q * px;
+          caMontage += q * px;
+          nbMontage++;
         });
-        return Math.round(ca);
+        if (nbMontage > 0) return Math.round(caMontage);
+        /* Pas de taux « % du CA » sur cet employé : inutile de charger le CA
+           de l'entreprise (il ne serait multiplié que par 0). */
+        var _tauxCaEmp = 0;
+        try { _tauxCaEmp = ptPrimeProdTauxCa(empId, mois) || 0; } catch (eT) {}
+        if (!(_tauxCaEmp > 0)) return 0;
+        /* 2) Sinon (directeur, commercial, responsable...) : CA HT RÉEL de
+           l'entreprise sur le mois, repris des factures — même total que
+           l'écran Facturation. Les factures « hors CA » / exclues sont retirées. */
+        var facs = [];
+        try { facs = window._payeFacturesCache || []; } catch (eF1) {}
+        if (!Array.isArray(facs) || !facs.length) {
+          try { facs = payeArr("mdb_factures") || []; } catch (eF2) { facs = []; }
+        }
+        var caFac = 0;
+        (Array.isArray(facs) ? facs : []).forEach(function (f) {
+          if (!f) return;
+          var d = String(f.dateEmission || f.date || "").slice(0, 7);
+          if (d !== mois) return;
+          if (f.statut === "annulee" || f.statut === "supprimee") return;
+          /* Un brouillon n'est pas encore du CA réalisé : il ne doit pas
+             gonfler la prime. C'est ce qui doublait FAC-134 (2 400 000). */
+          if (f.statut === "brouillon") return;
+          if (f.hors_prime_ca === true) return;
+          var idL = String(f.id || "").trim().toLowerCase();
+          var numL = String(f.numero || "").trim().toLowerCase();
+          if (idL && (exFac.indexOf(idL) >= 0 || exFacEmp.indexOf(idL) >= 0 || ptFactureHorsCA(idL))) return;
+          if (numL && (exFac.indexOf(numL) >= 0 || exFacEmp.indexOf(numL) >= 0 || ptFactureHorsCA(numL))) return;
+          var ht = parseFloat(f.total);
+          if (isNaN(ht) || !ht) {
+            var ttc = parseFloat(f.totalTTC) || 0;
+            var tx = parseFloat(f.tauxTvaDefaut);
+            if (isNaN(tx)) tx = 18;
+            ht = ttc > 0 ? ttc / (1 + tx / 100) : 0;
+          }
+          caFac += ht || 0;
+        });
+        return Math.round(caFac);
       }
       /* Montant progressif : chaque tranche est payée sur les articles
          qui tombent DANS cette tranche (cumul des tranches). */
