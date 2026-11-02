@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-408';
+      window.__APP_VERSION = '2026-11-02-409';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -31473,6 +31473,14 @@ function majExpatHint(inp) {
         ptMontStats.forEach(function (p) {
           montageDaysSet[p.date] = true;
         });
+        var montageDaysCount = 0, montageWeekdayCount = 0;
+        Object.keys(montageDaysSet).forEach(function (dkM) {
+          if (!montageDaysSet[dkM]) return;
+          montageDaysCount++;
+          var _dM = new Date(dkM + "T00:00:00");
+          var _dwM = (_dM.getDay() + 6) % 7;
+          if (_dwM < 5) montageWeekdayCount++;
+        });
         var year = parseInt(mois.split("-")[0]),
           mIdx = parseInt(mois.split("-")[1]) - 1;
         var daysInMonth = new Date(year, mIdx + 1, 0).getDate();
@@ -31497,6 +31505,7 @@ function majExpatHint(inp) {
           hNuit = 0,
           normalHours = 0;
         var isJ = empCategorie(emp) === "journalier";
+        var isRendement = emp.rendement === true;
         var firstDow = (new Date(year, mIdx, 1).getDay() + 6) % 7;
         for (var d = 1; d <= daysInMonth; d++) {
           var dk = mois + "-" + (d < 10 ? "0" : "") + d;
@@ -31521,11 +31530,16 @@ function majExpatHint(inp) {
           if (rec) {
             var _isEmpRendStat = (rec.rendement === true) || (rec.rendement !== false && (emp.rendement === true || String(emp.fonction||'').toLowerCase().indexOf('monteur') !== -1));
             if (_isEmpRendStat) {
-              /* Travailleur au rendement / monteur : arrivée et départ sans pause = preuve de présence (0h payées, salaire via montage).
-                 Seuls les créneaux atelier (avec pause) ou heures libres manuelles sont payés. */
-              var ccfStat = ptCalcDay(rec, true);
-              hJ = ccfStat.r || 0;
-              hN = 0;
+              /* Monteur / rendement : les créneaux d'arrivée-pause-reprise-départ
+                 sont une preuve de PRÉSENCE, pas des heures de salaire de base.
+                 Seules les heures RÉELLEMENT INDIQUÉES (H. Jour / H. Nuit /
+                 heures libres) entrent dans le taux du salaire de base. Sans
+                 heures indiquées : 0 h, le salaire vient du montage. */
+              var _mjR = parseHeure(rec.h_j_manual !== undefined ? rec.h_j_manual : "");
+              var _mnR = parseHeure(rec.h_n_manual !== undefined ? rec.h_n_manual : "");
+              var _mlR = parseFloat(rec.h_libres) || 0;
+              hJ = _mjR + _mlR;
+              hN = _mnR;
             } else {
               if (rec.h_j_manual !== undefined && rec.h_j_manual !== "")
                 hJ = parseHeure(rec.h_j_manual);
@@ -31535,18 +31549,20 @@ function majExpatHint(inp) {
             /* Jour faute-payé SANS heures saisies (ex. rattraper seul) : la
                grille affiche quand même « ✔ 8 ». Les heures dues (gagnées)
                comptent comme heures payées, sinon le total les oublie. */
-            if (hJ + hN <= 0 && (rec.paye_sans_travail === true || rec.absent_paye === true)) {
+            if (hJ + hN <= 0 && !isRendement && (rec.paye_sans_travail === true || rec.absent_paye === true)) {
               var _gFaute = parseFloat(rec.rattrap_gagnees) || 0;
               if (_gFaute > 0) hJ = _gFaute;
             }
             /* Do not force hJ = 8 if no hours entered */
-            var _estPresStat = (hJ > 0 || hN > 0 || rec.present === true || montageDaysSet[dk] === true);
+            var _estPresStat = isRendement
+              ? (hJ > 0 || hN > 0 || montageDaysSet[dk] === true)
+              : (hJ > 0 || hN > 0 || rec.present === true || montageDaysSet[dk] === true);
             if (_estPresStat) daysPresent++;
             if (_estPresStat) {
               if (isWeekday) { businessPresent++; businessPresentSalary++; }
             }
             // Faute société (chômage technique) : absent mais payé comme présent pour salaire, pas pour transport
-            if (rec.faute_societe === true && isWeekday && hJ === 0 && hN === 0 && !rec.present) {
+            if (rec.faute_societe === true && isWeekday && hJ === 0 && hN === 0 && !rec.present && !isRendement) {
               businessPresent++;
               businessPresentSalary++;
               daysPresent++;
@@ -31682,6 +31698,10 @@ if (normalHours > 173.33) {
           var rec2 = pts.find(function (p) {
             return p.date === dk2;
           });
+          if (isRendement) {
+            if (montageDaysSet[dk2] === true || (rec2 && (parseHeure(rec2.h_j_manual) > 0 || parseHeure(rec2.h_n_manual) > 0))) transportDays++;
+            continue;
+          }
           /* Faute (entreprise) = pas de déplacement, donc pas de transport —
              SAUF choix explicite « payer le transport » (venu sur site). */
           var _fautT = rec2 && (rec2.faute_societe === true || rec2.paye_sans_travail === true || rec2.absent_paye === true) && rec2.transport_faute !== true;
