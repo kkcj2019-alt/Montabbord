@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-413';
+      window.__APP_VERSION = '2026-11-02-414';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -11009,6 +11009,7 @@ function renderPrimeEmpMatrix() {
           /* Marqueur remise collective (saisie caisse) : tout ce qui a un groupeId va en collectif, le reste en individuel */
           groupeId: a.groupeId || "",
           collective: a.collective === true || !!a.groupeId,
+          updatedAt: parseFloat(a.updatedAt) || 0,
         };
       }
       function fmtMoisAP(m) {
@@ -11067,43 +11068,103 @@ function renderPrimeEmpMatrix() {
         DB.setMain("mdb_acomptesPrets", mainAP);
       }
 
+      /* Liste AP d'un employé, dédupliquée pour le CALCUL (paie + détail).
+         Règle : une pièce de caisse = UNE seule ligne. On garde en priorité
+         la ligne dont le montant correspond à la pièce de caisse, puis
+         prêt > solde > acompte validé, puis la plus récemment modifiée.
+         Cela évite qu'une ancienne copie (ex. 20 000 restée à côté du
+         25 000 corrigé) soit déduite en plus du bon montant. */
+      function _apCalcDedupList(empId) {
+        var list = (getAPList() || []).map(normalizeAP).filter(function (a) {
+          return a && String(a.employee_id || a.employeId || "") === String(empId);
+        });
+        var ops = {};
+        try {
+          (payeArr("mdb_operationsCaisse") || []).forEach(function (o) {
+            if (o && o.id) ops[o.id] = o;
+          });
+        } catch (eO) {}
+        function opAmount(a) {
+          var o = a && a.caisseOpId ? ops[a.caisseOpId] : null;
+          if (!o) return null;
+          var m = parseFloat(o.montant);
+          return isNaN(m) ? null : m;
+        }
+        function rank(a) {
+          return a.type === "pret" ? 3 : a.type === "solde" ? 2 : a.valide === true ? 1 : 0;
+        }
+        function better(a, b) {
+          var ra = rank(a), rb = rank(b);
+          if (ra !== rb) return ra > rb;
+          var oa = opAmount(a), ob = opAmount(b);
+          if (oa != null || ob != null) {
+            var ma = Math.abs((parseFloat(a.montant) || 0) - (oa != null ? oa : -1));
+            var mb = Math.abs((parseFloat(b.montant) || 0) - (ob != null ? ob : -1));
+            if (Math.abs(ma - mb) > 0.5) return ma < mb;
+          }
+          return (parseFloat(a.updatedAt) || 0) > (parseFloat(b.updatedAt) || 0);
+        }
+        /* Clé prioritaire : opération de caisse (unique). Sinon pièce + date
+           + montant, comme avant. */
+        var best = {}, order = [];
+        list.forEach(function (a) {
+          if (!a.type) return;
+          var k = a.caisseOpId
+            ? "OP:" + a.caisseOpId
+            : a.numeroPiece
+              ? "PC:" + String(a.numeroPiece).toUpperCase() + "|" + String(a.date || "").slice(0, 10) + "|" + Math.round((parseFloat(a.montant) || 0) * 100)
+              : "ID:" + String(a.id || "");
+          if (!Object.prototype.hasOwnProperty.call(best, k)) { best[k] = a; order.push(k); }
+          else if (better(a, best[k])) best[k] = a;
+        });
+        /* Passe 2 : mêmes employé + date + type (acompte collectif) avec des
+           montants différents (ancien 20 000 resté à côté du 25 000 corrigé).
+           On ne garde que les montants réellement présents en caisse ce jour. */
+        var byDay = {};
+        order.forEach(function (k) {
+          var x = best[k];
+          if (!x || x.type === "pret" || !(x.groupeId || x.collective)) return;
+          var d = String(x.date || "").slice(0, 10);
+          if (!d) return;
+          var kk = d + "|" + x.type;
+          (byDay[kk] = byDay[kk] || []).push(x);
+        });
+        var drop = {};
+        Object.keys(byDay).forEach(function (kk) {
+          var L = byDay[kk];
+          if (L.length < 2) return;
+          var d = kk.split("|")[0], amounts = {};
+          Object.keys(ops).forEach(function (id) {
+            var o = ops[id];
+            if (!o || o.reversed) return;
+            if (String(o.date || "").slice(0, 10) !== d) return;
+            var code = String(o.code || "") + " " + String(o.libelle || "") + " " + String(o.apType || "");
+            if (!/acompte|avance/i.test(code) || /solde/i.test(code)) return;
+            amounts[Math.round((parseFloat(o.montant) || 0) * 100)] = true;
+          });
+          var hasAmt = Object.keys(amounts).length > 0, keepAmt = {}, keepers = [];
+          L.forEach(function (x) {
+            var am = Math.round((parseFloat(x.montant) || 0) * 100);
+            if (hasAmt && !amounts[am]) { drop[x.id] = true; return; }
+            if (keepAmt[am]) { drop[x.id] = true; return; }
+            keepAmt[am] = true; keepers.push(x);
+          });
+          if (!keepers.length) {
+            var latest = L.slice().sort(function (p, q) { return (q.updatedAt || 0) - (p.updatedAt || 0); })[0];
+            keepers = [latest];
+            L.forEach(function (x) { if (x !== latest) drop[x.id] = true; });
+          }
+        });
+        return order.map(function (k) { return best[k]; }).filter(function (x) { return x && !drop[x.id]; });
+      }
       /* Récupère les acomptes/prêts pour un employé et un mois donné (déduction) */
       var PRET_VALIDATION_DEPUIS = "2026-10";
 
       function getAPForMonth(empId, mois) {
-        var list = (getAPList() || []).map(normalizeAP);
-        /* Une même pièce de caisse ne doit pas être comptée deux fois : certaines
-           copies anciennes existent en « acompte » ET en « prêt » (même pièce,
-           même date, même montant). On repère d'abord les prêts, puis on ignore
-           la copie « acompte » de la même pièce. Sans cela, ACHI avait 47 060 en
-           acompte (27 060 + le prêt de 20 000) + encore 20 000 en prêt. */
-        function _apSig(a) {
-          if (!a) return "";
-          var np = String(a.numeroPiece || "").trim().toUpperCase();
-          var dt = String(a.date || "").slice(0, 10);
-          var mt = Math.round((parseFloat(a.montant) || 0) * 100);
-          if (np && dt && mt) return "PC:" + np + "|" + dt + "|" + mt;
-          if (a.caisseOpId) return "OP:" + String(a.caisseOpId);
-          return "ID:" + String(a.id || "");
-        }
-        /* D\u00e9duplication AVANT calcul : une m\u00eame pi\u00e8ce (m\u00eame n\u00b0, date,
-           montant, employ\u00e9) ne doit \u00eatre compt\u00e9e qu'une fois. On garde la
-           ligne la plus significative : pr\u00eat > solde > acompte valid\u00e9. */
-        function _rankAp(a) {
-          if (!a) return 0;
-          if (a.type === "pret") return 3;
-          if (a.type === "solde") return 2;
-          return a.valide === true ? 1 : 0;
-        }
-        var _bestAp = {}, _ordreAp = [];
-        list.forEach(function (a) {
-          if (!a || a.employee_id !== empId) return;
-          var _s = _apSig(a);
-          if (!_s) { _ordreAp.push(a); return; }
-          if (!Object.prototype.hasOwnProperty.call(_bestAp, _s)) { _bestAp[_s] = a; _ordreAp.push(_s); }
-          else if (_rankAp(a) > _rankAp(_bestAp[_s])) _bestAp[_s] = a;
-        });
-        var _rowsAp = _ordreAp.map(function (x) { return (typeof x === "string") ? _bestAp[x] : x; });
+        /* Déduplication centralisée (pièce de caisse = une ligne, montant
+           réellement présent en caisse). Utilisée aussi par le détail cliquable
+           et par l'impression : le total du détail correspond au bulletin. */
+        var _rowsAp = _apCalcDedupList(empId);
         var mAcc = 0,
           mPret = 0,
           mSolde = 0;
@@ -27735,6 +27796,13 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         return diff >= 0 && diff < duree && apRestP(a) > 0;
       }
       function apDeductionP(a, month) {
+        /* Source unique : apNetImpression (même règle que le calcul de paie et
+           l'impression). Un acompte non validé ne part pas ; un prêt ne part
+           que si l'échéance du mois est validée. */
+        try {
+          var r = apNetImpression(a, month);
+          if (r) return r.deduit || 0;
+        } catch (e) {}
         if (a.type === "acompte")
           return a.valide === true && apNormMoisP(a.moisDeduction || "") === apNormMoisP(month)
             ? a.montant || 0
@@ -27856,53 +27924,70 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         loadAP();
       }
       /* Détail cliquable d'un montant d'acompte / prêt / solde (livre de paie
-         et bulletin). Affiche toutes les lignes qui composent le montant. */
+         et bulletin). Par défaut : UNIQUEMENT les opérations réellement
+         déduites sur le mois — le total correspond au bulletin. Un bouton
+         permet d'afficher aussi l'historique non déduit. */
       function apDetailLivre(empId, mois, type) {
         try {
-          var list = (getAPList() || []).map(normalizeAP).filter(function (a) {
-            return a && String(a.employee_id || a.employeId || "") === String(empId);
-          });
-          /* Même déduplication que le calcul de paie : une pièce = une ligne. */
-          var best = {}, order = [];
-          function sig(a) {
-            var np = String(a.numeroPiece || "").trim().toUpperCase();
-            var dt = String(a.date || "").slice(0, 10);
-            var mt = Math.round((parseFloat(a.montant) || 0) * 100);
-            if (np && dt && mt) return "PC:" + np + "|" + dt + "|" + mt;
-            if (a.caisseOpId) return "OP:" + String(a.caisseOpId);
-            return "ID:" + String(a.id || "");
-          }
-          function rank(a) { return a.type === "pret" ? 3 : a.type === "solde" ? 2 : (a.valide === true ? 1 : 0); }
-          list.forEach(function (a) {
-            var s = sig(a);
-            if (!best[s]) { best[s] = a; order.push(s); }
-            else if (rank(a) > rank(best[s])) best[s] = a;
-          });
-          var rows = order.map(function (s) { return best[s]; });
+          /* Même liste dédupliquée que le calcul de paie : une pièce de
+             caisse = une seule ligne (pas de vieille copie 20 000 / 25 000). */
+          var rows = _apCalcDedupList(empId);
           var want = String(type || "").toLowerCase();
+          /* Nature réelle (un solde saisi comme « acompte » reste un solde) :
+             l'acompte cliqué ne doit pas inclure les soldes, qui ont leur
+             propre colonne et leur propre détail. */
+          var _natL = function (a) {
+            try { return apNatureDe(a) || a.type; } catch (e) { return a.type; }
+          };
           if (want === "acompte" || want === "pret" || want === "solde") {
-            rows = rows.filter(function (a) { return String(a.type || "").toLowerCase() === want; });
+            rows = rows.filter(function (a) { return String(_natL(a)).toLowerCase() === want; });
           }
+          var all = rows.map(function (a) {
+            var ded = 0;
+            try { ded = (typeof apNetImpression === "function") ? (apNetImpression(a, mois).deduit || 0) : 0; } catch (eD) {}
+            if (!ded) { try { ded = (typeof apDeductionP === "function") ? (apDeductionP(a, mois) || 0) : 0; } catch (eD2) {} }
+            return { a: a, ded: ded, nat: _natL(a) };
+          }).sort(function (x, y) {
+            /* Déduites d'abord, puis par date décroissante. */
+            if ((x.ded > 0) !== (y.ded > 0)) return x.ded > 0 ? -1 : 1;
+            return String(y.a.date || "").localeCompare(String(x.a.date || ""));
+          });
+          var totDedAll = all.reduce(function (s, x) { return s + (x.ded || 0); }, 0);
+          var showAll = window._apDetailTout === true;
+          var view = showAll ? all : all.filter(function (x) { return x.ded > 0; });
+          if (!view.length && all.length) view = all; /* rien déduit : montrer pourquoi */
           var nom = _apNomDiag(empId);
           var h = '<div style="max-height:72vh;overflow:auto;padding:2px 4px">';
           h += '<div style="font-size:14px;font-weight:800;color:#0f172a">Détail ' + (want === "pret" ? "des prêts" : want === "solde" ? "des soldes" : "des acomptes") + ' — ' + escH(nom) + '</div>';
-          h += '<div style="font-size:11px;color:#64748b;margin:2px 0 10px">Mois : <b>' + escH(fmtMoisAP(mois || "")) + '</b> · ' + rows.length + ' ligne(s)</div>';
+          h += '<div style="font-size:11px;color:#64748b;margin:2px 0 4px">Mois : <b>' + escH(fmtMoisAP(mois || "")) + '</b> · ' +
+            (showAll
+              ? all.length + ' ligne(s) au total · <b style="color:#dc2626">' + fmtF(totDedAll) + '</b> déduit(s) ce mois'
+              : view.filter(function (x) { return x.ded > 0; }).length + ' opération(s) déduite(s) ce mois · <b style="color:#dc2626">' + fmtF(totDedAll) + '</b>') +
+            '</div>';
+          h += '<div style="font-size:10.5px;color:#64748b;margin-bottom:8px">' +
+            (showAll
+              ? 'Historique complet : les lignes non déduites ce mois ne sont pas retenues sur le bulletin.'
+              : 'Seules les opérations qui partent réellement du salaire de ce mois sont listées.') +
+            '</div>';
+          var other = all.length - all.filter(function (x) { return x.ded > 0; }).length;
+          h += '<div style="margin-bottom:8px"><button class="btn btn-sm btn-outline" onclick="window._apDetailTout=' + (showAll ? 'false' : 'true') + ';apDetailLivre(\'' + escH(empId) + '\',\'' + escH(mois) + '\',\'' + escH(want) + '\')" style="font-size:11px">' +
+            (showAll ? '← Revenir aux déductions du mois' : (other > 0 ? 'Afficher aussi les ' + other + ' ligne(s) non déduite(s)' : 'Tout est déduit ce mois')) +
+            '</button></div>';
           h += '<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="background:#0f172a;color:#fff">' +
             '<th style="padding:5px;text-align:left">Date</th><th style="padding:5px;text-align:left">Pièce</th><th style="padding:5px;text-align:left">Type</th>' +
             '<th style="padding:5px;text-align:right">Montant</th><th style="padding:5px;text-align:center">Validé</th><th style="padding:5px;text-align:left">Mois déd.</th>' +
             '<th style="padding:5px;text-align:right">Déduit ce mois</th><th style="padding:5px;text-align:right">Remboursé</th><th style="padding:5px;text-align:right">Reste dû</th><th style="padding:5px;text-align:left">Observation</th></tr></thead><tbody>';
           var totMt = 0, totDed = 0;
-          rows.forEach(function (a, i) {
-            var ded = 0;
-            try { ded = (typeof apDeductionP === "function") ? apDeductionP(a, mois) : 0; } catch (eD) { ded = 0; }
+          view.forEach(function (x, i) {
+            var a = x.a, ded = x.ded || 0;
             totMt += parseFloat(a.montant) || 0;
-            totDed += ded || 0;
+            totDed += ded;
             var remb = parseFloat(a.rembourse) || 0;
             var reste = Math.max(0, (parseFloat(a.montant) || 0) - remb);
             h += '<tr style="background:' + (i % 2 ? '#f8fafc' : '#fff') + '">';
             h += '<td style="padding:4px 5px;border:1px solid #e2e8f0">' + escH(a.date || "-") + '</td>';
             h += '<td style="padding:4px 5px;border:1px solid #e2e8f0;font-weight:700">' + escH(a.numeroPiece || "-") + '</td>';
-            h += '<td style="padding:4px 5px;border:1px solid #e2e8f0">' + escH(a.type === "pret" ? "Prêt" : a.type === "solde" ? "Solde" : "Acompte") + '</td>';
+            h += '<td style="padding:4px 5px;border:1px solid #e2e8f0">' + escH(x.nat === "pret" ? "Prêt" : x.nat === "solde" ? "Solde" : "Acompte") + '</td>';
             h += '<td style="padding:4px 5px;border:1px solid #e2e8f0;text-align:right;font-weight:700">' + fmtF(a.montant) + '</td>';
             h += '<td style="padding:4px 5px;border:1px solid #e2e8f0;text-align:center">' + (a.valide === true ? "Oui" : "Non") + '</td>';
             h += '<td style="padding:4px 5px;border:1px solid #e2e8f0">' + escH(fmtMoisAP(a.moisDeduction || "")) + '</td>';
@@ -27912,7 +27997,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             h += '<td style="padding:4px 5px;border:1px solid #e2e8f0;color:#64748b">' + escH(a.notes || a.motif || "") + '</td>';
             h += '</tr>';
           });
-          if (!rows.length) h += '<tr><td colspan="10" style="padding:16px;text-align:center;color:#94a3b8">Aucune ligne pour ce montant</td></tr>';
+          if (!view.length) h += '<tr><td colspan="10" style="padding:16px;text-align:center;color:#94a3b8">Aucune ligne pour ce montant</td></tr>';
           h += '</tbody><tfoot><tr style="background:#e2e8f0;font-weight:800"><td colspan="3" style="padding:5px;text-align:right">TOTAUX</td><td style="padding:5px;text-align:right">' + fmtF(totMt) + '</td><td colspan="2"></td><td style="padding:5px;text-align:right;color:#dc2626">' + fmtF(totDed) + '</td><td colspan="3"></td></tr></tfoot></table>';
           h += '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-sec" onclick="closePtModal()">Fermer</button></div></div>';
           openPtModal(h, true);
