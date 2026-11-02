@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-02-460';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-02-461';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -2056,6 +2056,66 @@ function mergeObjetPartage(cloud, local) {
   return out;
 }
 
+/* ---- Organigramme personnalis\u00e9 : fusion par horodatage ------------------
+   mdb_orgChart est un objet (pas un tableau). Sans r\u00e8gle d\u00e9di\u00e9e, un poste qui
+   venait de cr\u00e9er la dotation par d\u00e9faut \u00e9crasait le responsable saisi sur un
+   autre poste (m\u00eame id de bo\u00eete, « local gagne »). On compare d'abord
+   updatedAt ; \u00e0 \u00e9galit\u00e9, une copie qui ressemble encore au mod\u00e8le par d\u00e9faut
+   s'efface devant une vraie saisie. */
+function _orgChartTime(o) {
+  if (!o || typeof o !== 'object') return 0;
+  var t = +o.updatedAt || 0;
+  if (!t) { try { t = Date.parse(o.maj || '') || 0; } catch (e) {} }
+  return (isFinite(t) && t > 0) ? t : 0;
+}
+function _orgChartLooksSeed(o) {
+  if (!o || typeof o !== 'object' || !Array.isArray(o.nodes)) return true;
+  try {
+    if (typeof _orgCustomSeed !== 'function') return false;
+    var s = _orgCustomSeed();
+    var sameNodes = JSON.stringify(o.nodes) === JSON.stringify(s.nodes);
+    if (!sameNodes) return false;
+    if (typeof _orgCustomSeedTT === 'function') {
+      var st = _orgCustomSeedTT();
+      if (Array.isArray(o.nodesTT) && JSON.stringify(o.nodesTT) !== JSON.stringify(st.nodes)) return false;
+    }
+    if (o.title && o.title !== s.title) return false;
+    if (o.titleTT && typeof _orgCustomSeedTT === 'function' && o.titleTT !== _orgCustomSeedTT().title) return false;
+    if (o.validePar || o.dateValidation) return false;
+    return true;
+  } catch (e) { return false; }
+}
+function _orgChartMerge(cloud, local) {
+  if (!cloud || typeof cloud !== 'object' || Array.isArray(cloud)) return local;
+  if (!local || typeof local !== 'object' || Array.isArray(local)) return cloud;
+  var ct = _orgChartTime(cloud), lt = _orgChartTime(local);
+  var base;
+  if (lt > ct) base = local;
+  else if (ct > lt) base = cloud;
+  else if (_orgChartLooksSeed(local) && !_orgChartLooksSeed(cloud)) base = cloud;
+  else if (_orgChartLooksSeed(cloud) && !_orgChartLooksSeed(local)) base = local;
+  else base = local;
+  var out = {};
+  for (var k in base) if (Object.prototype.hasOwnProperty.call(base, k)) out[k] = base[k];
+  /* La vue Traitement thermique est ind\u00e9pendante : si la base n'a encore que
+     le mod\u00e8le par d\u00e9faut (ou rien), on r\u00e9cup\u00e8re la vraie saisie de l'autre copie. */
+  if (base === local) {
+    if (!Array.isArray(local.nodesTT) && Array.isArray(cloud.nodesTT)) out.nodesTT = cloud.nodesTT;
+    else if (Array.isArray(local.nodesTT) && _orgTTLooksSeed(local.nodesTT) && Array.isArray(cloud.nodesTT) && !_orgTTLooksSeed(cloud.nodesTT)) out.nodesTT = cloud.nodesTT;
+  } else {
+    if (!Array.isArray(cloud.nodesTT) && Array.isArray(local.nodesTT)) out.nodesTT = local.nodesTT;
+    else if (Array.isArray(cloud.nodesTT) && _orgTTLooksSeed(cloud.nodesTT) && Array.isArray(local.nodesTT) && !_orgTTLooksSeed(local.nodesTT)) out.nodesTT = local.nodesTT;
+  }
+  return out;
+}
+function _orgTTLooksSeed(arr) {
+  if (!Array.isArray(arr)) return true;
+  try {
+    if (typeof _orgCustomSeedTT !== 'function') return false;
+    return JSON.stringify(arr) === JSON.stringify(_orgCustomSeedTT().nodes);
+  } catch (e) { return false; }
+}
+
 /* ==== Fusion production : MEME MOTEUR QUE production.html ====
    L'app principale ecrit aussi mdb_production (Achats de la Gestion
    Commerciale, Couts). Sans base d'empreintes, l'union « local gagnant »
@@ -2675,6 +2735,10 @@ function pushToCloud() {
            lignes cloud sans id ne sont plus abandonnees a la poussee. */
         var mergedArr = _resetAuth ? lv : ((k === 'mdb_employes') ? mergeEmployesPreferRecent(lv, base) : syncUnionTableaux(lv, base));
         data[k] = _syncFiltreTombstonesGenerique(k, mergedArr);
+      } else if (k === 'mdb_orgChart') {
+        /* Horodat\u00e9 : le poste qui a r\u00e9ellement modifi\u00e9 gagne ; un poste rest\u00e9
+           sur le mod\u00e8le par d\u00e9faut ne peut plus \u00e9craser le responsable saisi. */
+        data[k] = _orgChartMerge(cloud[k], lv);
       } else if (lv && typeof lv === 'object' && !Array.isArray(lv) && cloud[k] && typeof cloud[k] === 'object' && !Array.isArray(cloud[k])) {
         /* Objet partage (mdb_paye, mdb_production) : NE JAMAIS renvoyer la copie
            locale en bloc. L'app principale peut etre perimee (module Paie ou
@@ -3980,7 +4044,7 @@ function _syncAppliquerCleExtra(key, val) {
         _dm = _syncFiltreTombstonesGenerique(key, _dm);
         if (JSON.stringify(_dm) !== JSON.stringify(_dl)) { DB.set(key, _dm); return true; }
       } else if (_dl && val && typeof _dl === 'object' && typeof val === 'object' && !Array.isArray(_dl) && !Array.isArray(val)) {
-        var _do = mergeObjetPartage(val, _dl);
+        var _do = (key === 'mdb_orgChart') ? _orgChartMerge(val, _dl) : mergeObjetPartage(val, _dl);
         if (JSON.stringify(_do) !== JSON.stringify(_dl)) { DB.set(key, _do); return true; }
       }
       return false;
@@ -4262,6 +4326,9 @@ window.addEventListener('storage', function(e) {
       try { DB.set(e.key, newData); } finally { window._relaiOnglet = false; }
       if (typeof markDirty === 'function') markDirty(e.key);
       if (currentPage === 'employes' && e.key === 'mdb_employes') renderEmployesPage();
+      if (currentPage === 'organigramme' && e.key === 'mdb_orgChart' && !window._modalOpen) {
+        try { renderOrganigramme(); } catch (eOrgRt) {}
+      }
       if (currentPage === 'tresorerie' && e.key === 'mdb_operationsCaisse') renderTresorerie();
       if (currentPage === 'production' && (e.key === 'mdb_production' || e.key === 'mdb_employes')) {
         if (typeof renderProduction === 'function') renderProduction();
@@ -7708,6 +7775,13 @@ entRef.get().then(function(doc) {
             /* Remplacement autoritaire pas encore envoyé : on garde la copie
                locale, le cloud encore périmé ne doit rien réimposer. */
             continue;
+          } else if (key === 'mdb_orgChart') {
+            /* Organigramme : horodatage, jamais la copie par d\u00e9faut qui gagne. */
+            var _mgOCld = _orgChartMerge(val, localData);
+            var _ocLdStr = JSON.stringify(localData), _ocMgStr = JSON.stringify(_mgOCld), _ocClStr = JSON.stringify(val);
+            if (_ocMgStr !== _ocLdStr) { DB.set(key, _mgOCld); }
+            else if (_ocLdStr !== _ocClStr) { try { markDirty(key); } catch (eOMd) {} }
+            continue;
           } else {
             /* Objet partage : fusion section par section (local gagne en
                conflit) plutot que remplacement en bloc — une copie cloud
@@ -7878,9 +7952,10 @@ function startRealtimeSync(uid) {
             _dm = _syncFiltreTombstonesGenerique(key, _dm);
             if (JSON.stringify(_dm) !== JSON.stringify(_dl)) { DB.set(key, _dm); changed = true; }
           } else if (_dl && data[key] && typeof _dl === 'object' && typeof data[key] === 'object' && !Array.isArray(_dl) && !Array.isArray(data[key])) {
-            var _do = (key === 'mdb_production' && typeof iProdFusionRecue === 'function')
-              ? iProdFusionRecue(data[key], _dl)
-              : mergeObjetPartage(data[key], _dl);
+            var _do = (key === 'mdb_orgChart') ? _orgChartMerge(data[key], _dl)
+              : (key === 'mdb_production' && typeof iProdFusionRecue === 'function')
+                ? iProdFusionRecue(data[key], _dl)
+                : mergeObjetPartage(data[key], _dl);
             if (JSON.stringify(_do) !== JSON.stringify(_dl)) { DB.set(key, _do); changed = true; }
           }
         } catch (eDG) {}
@@ -7944,6 +8019,13 @@ var local = DB.get(key);
            ordre obligatoire ici, sinon le cloud ecrasait le local des que la
            cle n'etait plus sale — c'est ce qui faisait revenir les 8 articles
            de pointage absents de l'Index, pousses par un autre poste. */
+        if (key === 'mdb_orgChart') {
+          var _mgOCrt = _orgChartMerge(data[key], local);
+          var _ocRtStr = JSON.stringify(_mgOCrt), _ocLcStr = JSON.stringify(local), _ocRvStr = JSON.stringify(data[key]);
+          if (_ocRtStr !== _ocLcStr) { DB.set(key, _mgOCrt); changed = true; }
+          else if (_ocLcStr !== _ocRvStr) { try { markDirty(key); } catch (eOMr) {} }
+          continue;
+        }
         if (data[key] && typeof data[key] === 'object' && !Array.isArray(data[key])
             && local && typeof local === 'object' && !Array.isArray(local)) {
           var _mgPartage = (key === 'mdb_production' && typeof iProdFusionRecue === 'function')
@@ -40214,11 +40296,13 @@ function _orgCustomLoad() {
     changed = true;
   }
   if (!d.maj) { d.maj = getToday(); changed = true; }
+  if (!d.updatedAt) d.updatedAt = 0;
   if (changed) { try { DB.set('mdb_orgChart', d); markDirty('mdb_orgChart'); } catch (e2) {} }
   return d;
 }
 function _orgCustomSave(d, keepMaj) {
   if (!keepMaj) d.maj = getToday();
+  d.updatedAt = Date.now();
   try { DB.set('mdb_orgChart', d); markDirty('mdb_orgChart'); } catch (e) {}
   try { _orgHistAuto(d); } catch (e2) {}
 }
@@ -40447,6 +40531,7 @@ function _orgHistEntry(d, emps, label, auto) {
     date: getToday(),
     auto: !!auto,
     label: label || '',
+    statut: '',
     maj: d.maj || getToday(),
     title: d.title || '',
     titleTT: d.titleTT || '',
@@ -40458,13 +40543,15 @@ function _orgHistEntry(d, emps, label, auto) {
     sig: _orgHistSig(d, emps || [])
   };
 }
-function _orgHistPush(d, label, auto) {
+function _orgHistPush(d, label, auto, statut) {
   var list = _orgHistList();
   var emps = _orgHistEmployes();
-  list.push(_orgHistEntry(d, emps, label, auto));
+  var entry = _orgHistEntry(d, emps, label, auto);
+  if (statut) entry.statut = statut;
+  list.push(entry);
   if (list.length > 60) list = list.slice(list.length - 60);
   _orgHistSave(list);
-  return list[list.length - 1];
+  return entry;
 }
 function _orgHistAuto(d) {
   try {
@@ -40517,7 +40604,7 @@ function _orgHistWhen(s) {
 function orgHistoryOpen() {
   _orgEnsureHistory();
   var list = _orgHistList().slice().reverse();
-  var h = '<div style="font-size:12px;color:#64748b;margin-bottom:10px">Chaque ligne = l\u2019organigramme et l\u2019\u00e9quipe en place \u00e0 cette date. Une photo automatique est prise chaque jour o\u00f9 l\u2019organigramme est consult\u00e9 ; \u00ab Enregistrer la version actuelle \u00bb cr\u00e9e une version nomm\u00e9e (ex. apr\u00e8s validation).</div>';
+  var h = '<div style="font-size:12px;color:#64748b;margin-bottom:10px">Chaque ligne = l\u2019organigramme et l\u2019\u00e9quipe en place \u00e0 cette date. La <b>version en vigueur</b> est celle qui sert actuellement ; quand vous validez une mise \u00e0 jour, l\u2019ancienne passe automatiquement en <b>archive</b> et reste consultable ici.</div>';
   h += '<div style="display:flex;flex-direction:column;gap:8px;max-height:58vh;overflow:auto">';
   if (!list.length) h += '<div style="padding:24px;text-align:center;color:#94a3b8">Aucune version enregistr\u00e9e</div>';
   list.forEach(function (s) {
@@ -40526,7 +40613,7 @@ function orgHistoryOpen() {
     h += '<div style="border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;background:#fff">';
     h += '<div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">';
     h += '<div style="width:38px;height:38px;flex-shrink:0;border-radius:10px;background:' + (s.auto ? '#eff6ff' : '#fffbeb') + ';color:' + (s.auto ? '#2563eb' : '#d97706') + ';display:flex;align-items:center;justify-content:center;font-size:18px">' + (s.auto ? '\ud83d\udd04' : '\ud83d\udcbe') + '</div>';
-    h += '<div style="flex:1;min-width:190px"><div style="font-size:12.5px;font-weight:800;color:#0f172a">' + escH(s.label || 'Mise \u00e0 jour automatique') + '</div>';
+    h += '<div style="flex:1;min-width:190px"><div style="font-size:12.5px;font-weight:800;color:#0f172a">' + escH(s.label || 'Mise \u00e0 jour automatique') + ' ' + (s.statut === 'en_vigueur' ? '<span style="font-size:9px;font-weight:800;color:#166534;background:#dcfce7;border:1px solid #86efac;border-radius:999px;padding:1px 7px;margin-left:4px">EN VIGUEUR</span>' : (s.statut === 'archivee' ? '<span style="font-size:9px;font-weight:800;color:#64748b;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:999px;padding:1px 7px;margin-left:4px">ARCHIV\u00c9</span>' : '<span style="font-size:9px;font-weight:700;color:#0369a1;background:#e0f2fe;border:1px solid #bae6fd;border-radius:999px;padding:1px 7px;margin-left:4px">AUTO</span>')) + '</div>';
     h += '<div style="font-size:11px;color:#64748b;margin-top:2px">' + escH(_orgHistWhen(s)) + ' \u00b7 <b>' + nb + '</b> bo\u00eete(s) \u00b7 <b>' + act + '</b> employ\u00e9(s) en place</div>';
     h += '<div style="font-size:10.5px;color:#94a3b8;margin-top:3px">' + escH(s.title || 'Organigramme') + (s.validePar ? ' \u00b7 valid\u00e9 par ' + escH(s.validePar) : '') + (s.dateValidation ? ' le ' + escH(fmtDate(s.dateValidation)) : '') + '</div></div>';
     h += '<div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">';
@@ -40537,16 +40624,28 @@ function orgHistoryOpen() {
     h += '</div></div></div>';
   });
   h += '</div>';
-  var footer = '<button class="btn btn-outline" onclick="closeModal()">Fermer</button><button class="btn btn-primary" onclick="orgHistSnapshot()">\ud83d\udcbe Enregistrer la version actuelle</button>';
+  var footer = '<button class="btn btn-outline" onclick="closeModal()">Fermer</button><button class="btn btn-primary" onclick="orgHistSnapshot()">\u2705 Valider / mettre \u00e0 jour la version</button>';
   openFormModal('\ud83d\udd52 Historique des organigrammes', h, footer, 'xwide');
 }
 function orgHistSnapshot() {
   var d = _orgCustomLoad();
-  var def = 'Organigramme du ' + fmtDate(getToday());
-  var label = window.prompt('Nom de cette version (ex: Organigramme valid\u00e9 du ' + fmtDate(getToday()) + ') :', def);
+  var def = 'Organigramme valid\u00e9 du ' + fmtDate(getToday());
+  var label = window.prompt('Nom de cette version (elle devient la version EN VIGUEUR ; la pr\u00e9c\u00e9dente sera archiv\u00e9e) :', def);
   if (label === null) return;
-  _orgHistPush(d, String(label || '').trim() || def, false);
-  try { toast('Version enregistr\u00e9e', 'success'); } catch (e) {}
+  label = String(label || '').trim() || def;
+  /* L'ancienne version en vigueur passe en archive. */
+  var list = _orgHistList();
+  var changed = false;
+  list.forEach(function (s) { if (s && s.statut === 'en_vigueur') { s.statut = 'archivee'; changed = true; } });
+  if (changed) _orgHistSave(list);
+  if (!d.dateValidation) d.dateValidation = getToday();
+  var e = _orgHistPush(d, label, false, 'en_vigueur');
+  d.versionId = e.id;
+  d.versionLabel = label;
+  d.versionDate = e.date;
+  _orgCustomSave(d, true);
+  try { renderOrganigramme(); } catch (eR) {}
+  try { toast('Version valid\u00e9e et enregistr\u00e9e \u2014 l\u2019ancienne est archiv\u00e9e', 'success'); } catch (eT) {}
   orgHistoryOpen();
 }
 function _orgHistPreviewHTML(s, withCss) {
@@ -40604,9 +40703,13 @@ function orgHistoryPrint(id) {
 function orgHistoryRestore(id) {
   var s = _orgHistFind(id);
   if (!s) return;
-  if (!window.confirm('Restaurer l\u2019organigramme du ' + fmtDate(s.date) + ' ?\nL\u2019organigramme actuel sera d\u2019abord enregistr\u00e9 dans l\u2019historique.')) return;
+  if (!window.confirm('Restaurer l\u2019organigramme du ' + fmtDate(s.date) + ' ?\nL\u2019organigramme actuel sera d\u2019abord enregistr\u00e9 dans l\u2019historique, puis cette version deviendra la version EN VIGUEUR.')) return;
   var d = _orgCustomLoad();
   _orgHistPush(d, 'Avant restauration du ' + fmtDate(getToday()), false);
+  var l1 = _orgHistList();
+  l1.forEach(function (x) { if (x && x.statut === 'en_vigueur') x.statut = 'archivee'; });
+  l1.forEach(function (x) { if (x && String(x.id) === String(id)) x.statut = 'en_vigueur'; });
+  _orgHistSave(l1);
   d.nodes = _orgHistClone(s.nodes || []);
   d.nodesTT = _orgHistClone(s.nodesTT || []);
   if (s.title) d.title = s.title;
@@ -40614,9 +40717,12 @@ function orgHistoryRestore(id) {
   d.validePar = s.validePar || '';
   d.dateValidation = s.dateValidation || '';
   d.maj = s.maj || s.date;
+  d.versionId = s.id;
+  d.versionLabel = s.label || ('Version du ' + fmtDate(s.date));
+  d.versionDate = s.date;
   _orgCustomSave(d, true);
   try { closeModal(); } catch (e) {}
-  try { toast('Organigramme restaur\u00e9', 'success'); } catch (e2) {}
+  try { toast('Organigramme restaur\u00e9 comme version en vigueur', 'success'); } catch (e2) {}
   renderOrganigramme();
 }
 function orgHistoryDelete(id) {
@@ -40627,6 +40733,19 @@ function orgHistoryDelete(id) {
 }
 function _orgCustomCss() {
   return '.org-wrap{font-family:inherit}.oc-board{background:#fff;border:1px solid #e6ebf2;border-radius:14px;padding:24px;min-height:300px;overflow:auto}.oc-head{background:#d9ead3;border:2px solid #6aa84f;border-radius:8px;padding:10px 16px;text-align:center;margin:0 auto 16px;max-width:760px}.oc-head-title{font-size:17px;font-weight:800;color:#274e13;text-decoration:underline}.oc-head-sub{font-size:11.5px;color:#3f6212;font-weight:700;margin-top:3px}.oc-droproot{border:2px dashed #cbd5e1;border-radius:10px;padding:11px;text-align:center;color:#94a3b8;font-size:12px;margin-bottom:16px}.oc-tree,.oc-tree ul{position:relative;padding:0;margin:0;display:flex;justify-content:center;list-style:none;flex-wrap:nowrap}.oc-tree li{list-style:none;position:relative;padding:32px 12px 0;text-align:center}.oc-tree li::before,.oc-tree li::after{content:"";position:absolute;top:0;right:50%;border-top:2px solid #e69138;width:50%;height:30px}.oc-tree li::after{right:auto;left:50%;border-left:2px solid #e69138}.oc-tree li:only-child::after,.oc-tree li:only-child::before{display:none}.oc-tree li:only-child{padding-top:0}.oc-tree li:first-child::before,.oc-tree li:last-child::after{border:0 none}.oc-tree li:last-child::before{border-right:2px solid #e69138;border-radius:0 6px 0 0}.oc-tree li:first-child::after{border-radius:6px 0 0 0}.oc-tree ul ul::before{content:"";position:absolute;top:0;left:50%;border-left:2px solid #e69138;width:0;height:30px}.org-cnode{display:inline-block;background:#fff;border:2px solid #e69138;border-radius:12px;padding:12px 13px;min-width:185px;max-width:240px;box-shadow:0 2px 6px -3px rgba(120,53,15,.35);cursor:grab;position:relative}.org-cnode:active{cursor:grabbing}.org-cnode .oc-title{font-size:13px;font-weight:800;color:#7c2d12;text-transform:uppercase;line-height:1.2}.org-cnode .oc-lines{font-size:11px;color:#334155;margin-top:4px;text-align:left}.org-cnode .oc-person{font-size:13px;font-weight:800;color:#0f172a;margin-top:5px}.org-cnode.oc-green{border-color:#6aa84f;background:#eaf5e3}.org-cnode.oc-green .oc-title{color:#274e13}.org-cnode.oc-blue{border-color:#3b82f6;background:#eff6ff}.org-cnode.oc-blue .oc-title{color:#1e3a8a}.org-cnode.oc-purple{border-color:#8b5cf6;background:#f5f3ff}.org-cnode.oc-purple .oc-title{color:#4c1d95}.org-cnode.oc-gray{border-color:#94a3b8;background:#f8fafc}.org-cnode.oc-gray .oc-title{color:#334155}.org-cnode.oc-orange{border-color:#e69138;background:#fff7ed}.oc-actions{position:absolute;top:-15px;right:-10px;display:flex;gap:4px;background:#fff;border:1px solid #cbd5e1;border-radius:999px;padding:2px 6px;box-shadow:0 3px 8px rgba(15,23,42,.2);z-index:3}.org-cnode:hover .oc-actions{display:flex}.oc-actions button{border:none;background:#f8fafc;cursor:pointer;font-size:15px;width:26px;height:26px;padding:0;line-height:1;border-radius:50%;display:flex;align-items:center;justify-content:center}.oc-actions button:hover{background:#e2e8f0}.oc-foot{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;border-top:2px solid #e69138;margin-top:22px;padding-top:10px}.oc-foot-cell{border:1px solid #e2e8f0;border-radius:8px;padding:7px 9px;background:#fffdf8}.oc-foot-lbl{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:#94a3b8}.oc-foot-val{font-size:12.5px;font-weight:800;color:#0f172a;margin-top:3px;min-height:13px}.oc-foot-sign{height:30px;border-bottom:1px solid #94a3b8;margin-top:4px}@media print{.oc-foot{page-break-inside:avoid}}';
+}
+function _orgChartCurrentDiff() {
+  try {
+    var d = _orgCustomLoad();
+    if (!d.versionId) return false;
+    var list = _orgHistList(), s = null;
+    for (var i = 0; i < list.length; i++) { if (list[i] && String(list[i].id) === String(d.versionId)) { s = list[i]; break; } }
+    if (!s) return false;
+    function sig(o) {
+      return JSON.stringify({ n: o.nodes || [], t: o.nodesTT || [], ti: o.title || '', tit: o.titleTT || '', v: o.validePar || '', dv: o.dateValidation || '' });
+    }
+    return sig(d) !== sig(s);
+  } catch (e) { return false; }
 }
 function renderOrgCustomPage() {
   var d = _orgCustomLoad();
@@ -40641,7 +40760,7 @@ function renderOrgCustomPage() {
     roots.forEach(function (n) { if (s2[n.id]) return; s2[n.id] = true; tree += _orgCustomCard(n, _orgCustomTree(d, n.id, s2, arr), s2); });
   }
   var tit = _orgCustomTitleOf(d);
-  var h = '<div class="section" style="padding:0"><div class="section-header"><h3>\ud83d\udc65 Organigramme</h3><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" onclick="orgCustomEdit()">\uff0b Nouvelle bo\u00eete</button><button class="btn btn-primary" onclick="orgCustomSaveNow()">\ud83d\udcbe Enregistrer</button><button class="btn btn-outline" onclick="orgCustomEditTitle()">\ud83c\udff7\ufe0f Titre & validation</button><button class="btn btn-outline" onclick="orgHistoryOpen()">\ud83d\udd52 Historique</button><button class="btn btn-outline" onclick="orgPrint()">\ud83d\udda8\ufe0f Imprimer</button></div></div>';
+  var h = '<div class="section" style="padding:0"><div class="section-header"><h3>\ud83d\udc65 Organigramme</h3><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-primary" onclick="orgCustomEdit()">\uff0b Nouvelle bo\u00eete</button><button class="btn btn-primary" onclick="orgCustomSaveNow()">\ud83d\udcbe Enregistrer</button><button class="btn btn-outline" onclick="orgHistSnapshot()">\u2705 Valider la version</button><button class="btn btn-outline" onclick="orgCustomEditTitle()">\ud83c\udff7\ufe0f Titre & validation</button><button class="btn btn-outline" onclick="orgHistoryOpen()">\ud83d\udd52 Historique</button><button class="btn btn-outline" onclick="orgPrint()">\ud83d\udda8\ufe0f Imprimer</button></div></div>';
   h += '<div style="display:flex;gap:8px;padding:0 16px 14px;flex-wrap:wrap;align-items:center">';
   h += '<button class="btn btn-outline" onclick="orgSwitchMode(\'auto\')">\ud83d\udc65 Employ\u00e9s (automatique)</button>';
   h += '<button class="btn btn-primary" onclick="orgSwitchMode(\'custom\')">\u270f\ufe0f Personnalis\u00e9 (type Word)</button>';
@@ -40652,7 +40771,7 @@ function renderOrgCustomPage() {
   h += '</div>';
   h += '<div style="padding:0 16px 14px">';
   h += '<div class="oc-board">';
-  h += '<div class="oc-head"><div class="oc-head-title">' + escH(tit) + '</div><div class="oc-head-sub">\u00c0 jour au ' + escH(d.maj ? fmtDate(d.maj) : fmtDate(getToday())) + '</div></div>';
+  h += '<div class="oc-head"><div class="oc-head-title">' + escH(tit) + '</div><div class="oc-head-sub">\u00c0 jour au ' + escH(d.maj ? fmtDate(d.maj) : fmtDate(getToday())) + (d.versionLabel ? ' \u00b7 Version en vigueur : ' + escH(d.versionLabel) : '') + (d.versionId ? (_orgChartCurrentDiff() ? ' \u00b7 \u270f\ufe0f modifications non valid\u00e9es' : ' \u00b7 \u2705 \u00e0 jour') : '') + '</div></div>';
   h += '<div class="oc-droproot" ondragover="orgDragOver(event)" ondrop="orgDrop(event,\'\')">D\u00e9poser ici pour mettre au niveau sup\u00e9rieur</div>';
   h += '<style id="orgCss">' + _orgCustomCss() + '</style>';
   h += '<div class="oc-tree org-wrap" id="orgChartWrap"><ul class="oc-root">' + tree + '</ul></div>';
