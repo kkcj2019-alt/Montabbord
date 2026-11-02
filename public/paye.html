@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-405';
+      window.__APP_VERSION = '2026-11-02-406';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -11087,7 +11087,7 @@ function renderPrimeEmpMatrix() {
         }
         var _pretParOp = {}, _pretParSig = {};
         list.forEach(function (a) {
-          if (!a || a.employee_id !== empId || !_apEstPretLigne(a)) return;
+          if (!a || a.employee_id !== empId || a.type !== "pret") return;
           if (a.caisseOpId) _pretParOp[String(a.caisseOpId)] = true;
           var _s = _apSig(a); if (_s) _pretParSig[_s] = true;
         });
@@ -11112,7 +11112,7 @@ function renderPrimeEmpMatrix() {
         }
         list.forEach(function (a) {
           if (a.employee_id !== empId) return;
-          var _isPretL = _apEstPretLigne(a);
+          var _isPretL = (a.type === "pret");
           if (!_isPretL && ((a.caisseOpId && _pretParOp[String(a.caisseOpId)]) || _pretParSig[_apSig(a)])) return;
           if (!_isPretL && (a.type === "acompte" || a.type === "solde")) {
             var _mdAcc = apMoisPrisEnCompte(a);
@@ -27730,6 +27730,120 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             : 0;
         return Math.min(a.mensualite || 0, apRestP(a));
       }
+      /* ===== CONTRÔLE DES DOUBLONS ACOMPTE / PRÊT =====
+         Une même pièce (même n° + date + montant + employé) ne doit exister
+         qu'une fois. Les anciennes synchros pouvaient laisser une copie
+         « acompte » à côté de la vraie ligne « prêt » : le bulletin comptait
+         alors l'acompte ET le prêt. Ce contrôle liste les cas et permet de
+         corriger en gardant la ligne prêt/solde. */
+      function _apNomDiag(id) {
+        try {
+          var p = (getPersonnel() || []).filter(function (x) { return x && x.id === id; })[0];
+          if (!p) return id || "?";
+          return ((p.matricule ? p.matricule + " - " : "") + (p.nom || "") + " " + (p.prenoms || "")).trim();
+        } catch (e) { return id || "?"; }
+      }
+      function apScanDoublonsAP(raw) {
+        var by = {};
+        (raw || []).forEach(function (a) {
+          if (!a || !a.id) return;
+          var emp = a.employeId || a.employee_id || "";
+          var np = String(a.numeroPiece || "").trim().toUpperCase();
+          var dt = String(a.date || "").slice(0, 10);
+          var mt = Math.round((parseFloat(a.montant) || 0) * 100);
+          var key;
+          if (np && dt && mt) key = emp + "|PC:" + np + "|" + dt + "|" + mt;
+          else if (a.caisseOpId) key = emp + "|OP:" + a.caisseOpId;
+          else key = emp + "|ID:" + a.id;
+          (by[key] = by[key] || []).push(a);
+        });
+        var out = [];
+        Object.keys(by).forEach(function (k) {
+          var rows = by[k];
+          if (rows.length < 2) return;
+          out.push({ key: k, rows: rows, employee_id: rows[0].employeId || rows[0].employee_id || "", montant: parseFloat(rows[0].montant) || 0, piece: rows[0].numeroPiece || "", date: rows[0].date || "" });
+        });
+        return out;
+      }
+      function apOuvrirDoublons() {
+        var raw = getAPList() || [];
+        var groups = apScanDoublonsAP(raw);
+        var suspects = raw.filter(function (a) {
+          if (!a || a.type !== "acompte") return false;
+          return (parseFloat(a.dureeMois) || 0) > 0 || (parseFloat(a.montantMensuel) || 0) > 0 || (Array.isArray(a.echeances) && a.echeances.length > 0);
+        });
+        var h = '<div style="padding:2px 4px;max-height:72vh;overflow:auto">';
+        h += '<div style="font-size:14px;font-weight:800;color:#0f172a;margin-bottom:4px">\ud83d\udd0e Contr\u00f4le des doublons acompte / pr\u00eat</div>';
+        h += '<div style="font-size:11.5px;color:#64748b;margin-bottom:10px">Une m\u00eame pi\u00e8ce ne doit \u00eatre compt\u00e9e qu\u2019une fois. La correction garde la ligne <b>pr\u00eat</b> (ou solde) et supprime la copie <b>acompte</b>.</div>';
+        if (!groups.length) h += '<div style="padding:14px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;color:#166534;font-weight:700">\u2705 Aucun doublon d\u00e9tect\u00e9.</div>';
+        else {
+          h += '<div style="padding:9px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;color:#92400e;font-weight:700;margin-bottom:10px">\u26a0\ufe0f ' + groups.length + ' doublon(s) d\u00e9tect\u00e9(s) \u2014 montant en double : <b>' + fmtF(groups.reduce(function (s, g) { return s + (g.montant || 0); }, 0)) + '</b></div>';
+          groups.forEach(function (g, gi) {
+            h += '<div style="border:1px solid #e2e8f0;border-radius:10px;padding:9px 11px;margin-bottom:8px;background:#fff">';
+            h += '<div style="font-weight:800;font-size:12.5px;color:#0f172a">' + escH(_apNomDiag(g.employee_id)) + '</div>';
+            h += '<div style="font-size:11px;color:#64748b;margin-top:2px">Pi\u00e8ce <b>' + escH(g.piece || "-") + '</b> \u00b7 ' + escH(g.date || "-") + ' \u00b7 ' + fmtF(g.montant) + '</div>';
+            h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">';
+            g.rows.forEach(function (r) {
+              var lab = String(r.type || "acompte").toUpperCase();
+              h += '<span style="font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:999px;background:' + (r.type === "pret" ? "#ede9fe" : "#eff6ff") + ';color:' + (r.type === "pret" ? "#6d28d9" : "#1d4ed8") + ';border:1px solid #e2e8f0">' + escH(lab) + ' \u00b7 ' + fmtF(r.montant) + (r.valide === true ? ' \u00b7 valid\u00e9' : '') + '</span>';
+            });
+            h += '</div></div>';
+          });
+        }
+        if (suspects.length) {
+          h += '<div style="margin-top:14px;font-size:12px;font-weight:800;color:#92400e">\ud83d\udccc Acomptes avec dur\u00e9e / \u00e9ch\u00e9ances (souvent d\u2019anciens pr\u00eats mal typ\u00e9s)</div>';
+          h += '<div style="font-size:11px;color:#64748b;margin-bottom:6px">\u00c0 v\u00e9rifier : s\u2019ils sont vraiment des pr\u00eats, corrigez leur type dans Caisse. Ils ne sont pas modifi\u00e9s automatiquement.</div>';
+          suspects.forEach(function (a) {
+            h += '<div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;padding:5px 8px;border-bottom:1px solid #f1f5f9"><span><b>' + escH(_apNomDiag(a.employeId || a.employee_id)) + '</b> \u00b7 ' + escH(a.numeroPiece || "-") + ' \u00b7 ' + fmtF(a.montant) + '</span><span style="color:#64748b">dur\u00e9e ' + (a.dureeMois || 0) + ' mois</span></div>';
+          });
+        }
+        h += '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;position:sticky;bottom:0;background:#fff;padding-top:8px">';
+        h += '<button class="btn btn-sec" onclick="closePtModal()">Fermer</button>';
+        if (groups.length) h += '<button class="btn btn-primary" onclick="apCorrigerDoublons()">\u2705 Corriger les doublons</button>';
+        h += '</div></div>';
+        try { openPtModal(h, true); } catch (e) { toast("Impossible d\u2019ouvrir le contr\u00f4le", "error"); }
+      }
+      function apCorrigerDoublons() {
+        var raw = getAPList() || [];
+        var groups = apScanDoublonsAP(raw);
+        if (!groups.length) { toast("Aucun doublon \u00e0 corriger", "info"); return; }
+        if (!confirm("Corriger " + groups.length + " doublon(s) ?\nLa copie acompte sera supprim\u00e9e et la ligne pr\u00eat/solde conserv\u00e9e.")) return;
+        var removeIds = {}, idToKeep = {};
+        groups.forEach(function (g) {
+          var keep = null;
+          g.rows.forEach(function (r) { if (!keep && r.type === "pret") keep = r; });
+          if (!keep) g.rows.forEach(function (r) { if (!keep && r.type === "solde") keep = r; });
+          if (!keep) keep = g.rows[0];
+          g.rows.forEach(function (r) {
+            if (String(r.id) === String(keep.id)) return;
+            removeIds[r.id] = true;
+            idToKeep[String(r.id)] = keep.id;
+          });
+        });
+        var list = raw.filter(function (a) { return !removeIds[a.id]; });
+        DB.setMain("mdb_acomptesPrets", list);
+        try { _payeAddTombstones("mdb_acomptesPrets", Object.keys(removeIds)); } catch (eT) {}
+        try {
+          var ops = payeArr("mdb_operationsCaisse") || [], changed = false;
+          ops.forEach(function (o) {
+            if (o && o.acomptePretId && idToKeep[String(o.acomptePretId)]) {
+              o.acomptePretId = idToKeep[String(o.acomptePretId)];
+              o.updatedAt = Date.now();
+              changed = true;
+            }
+          });
+          if (changed) DB.setMain("mdb_operationsCaisse", ops);
+        } catch (eO) {}
+        try {
+          var reg = _apValReg();
+          Object.keys(removeIds).forEach(function (id) { delete reg[String(id)]; });
+          _apValRegSave(reg);
+        } catch (eR) {}
+        try { pushPayeCloud(); } catch (eP) {}
+        try { closePtModal(); } catch (eC) {}
+        toast(Object.keys(removeIds).length + " doublon(s) supprim\u00e9(s)", "success");
+        loadAP();
+      }
       function loadAP() {
         /* Les fonctions partagees apsh* sont definies plus bas dans la page :
            au tout premier rendu elles peuvent manquer (même correctif que
@@ -27758,6 +27872,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
            Doit tourner AVANT getAPList(). */
         try { _payeReconcileAPFromCaisse(); } catch (eRec) {}
         var raw = getAPList() || [];
+        var _dblGroups = apScanDoublonsAP(raw);
         var list = raw.map(normalizeAP);
         var personnel = getPersonnel();
         var empById = {};
@@ -27840,8 +27955,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         var filtered = [];
         for (var i = 0; i < list.length; i++) {
           var a = list[i];
-          if (activeTab === "acompte" && (a.type !== "acompte" || _apEstPretLigne(a))) continue;
-          if (activeTab === "pret" && !_apEstPretLigne(a)) continue;
+          if (activeTab === "acompte" && a.type !== "acompte") continue;
+          if (activeTab === "pret" && a.type !== "pret") continue;
           if (month && !search && !apInMonthP(a, month)) continue;
           /* Un solde verse a toujours un reste 0 : il reste visible (colonne Soldes). */
           /* Filtre « Actifs (non soldés) » : on garde les acomptes (même déjà
@@ -27878,7 +27993,6 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
            mais ce n'en est pas un -> compte et colonne a part. */
         function apEstSoldeP(a) {
           if (!a || a.type === "pret") return false;
-          try { if (_apEstPretLigne(a)) return false; } catch (ePL) {}
           var opS = a.caisseOpId ? opsMap[a.caisseOpId] : null;
           /* Meme SANS piece de caisse liee : apNatureLigne(a, null) retombe sur
              le type de la ligne puis son motif — sinon un solde verse dont le
@@ -27939,10 +28053,16 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             '\';loadAP()">' +
             tabs[tb].l +
             "</div>";
+        tabsHtml += '<div style="margin-left:auto;display:flex;align-items:center;gap:6px"><button class="btn-sec" onclick="apOuvrirDoublons()" style="padding:4px 10px;font-size:.72rem;white-space:nowrap" title="V\u00e9rifier les pi\u00e8ces compt\u00e9es deux fois (acompte + pr\u00eat)">\ud83d\udd0e Doublons' + (_dblGroups.length ? ' <span style="background:#dc2626;color:#fff;border-radius:999px;padding:1px 6px;font-size:9px">' + _dblGroups.length + '</span>' : '') + '</button></div>';
         tabsHtml += "</div>";
         document.getElementById("ap-tabs").innerHTML = tabsHtml;
 
         var out = "";
+        if (_dblGroups.length) {
+          out += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;color:#92400e;font-size:12px;font-weight:700;margin-bottom:10px">' +
+            '<span>\u26a0\ufe0f ' + _dblGroups.length + ' doublon(s) acompte/pr\u00eat d\u00e9tect\u00e9(s) \u2014 montant compt\u00e9 deux fois : ' + fmtF(_dblGroups.reduce(function (s, g) { return s + (g.montant || 0); }, 0)) + '</span>' +
+            '<button class="btn-sec" onclick="apOuvrirDoublons()" style="margin-left:auto;padding:5px 10px;font-size:11px">Voir / corriger</button></div>';
+        }
 
         if (activeTab === "mois") {
           /* Tableau fusionné (même présentation que l'appli principale) :
@@ -28030,7 +28150,7 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             var _estSoldeC = false;
             try { _estSoldeC = (typeof apEstSoldeP === "function") && apEstSoldeP(ca); } catch (eSolC) {}
             if (_estSoldeC) ag.soldes += dedC;
-            else if (_apEstPretLigne(ca)) { ag.prets += dedC; ag.nbPrets++; }
+            else if (ca.type === "pret") { ag.prets += dedC; ag.nbPrets++; }
             else ag.acc += dedC;
             ag.remb += ca.rembourse || 0;
             ag.rest += apRestP(ca);
