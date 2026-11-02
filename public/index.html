@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-02-440';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-02-441';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -7712,6 +7712,34 @@ entRef.get().then(function(doc) {
             DB.set(key, finalVal);
           }
         }
+        /* Rubriques D\u00c9COUP\u00c9ES du cloud (mdb_production.articles,
+           mdb_production.stockFinished, mdb_paye.pointage\u2026) : on les
+           r\u00e9assemble dans l'objet local. Sans \u00e7a, l'index gardait un ancien
+           mdb_production (stock et d\u00e9signations p\u00e9rim\u00e9s) alors que
+           l'Exploitation lisait les sections \u00e0 jour. */
+        try {
+          ['mdb_production', 'mdb_paye'].forEach(function (base) {
+            var patch = null;
+            for (var dk in data) {
+              if (!Object.prototype.hasOwnProperty.call(data, dk)) continue;
+              if (dk.indexOf(base + '.') !== 0) continue;
+              if (!patch) patch = {};
+              patch[dk.slice(base.length + 1)] = data[dk];
+            }
+            if (!patch) return;
+            var cur = DB.get(base);
+            if (!cur || typeof cur !== 'object' || Array.isArray(cur)) cur = {};
+            if (base === 'mdb_paye') {
+              try { cur = mergePayeRecu(cur, patch); } catch (eMP) { for (var kp in patch) cur[kp] = patch[kp]; }
+            } else {
+              var cloudAt = parseFloat(patch.__prodUpdatedAt != null ? patch.__prodUpdatedAt : cur.__prodUpdatedAt) || 0;
+              var localAt = parseFloat(cur.__prodUpdatedAt || 0) || 0;
+              if (localAt && cloudAt && cloudAt < localAt) return;
+              for (var sp in patch) { if (Object.prototype.hasOwnProperty.call(patch, sp)) cur[sp] = patch[sp]; }
+            }
+            DB.set(base, cur);
+          });
+        } catch (eSec) {}
         /* Cles hors DATA_KEYS : sinon poussees mais jamais recues (bandeau
            "locales vides / cloud plein" en boucle). */
         try {
@@ -10830,10 +10858,35 @@ function getProductionStocksReel() {
       var vol = (s && typeof s === 'object') ? (parseFloat(s.volume) || 0) : 0;
       out.push({ categorie: cat, designation: nom, quantite: qte, prixUnitaire: pu, montant: qte * pu, volume: vol });
     }
-    /* Produits finis : UNE ligne par produit (même à 0), comme la fiche
-       Exploitation. Avant, chaque mouvement était une ligne et les produits
-       à 0 n'apparaissaient pas : l'onglet ne reflétait pas l'Exploitation. */
+    /* Produits finis : M\u00caME LISTE QUE L'EXPLOITATION = une ligne par article
+       du catalogue (m\u00eame \u00e0 0), quantit\u00e9 = somme du stock de cet article.
+       Les anciennes lignes orphelines sans article du catalogue (ni code ni
+       d\u00e9signation) ne sont plus affich\u00e9es : c'est ce qui faisait diverger
+       l'index de l'Exploitation. */
     (function () {
+      var _cat = (p.articles || []).filter(function (a) {
+        if (!a) return false;
+        var c = String(a.categorie || a.type || '').toLowerCase();
+        return c === 'finished' || c === 'produit_fini' || c === 'produit fini' || (a.typeArticle || '') === 'produit_fini';
+      });
+      if (_cat.length) {
+        var _qById = {}, _puById = {};
+        (p.stockFinished || []).forEach(function (s) {
+          if (!s) return;
+          var aid = String(s.article_id || '');
+          if (!aid) return;
+          _qById[aid] = (_qById[aid] || 0) + (parseFloat(s.quantite) || 0);
+          if (s.prix_unitaire != null && s.prix_unitaire !== '') _puById[aid] = parseFloat(s.prix_unitaire) || 0;
+        });
+        _cat.forEach(function (a) {
+          var aid = String(a.id);
+          var q = _qById[aid] || 0;
+          var pu = (_puById[aid] != null) ? _puById[aid] : (parseFloat(a.prix_vente || a.prix_revient || 0) || 0);
+          out.push({ categorie: 'Produits finis', designation: ((a.code ? a.code + ' \u2014 ' : '') + (a.designation || a.nom || '')).trim(), quantite: q, prixUnitaire: pu, montant: q * pu, volume: 0 });
+        });
+        return;
+      }
+      /* Repli (catalogue absent) : ancien regroupement */
       var _map = {}, _ord = [];
       (p.stockFinished || []).forEach(function (s) {
         if (!s) return;
@@ -57396,6 +57449,19 @@ function refreshTauxPerteUI() {
 }
 
 function setStkTab(t) { window._stkTab = t; renderStock(); }
+/* Force un rechargement complet depuis le cloud : l'index r\u00e9cup\u00e8re alors
+   les rubriques d\u00e9coup\u00e9es de l'Exploitation (articles, stockFinished\u2026). */
+function _stkSyncExploitation() {
+  try {
+    if (typeof loadCloudData === 'function' && typeof currentUser !== 'undefined' && currentUser && currentUser.id) {
+      window._stkTab = 'reel';
+      try { toast('Synchronisation du stock Exploitation\u2026'); } catch (eT) {}
+      loadCloudData(currentUser.id, function () { try { renderStock(); } catch (eR) {} });
+      return;
+    }
+  } catch (e) {}
+  try { renderStock(); } catch (e2) {}
+}
 function renderStock() {
   if (!window._stkTab) window._stkTab = 'actif';
   var _tab = window._stkTab;
@@ -57407,7 +57473,7 @@ function renderStock() {
   html += '<button onclick="setStkTab(\'actif\')" style="padding:7px 14px;border:none;cursor:pointer;background:' + (_tab === 'actif' ? 'var(--primary)' : 'transparent') + ';color:' + (_tab === 'actif' ? '#fff' : 'var(--gray-600)') + '">Actif \u2014 saisie manuelle</button>';
   html += '<button onclick="setStkTab(\'reel\')" style="padding:7px 14px;border:none;cursor:pointer;background:' + (_tab === 'reel' ? 'var(--primary)' : 'transparent') + ';color:' + (_tab === 'reel' ? '#fff' : 'var(--gray-600)') + '">Stock EXPLOITATION (r\u00e9el)</button>';
   html += '</div>';
-  if (_tab === 'reel') html += '<button class="btn btn-sm btn-outline" onclick="openProductionModule(\'prodStock\')" style="margin-left:auto">Ouvrir Exploitation</button>';
+  if (_tab === 'reel') html += '<span style="margin-left:auto;display:inline-flex;gap:6px;flex-wrap:wrap"><button class="btn btn-sm btn-outline" onclick="_stkSyncExploitation()" title="Recharger le stock depuis le cloud Exploitation">\u21bb Synchroniser Exploitation</button><button class="btn btn-sm btn-outline" onclick="openProductionModule(\'prodStock\')">Ouvrir Exploitation</button></span>';
   else html += '<span style="margin-left:auto;font-size:11px;color:var(--gray-500)">\u00ab Actif \u00bb = saisie manuelle ici ; \u00ab Stock EXPLOITATION \u00bb = le vrai stock du module Exploitation (= bouton R\u00e9el du tableau de bord).</span>';
   html += '</div>';
 
