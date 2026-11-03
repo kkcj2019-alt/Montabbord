@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-03-424';
+      window.__APP_VERSION = '2026-11-03-425';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -34881,7 +34881,7 @@ function panierVerserJour() {
             var st = c.stats || {};
             var row =
               '<tr><td class="lp-mat">' +
-              '<div class="lp-nom">' + escH(_dispNamePp(emp)) + '</div>' +
+              '<div class="lp-nom" style="cursor:pointer;text-decoration:underline dotted" title="Cliquer pour imprimer / PDF le bulletin" onclick="printBulletinComplet(\'' + escJ(emp.id) + '\',\'' + escJ(mois) + '\')">' + escH(_dispNamePp(emp)) + '</div>' +
               '<div class="lp-meta">' + escH(emp.matricule || '') + (emp.type_contrat ? ' \u00b7 ' + escH(emp.type_contrat) : '') + (emp.fonction ? ' \u00b7 ' + escH(emp.fonction) : '') + '</div>' +
               '</td>';
             if (g[0] === "journalier") {
@@ -42166,11 +42166,17 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           /* Ferme le bloc bulletin-page (1 page A4 par employé) */
           h += "</div>";
           /* ===== POINTAGE (si demandé) ===== */
+          var _isRendBul = (emp.rendement === true || /monteur/i.test(String(emp.fonction || "")));
           if ((_parEmp[emp.id] ? _parEmp[emp.id].pt : includePointage) && !isExt) {
             var ptsEmp = getPointageData().filter(function (p) {
               return p.employee_id === emp.id && p && p.date && p.date.indexOf(mois) === 0;
             });
-            if (ptsEmp.length > 0) {
+            if (_isRendBul) {
+              /* Monteur au rendement : détail du 1er au dernier jour du mois,
+                 pointage + montage du jour + montant. Les absences sont
+                 explicitement marquées « Absent ». */
+              try { h += bulPointageRendementHtml(emp, mois); } catch (eRendBul) {}
+            } else if (ptsEmp.length > 0) {
               ptsEmp.sort(function (a, b) { return a.date.localeCompare(b.date); });
               var _tHJb = 0, _tHNb = 0, _joursPb = 0, _fauteSocB = 0;
               ptsEmp.forEach(function (p) {
@@ -42254,6 +42260,92 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         h += "</body></html>";
         w.document.write(h);
         w.document.close();
+      }
+      /* Détail jour par jour pour un monteur au rendement : pointage + montage
+         du jour + montant, du 1er au dernier jour du mois, absences incluses. */
+      function bulPointageRendementHtml(emp, mois) {
+        var y = parseInt(String(mois).slice(0, 4), 10), m = parseInt(String(mois).slice(5, 7), 10);
+        var daysInMonth = new Date(y, m, 0).getDate();
+        var pts = getPointageData().filter(function (p) { return p && p.employee_id === emp.id && String(p.date || "").indexOf(mois) === 0; });
+        var byDate = {};
+        pts.forEach(function (p) { byDate[p.date] = p; });
+        var monts = getPointageMontage().filter(function (p) { return p && p.employee_id === emp.id && String(p.date || "").indexOf(mois) === 0; });
+        var montByDate = {};
+        monts.forEach(function (p) { (montByDate[p.date] = montByDate[p.date] || []).push(p); });
+        var jours = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
+        var toM = function (t) {
+          if (!t) return null;
+          var p = String(t).trim().split(":");
+          if (p.length >= 2) return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+          var h = parseFloat(t);
+          return isNaN(h) ? null : h * 60;
+        };
+        var presence = function (rec) {
+          if (!rec) return 0;
+          var one = function (aT, fT, pT) {
+            var a = toM(aT), f = toM(fT), p1 = toM(pT);
+            var e = (f !== null) ? f : p1;
+            if (a === null || e === null) return 0;
+            if (e <= a) e += 1440;
+            return Math.max(0, (e - a) / 60);
+          };
+          var h = 0;
+          if (rec.j_arrivee || rec.j_fin || rec.j_pause) h += one(rec.j_arrivee, rec.j_fin, rec.j_pause);
+          if (rec.n_arrivee || rec.n_fin || rec.n_pause) h += one(rec.n_arrivee, rec.n_fin, rec.n_pause);
+          return Math.min(8, h);
+        };
+        var html = '<div class="page-break"></div><div class="section-title">DÉTAIL DU POINTAGE ET DU MONTAGE — ' + escH(mois) + '</div>';
+        html += '<div style="font-size:8.5px;color:#475569;margin-bottom:4px">Heures salaire = heures travaillées (0 sur un jour de montage sans heures). Heures présence = arrivée → fin réelle, max 8 h/jour. Montant = rémunération du montage du jour.</div>';
+        html += '<table><thead><tr><th>Date</th><th>Jour</th><th>Arrivée</th><th>Fin 1</th><th>Reprise</th><th>Fin 2</th><th style="text-align:right">H. salaire</th><th style="text-align:right">H. présence</th><th>Montage</th><th style="text-align:right">Montant</th><th>Statut</th></tr></thead><tbody>';
+        var tSal = 0, tPres = 0, tMont = 0;
+        for (var d = 1; d <= daysInMonth; d++) {
+          var dk = mois + "-" + (d < 10 ? "0" : "") + d;
+          var rec = byDate[dk] || null;
+          var ml = montByDate[dk] || [];
+          var dt = new Date(y, m - 1, d);
+          var dow = (dt.getDay() + 6) % 7;
+          var weekend = dow >= 5;
+          var q = 0, mt = 0, artMap = {};
+          ml.forEach(function (p) {
+            var qq = parseFloat(p.quantite) || 0;
+            var px = parseFloat(p.prix);
+            if (!px || px <= 0) { try { px = ptPrixEffectif(p.article_code, emp.id, p.date); } catch (ePx) { px = 0; } }
+            mt += qq * (px || 0);
+            q += qq;
+            artMap[p.article_code] = (artMap[p.article_code] || 0) + qq;
+          });
+          var arts = Object.keys(artMap).map(function (k) { return k + "×" + ptFmtDec(artMap[k]); }).join(", ");
+          var isAbs = rec
+            ? (rec.present === false && !rec.absent_paye && !rec.faute_societe && ml.length === 0)
+            : (!weekend && ml.length === 0);
+          var isAbsPaye = !!(rec && rec.absent_paye);
+          var isFaute = !!(rec && rec.faute_societe);
+          var rg = rec ? (parseFloat(rec.rattrap_gagnees) || 0) : 0;
+          var aRatt = rg > 0 && rec && (rec.pst_a_rattraper === true || rec.paye_sans_travail === true || rec.absent_paye === true || rec.faute_societe === true);
+          var salH = 0, presH = 0;
+          if (rec) {
+            try {
+              var cR = ptCoreCalc({ ja: rec.j_arrivee, jp1: rec.j_pause, jp2: rec.j_reprise, jf: rec.j_fin, na: rec.n_arrivee, np1: rec.n_pause, np2: rec.n_reprise, nf: rec.n_fin, libres: rec.h_libres, isR: true });
+              salH = Math.max(cR.r || 0, parseHeure(rec.h_j_manual) || 0);
+            } catch (eR) { salH = parseHeure(rec.h_j_manual) || 0; }
+            presH = presence(rec);
+            if (aRatt) { salH = Math.max(salH, Math.min(8, rg)); presH = Math.max(presH, Math.min(8, rg)); }
+          } else if (ml.length > 0) {
+            presH = 8; /* montage sans pointage : journée pleine */
+          }
+          if (isAbs || isFaute) { salH = 0; presH = 0; }
+          tSal += salH; tPres += presH; tMont += mt;
+          var statut = isFaute ? "Faute entreprise" : (isAbsPaye ? "Absent payé" : (aRatt ? "À rattraper" : (isAbs ? "Absent" : (weekend && !ml.length ? "Repos" : (ml.length ? "Montage" : "Présent")))));
+          html += '<tr' + (isAbs ? ' style="background:#fef2f2"' : '') + '>';
+          html += '<td>' + escH(dk) + '</td><td>' + jours[dow] + '</td>';
+          html += '<td>' + (rec && rec.j_arrivee ? escH(rec.j_arrivee) : "-") + '</td><td>' + (rec && rec.j_pause ? escH(rec.j_pause) : "-") + '</td><td>' + (rec && rec.j_reprise ? escH(rec.j_reprise) : "-") + '</td><td>' + (rec && rec.j_fin ? escH(rec.j_fin) : "-") + '</td>';
+          html += '<td style="text-align:right">' + (salH > 0 ? ptFmtDec(salH) + "h" : "-") + '</td><td style="text-align:right">' + (presH > 0 ? ptFmtDec(presH) + "h" : "-") + '</td>';
+          html += '<td style="font-size:8px">' + (arts || "-") + '</td><td style="text-align:right;font-weight:700">' + (mt > 0 ? fmt(mt) : "-") + '</td>';
+          html += '<td>' + escH(statut) + '</td></tr>';
+        }
+        html += '<tr class="tot"><td colspan="6" style="text-align:right">TOTAUX</td><td style="text-align:right">' + ptFmtDec(tSal) + 'h</td><td style="text-align:right">' + ptFmtDec(tPres) + 'h</td><td></td><td style="text-align:right">' + fmt(tMont) + '</td><td></td></tr>';
+        html += '</tbody></table>';
+        return html;
       }
       function printBulletinComplet(empId, mois) {
         var emp = getPersonnel().find(function (p) {
