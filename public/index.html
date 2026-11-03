@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-03-484';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-03-485';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -4199,6 +4199,25 @@ var DB = {
   },
   set: function(key, data) {
     var old = DB.get(key);
+    /* mdb_acomptesPrets : ne jamais perdre une validation / un échéancier de
+       prêt quand un autre module réécrit la ligne sans ces champs. */
+    var _apValFix = false;
+    if (key === 'mdb_acomptesPrets' && Array.isArray(old) && Array.isArray(data)) {
+      var _oldApById = {};
+      for (var _oap = 0; _oap < old.length; _oap++) { if (old[_oap] && old[_oap].id) _oldApById[String(old[_oap].id)] = old[_oap]; }
+      var _apFields = ['valide', 'valideLe', 'preleve', 'moisPreleve', 'echeances', 'montantRembourse'];
+      for (var _nap = 0; _nap < data.length; _nap++) {
+        var _nAp = data[_nap];
+        if (!_nAp || !_nAp.id) continue;
+        var _oAp = _oldApById[String(_nAp.id)];
+        if (!_oAp) continue;
+        for (var _fap = 0; _fap < _apFields.length; _fap++) {
+          var _fk = _apFields[_fap];
+          if (_nAp[_fk] === undefined && _oAp[_fk] !== undefined) { _nAp[_fk] = _oAp[_fk]; _apValFix = true; }
+        }
+        if (_nAp.valide === undefined && _oAp.valide === true) { _nAp.valide = true; _apValFix = true; }
+      }
+    }
     _dbMemCache[key] = data;
     if (key === 'mdb_clients') _clientMap = null;
     else if (key === 'mdb_fournisseurs') _fournMap = null;
@@ -7482,6 +7501,30 @@ function mergeArraysPreferCloud(local, cloud) {
   for (i = 0; i < order.length; i++) result.push(map[order[i]]);
   return result;
 }
+/* Acomptes/prêts : une fusion qui garde la copie locale (ou cloud) ne doit
+   jamais effacer un champ « valide » / « preleve » porté par l'autre copie.
+   C'était la cause des acomptes déjà validés qui revenaient « À valider ». */
+function _apFusionnerValidations(merged, local, cloud) {
+  try {
+    if (!Array.isArray(merged)) return merged;
+    var byL = {}, byC = {};
+    (local || []).forEach(function (a) { if (a && a.id) byL[String(a.id)] = a; });
+    (cloud || []).forEach(function (a) { if (a && a.id) byC[String(a.id)] = a; });
+    var fields = ['valide', 'valideLe', 'preleve', 'moisPreleve', 'echeances', 'montantRembourse'];
+    merged.forEach(function (m) {
+      if (!m || !m.id) return;
+      var l = byL[String(m.id)], c = byC[String(m.id)];
+      fields.forEach(function (f) {
+        if (m[f] === undefined) {
+          if (c && c[f] !== undefined) m[f] = c[f];
+          else if (l && l[f] !== undefined) m[f] = l[f];
+        }
+      });
+      if (m.valide === undefined && ((l && l.valide === true) || (c && c.valide === true))) m.valide = true;
+    });
+  } catch (e) {}
+  return merged;
+}
 
 function operationFingerprint(op) {
   return (op.date || '') + '|' + (op.heure || '') + '|' + (op.libelle || '').toLowerCase().trim() + '|' +
@@ -7785,7 +7828,7 @@ entRef.get().then(function(doc) {
              var merged = (_resetAuthLoad && _dirtyKeys[key]) ? localData.slice() : ((key === 'mdb_employes') ? mergeEmployesPreferRecent(localData, val) : mergeArraysPreferCloud(localData, val));
              if ((window.__mdbLocalGagne || 0) !== _lgAv) { window.__mdbAPousser = window.__mdbAPousser || {}; window.__mdbAPousser[key] = true; }
              if (key === 'mdb_operationsCaisse') { merged = removeDeletedOperations(merged); merged = _bloquerResurrectionsOps(merged, val); }
-             if (key === 'mdb_acomptesPrets') merged = stripTombstoned(key, merged);
+             if (key === 'mdb_acomptesPrets') { merged = stripTombstoned(key, merged); merged = _apFusionnerValidations(merged, localData, val); }
              if (key === 'mdb_caisseInventaires') merged = stripTombstoned(key, merged);
              if (key === 'mdb_reglements') merged = stripTombstoned(key, merged);
              if (key === 'mdb_bl') merged = removeByTombstone('mdb_deletedBLs', merged);
@@ -25204,6 +25247,20 @@ function apValiderAcomptesModal(onglet) {
     try { if (_natRowApGlobal(a) === 'solde') return false; } catch (eN) {}
     return apNormMois(a.moisDeduction || '').substring(0, 7) === mois;
   });
+  /* Réapplique les validations mémorisées localement (même registre que la
+     page Paie) : une copie cloud sans le champ « valide » ne doit plus faire
+     réapparaître un acompte déjà validé comme « à valider ». */
+  var _regVal = {};
+  try { _regVal = JSON.parse(localStorage.getItem('mdb_ap_valides') || '{}') || {}; } catch (eRegV) {}
+  var _regChanged = false;
+  duMois.forEach(function (a) {
+    if (a && a.valide === undefined && _regVal[String(a.id)] === true) {
+      a.valide = true; a.valideLe = a.valideLe || ''; a.updatedAt = Date.now(); _regChanged = true;
+    }
+  });
+  if (_regChanged) {
+    try { DB.set('mdb_acomptesPrets', list); _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (eRegS) {}
+  }
   var aFaire = duMois.filter(function (a) { return a.valide !== true; });
   var faits = duMois.filter(function (a) { return a.valide === true; });
   var items = ong === 'faits' ? faits : aFaire;
@@ -25329,13 +25386,23 @@ function _apSetValide(ids) {
   var list = dbArr('mdb_acomptesPrets');
   var changed = false;
   var moisV = _apMoisValidation();
+  var _validesIds = [];
   for (var i = 0; i < list.length; i++) {
     if (ids.indexOf(list[i].id) === -1) continue;
     if (list[i].type === 'pret') { if (_apPretMarquerMois(list[i], moisV, true)) changed = true; continue; }
     if (list[i].type === 'acompte' && list[i].valide !== true) {
       list[i].valide = true; list[i].updatedAt = Date.now(); changed = true;
     }
+    if (list[i].type === 'acompte') _validesIds.push(String(list[i].id));
   }
+  /* Registre local partagé avec la page Paie : une validation ne doit plus
+     disparaître quand une copie cloud plus ancienne réécrit la ligne. */
+  try {
+    var _reg = JSON.parse(localStorage.getItem('mdb_ap_valides') || '{}');
+    if (!_reg || typeof _reg !== 'object' || Array.isArray(_reg)) _reg = {};
+    _validesIds.forEach(function (id) { _reg[id] = true; });
+    localStorage.setItem('mdb_ap_valides', JSON.stringify(_reg));
+  } catch (eReg) {}
   if (changed) { DB.set('mdb_acomptesPrets', list); try{ _dirtyKeys['mdb_acomptesPrets']=true; persistPendingSync(); schedulePush(); }catch(e){} }
   return changed;
 }
@@ -25383,6 +25450,10 @@ function apDeValiderUn(id) {
     }
   }
   if (!found) { toast('Opération introuvable', 'error'); return; }
+  try {
+    var _regD = JSON.parse(localStorage.getItem('mdb_ap_valides') || '{}');
+    if (_regD && typeof _regD === 'object' && !Array.isArray(_regD)) { delete _regD[String(id)]; localStorage.setItem('mdb_ap_valides', JSON.stringify(_regD)); }
+  } catch (eRegD) {}
   DB.set('mdb_acomptesPrets', list);
   try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e) {}
   toast(isPret ? 'Échéance de ' + fmtMois(_apMoisValidation()) + ' remise en attente — non déduite sur le bulletin'
