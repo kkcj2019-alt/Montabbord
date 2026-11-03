@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-03-437';
+      window.__APP_VERSION = '2026-11-03-438';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -9938,18 +9938,41 @@ function renderPrimeEmpMatrix() {
         var d = getManualLines();
         return d[empId + "|" + mois] || [];
       }
-      function addManualLine(empId, mois, label, montant, num) {
+      function addManualLine(empId, mois, label, montant, num, tauxTxt) {
         var d = getManualLines();
         var key = empId + "|" + mois;
         if (!d[key]) d[key] = [];
+        var _tx = (tauxTxt == null ? "" : String(tauxTxt)).trim();
         d[key].push({
           id:
             "ml_" + Date.now() + "_" + Math.random().toString(36).substr(2, 4),
           label: label,
           montant: parseFloat(montant) || 0,
           num: num || "37",
+          taux: _tx,
+          tauxTxt: _tx,
         });
         setManualLines(d);
+      }
+      /* Taux d'une ligne manuelle : « 1 » = montant × 1, « 1,5 » = × 1,5,
+         « 10% » = × 0,10, « 18/22 » = × 18/22. Vide = × 1. */
+      function bulTauxFactor(raw) {
+        var s = String(raw == null ? "" : raw).trim().replace(/\s+/g, "").replace(/,/g, ".");
+        if (!s) return 1;
+        if (s.indexOf("+") >= 0) {
+          return s.split("+").reduce(function (acc, x) { return acc + bulTauxFactor(x); }, 0);
+        }
+        if (s.charAt(s.length - 1) === "%") {
+          var p = parseFloat(s.slice(0, -1));
+          return isNaN(p) ? 1 : p / 100;
+        }
+        var m = s.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/);
+        if (m) {
+          var a = parseFloat(m[1]), b = parseFloat(m[2]);
+          return b ? a / b : 1;
+        }
+        var n = parseFloat(s.replace(/[^0-9.\-].*$/, ""));
+        return isNaN(n) ? 1 : n;
       }
       function addManualLineAllEmps(empIdRef, moisX) {
         var lblA =
@@ -10135,20 +10158,19 @@ function renderPrimeEmpMatrix() {
       function bulAddLine(empId, mois, type) {
         var label = ((document.getElementById('bul-add-label-' + empId) || {}).value || '').trim();
         var mt = parseFloat((document.getElementById('bul-add-mt-' + empId) || {}).value);
-        var taux = parseFloat((document.getElementById('bul-add-taux-' + empId) || {}).value);
+        var tauxRaw = ((document.getElementById('bul-add-taux-' + empId) || {}).value || '').trim();
         var num = ((document.getElementById('bul-add-num-' + empId) || {}).value || '37').trim();
         if (isNaN(mt)) mt = 0;
-        if (isNaN(taux)) taux = 0;
         if (!label) { toast('Libellé requis', 'error'); return; }
         if (type === 'catalogue') {
           var primes = getPrimesSpec();
           var newPrime = { id: DB.id(), type: 'custom', label: label, num: num || '37', montant: mt, employes: [empId] };
-          if (taux > 0) newPrime.taux = taux;
+          if (tauxRaw) { newPrime.taux = tauxRaw; newPrime.tauxFactor = bulTauxFactor(tauxRaw); }
           primes.push(newPrime);
           setPrimesSpec(primes);
           toast('Rubrique catalogue ajoutée', 'success');
         } else {
-          addManualLine(empId, mois, label, mt, num || '37');
+          addManualLine(empId, mois, label, mt, num || '37', tauxRaw);
           toast(mt ? 'Ligne ajoutée au bulletin' : 'Ligne ajoutée (sans montant)', 'success');
         }
         generateBulletin();
@@ -10195,6 +10217,32 @@ function renderPrimeEmpMatrix() {
         try { pushPayeCloud(true); } catch(ePPC){}
         try {
           toast("Valeur enregistrée : " + fmt(v), "success");
+        } catch (eT) {}
+        generateBulletin();
+      }
+      /* Modification du taux / nombre d'une ligne manuelle. « 1 » = ×1,
+         « 10% » = ×0,10, « 1,5 » = ×1,5, « 18/22 » = ×18/22. */
+      function bulUpdateTaux(empId, mois, itemId, type, val) {
+        var raw = String(val == null ? "" : val).trim();
+        if (type === "manual") {
+          var d = getManualLines() || {};
+          var key = empId + "|" + mois;
+          var arr = d[key] || [];
+          for (var i = 0; i < arr.length; i++) {
+            if (arr[i] && arr[i].id === itemId) {
+              arr[i].taux = raw;
+              arr[i].tauxTxt = raw;
+              break;
+            }
+          }
+          d[key] = arr;
+          setManualLines(d);
+        }
+        try { if (window._payrollCache) window._payrollCache = {}; } catch (eC) {}
+        try { pushPayeCloud(true); } catch (eP) {}
+        var f = bulTauxFactor(raw);
+        try {
+          toast('Taux « ' + (raw || "1") + " » enregistré" + (f !== 1 ? " (×" + String(Math.round(f * 10000) / 10000).replace(".", ",") + ")" : ""), "success");
         } catch (eT) {}
         generateBulletin();
       }
@@ -32665,18 +32713,21 @@ if (normalHours > 173.33) {
         var mLines = getManualLinesEmp(emp.id, mois);
         mLines.forEach(function (ml) {
           var mt = parseFloat(ml.montant) || 0;
-          if (mt > 0)
-            items.push({
-              n: ml.num || "37",
-              label: ml.label || "Indemnité",
-              base: mt,
-              taux: "",
-              gain: mt,
-              ret: 0,
-              _editable: true,
-              _type: 'manual',
-              _id: ml.id,
-            });
+          var _txRaw = String((ml.tauxTxt != null ? ml.tauxTxt : (ml.taux != null ? ml.taux : "")) || "").trim();
+          var _txFactor = bulTauxFactor(_txRaw);
+          var _gainM = Math.round(mt * _txFactor);
+          items.push({
+            n: ml.num || "37",
+            label: ml.label || "Indemnité",
+            base: mt,
+            taux: _txRaw || "1",
+            gain: _gainM,
+            ret: 0,
+            _editable: true,
+            _type: 'manual',
+            _id: ml.id,
+            _tauxTxt: _txRaw || "1",
+          });
         });
         /* Rémunération Montage (Production) */
         var montage = calcMontageMensuel(emp.id, mois);
@@ -32710,6 +32761,13 @@ if (normalHours > 173.33) {
             ret: 0,
           });
         ptRemonterMontage(items);
+        /* Les lignes créées à la main restent en bas du tableau (dernières
+           lignes de gains, juste avant le total brut), tout en restant
+           modifiables. */
+        var _manualTail = items.filter(function (it) { return it && it._type === "manual"; });
+        if (_manualTail.length) {
+          items = items.filter(function (it) { return !(it && it._type === "manual"); }).concat(_manualTail);
+        }
         var totalBrut = items.reduce(function (s, i) {
           return s + i.gain;
         }, 0);
@@ -34080,6 +34138,12 @@ function panierVerserJour() {
         rows.push({ label: "Congés", base: "", baseVal: ovrVal("conges", cgG), taux: "", gain: cgG, ret: 0, edit: "conges" });
         var auG = gainOf("Autres Primes Fixes");
         rows.push({ label: "Autres Primes Fixes", base: "", baseVal: ovrVal("autres", auG), taux: "", gain: auG, ret: 0, edit: "autres" });
+        /* Lignes manuelles : visibles au bas du tableau, modifiables (base et taux). */
+        (getManualLinesEmp(emp.id, mois) || []).forEach(function (ml) {
+          var mtM = parseFloat(ml.montant) || 0;
+          var txM = String((ml.tauxTxt != null ? ml.tauxTxt : (ml.taux != null ? ml.taux : "")) || "").trim();
+          rows.push({ label: ml.label || "Indemnité", base: fmt(mtM), baseVal: mtM, taux: txM || "1", gain: Math.round(mtM * bulTauxFactor(txM)), ret: 0, edit: "manual", manualId: ml.id });
+        });
         if (ap.acomptes > 0) rows.push({ label: "Acompte", base: fmt(ap.acomptes), baseVal: 0, taux: "1", gain: 0, ret: ap.acomptes, edit: null });
         if (ap.prets > 0) rows.push({ label: "Prêt", base: fmt(ap.prets), baseVal: 0, taux: "1", gain: 0, ret: ap.prets, edit: null });
         /* Colonne Taux jamais vide : transport = jours de présence, salissure =
@@ -34225,6 +34289,10 @@ function panierVerserJour() {
             var tauxPatStr = i.tauxPat || "";
             var retPatStr = i.retPat > 0 ? fmt(i.retPat) : "";
             var gainCell = "";
+            /* Taux affiché : jamais vide pour un montant fixe (1 = ×1).
+               Pour une ligne manuelle, le taux est modifiable librement
+               (« 1 », « 1,5 », « 10% », « 18/22 »). */
+            var tauxCellHtml = tdC(escH(i.taux || (i.gain > 0 ? "1" : "")));
             /* Saisie au niveau BASE (comme le tableau simple) : le gain affiché
                est recalculé (base x taux), non saisissable. La base tapée reste
                telle quelle à l'écran. */
@@ -34235,6 +34303,9 @@ function panierVerserJour() {
                  chiffres tombent exactement sur la même colonne (le ✕ est posé
                  à gauche, hors du flux du nombre). */
               baseCellHtml = '<td style="' + B + 'padding:1px 2px;text-align:right;' + bg + '"><input type="number" value="' + (i.base || 0) + '" min="0" step="500" style="width:100%;box-sizing:border-box;padding:2px 3px;text-align:right;font:inherit;border:1px dashed #94a3b8;border-radius:3px;background:#fff" onchange="bulUpdateBase(\'' + empId + '\',\'' + mois + '\',\'' + i._id + '\',\'' + i._type + '\',this.value)"></td>';
+              if (i._type === "manual") {
+                tauxCellHtml = '<td style="' + B + 'padding:1px 2px;text-align:center;' + bg + '"><input type="text" value="' + escH(i.taux || "1") + '" placeholder="1 · 10% · 1,5" style="width:100%;box-sizing:border-box;padding:2px 3px;text-align:center;font:inherit;border:1px dashed #94a3b8;border-radius:3px;background:#fff" onchange="bulUpdateTaux(\'' + empId + '\',\'' + mois + '\',\'' + i._id + '\',\'' + i._type + '\',this.value)"></td>';
+              }
               gainCell = '<td style="' + B + P + 'text-align:right;position:relative">' + (i.gain > 0 ? fmt(i.gain) : "-") + '<button class="btn btn-red no-print" style="position:absolute;left:2px;top:50%;transform:translateY(-50%);padding:0 4px;font-size:.55rem;line-height:1.4;border:none;color:#fff;opacity:.55" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.55" title="Supprimer cette ligne" onclick="bulRemoveLine(\'' + empId + '\',\'' + mois + '\',\'' + i._id + '\',\'' + i._type + '\')">✕</button></td>';
             } else {
               gainCell = tdR(i.gain > 0 ? fmt(i.gain) : "");
@@ -34244,7 +34315,7 @@ function panierVerserJour() {
               tdC(escH(i.n || "")) +
               tdL(escH(i.label)) +
               baseCellHtml +
-              tdC(escH(i.taux || "")) +
+              tauxCellHtml +
               gainCell +
               tdR(retStr) +
               tdC(escH(tauxPatStr)) +
@@ -34266,6 +34337,8 @@ function panierVerserJour() {
               baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdatePrimeProd(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
             } else if (r.edit === "gratif") {
               baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateGratif(\'' + empId + '\',\'' + mois + '\',this.value)"></td>';
+            } else if (r.edit === "manual") {
+              baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="500" style="width:100px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateGain(\'' + empId + '\',\'' + mois + '\',\'' + escH(r.manualId || "") + '\',\'manual\',this.value)"></td>';
             } else if (r.edit) {
               baseCell = '<td style="text-align:right;padding:2px 4px"><input type="number" value="' + (r.baseVal || 0) + '" min="0" step="1" style="width:80px;padding:2px 4px;text-align:right;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateJovr(\'' + empId + '\',\'' + mois + '\',\'' + r.edit + '\',this.value)"></td>';
             } else {
@@ -34282,11 +34355,15 @@ function panierVerserJour() {
             } else {
               labelCell = tdL(escH(r.label));
             }
+            var rateCell = tdC(escH(r.edit === "prod" ? "1" : (r.taux || (r.gain > 0 ? "1" : ""))));
+            if (r.edit === "manual") {
+              rateCell = '<td style="text-align:center;padding:2px 4px"><input type="text" value="' + escH(r.taux || "1") + '" placeholder="1 · 10% · 1,5" style="width:72px;padding:2px 4px;text-align:center;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px" onchange="bulUpdateTaux(\'' + empId + '\',\'' + mois + '\',\'' + escH(r.manualId || "") + '\',\'manual\',this.value)"></td>';
+            }
             return (
               "<tr>" +
               labelCell +
               baseCell +
-              tdC(escH(r.edit === "prod" ? "1" : (r.taux || ""))) +
+              rateCell +
               tdR(r.gain > 0 ? fmt(r.gain) : "") +
               tdR(r.ret > 0 ? fmt(r.ret) : "") +
               "</tr>"
@@ -34615,11 +34692,12 @@ function panierVerserJour() {
             h += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:flex-end">';
             h += '<div style="flex:2;min-width:140px"><label style="font-size:.65rem;font-weight:700;color:#64748b">Libellé</label><input type="text" id="bul-add-label-' + empId + '" placeholder="Ex: Prime de risque" style="width:100%;padding:3px 5px;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px"></div>';
             h += '<div style="flex:1;min-width:80px"><label style="font-size:.65rem;font-weight:700;color:#64748b">Montant (FCFA)</label><input type="number" id="bul-add-mt-' + empId + '" min="0" step="500" placeholder="0" style="width:100%;padding:3px 5px;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px"></div>';
-            h += '<div style="flex:1;min-width:60px"><label style="font-size:.65rem;font-weight:700;color:#64748b">Taux %</label><input type="number" id="bul-add-taux-' + empId + '" min="0" max="100" step="0.1" placeholder="—" style="width:100%;padding:3px 5px;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px"></div>';
+            h += '<div style="flex:1.2;min-width:96px"><label style="font-size:.65rem;font-weight:700;color:#64748b">Taux / Nbre</label><input type="text" id="bul-add-taux-' + empId + '" placeholder="1 · 10% · 1,5" title="1 = montant ×1 ; 10% = 10 % ; 1,5 = ×1,5 ; 18/22 = prorata" style="width:100%;padding:3px 5px;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px"></div>';
             h += '<div style="max-width:55px"><label style="font-size:.65rem;font-weight:700;color:#64748b">N°</label><input type="text" id="bul-add-num-' + empId + '" value="37" style="width:100%;padding:3px 5px;font-size:.72rem;border:1px solid #d1d5db;border-radius:4px"></div>';
             h += '<button class="btn btn-green" style="padding:3px 8px;font-size:.7rem;white-space:nowrap" onclick="bulAddLine(\'' + empId + '\',\'' + mois + '\',\'manual\')">+ Ligne</button>';
             h += '<button class="btn btn-primary" style="padding:3px 8px;font-size:.7rem;white-space:nowrap" onclick="bulAddLine(\'' + empId + '\',\'' + mois + '\',\'catalogue\')">+ Catalogue</button>';
-            h += '</div></div>';
+            h += '</div>';
+            h += '<div style="font-size:.62rem;color:#64748b;margin-top:4px">Taux : <b>1</b> = montant × 1 · <b>10%</b> = 10 % · <b>1,5</b> = × 1,5 · <b>18/22</b> = prorata. Vide = 1.</div></div>';
           }
 
           // --- Impression : un seul bouton (assistant) ---
@@ -42690,7 +42768,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           r += "<td>" + escH(i.n || "") + "</td>";
           r += "<td>" + escH(i.label) + "</td>";
           r += '<td style="text-align:right">' + baseStr + "</td>";
-          r += '<td style="text-align:center">' + escH(i.taux || "") + "</td>";
+          r += '<td style="text-align:center">' + escH(i.taux || (i.gain > 0 ? "1" : "")) + "</td>";
           r +=
             '<td style="text-align:right;font-weight:700">' + gainStr + "</td>";
           r +=
@@ -42716,7 +42794,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             if ((r.gain || 0) <= 0 && (r.ret || 0) === 0) return; /* lignes à 0 exclues */
             var bP = r.edit ? (r.baseVal > 0 ? fmt(r.baseVal) : "") : (r.base || "");
             var lblP = r.edit === "tauxJ" && r.base ? escH(r.label) + ' <span style="font-size:.7rem;color:#94a3b8">' + escH(r.base) + '</span>' : escH(r.label);
-            rowsP += "<tr><td>" + lblP + "</td><td style='text-align:right'>" + bP + "</td><td style='text-align:center'>" + escH(r.taux || "") + "</td><td style='text-align:right;font-weight:700'>" + (r.gain > 0 ? fmt(r.gain) : "") + "</td><td style='text-align:right;font-weight:700;color:#dc2626'>" + (r.ret > 0 ? fmt(r.ret) : "") + "</td></tr>";
+            rowsP += "<tr><td>" + lblP + "</td><td style='text-align:right'>" + bP + "</td><td style='text-align:center'>" + escH(r.taux || (r.gain > 0 ? "1" : "")) + "</td><td style='text-align:right;font-weight:700'>" + (r.gain > 0 ? fmt(r.gain) : "") + "</td><td style='text-align:right;font-weight:700;color:#dc2626'>" + (r.ret > 0 ? fmt(r.ret) : "") + "</td></tr>";
             totGainP += (r.gain > 0 ? r.gain : 0);
             totRetP += (r.ret > 0 ? r.ret : 0);
           });
