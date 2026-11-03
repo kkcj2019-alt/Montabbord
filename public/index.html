@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-03-475';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-03-476';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -41860,10 +41860,10 @@ function _gsSrc(cat) {
       case 'bls': L = getBLs(); break;
       case 'bcf': L = (typeof getBonsCommandeFournisseurs === 'function') ? getBonsCommandeFournisseurs() : []; break;
       case 'previsions': L = getPrevisions(); break;
-      case 'ops': L = getOperationsCaisse(); break;
-      case 'ap': L = dbArr('mdb_acomptesPrets'); break;
-      case 'banque': L = dbArr('mdb_banqueOperations'); break;
-      case 'immo': L = dbArr('mdb_immobilisations'); break;
+      case 'ops': L = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_operationsCaisse', getOperationsCaisse()) : getOperationsCaisse(); break;
+      case 'ap': L = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_acomptesPrets', dbArr('mdb_acomptesPrets')) : dbArr('mdb_acomptesPrets'); break;
+      case 'banque': L = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_banqueOperations', dbArr('mdb_banqueOperations')) : dbArr('mdb_banqueOperations'); break;
+      case 'immo': L = (typeof stripTombstoned === 'function') ? stripTombstoned('mdb_immobilisations', dbArr('mdb_immobilisations')) : dbArr('mdb_immobilisations'); break;
       case 'taches': L = getTaches(); break;
       case 'fournisseurs': L = getFournisseurs(); break;
     }
@@ -42215,6 +42215,11 @@ var _gsAllQuery = '';
 function globalGoAll() { closeGlobalSearch(); var inp = document.getElementById('globalSearch'); _gsAllQuery = inp ? inp.value : ''; renderGlobalSearchAll(); }
 function renderGlobalSearchAll() {
   var q = _gsAllQuery || ''; var ql = q.toLowerCase();
+  /* La page de résultats est une VRAIE page : elle doit rester ouverte même
+     quand la synchro temps réel redessine (avant, currentPage restait sur
+     l'ancienne page et le moindre rafraîchissement refermait les résultats). */
+  currentPage = 'searchResults';
+  try { window._gsAllQuery = q; } catch (eGQ) {}
   /* Meme index montants que la liste deroulante : sans cela, taper « 960 »
      trouvait la piece dans le menu mais la page « Recherche globale »
      repondait « Aucun resultat ». */
@@ -50961,6 +50966,54 @@ function dbxSupprimerCoches() {
       setTimeout(clean20k, 13000);
     }
   } catch (e) { setTimeout(clean20k, 13000); }
+})();
+/* Nettoyage global des fantômes : enregistrements supprimés dans l'UI mais
+   restés dans les tableaux (ou copies recréées par une synchro). Les lignes
+   AP 3 000 000 KKCJ2611005 et les deux pièces 3 000 000 déjà supprimées par
+   l'utilisateur sont retirées avec pierres tombales. */
+(function () {
+  function cleanGhosts() {
+    try {
+      if (typeof currentUser === "undefined" || !currentUser || !currentUser.id) return;
+      if ((typeof _loadingCloud !== "undefined" && _loadingCloud) || (typeof _receivingSnapshot !== "undefined" && _receivingSnapshot)) return;
+      var ap = dbArr("mdb_acomptesPrets") || [];
+      var ops = getOperationsCaisse() || [];
+      var delAp = {}, delOp = {}, nb = 0;
+      ap.forEach(function (a) {
+        if (!a || !a.id) return;
+        var p = String(a.numeroPiece || "").toUpperCase();
+        if (p === "KKCJ2611005" && Math.abs(Number(a.montant) || 0) === 3000000) { delAp[a.id] = true; nb++; return; }
+        /* Orphelin de caisse : ni pièce ni opération liée. */
+        if (a.provenance === "caisse" && !a.caisseOpId && !a.numeroPiece) { delAp[a.id] = true; nb++; }
+      });
+      ops.forEach(function (o) {
+        if (!o || !o.id) return;
+        var p = String(o.numeroPiece || "").toUpperCase();
+        if ((p === "KKCJ2609148" || p === "AWR2610050") && Math.abs(Number(o.montant) || 0) === 3000000) { delOp[o.id] = true; nb++; }
+      });
+      if (!nb) return;
+      if (Object.keys(delAp).length) {
+        try { addTombstones("mdb_acomptesPrets", Object.keys(delAp)); } catch (eTA) {}
+        DB.set("mdb_acomptesPrets", ap.filter(function (a) { return a && !delAp[a.id]; }));
+        try { markDirty("mdb_acomptesPrets"); } catch (eDA) {}
+      }
+      if (Object.keys(delOp).length) {
+        try { addTombstones("mdb_operationsCaisse", Object.keys(delOp)); } catch (eTO) {}
+        DB.set("mdb_operationsCaisse", ops.filter(function (o) { return o && !delOp[o.id]; }));
+        try { markDirty("mdb_operationsCaisse"); } catch (eDO) {}
+      }
+      try { if (typeof schedulePush === "function") schedulePush(); } catch (eP) {}
+      try { console.log("[Nettoyage] " + nb + " fantôme(s) supprimé(s)"); } catch (eL) {}
+      try { toast(nb + " opération(s) fantôme(s) nettoyée(s)", "success"); } catch (eT) {}
+    } catch (e) { try { console.warn("[Nettoyage fantômes]", e); } catch (e2) {} }
+  }
+  window.mdbNettoyerFantomes = cleanGhosts;
+  try {
+    if (!sessionStorage.getItem("mdb_clean_ghosts_v1")) {
+      sessionStorage.setItem("mdb_clean_ghosts_v1", "1");
+      setTimeout(cleanGhosts, 14000);
+    }
+  } catch (e) { setTimeout(cleanGhosts, 14000); }
 })();
 /* Correction demandée le 31/10/2026 : 9 prêts scolaires saisis 2 fois le 29/10
    (pièces KKCJ2609207 à KKCJ2609215). On garde les prêts d'origine (avec
