@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-02-423';
+      window.__APP_VERSION = '2026-11-03-424';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -21110,6 +21110,61 @@ html +=
       /* ==================== SYSTÈME MODAL ==================== */
       var ptHideStandard = false;
 
+      /* ===== BROUILLON AUTO DES MODALES PAIE =====
+         Si on clique à côté et que la modale se ferme, ce qui était saisi est
+         conservé et restauré à la réouverture (même jour / même écran). */
+      var _ptDraftTimer = null;
+      function _ptDraftKey(content) {
+        var txt = String(content.textContent || "").replace(/\s+/g, " ").trim().slice(0, 140);
+        var ids = [];
+        try { content.querySelectorAll("input[id],select[id],textarea[id]").forEach(function (el) { ids.push(el.id); }); } catch (e) {}
+        return txt + "|" + ids.sort().join(",");
+      }
+      function _ptDraftBindRestore(content) {
+        if (!content) return;
+        var key = _ptDraftKey(content);
+        content.setAttribute("data-draft-key", key);
+        if (!content._ptDraftBound) {
+          content._ptDraftBound = true;
+          var save = function () {
+            clearTimeout(_ptDraftTimer);
+            _ptDraftTimer = setTimeout(function () {
+              var k = content.getAttribute("data-draft-key") || "";
+              if (!k) return;
+              var v = {};
+              content.querySelectorAll("input[id],select[id],textarea[id]").forEach(function (el) {
+                if (el.type === "password" || el.disabled) return;
+                v[el.id] = (el.type === "checkbox" || el.type === "radio") ? !!el.checked : el.value;
+              });
+              try { localStorage.setItem("mdb_pt_modal_draft", JSON.stringify({ k: k, t: Date.now(), v: v })); } catch (e) {}
+            }, 250);
+          };
+          content.addEventListener("input", save);
+          content.addEventListener("change", save);
+          var modal = document.getElementById("pt-modal");
+          if (modal) modal.addEventListener("click", function (e) {
+            var b = e.target && e.target.closest ? e.target.closest("button") : null;
+            if (!b) return;
+            var sig = (b.getAttribute("onclick") || "") + " " + (b.textContent || "");
+            if (/save|enregistr|valider|cr\u00e9er|ajouter|confirmer|calculer/i.test(sig)) {
+              try { localStorage.removeItem("mdb_pt_modal_draft"); } catch (e) {}
+            }
+          });
+        }
+        try {
+          var d = JSON.parse(localStorage.getItem("mdb_pt_modal_draft") || "null");
+          if (!d || d.k !== key || (Date.now() - (d.t || 0)) > 120000) return;
+          Object.keys(d.v || {}).forEach(function (id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            if (el.type === "checkbox" || el.type === "radio") el.checked = !!d.v[id];
+            else el.value = d.v[id];
+            try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (eI) {}
+            try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (eC) {}
+          });
+          try { toast("Brouillon restauré", "info"); } catch (eT) {}
+        } catch (e) {}
+      }
       function openPtModal(html, wide, xl) {
         var overlay = document.getElementById("pt-modal-overlay");
         var content = document.getElementById("pt-modal-content");
@@ -21124,6 +21179,7 @@ html +=
         if (overlay && content) {
           content.innerHTML = html;
           overlay.style.display = "block";
+          try { _ptDraftBindRestore(content); } catch (eDraft) {}
         }
       }
       /* Une fenêtre modale est-elle ouverte ? Sert à reporter les re-rendus
@@ -21797,17 +21853,36 @@ var pstOn = !!(rec && (rec.paye_sans_travail === true || rec.absent_paye === tru
         var leg = window._peLegacy || {j:0, n:0};
         if (!isR && !typed) { c.j = leg.j; c.n = leg.n; }
         if (isR) {
-          /* Rendement : les heures d'arrivée / départ restent visibles (présence),
-             mais seules les heures libres (+) s'ajoutent au rendement. */
-          var pres = "";
-          try {
-            var cP = ptCoreCalc({ ja:g("pe-ja"), jp1:g("pe-jp1"), jp2:g("pe-jp2"), jf:g("pe-jf"), na:g("pe-na"), np1:g("pe-np1"), np2:g("pe-np2"), nf:g("pe-nf"), libres:0, isR:false });
-            var hP = (cP.j || 0) + (cP.n || 0);
-            if (g("pe-ja") && g("pe-jf")) pres = ' <span style="font-weight:600;font-size:.75rem;color:#475569">· présent de ' + g("pe-ja") + ' à ' + g("pe-jf") + (hP > 0 ? ' (' + ptFmtHM(hP) + ')' : '') + '</span>';
-          } catch (eP) {}
-          sum.innerHTML = (c.r > 0
-            ? '<span style="color:#ea580c">' + ptFmtR(c.r) + '</span> <span style="font-weight:400;font-size:.75rem;color:#666">(rendement + heures libres)</span>'
-            : '<span style="color:#ea580c">RENDEMENT</span> <span style="font-weight:400;font-size:.75rem;color:#666">(payé au montage, aucune heure en plus)</span>') + pres;
+          /* Rendement : afficher clairement les DEUX taux.
+             - salaire = heures des créneaux travaillés (0 si montage seul) ;
+             - non salaire / présence = intervalle arrivée → fin réelle (max 8 h). */
+          var _toM = function (t) {
+            if (!t) return null;
+            var p = String(t).trim().split(":");
+            if (p.length >= 2) return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0);
+            var h = parseFloat(t);
+            return isNaN(h) ? null : h * 60;
+          };
+          var _presMin = function (aT, fT, pT) {
+            var a = _toM(aT), f = _toM(fT), p1 = _toM(pT);
+            var e = (f !== null) ? f : p1;
+            if (a === null || e === null) return 0;
+            if (e <= a) e += 1440;
+            return Math.max(0, (e - a) / 60);
+          };
+          var _hasAnyTime = g("pe-ja") || g("pe-jp1") || g("pe-jp2") || g("pe-jf") ||
+                            g("pe-na") || g("pe-np1") || g("pe-np2") || g("pe-nf");
+          var _pJ = _presMin(g("pe-ja"), g("pe-jf"), g("pe-jp1"));
+          var _pN = _presMin(g("pe-na"), g("pe-nf"), g("pe-np1"));
+          var _presTot = _hasAnyTime ? Math.min(8, _pJ + _pN) : 8;
+          var _salH = c.r || 0;
+          sum.innerHTML =
+            '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">' +
+              '<span><b style="color:#0f172a">Heures salaire :</b> ' +
+                (_salH > 0 ? ptFmtDec(_salH) + 'h (' + ptFmtHM(_salH) + ')' : '0 h <span style="font-weight:400;font-size:.72rem;color:#666">(payé au montage)</span>') +
+              '</span>' +
+              '<span><b style="color:#0369a1">Heures non salaire / présence :</b> ' + ptFmtDec(_presTot) + 'h (' + ptFmtHM(_presTot) + ')</span>' +
+            '</div>';
         } else {
           sum.innerHTML = 'Jour: <strong>' + ptFmtDec(c.j) + 'h (' + ptFmtHM(c.j) + ')</strong> &nbsp; Nuit: <strong style="color:#7c3aed">' + ptFmtDec(c.n) + 'h (' + ptFmtHM(c.n) + ')</strong> &nbsp; Total: <strong>' + ptFmtDec((c.j + c.n)) + 'h (' + ptFmtHM(c.j + c.n) + ')</strong>' +
             ((!typed && (leg.j + leg.n > 0)) ? ' <span style="font-weight:400;font-size:.72rem;color:#b45309">(heures existantes, sans créneaux)</span>' : '');
@@ -31853,15 +31928,20 @@ if (normalHours > 173.33) {
             var h = parseFloat(t);
             return isNaN(h) ? null : h * 60;
           };
-          var a = toM(rec.j_arrivee);
-          var f = toM(rec.j_fin);
-          var p1 = toM(rec.j_pause);
-          /* Heure de fin réelle : départ final s'il existe, sinon 1re fin. */
-          var e = (f !== null) ? f : p1;
-          if (a === null || e === null) return 8;
-          if (e <= a) e += 1440;
-          var h = (e - a) / 60;
-          if (h < 0) h = 0;
+          var one = function (aT, fT, pT) {
+            var a = toM(aT), f = toM(fT), p1 = toM(pT);
+            /* Heure de fin réelle : départ final s'il existe, sinon 1re fin. */
+            var e = (f !== null) ? f : p1;
+            if (a === null || e === null) return 0;
+            if (e <= a) e += 1440;
+            return Math.max(0, (e - a) / 60);
+          };
+          var hasDay = !!(rec.j_arrivee || rec.j_fin || rec.j_pause);
+          var hasNight = !!(rec.n_arrivee || rec.n_fin || rec.n_pause);
+          if (!hasDay && !hasNight) return 8;
+          var h = 0;
+          if (hasDay) h += one(rec.j_arrivee, rec.j_fin, rec.j_pause);
+          if (hasNight) h += one(rec.n_arrivee, rec.n_fin, rec.n_pause);
           return Math.min(8, h);
         }
         for (var d2 = 1; d2 <= daysInMonth; d2++) {
