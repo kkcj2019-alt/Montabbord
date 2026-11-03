@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-03-488';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-03-489';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -11789,10 +11789,42 @@ function _sigScore(aData, bData) {
         if (!a || !b) return resolve(0);
         try {
           var W = 80, H = 40;
+          /* Normalisation : on recadre chaque signature sur son encre avant
+             de comparer. Sans cela, une signature identique mais dessinee un
+             peu plus a gauche ou plus petite obtenait un score ridicule. */
           function gray(img) {
+            var nw = img.naturalWidth || img.width || 1;
+            var nh = img.naturalHeight || img.height || 1;
+            var src = document.createElement('canvas');
+            src.width = nw; src.height = nh;
+            var sx = src.getContext('2d');
+            sx.fillStyle = '#fff'; sx.fillRect(0, 0, nw, nh);
+            sx.drawImage(img, 0, 0, nw, nh);
+            var sd = sx.getImageData(0, 0, nw, nh).data;
+            var minX = nw, minY = nh, maxX = -1, maxY = -1;
+            for (var py = 0; py < nh; py++) {
+              for (var px = 0; px < nw; px++) {
+                var p = (py * nw + px) * 4;
+                var g = sd[p] * 0.299 + sd[p + 1] * 0.587 + sd[p + 2] * 0.114;
+                if (g < 200) {
+                  if (px < minX) minX = px;
+                  if (px > maxX) maxX = px;
+                  if (py < minY) minY = py;
+                  if (py > maxY) maxY = py;
+                }
+              }
+            }
+            if (maxX < 0) { minX = 0; minY = 0; maxX = nw - 1; maxY = nh - 1; }
+            var bw = maxX - minX + 1, bh = maxY - minY + 1;
+            var pad = Math.max(3, Math.round(Math.max(bw, bh) * 0.06));
+            minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
+            maxX = Math.min(nw - 1, maxX + pad); maxY = Math.min(nh - 1, maxY + pad);
+            bw = maxX - minX + 1; bh = maxY - minY + 1;
             var c = document.createElement('canvas'); c.width = W; c.height = H;
             var x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
-            x.drawImage(img, 0, 0, W, H);
+            var sc = Math.min(W / bw, H / bh);
+            var dw = Math.max(1, bw * sc), dh = Math.max(1, bh * sc);
+            x.drawImage(src, minX, minY, bw, bh, (W - dw) / 2, (H - dh) / 2, dw, dh);
             var d = x.getImageData(0, 0, W, H).data, out = [];
             for (var i = 0; i < d.length; i += 4) out.push((d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114));
             return out;
@@ -11806,6 +11838,8 @@ function _sigScore(aData, bData) {
     });
   });
 }
+var _SIG_SEUIL = 60; /* similarité minimale conseillée pour valider automatiquement */
+var _sigPendingForce = null;
 var _sigCanvasCtx = null, _sigDrawing = false, _sigHasInk = false, _sigLastPt = null;
 function _sigInitCanvas() {
   var cv = document.getElementById('sigCanvas');
@@ -11876,12 +11910,16 @@ function openSignatureBeneficiaire(opId) {
     h += '<div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">';
     h += '<button type="button" class="btn btn-outline" onclick="_sigClear()">⌫ Effacer</button>';
     h += '<label style="font-size:11px;font-weight:700;color:#475569">Code PIN <input id="sigPin" type="password" inputmode="numeric" maxlength="8" placeholder="' + (rec.pinHash ? 'PIN existant' : '4 chiffres minimum') + '" style="width:120px;padding:6px;border:1px solid #cbd5e1;border-radius:7px;font-size:12px"></label>';
+    h += '<button type="button" class="btn btn-outline" style="font-size:10.5px;border-color:#93c5fd;color:#1d4ed8" onclick="_sigValidatePinOnly(\'' + escJ(opId) + '\')" title="Valider la pièce avec le PIN seul, sans dessiner de signature">🔑 Valider sans signature (PIN)</button>';
     h += '</div>';
+    h += '<div style="font-size:10px;color:#64748b;margin-top:6px">À défaut de signature, le <b>code PIN seul</b> peut valider la pièce de caisse. Le mode utilisé (signature ou PIN) est enregistré sur la pièce.</div>';
     h += '<div id="sigMsg" style="font-size:11px;margin-top:6px;color:#64748b"></div>';
+    h += '<div id="sigResult" style="margin-top:8px"></div>';
     if (op.beneficiaireValide) {
       h += '<div style="margin-top:8px;padding:6px 9px;border:1px solid #bbf7d0;background:#f0fdf4;border-radius:7px;font-size:10.5px;color:#166534;line-height:1.5">' +
-        '<b>Pièce déjà validée</b>' + (op.validePar ? ' par <b>' + escH(op.validePar) + '</b>' + (op.valideParRole ? ' (' + escH(op.valideParRole) + ')' : '') : '') +
+        '<b>Pièce déjà validée' + (op.validationParPin ? ' par PIN (sans signature)' : '') + '</b>' + (op.validePar ? ' par <b>' + escH(op.validePar) + '</b>' + (op.valideParRole ? ' (' + escH(op.valideParRole) + ')' : '') : '') +
         (op.valideLe || op.signatureAt ? ' le ' + escH(new Date(op.valideLe || op.signatureAt).toLocaleString('fr-FR')) : '') +
+        (op.validationParPin ? '<br><span style="font-size:9.5px">Mode : code PIN seul — aucune signature dessinée.</span>' : '') +
         '</div>';
     }
     h += '</div>';
@@ -11911,6 +11949,78 @@ function _sigShowQR(opId) {
     if (box) box.innerHTML = '<img alt="QR signature" style="width:190px;height:190px;border:1px solid #e2e8f0;border-radius:8px;background:#fff" src="https://api.qrserver.com/v1/create-qr-code/?size=190x190&data=' + encodeURIComponent(url) + '"><div style="font-size:9.5px;color:#64748b;margin-top:3px">Scannez avec le téléphone du bénéficiaire (connecté à Montabbord).</div>';
   } catch (e) {}
 }
+function _sigShowResult(html) {
+  var el = document.getElementById('sigResult');
+  if (el) el.innerHTML = html || '';
+}
+function _sigMarkCommitted() {
+  try {
+    var btns = document.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      var oc = btns[i].getAttribute('onclick') || '';
+      if (oc.indexOf('_sigValidate') !== -1) {
+        btns[i].textContent = '✅ Terminé — Fermer';
+        btns[i].setAttribute('onclick', 'closeModal()');
+        btns[i].classList.remove('btn-primary');
+        btns[i].classList.add('btn-outline');
+      }
+    }
+  } catch (e) {}
+}
+function _sigRefScoreHtml(score, conforme) {
+  var col = conforme ? '#15803d' : '#b45309';
+  return '<div style="font-size:11px;font-weight:800;color:' + col + ';margin-top:6px">Similarité : ' + score + ' % · seuil ' + _SIG_SEUIL + ' %</div>';
+}
+/* Enregistre la signature et valide la pièce (une seule fois). */
+function _sigCommit(opId, op, key, store, rec, data, score, opts) {
+  opts = opts || {};
+  var _u = _sigUserInfo();
+  var premiere = !rec.ref;
+  if (premiere) {
+    rec.ref = data;
+    rec.nom = op.beneficiaireNom || op.remettant || '';
+    rec.pinHash = mdbMakePassHash(opts.pin);
+    rec.createdAt = Date.now();
+  }
+  rec.last = data;
+  rec.lastAt = Date.now();
+  rec.lastScore = premiere ? 100 : score;
+  rec.lastValidatedBy = _u.nom || '';
+  rec.lastValidatedByRole = _u.role || '';
+  rec.lastValidatedAt = new Date().toISOString();
+  rec.lastValidatedPiece = op.numeroPiece || '';
+  store[key] = rec;
+  _sigSaveStore(store);
+  op.signatureData = data;
+  op.signatureNom = op.beneficiaireNom || op.remettant || '';
+  op.signatureAt = rec.lastValidatedAt;
+  op.signatureScore = rec.lastScore;
+  op.beneficiaireValide = true;
+  op.validePar = _u.nom || '';
+  op.valideParLogin = _u.login || '';
+  op.valideParRole = _u.role || '';
+  op.valideParId = _u.id || '';
+  op.valideLe = rec.lastValidatedAt;
+  if (opts.force) {
+    op.signatureForcee = true;
+    op.signatureForceMotif = opts.motif || '';
+    op.signatureForcePar = _u.nom || '';
+    op.signatureForceRole = _u.role || '';
+    op.signatureForceLe = rec.lastValidatedAt;
+  } else {
+    delete op.signatureForcee;
+    delete op.signatureForceMotif;
+    delete op.signatureForcePar;
+    delete op.signatureForceRole;
+    delete op.signatureForceLe;
+  }
+  DB.set('mdb_operationsCaisse', (getOperationsCaisse() || []).map(function (x) {
+    return (x && String(x.id) === String(opId)) ? op : x;
+  }));
+  try { markDirty('mdb_operationsCaisse'); persistPendingSync(); schedulePush(); } catch (eP) {}
+  try { renderTresorerie(); } catch (eR) {}
+  return { user: _u, premiere: premiere, score: rec.lastScore };
+}
 function _sigValidate(opId) {
   try {
     var cv = document.getElementById('sigCanvas');
@@ -11924,42 +12034,158 @@ function _sigValidate(opId) {
     var store = _sigGetStore();
     var rec = store[key] || {};
     if (rec.pinHash) {
-      if (!mdbPassCheck({ passwordHash: rec.pinHash }, pin)) { toast('Code PIN incorrect', 'error'); return; }
+      if (!mdbPassCheck({ passwordHash: rec.pinHash }, pin)) {
+        _sigShowResult('<div style="padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;color:#b91c1c;font-size:11.5px;font-weight:700">❌ Code PIN incorrect — la pièce n’est pas validée.</div>');
+        toast('Code PIN incorrect', 'error');
+        return;
+      }
     } else {
-      if (pin.length < 4) { toast('Choisissez un code PIN de 4 chiffres minimum', 'error'); return; }
+      if (pin.length < 4) {
+        _sigShowResult('<div style="padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;color:#b91c1c;font-size:11.5px;font-weight:700">❌ Choisissez un code PIN de 4 chiffres minimum.</div>');
+        toast('Choisissez un code PIN de 4 chiffres minimum', 'error');
+        return;
+      }
     }
     var data = cv.toDataURL('image/png');
+    _sigShowResult('<div style="padding:8px 10px;border:1px solid #dbe3ef;background:#f8fafc;border-radius:8px;color:#475569;font-size:11.5px;font-weight:700">Comparaison de la signature…</div>');
     _sigScore(data, rec.ref).then(function (score) {
       try {
         if (!rec.ref) {
-          rec.ref = data; rec.nom = op.beneficiaireNom || op.remettant || ''; rec.pinHash = mdbMakePassHash(pin); rec.createdAt = Date.now();
+          var r0 = _sigCommit(opId, op, key, store, rec, data, 100, { pin: pin });
+          _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #86efac;background:#f0fdf4;border-radius:9px;color:#166534;font-size:12px;line-height:1.55">'
+            + '<b>✅ Première signature : référence enregistrée</b><br>'
+            + 'La pièce est <b>validée</b> par le bénéficiaire.<br>'
+            + 'Validée par <b>' + escH(r0.user.nom || '—') + '</b> le ' + escH(new Date(rec.lastValidatedAt).toLocaleString('fr-FR')) + '.</div>');
+          _sigMarkCommitted();
+          toast('Signature de référence enregistrée — pièce validée', 'success');
+          return;
         }
-        rec.last = data; rec.lastAt = Date.now(); rec.lastScore = rec.ref && rec.ref !== data ? score : 100;
-        store[key] = rec; _sigSaveStore(store);
-        var _u = _sigUserInfo();
-        op.signatureData = data;
-        op.signatureNom = op.beneficiaireNom || op.remettant || '';
-        op.signatureAt = new Date().toISOString();
-        op.signatureScore = score;
-        op.beneficiaireValide = true;
-        op.validePar = _u.nom || '';
-        op.valideParLogin = _u.login || '';
-        op.valideParRole = _u.role || '';
-        op.valideParId = _u.id || '';
-        op.valideLe = op.signatureAt;
-        rec.lastValidatedBy = _u.nom || '';
-        rec.lastValidatedByRole = _u.role || '';
-        rec.lastValidatedAt = op.valideLe;
-        rec.lastValidatedPiece = op.numeroPiece || '';
-        store[key] = rec; _sigSaveStore(store);
-        DB.set('mdb_operationsCaisse', ops);
-        try { markDirty('mdb_operationsCaisse'); persistPendingSync(); schedulePush(); } catch (eP) {}
-        try { closeModal(); } catch (eC) {}
-        try { renderTresorerie(); } catch (eR) {}
-        toast('Pièce validée par le bénéficiaire' + (rec.ref === data ? ' (signature de référence enregistrée)' : ' — similarité ' + score + '%') + (_u.nom ? ' · compte ' + _u.nom : ''), 'success');
+        var conforme = score >= _SIG_SEUIL;
+        var scEl = document.getElementById('sigRefScore');
+        if (scEl) scEl.innerHTML = _sigRefScoreHtml(score, conforme);
+        if (conforme) {
+          var r1 = _sigCommit(opId, op, key, store, rec, data, score, { pin: pin });
+          _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #86efac;background:#f0fdf4;border-radius:9px;color:#166534;font-size:12px;line-height:1.55">'
+            + '<b>✅ Signature conforme — pièce validée</b><br>'
+            + 'Similarité : <b>' + score + ' %</b> (seuil ' + _SIG_SEUIL + ' %).<br>'
+            + 'Validée par <b>' + escH(r1.user.nom || '—') + '</b> le ' + escH(new Date(rec.lastValidatedAt).toLocaleString('fr-FR')) + '.</div>');
+          _sigMarkCommitted();
+          toast('Signature conforme (' + score + ' %) — pièce validée', 'success');
+        } else {
+          _sigPendingForce = { opId: opId, data: data, score: score, pin: pin };
+          var forceBtn = _sigIsAdmin()
+            ? '<button type="button" class="btn btn-outline" style="font-size:10.5px;border-color:#fca5a5;color:#b91c1c;padding:5px 10px" onclick="_sigForce()">⚠️ Forcer la validation (admin)</button>'
+            : '';
+          _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #fcd34d;background:#fffbeb;border-radius:9px;color:#92400e;font-size:12px;line-height:1.55">'
+            + '<b>⚠️ Signature différente — pièce NON validée</b><br>'
+            + 'Similarité : <b>' + score + ' %</b>, en dessous du seuil de ' + _SIG_SEUIL + ' %.<br>'
+            + '<span style="font-size:11px">La pièce n’a pas été validée. Vous pouvez recommencer ou, si vous êtes administrateur, forcer avec un motif.</span>'
+            + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">'
+            + '<button type="button" class="btn btn-outline" style="font-size:10.5px;padding:5px 10px" onclick="_sigRetry()">✏️ Recommencer</button>'
+            + forceBtn + '</div></div>');
+          toast('Signature différente (' + score + ' %) — pièce non validée', 'error');
+        }
       } catch (e) { try { toast('Erreur signature : ' + (e.message || e), 'error'); } catch (e2) {} }
     });
   } catch (e) { try { toast('Signature indisponible : ' + (e.message || e), 'error'); } catch (e2) {} }
+}
+function _sigRetry() {
+  _sigPendingForce = null;
+  _sigShowResult('');
+  var m = document.getElementById('sigMsg'); if (m) m.textContent = '';
+  var sc = document.getElementById('sigRefScore'); if (sc) sc.innerHTML = '';
+  _sigClear();
+}
+/* Valider la pièce avec le PIN seul, sans signature dessinée.
+   Le mode est enregistré sur la pièce : validationParPin = true. */
+function _sigValidatePinOnly(opId) {
+  try {
+    var pin = String((document.getElementById('sigPin') || {}).value || '').trim();
+    var ops = getOperationsCaisse() || [];
+    var op = null;
+    for (var i = 0; i < ops.length; i++) if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; }
+    if (!op) { toast('Pièce introuvable', 'error'); return; }
+    var nom = op.beneficiaireNom || op.remettant || 'le bénéficiaire';
+    var key = _sigBenefKey(op);
+    var store = _sigGetStore();
+    var rec = store[key] || {};
+    if (rec.pinHash) {
+      if (!mdbPassCheck({ passwordHash: rec.pinHash }, pin)) {
+        _sigShowResult('<div style="padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;color:#b91c1c;font-size:11.5px;font-weight:700">❌ Code PIN incorrect — la pièce n’est pas validée.</div>');
+        toast('Code PIN incorrect', 'error');
+        return;
+      }
+    } else {
+      if (!/^\d{4,8}$/.test(pin)) {
+        _sigShowResult('<div style="padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;color:#b91c1c;font-size:11.5px;font-weight:700">❌ Choisissez un code PIN de 4 à 8 chiffres.</div>');
+        toast('Choisissez un code PIN de 4 à 8 chiffres', 'error');
+        return;
+      }
+    }
+    if (!window.confirm('Valider cette pièce de caisse avec le code PIN seul, SANS signature dessinée ?\n\nBénéficiaire : ' + nom + '\nPièce : ' + (op.numeroPiece || '-') + '\nMontant : ' + fmtMoney(op.montant || 0) + ' F\n\nCette validation sera enregistrée comme « validée par PIN ».')) return;
+    if (!rec.pinHash) { rec.pinHash = mdbMakePassHash(pin); rec.nom = nom; rec.createdAt = Date.now(); }
+    var _u = _sigUserInfo();
+    var now = new Date().toISOString();
+    op.beneficiaireValide = true;
+    op.validationParPin = true;
+    op.signatureData = '';
+    op.signatureNom = nom;
+    op.signatureAt = now;
+    op.signatureScore = null;
+    op.validePar = _u.nom || '';
+    op.valideParLogin = _u.login || '';
+    op.valideParRole = _u.role || '';
+    op.valideParId = _u.id || '';
+    op.valideLe = now;
+    op.pinValideLe = now;
+    op.pinValidePar = _u.nom || '';
+    rec.lastValidatedBy = _u.nom || '';
+    rec.lastValidatedByRole = _u.role || '';
+    rec.lastValidatedAt = now;
+    rec.lastValidatedPiece = op.numeroPiece || '';
+    rec.lastValidationMode = 'pin';
+    store[key] = rec;
+    _sigSaveStore(store);
+    DB.set('mdb_operationsCaisse', (getOperationsCaisse() || []).map(function (x) {
+      return (x && String(x.id) === String(opId)) ? op : x;
+    }));
+    try { markDirty('mdb_operationsCaisse'); persistPendingSync(); schedulePush(); } catch (eP) {}
+    try { renderTresorerie(); } catch (eR) {}
+    _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #93c5fd;background:#eff6ff;border-radius:9px;color:#1e40af;font-size:12px;line-height:1.55">'
+      + '<b>🔑 Pièce validée par code PIN (sans signature)</b><br>'
+      + 'Bénéficiaire : <b>' + escH(nom) + '</b><br>'
+      + 'Validée par <b>' + escH(_u.nom || '—') + '</b> le ' + escH(new Date(now).toLocaleString('fr-FR')) + '.<br>'
+      + '<span style="font-size:10.5px">Mode enregistré : validation par PIN seul.</span></div>');
+    _sigMarkCommitted();
+    toast('Pièce validée par PIN (sans signature)', 'success');
+  } catch (e) { try { toast('Validation par PIN impossible : ' + (e.message || e), 'error'); } catch (e2) {} }
+}
+function _sigForce() {
+  try {
+    if (!_sigIsAdmin()) { toast('Validation forcée réservée à l’administrateur', 'error'); return; }
+    if (!_sigPendingForce) { toast('Aucune signature en attente', 'error'); return; }
+    var motif = window.prompt('Motif de la validation forcée (signature différente) :', '');
+    if (motif === null) return;
+    motif = String(motif || '').trim();
+    if (!motif) { toast('Le motif est obligatoire', 'error'); return; }
+    var opId = _sigPendingForce.opId;
+    var ops = getOperationsCaisse() || [];
+    var op = null;
+    for (var i = 0; i < ops.length; i++) if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; }
+    if (!op) { toast('Pièce introuvable', 'error'); return; }
+    var key = _sigBenefKey(op);
+    var store = _sigGetStore();
+    var rec = store[key] || {};
+    var r = _sigCommit(opId, op, key, store, rec, _sigPendingForce.data, _sigPendingForce.score, { pin: _sigPendingForce.pin, force: true, motif: motif });
+    _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #fdba74;background:#fff7ed;border-radius:9px;color:#9a3412;font-size:12px;line-height:1.55">'
+      + '<b>⚠️ Signature validée par décision administrative</b><br>'
+      + 'Similarité : <b>' + _sigPendingForce.score + ' %</b> (seuil ' + _SIG_SEUIL + ' %).<br>'
+      + 'Motif : <b>' + escH(motif) + '</b><br>'
+      + 'Forcée par <b>' + escH(r.user.nom || '—') + '</b> le ' + escH(new Date(rec.lastValidatedAt).toLocaleString('fr-FR')) + '.</div>');
+    _sigPendingForce = null;
+    _sigMarkCommitted();
+    toast('Signature validée avec motif — pièce validée', 'success');
+  } catch (e) { try { toast('Validation forcée impossible : ' + (e.message || e), 'error'); } catch (e2) {} }
 }
 function _sigResetRef(opId) {
   try {
@@ -38640,7 +38866,7 @@ function renderCaisseIn(el) {
     if (o.groupeId) html += '<button class="btn-icon" onclick="printCaisseGroupe(\'' + o.groupeId + '\')" title="Imprimer tout le groupe ensemble" style="color:var(--primary)">👥</button> ';
     if (csOpSignatureRequise(o)) {
       if (o.beneficiaireValide) {
-        html += '<button class="btn-icon" title="Signé par le bénéficiaire le ' + escH(o.signatureAt ? new Date(o.signatureAt).toLocaleString('fr-FR') : '') + (o.validePar ? ' — compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') : '') + '" style="color:#16a34a" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">✅✍️</button> ';
+        html += '<button class="btn-icon" title="' + (o.validationParPin ? 'Validé par code PIN (sans signature)' : 'Signé par le bénéficiaire') + ' le ' + escH(o.signatureAt ? new Date(o.signatureAt).toLocaleString('fr-FR') : '') + (o.validePar ? ' — compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') : '') + '" style="color:#16a34a" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">' + (o.validationParPin ? '✅🔑' : '✅✍️') + '</button> ';
       } else {
         html += '<button class="btn-icon" title="Faire signer le bénéficiaire" style="color:#ea580c" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">✍️</button> ';
       }
@@ -50661,7 +50887,7 @@ function buildCaisseReceiptHTML(o) {
   h += '<div class="sign-area">';
   h += '<div class="sign-box">Le Remettant<br><strong>' + escH(csPersonFullName(caissierNom || o.remettant || '')) + '</strong></div>';
   h += '<div class="sign-box">L\u2019Ex\u00e9cutant<br><strong>' + escH(csPersonFullName(o.executant || '')) + '</strong></div>';
-  h += '<div class="sign-box">Le B\u00e9n\u00e9ficiaire<br>' + (o.signatureData ? '<img src="' + o.signatureData + '" alt="signature" style="max-height:56px;max-width:92%;display:block;margin:2px auto">' : '') + '<strong>' + escH(csBeneficiaireFullName(o)) + '</strong>' + (o.signatureAt ? '<div style="font-size:8px;color:#64748b;font-weight:400">Sign\u00e9 le ' + escH(new Date(o.signatureAt).toLocaleDateString('fr-FR')) + '</div>' : '') + (o.validePar ? '<div style="font-size:7.5px;color:#475569;font-weight:400">Compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') + '</div>' : '') + '</div>';
+  h += '<div class="sign-box">Le B\u00e9n\u00e9ficiaire<br>' + (o.signatureData ? '<img src="' + o.signatureData + '" alt="signature" style="max-height:56px;max-width:92%;display:block;margin:2px auto">' : (o.validationParPin ? '<div style="margin:4px auto;display:inline-block;padding:2px 8px;border:1px solid #16a34a;border-radius:999px;color:#166534;font-size:8.5px;font-weight:800;background:#f0fdf4">\u2714 VALID\u00c9 PAR PIN</div>' : '')) + '<strong>' + escH(csBeneficiaireFullName(o)) + '</strong>' + (o.signatureAt ? '<div style="font-size:8px;color:#64748b;font-weight:400">' + (o.validationParPin ? 'Valid\u00e9 par PIN le ' : 'Sign\u00e9 le ') + escH(new Date(o.signatureAt).toLocaleDateString('fr-FR')) + '</div>' : '') + (o.validePar ? '<div style="font-size:7.5px;color:#475569;font-weight:400">Compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') + '</div>' : '') + '</div>';
   h += '</div>';
   try {
     var _qrRefC = receiptNum || ('PC-' + String(o.id || '').slice(-8) + '-' + String(o.date || '').replace(/-/g, ''));
@@ -52108,7 +52334,7 @@ function printBulkCaisse() {
     html += '<div class="sign-area">';
 html += '<div class="sign-box">Le Remettant<br><strong>' + escH(csPersonFullName(caissierNom || o.remettant || '')) + '</strong></div>';
   html += '<div class="sign-box">L\u2019Ex\u00e9cutant<br><strong>' + escH(csPersonFullName(o.executant || '')) + '</strong></div>';
-    html += '<div class="sign-box">Le B\u00e9n\u00e9ficiaire<br>' + (o.signatureData ? '<img src="' + o.signatureData + '" alt="signature" style="max-height:50px;max-width:90%;display:block;margin:2px auto">' : '') + '<strong>' + escH(csBenefDisplay(o) || '') + '</strong>' + (o.signatureAt ? '<div style="font-size:8px;color:#64748b;font-weight:400">Sign\u00e9 le ' + escH(new Date(o.signatureAt).toLocaleDateString('fr-FR')) + '</div>' : '') + (o.validePar ? '<div style="font-size:7.5px;color:#475569;font-weight:400">Compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') + '</div>' : '') + '</div>';
+    html += '<div class="sign-box">Le B\u00e9n\u00e9ficiaire<br>' + (o.signatureData ? '<img src="' + o.signatureData + '" alt="signature" style="max-height:50px;max-width:90%;display:block;margin:2px auto">' : (o.validationParPin ? '<div style="margin:3px auto;display:inline-block;padding:2px 8px;border:1px solid #16a34a;border-radius:999px;color:#166534;font-size:8px;font-weight:800;background:#f0fdf4">\u2714 VALID\u00c9 PAR PIN</div>' : '')) + '<strong>' + escH(csBenefDisplay(o) || '') + '</strong>' + (o.signatureAt ? '<div style="font-size:8px;color:#64748b;font-weight:400">' + (o.validationParPin ? 'Valid\u00e9 par PIN le ' : 'Sign\u00e9 le ') + escH(new Date(o.signatureAt).toLocaleDateString('fr-FR')) + '</div>' : '') + (o.validePar ? '<div style="font-size:7.5px;color:#475569;font-weight:400">Compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') + '</div>' : '') + '</div>';
     html += '</div>';
     html += '</div>';
   }
