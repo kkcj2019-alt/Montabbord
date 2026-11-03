@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-03-438';
+      window.__APP_VERSION = '2026-11-03-439';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -11241,7 +11241,11 @@ function renderPrimeEmpMatrix() {
       /* Récupère les acomptes/prêts pour un employé et un mois donné (déduction) */
       var PRET_VALIDATION_DEPUIS = "2026-10";
 
-      function getAPForMonth(empId, mois) {
+      function getAPForMonth(empId, mois, vue) {
+        /* « avant paie » : on ignore un solde versé APRÈS la fin du mois
+           imprimé (ex. solde payé le 02/11 pour le bulletin d'octobre).
+           Le bulletin avant paie montre donc l'état d'avant la remise. */
+        var _vueAvant = vue === "avant";
         /* Déduplication centralisée (pièce de caisse = une ligne, montant
            réellement présent en caisse). Utilisée aussi par le détail cliquable
            et par l'impression : le total du détail correspond au bulletin. */
@@ -11270,6 +11274,12 @@ function renderPrimeEmpMatrix() {
           if (!_isPretL && (a.type === "acompte" || a.type === "solde")) {
             var _mdAcc = apMoisPrisEnCompte(a);
             var isSol = _estSolde(a);
+            /* Vue « avant paie » : on ne déduit PAS les soldes de salaire du mois
+               concerné (ni un solde encaissé après la fin du mois). Le net du
+               bulletin avant paie reste donc celui d'avant la remise. */
+            var _solMois = _mdAcc || String(a.date || "").slice(0, 7);
+            var _solDateM = String(a.date || "").slice(0, 7);
+            if (_vueAvant && isSol && (_solMois === mois || (_solDateM && _solDateM > mois))) return;
             /* Règle absolue : tous les soldes se déduisent AUTOMATIQUEMENT de la paie de tous les employés sans exception */
             /* Avant octobre 2026 : ancienne règle (acompte de caisse retenu d'office,
                bulletins déjà payés inchangés). Depuis : seulement s'il est VALIDÉ. */
@@ -32122,17 +32132,20 @@ if (normalHours > 173.33) {
          chaque fois — maintenant le resultat est calcule une seule fois par
          employe+mois et reutilise. Invalide par setPayeSection. */
       window._payrollCache = window._payrollCache || {};
-      function _payrollCacheKey(emp, mois) {
+      function _payrollCacheKey(emp, mois, vue) {
         /* La retenue acomptes/prets/soldes fait partie du resultat : le cache doit changer quand ces donnees changent. */
         var _apSig = '';
         try { _apSig = (localStorage.getItem('mdb_acomptesPrets') || '').length + '/' + (localStorage.getItem('mdb_ap_valides') || '').length; } catch (eSg) {}
-        return (emp.id || emp.matricule || emp.nom || '') + '|' + mois + '|' + _apSig;
+        return (emp.id || emp.matricule || emp.nom || '') + '|' + mois + '|' + _apSig + '|' + (vue === 'avant' ? 'avant' : 'apres');
       }
 
-      function calculatePayroll(emp, mois) {
+      function calculatePayroll(emp, mois, vue) {
+        /* « avant paie » : le bulletin ignore le solde versé après la fin du
+           mois imprimé. « apres » (défaut) : le solde est pris en compte. */
+        var _vue = vue === "avant" ? "avant" : "apres";
         /* Lecture du cache : si le resultat existe deja pour cet employe+mois,
            on le retourne immediatement sans aucun recalcul. */
-        var _cKey = _payrollCacheKey(emp, mois);
+        var _cKey = _payrollCacheKey(emp, mois, _vue);
         if (window._payrollCache[_cKey]) return window._payrollCache[_cKey];
 
         var isJ = empCategorie(emp) === "journalier";
@@ -32206,7 +32219,7 @@ if (normalHours > 173.33) {
            Journalier = taux journalier x jours point\u00e9s. Externe = montant forfaitaire. */
         var catEmp = empCategorie(emp);
         if (catEmp === "journalier" || catEmp === "externe") {
-          var apJ = getAPForMonth(emp.id, mois);
+          var apJ = getAPForMonth(emp.id, mois, _vue);
           var primeJ = getPrimeMois(emp.id, mois);
           /* Saisies bulletin J/E (toutes lignes modifiables) : overrides mensuels par rubrique */
           var jovr = getBulJOverrides(emp.id, mois);
@@ -33052,15 +33065,17 @@ if (normalHours > 173.33) {
             tauxPat: "",
             retPat: 0,
           });
-        var ap = getAPForMonth(emp.id, mois);
-        items.push({
-          n: "81",
-          label: "Avance/Acompte",
-          base: 0,
-          taux: "",
-          gain: 0,
-          ret: ap.acomptes - (ap.soldes || 0),
-        });
+        var ap = getAPForMonth(emp.id, mois, _vue);
+        var _apAccRet = (ap.acomptes || 0) - (ap.soldes || 0);
+        if (_apAccRet > 0)
+          items.push({
+            n: "81",
+            label: "Avance/Acompte",
+            base: 0,
+            taux: "",
+            gain: 0,
+            ret: _apAccRet,
+          });
         if (ap.soldes > 0)
           items.push({
             n: "81",
@@ -33070,14 +33085,15 @@ if (normalHours > 173.33) {
             gain: 0,
             ret: ap.soldes,
           });
-        items.push({
-          n: "82",
-          label: "Prêt (s)",
-          base: 0,
-          taux: "",
-          gain: 0,
-          ret: ap.prets,
-        });
+        if (ap.prets > 0)
+          items.push({
+            n: "82",
+            label: "Prêt (s)",
+            base: 0,
+            taux: "",
+            gain: 0,
+            ret: ap.prets,
+          });
         var assur = parseFloat(emp.assurance_mensuelle) || 0;
         if (assur > 0)
           items.push({
@@ -33152,6 +33168,7 @@ if (normalHours > 173.33) {
         var _result = {
           items: items,
           stats: stats,
+          _vue: _vue,
           totals: {
             brut: totalBrut,
             brutFiscal: brutFiscal,
@@ -34052,7 +34069,7 @@ function panierVerserJour() {
         function zero(lbl) {
           return { label: lbl, base: "", baseVal: 0, taux: "", gain: 0, ret: 0, edit: null };
         }
-        var ap = getAPForMonth(emp.id, mois);
+        var ap = getAPForMonth(emp.id, mois, (calc && calc._vue) || "apres");
         var primeJ = totals.prime || 0;
         var gratif = totals.gratif || 0;
         var prodGain = gainRx(/^Prime de Production/);
@@ -34210,7 +34227,7 @@ function panierVerserJour() {
             return p.id === empId;
           });
           if (!emp) return;
-          var calc = calculatePayroll(emp, mois);
+          var calc = calculatePayroll(emp, mois, window._bulVue === "avant" ? "avant" : "apres");
           var soc = getSocieteP();
           var ent = payeObj("mdb_entreprise");
           var mp = mois.split("-");
@@ -34584,7 +34601,7 @@ function panierVerserJour() {
             fmt(calc.totals.net) +
             " FCFA</span></div></div>";
           /* Vue après paie : ce qui est déjà payé et le solde restant. */
-          h += bulApresPaieHtml(emp, mois, calc);
+          h += bulApresPaieHtml(emp, mois, calc, window._bulVue);
           /* Signatures : employé (son nom) / société */
           h += bulSignaturesHtml(emp, soc);
 
@@ -41925,9 +41942,9 @@ function printCongeIndividuel(empId) {
         h += "</div>";
         /* Vue du bulletin : avant ou après paie (vaut pour l'impression et le PDF) */
         h += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:8px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px">';
-        h += '<span style="font-size:.78rem;font-weight:800;color:#475569">Vue du bulletin :</span>';
-        h += '<label style="' + lab + ';margin:0;padding:5px 10px;border-radius:999px;flex:0 0 auto"><input type="radio" name="bpq-vue" value="avant"' + (window._bulVue !== "apres" ? " checked" : "") + ' style="' + inp + '"><div><b>📄 Avant paie</b></div></label>';
-        h += '<label style="' + lab + ';margin:0;padding:5px 10px;border-radius:999px;flex:0 0 auto"><input type="radio" name="bpq-vue" value="apres"' + (window._bulVue === "apres" ? " checked" : "") + ' style="' + inp + '"><div><b>✅ Après paie</b></div></label>';
+        h += '<span style="font-size:.78rem;font-weight:800;color:#475569">Vue à imprimer :</span>';
+        h += '<label style="' + lab + ';margin:0;padding:5px 10px;border-radius:999px;flex:0 0 auto"><input type="radio" name="bpq-vue" value="avant"' + (window._bulVuePrint !== "apres" ? " checked" : "") + ' style="' + inp + '"><div><b>📄 Avant paie</b></div></label>';
+        h += '<label style="' + lab + ';margin:0;padding:5px 10px;border-radius:999px;flex:0 0 auto"><input type="radio" name="bpq-vue" value="apres"' + (window._bulVuePrint === "apres" ? " checked" : "") + ' style="' + inp + '"><div><b>✅ Après paie</b></div></label>';
         h += "</div>";
         /* options pour le bulletin seul */
         h += '<div id="bpq-un-opts" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">';
@@ -42007,8 +42024,8 @@ function printCongeIndividuel(empId) {
         }
         try { localStorage.setItem("paye_bul_opts_print", JSON.stringify({ pt: o.pt, ap: o.ap })); } catch (e) {}
         var _vq = document.querySelector('input[name="bpq-vue"]:checked');
-        window._bulVue = _vq && _vq.value === "apres" ? "apres" : "avant";
-        try { localStorage.setItem("paye_bul_vue", window._bulVue); } catch (eV) {}
+        window._bulVuePrint = _vq && _vq.value === "apres" ? "apres" : "avant";
+        try { localStorage.setItem("paye_bul_vue_print", window._bulVuePrint); } catch (eV) {}
         var ov = document.getElementById("bul-print-modal"); if (ov) ov.remove();
         window.__bulOptsPrint = o;
         try {
@@ -42134,7 +42151,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           .toLocaleDateString("fr-FR", { month: "long", year: "numeric" })
           .toUpperCase();
         personnel.forEach(function (emp, idx) {
-          var calc = calculatePayroll(emp, mois);
+          var calc = calculatePayroll(emp, mois, window._bulVuePrint === "apres" ? "apres" : "avant");
           /* Rubriques vides (sans montant) : ne sortent pas à l'impression */
           calc.items = calc.items.filter(function (i) {
             return !(i._editable && i._type && (i.gain || 0) <= 0 && (i.base || 0) <= 0);
@@ -42392,11 +42409,12 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
          (ce qui a déjà été payé et ce qui reste). Le choix vaut pour l'écran,
          l'impression et le PDF. */
       try {
-        if (!window._bulVue) window._bulVue = localStorage.getItem("paye_bul_vue") === "apres" ? "apres" : "avant";
-      } catch (eBV) { window._bulVue = "avant"; }
+        if (!window._bulVue) window._bulVue = localStorage.getItem("paye_bul_vue_screen") === "avant" ? "avant" : "apres";
+        if (!window._bulVuePrint) window._bulVuePrint = localStorage.getItem("paye_bul_vue_print") === "apres" ? "apres" : "avant";
+      } catch (eBV) { window._bulVue = "apres"; window._bulVuePrint = "avant"; }
       function setBulVue(v) {
         window._bulVue = v === "apres" ? "apres" : "avant";
-        try { localStorage.setItem("paye_bul_vue", window._bulVue); } catch (e) {}
+        try { localStorage.setItem("paye_bul_vue_screen", window._bulVue); } catch (e) {}
         try { generateBulletin(); } catch (e2) {}
       }
       function bulVuePillsHtml() {
@@ -42406,15 +42424,16 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           return '<button type="button" onclick="setBulVue(\'' + val + '\')" style="border:1.5px solid ' + (on ? "#0f172a" : "#cbd5e1") + ";background:" + (on ? "#0f172a" : "#fff") + ";color:" + (on ? "#fff" : "#475569") + ';border-radius:999px;padding:5px 14px;font-size:.76rem;font-weight:800;cursor:pointer">' + icon + " " + label + "</button>";
         };
         return '<div id="bul-vue-pills" class="no-print" style="max-width:900px;margin:8px auto 0;display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap">' +
-          '<span style="font-size:.72rem;font-weight:700;color:#64748b;margin-right:2px">Vue :</span>' +
+          '<span style="font-size:.72rem;font-weight:700;color:#64748b;margin-right:2px">Vue à l\'écran :</span>' +
           b("avant", "Avant paie", "📄") + b("apres", "Après paie", "✅") +
+          '<span style="font-size:.65rem;color:#94a3b8">(impression : Avant paie par défaut)</span>' +
           "</div>";
       }
       /* Bloc signatures au bas du bulletin : uniquement les noms, sans texte
          « signature » superflu. Nom de l'employé à gauche, société à droite. */
       /* Bloc « vue après paie » du bulletin : ce qui est déjà payé et ce qui reste. */
-      function bulApresPaieHtml(emp, mois, calc) {
-        if (window._bulVue !== "apres") return "";
+      function bulApresPaieHtml(emp, mois, calc, vue) {
+        if ((vue || window._bulVue) !== "apres") return "";
         var paidMap = {};
         try { paidMap = psalPaidByEmp(mois) || {}; } catch (e) {}
         var solde = (calc && calc.totals && calc.totals.soldes) || 0;
@@ -42564,7 +42583,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           return p.id === empId;
         });
         if (!emp) return;
-        var calc = calculatePayroll(emp, mois);
+        var calc = calculatePayroll(emp, mois, window._bulVuePrint === "apres" ? "apres" : "avant");
         /* Rubriques vides (sans montant) : ne sortent pas à l'impression */
         calc.items = calc.items.filter(function (i) {
           return !(i._editable && i._type && (i.gain || 0) <= 0 && (i.base || 0) <= 0);
@@ -42585,7 +42604,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var w = _collect ? null : window.open("", "_blank", "width=1000,height=800");
         if (!w && !_collect) { toast("Popup bloquée — autorisez les popups pour ce site puis réessayez", "error"); return; }
         var h =
-          '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escH(bulNomFichier((empCategorie(emp) !== "titulaire" ? "Rémunération" : "Bulletin de paie"), emp, mois) + (window._bulVue === "apres" ? " - après paie" : "")) + '</title>';
+          '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escH(bulNomFichier((empCategorie(emp) !== "titulaire" ? "Rémunération" : "Bulletin de paie"), emp, mois) + (window._bulVuePrint === "apres" ? " - après paie" : " - avant paie")) + '</title>';
         h +=
           "<style>body{font-family:sans-serif;padding:14px 20px;color:#1e293b;font-size:13px}";
         h += "h1,h2,h3{margin:0}";
@@ -42890,7 +42909,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           fmt(calc.totals.net) +
           " FCFA</div>";
         /* Vue après paie (écran, impression et PDF). */
-        h += bulApresPaieHtml(emp, mois, calc);
+        h += bulApresPaieHtml(emp, mois, calc, window._bulVuePrint);
         h += bulSignaturesHtml(emp, soc);
         h +=
           '<div style="text-align:right;font-size:9px;color:#777;margin-top:4px">Document g\u00e9n\u00e9r\u00e9 le ' +
@@ -42916,6 +42935,16 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
              déduit en septembre ne doit pas réapparaître sur celui d'octobre
              (il était déduit ce mois-là, déduit 0 ici, reste 0). */
           var apListEmp = apListEmpAll.filter(function (a) {
+            /* Vue avant paie : on n'affiche pas non plus le solde de salaire
+               du mois concerné (le net est déjà recalculé sans lui). */
+            if (window._bulVuePrint !== "apres") {
+              try {
+                if (apNatureDe(a) === "solde") {
+                  var _ms = apMoisPrisEnCompte(a) || String(a.date || "").slice(0, 7);
+                  if (_ms === mois || String(a.date || "").slice(0, 7) > mois) return false;
+                }
+              } catch (eSolF) {}
+            }
             var p = String(a.moisDeduction || (a.date || "").substring(0, 7) || "");
             if (p === mois) return true;
             /* Un PRÊT en cours remboursé par mensualités figure aussi sur le
