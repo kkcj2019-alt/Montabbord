@@ -2,10 +2,10 @@
    S'applique aussi aux boutons créés plus tard (modales, listes, tableaux). */
 (function () {
   var CSS =
-    ".mdb-print-btn{background:#dc2626!important;border-color:#dc2626!important;color:#fff!important;font-weight:900!important;box-shadow:0 3px 10px rgba(220,38,38,.30)!important}" +
+    ".mdb-print-btn{background:#dc2626!important;border-color:#dc2626!important;color:#fff!important;font-weight:900!important;font-size:0!important;letter-spacing:0!important;box-shadow:0 3px 10px rgba(220,38,38,.30)!important}" +
     ".mdb-print-btn:hover{background:#b91c1c!important;border-color:#b91c1c!important;color:#fff!important}" +
-    ".mdb-print-btn svg{stroke:#fff!important;color:#fff!important;width:16px!important;height:16px!important;flex:0 0 auto}" +
-    ".mdb-print-btn .mdb-print-ico{width:16px;height:16px;display:inline-block;vertical-align:-3px;margin-right:5px}" +
+    ".mdb-print-btn svg{stroke:#fff!important;color:#fff!important;width:18px!important;height:18px!important;flex:0 0 auto}" +
+    ".mdb-print-btn .mdb-print-ico{width:18px;height:18px;display:inline-block;vertical-align:middle;margin:0!important}" +
     ".mdb-print-btn.mdb-print-icon-only{padding:0!important;width:38px!important;height:38px!important;min-width:38px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;border-radius:8px!important}" +
     ".mdb-print-btn.mdb-print-icon-only .mdb-print-ico{margin:0!important;width:18px!important;height:18px!important}" +
     ".mdb-print-btn:disabled{opacity:.55;cursor:not-allowed}";
@@ -29,7 +29,7 @@
     var tag = el.tagName;
     if (tag !== "BUTTON" && tag !== "A" && !el.classList.contains("btn")) return;
     var txt = (el.textContent || "").replace(/\s+/g, " ").trim();
-    if (!/imprimer/i.test(txt)) return;
+    if (!/(imprim|impression|pdf)/i.test(txt)) return;
     el.setAttribute("data-mdb-print", "1");
     el.classList.add("mdb-print-btn", "mdb-print-icon-only");
     if (!el.getAttribute("title")) el.setAttribute("title", txt);
