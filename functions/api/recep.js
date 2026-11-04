@@ -133,7 +133,7 @@ export async function onRequest(context) {
       matricule: rec.matricule || '',
       nom: rec.nom || '',
       mois: rec.mois || '',
-      net: rec.net || 0,
+      net: (rec.netAvantSolde != null ? rec.netAvantSolde : rec.net) || 0,
       dateReception: new Date().toISOString(),
       moyen: 'qr+pin'
     };
