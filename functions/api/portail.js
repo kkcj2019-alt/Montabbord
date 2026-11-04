@@ -149,6 +149,16 @@ function moisAutorises(empId, paye) {
   } catch (e) {}
   return out.sort().reverse();
 }
+function estInactif(emp) {
+  if (!emp) return true;
+  if (emp.status && emp.status !== 'actif') return true;
+  const d = String(emp.date_sortie || emp.date_fin || emp.dateFin || emp.dateSortie || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+    const today = new Date().toISOString().slice(0, 10);
+    if (d <= today) return true;
+  }
+  return false;
+}
 function employePublic(e) {
   return {
     id: e.id, nom: e.nom || '', prenoms: e.prenoms || '',
@@ -251,7 +261,7 @@ export async function onRequest(context) {
       if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
       if (found.length > 1) return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
       const emp = found[0];
-      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
       const paye = await lirePaye(db, uid);
       const portail = await lireComptesPortail(db, uid);
       const compte = trouverPin(fusionComptes(paye.employePins, portail), emp);
@@ -312,7 +322,7 @@ export async function onRequest(context) {
         }
         emp = found[0];
       }
-      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
       const pinRec = compte || trouverPin(comptes, emp);
       if (!pinRec || (!pinRec.passwordHash && !pinRec.hash)) return json({ ok: false, code: 'no_access' }, 403);
       let ok = false;
@@ -344,7 +354,7 @@ export async function onRequest(context) {
         return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
       }
       const emp = found[0];
-      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
       const loginChoisi = String(body.loginChoisi || '').trim();
       const password = String(body.password || '').trim();
       const pin = String(body.pin || '').trim();
@@ -439,7 +449,7 @@ export async function onRequest(context) {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
       const emp = (Array.isArray(employes) ? employes : []).find(e => e && String(e.id) === String(bul.empId));
       if (!emp) return json({ ok: false, code: 'not_personnel' }, 404);
-      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
       const portail = await lireComptesPortail(db, uid);
       const comptes = fusionComptes(paye.employePins, portail);
       const existing = trouverPin(comptes, emp);
@@ -723,6 +733,7 @@ export async function onRequest(context) {
     const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
     const emp = (employes || []).find(e => e && String(e.id) === String(sess.empId));
     if (!emp) return json({ ok: false, code: 'not_personnel' }, 404);
+    if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
     const paye = await lirePaye(db, uid);
     const allowed = moisAutorises(emp.id, paye);
 
