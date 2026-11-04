@@ -285,6 +285,14 @@ export async function onRequest(context) {
       return json({ ok: true, updated: n, visible });
     }
 
+    /* ---------- Photo ajoutée par l'administration ---------- */
+    if (action === 'adminphoto') {
+      const empId = String(body.empId || '');
+      const photo = String(body.photo || '');
+      if (!empId || !/^data:image\/(png|jpe?g|webp);base64,/i.test(photo)) return json({ ok: false, code: 'photo' }, 400);
+      await ecrireCle(db, uid, 'mdb_portailPhoto:' + empId, photo);
+      return json({ ok: true, photo });
+    }
     /* ---------- Connexion ---------- */
     if (action === 'login') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
@@ -651,20 +659,11 @@ export async function onRequest(context) {
         return true;
       });
       const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
-      const maPhoto = emp.photo || (photos && photos[emp.id]) || '';
+      let maPhoto = '';
+      try { maPhoto = parseVal(await lireCle(db, uid, 'mdb_portailPhoto:' + emp.id), ''); } catch (eP0) { maPhoto = ''; }
+      if (!maPhoto) maPhoto = (photos && photos[emp.id]) || emp.photo || '';
       if (maPhoto) {
-        try {
-          if (!(photos && photos[emp.id])) {
-            const ph = (photos && typeof photos === 'object') ? photos : {};
-            ph[emp.id] = maPhoto;
-            await ecrireCle(db, uid, 'mdb_portailPhotos', ph);
-          }
-          const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
-          const arrEmp = Array.isArray(employes) ? employes : [];
-          let touche = false;
-          arrEmp.forEach(x => { if (x && String(x.id) === String(emp.id) && x.photo !== maPhoto) { x.photo = maPhoto; touche = true; } });
-          if (touche) await ecrireCle(db, uid, 'mdb_employes', arrEmp);
-        } catch (ePh) {}
+        try { await ecrireCle(db, uid, 'mdb_portailPhoto:' + emp.id, maPhoto); } catch (ePh) {}
       }
       const opsCaisse = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
       const opsList = Array.isArray(opsCaisse) ? opsCaisse : [];
@@ -707,20 +706,8 @@ export async function onRequest(context) {
       const photo = String(body.photo || '');
       if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photo)) return json({ ok: false, code: 'photo_format' }, 400);
       if (photo.length > 900000) return json({ ok: false, code: 'photo_taille' }, 413);
-      const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
-      const arr = (photos && typeof photos === 'object') ? photos : {};
-      arr[emp.id] = photo;
-      await ecrireCle(db, uid, 'mdb_portailPhotos', arr);
-      /* La photo est aussi copiée sur la fiche employé (mdb_employes) :
-         elle est ainsi visible dans Index, Paye et les autres modules. */
-      try {
-        const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
-        if (Array.isArray(employes)) {
-          let touche = false;
-          employes.forEach(x => { if (x && String(x.id) === String(emp.id)) { x.photo = photo; touche = true; } });
-          if (touche) await ecrireCle(db, uid, 'mdb_employes', employes);
-        }
-      } catch (eP) {}
+      /* Une clé D1 par employé : pas de plafond lié à un gros objet unique. */
+      await ecrireCle(db, uid, 'mdb_portailPhoto:' + emp.id, photo);
       return json({ ok: true, photo });
     }
 
