@@ -117,6 +117,25 @@ function fusionComptes(payePins, portail) {
   }
   return out;
 }
+/* Le PIN choisi à la création du compte employé devient aussi le PIN de
+   validation des pièces de caisse (signature). */
+async function assurerSignaturePin(db, uid, emp, pinHash, nom) {
+  if (!emp || !pinHash) return;
+  try {
+    const sigs = parseVal(await lireCle(db, uid, 'mdb_signatures'), {});
+    const arr = (sigs && typeof sigs === 'object' && !Array.isArray(sigs)) ? sigs : {};
+    const key = 'employe:' + emp.id;
+    if (arr[key] && arr[key].pinHash) return;
+    arr[key] = Object.assign({}, arr[key] || {}, {
+      employeId: emp.id,
+      nom: nom || ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
+      pinHash: pinHash,
+      source: 'portail',
+      createdAt: (arr[key] && arr[key].createdAt) || Date.now()
+    });
+    await ecrireCle(db, uid, 'mdb_signatures', arr);
+  } catch (e) {}
+}
 function moisAutorises(empId, paye) {
   const now = new Date();
   const out = [];
@@ -292,6 +311,7 @@ export async function onRequest(context) {
       if (pinRec.passwordHash) ok = await verifierPin(pinRec.passwordHash, body.pin);
       if (!ok && pinRec.hash) ok = await verifierPin(pinRec.hash, body.pin);
       if (!ok) return json({ ok: false, code: 'bad_pin' }, 403);
+      await assurerSignaturePin(db, uid, emp, pinRec.hash, pinRec.nom);
 
       let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
       if (!Array.isArray(sessions)) sessions = [];
@@ -382,6 +402,7 @@ export async function onRequest(context) {
       const portailComptes = await lireComptesPortail(db, uid);
       portailComptes[emp.id] = recCompte;
       await ecrireCle(db, uid, 'mdb_portailComptes', portailComptes);
+      await assurerSignaturePin(db, uid, emp, pinHash, recCompte.nom);
 
       let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
       if (!Array.isArray(sessions)) sessions = [];
