@@ -110,7 +110,7 @@
   };
 
   window.qrVerifImage = function (url, size) {
-    size = size || 90;
+    size = size || 60;
     return 'https://api.qrserver.com/v1/create-qr-code/?size=' + size + 'x' + size + '&data=' + enc(url);
   };
 
@@ -119,22 +119,22 @@
     opts = opts || {};
     var r = window.qrVerifCreer(type, ref, data);
     if (!r.url) return '';
-    var size = opts.size || 84;
+    var size = opts.size || 56;
     var label = opts.label || 'Vérification';
     var texte = opts.texte || 'Scannez pour contrôler l\u2019authenticité de ce document.';
     var align = opts.align || 'left';
     var bg = opts.bg || '#ffffff';
     var border = opts.border || '#dbe3ef';
-    return '<div class="mdb-qr-verif" style="display:flex;align-items:center;gap:' + (opts.gap || 9) + 'px;'
+    return '<div class="mdb-qr-verif" style="display:flex;align-items:center;gap:' + (opts.gap || 7) + 'px;'
       + 'justify-content:' + (align === 'right' ? 'flex-end' : 'flex-start') + ';'
-      + 'margin-top:' + (opts.marginTop != null ? opts.marginTop : 10) + 'px;'
-      + 'padding:7px 10px;border:1px solid ' + border + ';border-radius:8px;background:' + bg + ';'
+      + 'margin-top:' + (opts.marginTop != null ? opts.marginTop : 7) + 'px;'
+      + 'padding:5px 8px;border:1px solid ' + border + ';border-radius:6px;background:' + bg + ';'
       + 'page-break-inside:avoid;break-inside:avoid">'
       + '<img src="' + window.qrVerifImage(r.url, size) + '" width="' + size + '" height="' + size + '" alt="QR vérification" style="display:block;width:' + size + 'px;height:' + size + 'px">'
-      + '<div style="font-size:8px;line-height:1.35;color:#475569">'
-      + '<div style="font-size:9px;font-weight:800;color:#0b3a6f;letter-spacing:.04em;text-transform:uppercase">' + esc(label) + '</div>'
+      + '<div style="font-size:7px;line-height:1.3;color:#475569">'
+      + '<div style="font-size:8px;font-weight:800;color:#0b3a6f;letter-spacing:.04em;text-transform:uppercase">' + esc(label) + '</div>'
       + '<div>' + esc(texte) + '</div>'
-      + '<div style="font-family:monospace;font-size:7.5px;color:#64748b;margin-top:2px">' + esc(r.token) + '</div>'
+      + '<div style="font-family:monospace;font-size:6.5px;color:#64748b;margin-top:2px">' + esc(r.token) + '</div>'
       + '</div></div>';
   };
 })();
