@@ -423,6 +423,80 @@ export async function onRequest(context) {
       return json({ ok: true, token, expiresAt: sess.expiresAt, employe: employePublic(emp), moiAutorises: moisAutorises(emp.id, paye), created: true });
     }
 
+    /* ---------- Premier accès depuis un bulletin (sans compte) ---------- */
+    if (action === 'premieracces') {
+      const tokenB = String(body.token || '').trim();
+      const pin = String(body.pin || '').trim();
+      const tel = String(body.telephone || '').replace(/\D/g, '');
+      const dob = String(body.dateNaissance || '').slice(0, 10);
+      if (!tokenB) return json({ ok: false, code: 'token' }, 400);
+      if (!/^\d{4,8}$/.test(pin)) return json({ ok: false, code: 'bad_format' }, 400);
+      const paye = await lirePaye(db, uid);
+      const buls = Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : [];
+      let bul = null;
+      for (let i = 0; i < buls.length; i++) { if (buls[i] && String(buls[i].token) === tokenB) { bul = buls[i]; break; } }
+      if (!bul) return json({ ok: false, code: 'not_found' }, 404);
+      const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+      const emp = (Array.isArray(employes) ? employes : []).find(e => e && String(e.id) === String(bul.empId));
+      if (!emp) return json({ ok: false, code: 'not_personnel' }, 404);
+      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      const portail = await lireComptesPortail(db, uid);
+      const comptes = fusionComptes(paye.employePins, portail);
+      const existing = trouverPin(comptes, emp);
+      if (existing && (existing.hash || existing.passwordHash)) return json({ ok: false, code: 'already' }, 409);
+      const empTel = String(emp.telephone || emp.tel || '').replace(/\D/g, '');
+      const empDob = String(emp.date_naissance || '').slice(0, 10);
+      const telOk = empTel && tel && empTel.slice(-8) === tel.slice(-8);
+      const dobOk = empDob && dob && empDob === dob;
+      if (!(telOk || dobOk)) return json({ ok: false, code: 'identity' }, 403);
+      let loginChoisi = String(emp.matricule || '').trim();
+      if (norm(loginChoisi).length < 3 && empTel) loginChoisi = String(emp.telephone || emp.tel || '').trim();
+      if (norm(loginChoisi).length < 3) loginChoisi = 'emp' + String(emp.id || Date.now()).replace(/[^a-z0-9]/gi, '').slice(-6);
+      const autre = trouverCompteParLogin(comptes, loginChoisi);
+      if (autre && String(autre.empId || '') !== String(emp.id)) loginChoisi = loginChoisi + String(emp.id || '').replace(/[^a-z0-9]/gi, '').slice(-3);
+      const pinSalt = newSalt();
+      const pinHash = 'sha256:' + pinSalt + ':' + await sha256Hex(pinSalt + '|' + pin);
+      const passSalt = newSalt();
+      const passHash = 'sha256:' + passSalt + ':' + await sha256Hex(passSalt + '|' + pin);
+      const recCompte = {
+        empId: emp.id, matricule: emp.matricule || '',
+        nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
+        login: loginChoisi, passwordHash: passHash, hash: pinHash, pinHash: pinHash,
+        updatedAt: new Date().toISOString(), self: true
+      };
+      paye.employePins = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
+      paye.employePins[emp.id] = recCompte;
+      await ecrireCle(db, uid, 'mdb_paye.employePins', paye.employePins);
+      const portailComptes = await lireComptesPortail(db, uid);
+      portailComptes[emp.id] = recCompte;
+      await ecrireCle(db, uid, 'mdb_portailComptes', portailComptes);
+      await assurerSignaturePin(db, uid, emp, pinHash, recCompte.nom);
+      /* Accusé de réception du bulletin */
+      let receptions = parseVal(await lireCle(db, uid, 'mdb_receptionsBulletins'), []);
+      if (!Array.isArray(receptions)) receptions = [];
+      let reception = null;
+      for (let i = 0; i < receptions.length; i++) { if (receptions[i] && String(receptions[i].token) === tokenB) { reception = receptions[i]; break; } }
+      if (!reception) {
+        reception = {
+          id: 'REC' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase(),
+          uid: uid, token: tokenB, empId: emp.id, matricule: emp.matricule || '',
+          nom: recCompte.nom, mois: bul.mois || '', net: bul.net || 0,
+          dateReception: new Date().toISOString(), moyen: 'qr+pin-premier-acces'
+        };
+        receptions.push(reception);
+        if (receptions.length > 5000) receptions = receptions.slice(receptions.length - 5000);
+        await ecrireCle(db, uid, 'mdb_receptionsBulletins', receptions);
+      }
+      let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
+      if (!Array.isArray(sessions)) sessions = [];
+      const now = Date.now();
+      sessions = sessions.filter(s => s && s.expiresAt > now).slice(-800);
+      const token = newToken();
+      sessions.push({ token, uid, empId: emp.id, createdAt: now, expiresAt: now + 12 * 3600 * 1000 });
+      await ecrireCle(db, uid, 'mdb_portailSessions', sessions);
+      return json({ ok: true, token, employe: employePublic(emp), reception, created: true, login: loginChoisi });
+    }
+
     /* ---------- Côté administration (Paye / RH) ---------- */
     if (action === 'adminlist') {
       const list = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
