@@ -291,6 +291,14 @@ export async function onRequest(context) {
       const photo = String(body.photo || '');
       if (!empId || !/^data:image\/(png|jpe?g|webp);base64,/i.test(photo)) return json({ ok: false, code: 'photo' }, 400);
       await ecrireCle(db, uid, 'mdb_portailPhoto:' + empId, photo);
+      try {
+        const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+        if (Array.isArray(employes)) {
+          let touche = false;
+          employes.forEach(x => { if (x && String(x.id) === empId) { x.photo = photo; touche = true; } });
+          if (touche) await ecrireCle(db, uid, 'mdb_employes', employes);
+        }
+      } catch (e) {}
       return json({ ok: true, photo });
     }
     /* ---------- Connexion ---------- */
@@ -687,6 +695,34 @@ export async function onRequest(context) {
       };
       const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
       const mesReq = (Array.isArray(reqs) ? reqs : []).filter(r => r && String(r.empId) === String(emp.id));
+      const caisses = parseVal(await lireCle(db, uid, 'mdb_caisses'), []);
+      const banques = parseVal(await lireCle(db, uid, 'mdb_banques'), []);
+      const reqMap = {};
+      (Array.isArray(reqs) ? reqs : []).forEach(r => { if (r && r.id) reqMap[r.id] = r; });
+      const enrichDe = function (a) {
+        let op = null;
+        for (let i = 0; i < opsList.length; i++) {
+          const o = opsList[i];
+          if (!o) continue;
+          if ((a.caisseOpId && String(o.id) === String(a.caisseOpId)) ||
+              (a.operationId && String(o.id) === String(a.operationId)) ||
+              (a.numeroPiece && String(o.numeroPiece || '') === String(a.numeroPiece))) { op = o; break; }
+        }
+        const srcList = (op && op.banqueId) ? (Array.isArray(banques) ? banques : []) : (Array.isArray(caisses) ? caisses : []);
+        const sid = op ? (op.caisseId || op.banqueId || '') : (a.caisseId || '');
+        const src = srcList.find(s => s && String(s.id) === String(sid));
+        const req = a.requeteId ? reqMap[a.requeteId] : null;
+        const isBanque = !!(op && op.banqueId) || String(a.provenance || '').toLowerCase() === 'banque';
+        return {
+          nature: natureDe(a),
+          sourceNom: (src && (src.nom || src.libelle || src.code)) || (req && req.traitement && req.traitement.sourceName) || '',
+          sourceType: isBanque ? 'banque' : 'caisse',
+          moyen: (op && op.moyenPaiement) || a.moyen || (isBanque ? 'virement' : 'espece'),
+          datePaiement: (op && op.date) || a.date || '',
+          validePar: (req && req.decision && req.decision.par) || (op && (op.signatureNom || op.validatedBy)) || '',
+          numeroPiece: (op && op.numeroPiece) || a.numeroPiece || ''
+        };
+      };
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
       return json({
         ok: true,
@@ -694,7 +730,7 @@ export async function onRequest(context) {
         moiAutorises: allowed,
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
         pointage, montage, bulletins,
-        acomptes: mesAcomptes.map(a => Object.assign({}, a, { nature: natureDe(a) })),
+        acomptes: mesAcomptes.map(a => Object.assign({}, a, enrichDe(a))),
         photo: maPhoto,
         requetes: mesReq,
         unread: mesReq.reduce((n, r) => n + ((r.messages || []).filter(m => m && m.auteur !== 'employe' && !m.luParEmploye).length), 0)
@@ -708,6 +744,14 @@ export async function onRequest(context) {
       if (photo.length > 900000) return json({ ok: false, code: 'photo_taille' }, 413);
       /* Une clé D1 par employé : pas de plafond lié à un gros objet unique. */
       await ecrireCle(db, uid, 'mdb_portailPhoto:' + emp.id, photo);
+      try {
+        const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+        if (Array.isArray(employes)) {
+          let touche = false;
+          employes.forEach(x => { if (x && String(x.id) === String(emp.id)) { x.photo = photo; touche = true; } });
+          if (touche) await ecrireCle(db, uid, 'mdb_employes', employes);
+        }
+      } catch (e) {}
       return json({ ok: true, photo });
     }
 
