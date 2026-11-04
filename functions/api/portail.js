@@ -705,6 +705,10 @@ export async function onRequest(context) {
         const src = srcList.find(s => s && String(s.id) === String(sid));
         const req = a.requeteId ? reqMap[a.requeteId] : null;
         const isBanque = !!(op && op.banqueId) || String(a.provenance || '').toLowerCase() === 'banque';
+        const ech = Array.isArray(a.echeances) ? a.echeances : [];
+        let preleve = 0;
+        ech.forEach(e => { if (e && e.preleve === true) preleve += parseFloat(e.montant) || 0; });
+        const rembEffectif = Math.max(parseFloat(a.montantRembourse) || 0, preleve);
         return {
           nature: natureDe(a),
           sourceNom: (src && (src.nom || src.libelle || src.code)) || (req && req.traitement && req.traitement.sourceName) || '',
@@ -712,7 +716,8 @@ export async function onRequest(context) {
           moyen: (op && op.moyenPaiement) || a.moyen || (isBanque ? 'virement' : 'espece'),
           datePaiement: (op && op.date) || a.date || '',
           validePar: (req && req.decision && req.decision.par) || (op && (op.signatureNom || op.validatedBy)) || '',
-          numeroPiece: (op && op.numeroPiece) || a.numeroPiece || ''
+          numeroPiece: (op && op.numeroPiece) || a.numeroPiece || '',
+          montantRembourseEffectif: rembEffectif
         };
       };
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};

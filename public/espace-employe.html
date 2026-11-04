@@ -212,9 +212,14 @@
     var h = loginHero() + '<div class="loginCard"><div class="loginForm">';
     h += '<h2>Bienvenue sur votre espace employé</h2><div class="intro">Connectez-vous avec votre login, votre nom, votre matricule ou votre téléphone, puis votre mot de passe ou code PIN. <b>Nous sommes à votre écoute.</b></div>';
     if (b) {
-      h += '<div class="bulletin"><b>Bulletin ' + esc(moisLbl(b.mois)) + '</b> — Net à payer <b>' + money(b.net) + '</b><br>'
-        + '<span class="muted">Employé : ' + esc(b.nom || "") + ' · Matricule ' + esc(b.matricule || "") + '</span><br>'
-        + '<a href="verif.html?uid=' + encodeURIComponent(uid) + '&token=' + encodeURIComponent(b.token || qtoken) + '" style="font-size:11px;color:#0b3a6f;font-weight:700">Vérifier l’authenticité du bulletin</a></div>';
+      h += '<div class="bulletin" id="bulValid">'
+        + '<b>Bulletin ' + esc(moisLbl(b.mois)) + '</b> — Net à payer <b>' + money(b.net) + '</b><br>'
+        + '<span class="muted">Employé : ' + esc(b.nom || "") + ' · Matricule ' + esc(b.matricule || "") + '</span>'
+        + '<div style="margin-top:10px;font-size:12px;font-weight:800;color:#0b3a6f">Valider la réception avec votre code PIN</div>'
+        + '<div class="row" style="margin-top:6px;align-items:flex-end"><div><label>Code PIN</label><input id="bl-pin" type="password" inputmode="numeric" maxlength="8" placeholder="Votre code PIN"></div>'
+        + '<div style="flex:0 0 auto"><button class="btn" onclick="window.__validerBulletin()">Valider la réception</button></div></div>'
+        + '<div class="err" id="bl-err"></div>'
+        + '<a href="verif.html?uid=' + encodeURIComponent(uid) + '&token=' + encodeURIComponent(b.token || qtoken) + '" style="font-size:11px;color:#0b3a6f;font-weight:700">Voir / vérifier le bulletin</a></div>';
     }
     h += '<label>Login, nom, matricule ou téléphone</label>'
       + '<input id="lg-login" list="lg-choices" autocomplete="off" placeholder="Ex : kanga, 01, 0707..." value="' + esc(b && b.matricule ? b.matricule : "") + '">'
@@ -272,6 +277,25 @@
       try { sessionStorage.setItem("mdb_portail_token", j.token); sessionStorage.setItem("mdb_portail_uid", uid); } catch (e) {}
       loadData();
     }).catch(function () { btn.disabled = false; err.textContent = "Connexion impossible. Vérifiez Internet."; });
+  };
+  window.__validerBulletin = function () {
+    var pin = (el("bl-pin") || {}).value || "";
+    var err = el("bl-err");
+    if (!pin.trim()) { if (err) { err.style.color = "#b91c1c"; err.textContent = "Saisissez votre code PIN."; } return; }
+    if (err) { err.style.color = "#475569"; err.textContent = "Validation…"; }
+    fetch("https://montabbord-api.kkcj2019.workers.dev/api/recep", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uid: uid, token: qtoken, pin: pin.trim() })
+    }).then(function (r) { return r.json().catch(function () { return { ok: false }; }); })
+      .then(function (j) {
+        if (j && j.ok) {
+          var d = j.reception && j.reception.dateReception ? new Date(j.reception.dateReception).toLocaleString("fr-FR") : "";
+          if (err) { err.style.color = "#15803d"; err.textContent = (j.already ? "Bulletin déjà validé" : "Bulletin reçu et validé") + (d ? " le " + d : "") + ". Merci."; }
+          var inp = el("bl-pin"); if (inp) inp.disabled = true;
+        } else {
+          if (err) { err.style.color = "#b91c1c"; err.textContent = (j && j.code === "bad_pin") ? "Code PIN incorrect. Réessayez." : "Validation impossible. Vérifiez votre code PIN."; }
+        }
+      }).catch(function () { if (err) { err.style.color = "#b91c1c"; err.textContent = "Connexion impossible."; } });
   };
   window.__pick = function (v) { el("lg-login").value = v; window.__login(); };
   function renderRegister() {
@@ -467,7 +491,9 @@
     var list = (state.data && state.data.acomptes) || [];
     var a = list.filter(function (x) { return String(x.id) === String(id); })[0];
     if (!a) return;
-    var m = parseFloat(a.montant) || 0, r = parseFloat(a.montantRembourse) || 0, reste = Math.max(0, m - r);
+    var m = parseFloat(a.montant) || 0;
+    var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : a.montantRembourse) || 0;
+    var reste = Math.max(0, m - r);
     var tt = a.nature || a.type;
     var type = tt === "pret" ? "Prêt" : tt === "solde" ? "Solde de salaire" : "Acompte";
     var src = (a.sourceType === "banque" ? "Banque" : "Caisse") + (a.sourceNom ? " — " + a.sourceNom : "");
@@ -546,10 +572,13 @@
     var dette = 0, vusD = {};
     (d.acomptes || []).forEach(function (a) {
       if (!a) return;
+      var nat = a.nature || a.type;
+      if (nat === "solde") return;
       var cle = a.requeteId ? "R|" + a.requeteId : ["C", a.date || "", Math.round(parseFloat(a.montant) || 0), String(a.moisDeduction || ""), a.type || ""].join("|");
       if (vusD[cle]) return;
       vusD[cle] = 1;
-      var m = parseFloat(a.montant) || 0, r = parseFloat(a.montantRembourse) || 0;
+      var m = parseFloat(a.montant) || 0;
+      var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : a.montantRembourse) || 0;
       dette += Math.max(0, m - r);
     });
     var base = parseFloat(e.salaire_base) || 0;
@@ -665,7 +694,8 @@
     list.sort(function (a, b) { return String(b.date || "").localeCompare(String(a.date || "")); });
     var h = '<div class="card"><h3>Mes acomptes, prêts et dettes — ' + esc(moisLbl(m)) + '</h3><table><thead><tr><th>Date</th><th>Type</th><th>Statut</th><th class="r">Montant</th><th class="r">Remboursé</th><th class="r">Reste</th><th>Déduction</th></tr></thead><tbody>';
     list.forEach(function (a) {
-      var m = parseFloat(a.montant) || 0, r = parseFloat(a.montantRembourse) || 0;
+      var m = parseFloat(a.montant) || 0;
+      var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : a.montantRembourse) || 0;
       var reste = Math.max(0, m - r);
       var tt = a.nature || a.type;
       var type = tt === "pret" ? "Prêt" : tt === "solde" ? "Solde de salaire" : "Acompte";
@@ -799,9 +829,12 @@
       return state.ent;
     }).catch(function () { state.ent = {}; return state.ent; });
     if (qtoken) {
-      Promise.all([entReady, getKey("mdb_paye").catch(function () { return null; })]).then(function (res) {
-        var paye = res[1];
-        var arr = (paye && Array.isArray(paye.bulletinVerifs)) ? paye.bulletinVerifs : [];
+      Promise.all([
+        entReady,
+        getKey("mdb_paye.bulletinVerifs").catch(function () { return null; }),
+        getKey("mdb_paye").catch(function () { return null; })
+      ]).then(function (res) {
+        var arr = Array.isArray(res[1]) ? res[1] : ((res[2] && Array.isArray(res[2].bulletinVerifs)) ? res[2].bulletinVerifs : []);
         var b = null;
         for (var i = 0; i < arr.length; i++) { if (arr[i] && String(arr[i].token) === String(qtoken)) { b = arr[i]; break; } }
         state.bulletin = b;
