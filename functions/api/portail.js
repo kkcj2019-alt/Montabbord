@@ -25,6 +25,15 @@ async function sha256Hex(msg) {
   for (let i = 0; i < bytes.length; i++) out += ('0' + bytes[i].toString(16)).slice(-2);
   return out;
 }
+function newSalt() {
+  try {
+    const a = new Uint8Array(8);
+    crypto.getRandomValues(a);
+    let s = '';
+    for (let i = 0; i < a.length; i++) s += ('0' + a[i].toString(16)).slice(-2);
+    return s;
+  } catch (e) { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+}
 async function verifierPin(hash, pin) {
   try {
     if (!hash || String(pin || '') === '') return false;
@@ -174,6 +183,55 @@ export async function onRequest(context) {
       sessions.push(sess);
       await ecrireCle(db, uid, 'mdb_portailSessions', sessions);
       return json({ ok: true, token, expiresAt: sess.expiresAt, employe: employePublic(emp), moiAutorises: moisAutorises(emp.id, paye) });
+    }
+
+    /* ---------- Création de compte employé (auto-inscription contrôlée) ---------- */
+    if (action === 'register') {
+      const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+      const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+      const found = trouverEmploye(employes, body.login).list;
+      if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
+      if (found.length > 1) {
+        return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
+      }
+      const emp = found[0];
+      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      const pin = String(body.pin || '').trim();
+      if (!/^\d{4,8}$/.test(pin)) return json({ ok: false, code: 'bad_format' }, 400);
+      const existing = trouverPin(paye.employePins, emp);
+      if (existing && existing.hash) return json({ ok: false, code: 'already' }, 409);
+
+      const tel = String(body.telephone || '').replace(/\D/g, '');
+      const dob = String(body.dateNaissance || '').slice(0, 10);
+      const empTel = String(emp.telephone || emp.tel || '').replace(/\D/g, '');
+      const empDob = String(emp.date_naissance || '').slice(0, 10);
+      const telOk = empTel && tel && empTel.slice(-8) === tel.slice(-8);
+      const dobOk = empDob && dob && empDob === dob;
+      const needTel = !!empTel;
+      const needDob = !!empDob;
+      if (!needTel && !needDob) return json({ ok: false, code: 'identity_missing' }, 403);
+      const identityOk = (!needTel || telOk) && (!needDob || dobOk);
+      if (!identityOk) return json({ ok: false, code: 'identity' }, 403);
+
+      const salt = newSalt();
+      const hash = 'sha256:' + salt + ':' + await sha256Hex(salt + '|' + pin);
+      paye.employePins = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
+      paye.employePins[emp.id] = {
+        empId: emp.id, matricule: emp.matricule || '',
+        nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
+        hash: hash, updatedAt: new Date().toISOString(), self: true
+      };
+      await ecrireCle(db, uid, 'mdb_paye', paye);
+
+      let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
+      if (!Array.isArray(sessions)) sessions = [];
+      const now = Date.now();
+      sessions = sessions.filter(s => s && s.expiresAt > now).slice(-800);
+      const token = newToken();
+      const sess = { token, uid, empId: emp.id, createdAt: now, expiresAt: now + 12 * 3600 * 1000 };
+      sessions.push(sess);
+      await ecrireCle(db, uid, 'mdb_portailSessions', sessions);
+      return json({ ok: true, token, expiresAt: sess.expiresAt, employe: employePublic(emp), moiAutorises: moisAutorises(emp.id, paye), created: true });
     }
 
     /* ---------- Côté administration (Paye / RH) ---------- */
@@ -390,6 +448,10 @@ export async function onRequest(context) {
         retourEstime: body.retourEstime || '',
         montant: parseFloat(body.montant) || 0,
         moisDeduction: body.moisDeduction || '',
+        datePointage: body.datePointage || '',
+        correction: body.correction || '',
+        heuresJour: parseFloat(body.heuresJour) || 0,
+        heuresNuit: parseFloat(body.heuresNuit) || 0,
         statut: 'ouverte', createdAt: now, updatedAt: now,
         messages: [{ id: 'M' + Date.now(), auteur: 'employe', nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(), texte, at: now }]
       };
