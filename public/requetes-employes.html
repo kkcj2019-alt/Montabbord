@@ -80,6 +80,7 @@
   function mois(m){try{var d=new Date(String(m)+"-01T00:00:00");return d.toLocaleDateString("fr-FR",{month:"long",year:"numeric"})}catch(e){return m}}
   function api(action,payload){return fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({uid:uid,action:action},payload||{}))}).then(function(r){return r.json().catch(function(){return {ok:false}})});}
   function getKey(cle){return fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&cle="+encodeURIComponent(cle)+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var v=j&&j.data&&j.data[cle];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){v=null}}return v;}).catch(function(){return null;});}
+  function getPrefix(prefix){return fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&prefix="+encodeURIComponent(prefix)+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var d=(j&&j.data)||{},out={};for(var k in d){if(!d.hasOwnProperty(k))continue;var v=d[k];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){}}out[k]=v;}return out;}).catch(function(){return {};});}
   function badge(s){if(s==="acceptee")return '<span class="badge b-ok">Acceptée</span>';if(s==="refusee")return '<span class="badge b-bad">Refusée</span>';if(s==="en_cours")return '<span class="badge b-info">En cours</span>';if(s==="fermee")return '<span class="badge b-gray">Fermée</span>';return '<span class="badge b-wait">Ouverte</span>';}
   function typeLbl(t){return {reclamation:"Réclamation",permission:"Permission / absence",conge:"Congé",pret:"Prêt",acompte:"Acompte",pointage:"Contestation de pointage",autre:"Autre"}[t]||"Demande";}
   function norm(s){return String(s==null?"":s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g,"");}
@@ -95,14 +96,29 @@
     return arr[0]||null;
   }
   function reqCount(empId){return (state.requetes||[]).filter(function(r){return r&&String(r.empId)===String(empId);}).length;}
+  function dernierBulletin(empId){
+    var arr=(state.paye&&state.paye.bulletinVerifs)||[];
+    var list=arr.filter(function(b){return b&&String(b.empId)===String(empId);});
+    list.sort(function(a,b){return String(b.mois||"").localeCompare(String(a.mois||""));});
+    return list[0]||null;
+  }
+  window.__toggleBulletin=function(empId,moisBul,visible){
+    api("adminbulletin",{empId:empId,mois:moisBul,visible:!visible}).then(function(j){
+      if(j&&j.ok){ loadAll(); }
+      else alert("Impossible de modifier la visibilité du bulletin (aucun bulletin pour cet employé).");
+    }).catch(function(){ alert("Connexion impossible. Réessayez."); });
+  };
 
   function loadAll(){
     if(!uid){document.getElementById("app").innerHTML='<div class="card"><div class="empty">Identifiant entreprise introuvable.</div></div>';return;}
-    Promise.all([getKey("mdb_employes"),getKey("mdb_paye"),getKey("mdb_requetesEmploye"),getKey("mdb_portailSessions")]).then(function(res){
+    Promise.all([getKey("mdb_employes"),getKey("mdb_paye"),getPrefix("mdb_paye."),getKey("mdb_requetesEmploye"),getKey("mdb_portailSessions")]).then(function(res){
       state.employes=Array.isArray(res[0])?res[0]:[];
-      state.paye=(res[1]&&typeof res[1]==="object")?res[1]:{};
-      state.requetes=Array.isArray(res[2])?res[2]:[];
-      state.sessions=Array.isArray(res[3])?res[3]:[];
+      var paye=(res[1]&&typeof res[1]==="object")?res[1]:{};
+      var sec=res[2]||{};
+      for(var k in sec){ if(!sec.hasOwnProperty(k)) continue; if(k.indexOf("mdb_paye.")===0){ paye[k.slice(9)]=sec[k]; } }
+      state.paye=paye;
+      state.requetes=Array.isArray(res[3])?res[3]:[];
+      state.sessions=Array.isArray(res[4])?res[4]:[];
       document.getElementById("who").textContent=me.nom+" · "+state.employes.length+" employé(s) · "+state.requetes.length+" requête(s)";
       renderAll();
     });
@@ -138,17 +154,25 @@
     var list=state.employes.slice().sort(function(a,b){return String(a.nom||"").localeCompare(String(b.nom||""));});
     if(q)list=list.filter(function(e){return norm((e.nom||"")+" "+(e.prenoms||"")+" "+(e.matricule||"")+" "+(e.fonction||"")).indexOf(q)!==-1;});
     var h='<div class="filters"><input id="empSearch" placeholder="🔎 Rechercher un employé, matricule, login…" value="'+esc(state.empSearch)+'" oninput="window.__empSearch(this.value)" style="flex:1;min-width:220px;max-width:340px"><span class="meta" style="margin:0 0 0 auto">'+list.length+' employé(s)</span></div>';
-    h+='<div style="overflow:auto;max-height:50vh;border:1px solid var(--line);border-radius:10px"><table><thead><tr><th>Employé</th><th>Matricule</th><th>Login</th><th>Mot de passe</th><th>PIN</th><th>Origine</th><th>Dernière connexion</th><th>Requêtes</th><th></th></tr></thead><tbody>';
-    if(!list.length)h+='<tr><td colspan="9"><div class="empty">Aucun employé.</div></td></tr>';
+    h+='<div style="overflow:auto;max-height:50vh;border:1px solid var(--line);border-radius:10px"><table><thead><tr><th>Compte</th><th>Employé</th><th>Matricule</th><th>Login</th><th>Mot de passe</th><th>PIN</th><th>Origine</th><th>Dernière connexion</th><th>Requêtes</th><th>Bulletin</th><th></th></tr></thead><tbody>';
+    if(!list.length)h+='<tr><td colspan="11"><div class="empty">Aucun employé.</div></td></tr>';
     list.forEach(function(e){
       var rec=compteDe(e),ls=lastSession(e.id);
-      var login=rec&&rec.login?rec.login:"—";
-      var pass=rec&&rec.passwordHash?'<span class="badge b-ok">défini</span>':'<span class="badge b-gray">—</span>';
-      var pin=(rec&&(rec.hash||rec.pinHash))?'<span class="badge b-ok">défini</span>':'<span class="badge b-gray">—</span>';
-      var src=rec?(rec.self?'<span class="badge b-info">Employé</span>':'<span class="badge b-gray">Admin</span>'):'<span class="badge b-gray">—</span>';
-      h+='<tr><td><b>'+esc(((e.nom||"")+" "+(e.prenoms||"")).trim())+'</b><div class="meta" style="margin:0">'+esc(e.fonction||"")+'</div></td>'
-        +'<td>'+esc(e.matricule||"—")+'</td><td>'+esc(login)+'</td><td>'+pass+'</td><td>'+pin+'</td><td>'+src+'</td>'
-        +'<td>'+esc(ls?fdt(ls.createdAt):"—")+'</td><td style="text-align:center">'+reqCount(e.id)+'</td>'
+      var login=rec&&rec.login?rec.login:"-";
+      var aCompte=!!(rec&&(rec.login||rec.passwordHash||rec.hash||rec.pinHash));
+      var pass=rec&&rec.passwordHash?'<span class="badge b-ok">défini</span>':'<span class="badge b-gray">-</span>';
+      var pin=(rec&&(rec.hash||rec.pinHash))?'<span class="badge b-ok">défini</span>':'<span class="badge b-gray">-</span>';
+      var src=rec?(rec.self?'<span class="badge b-info">Employé</span>':'<span class="badge b-gray">Admin</span>'):'<span class="badge b-gray">-</span>';
+      var bul=dernierBulletin(e.id);
+      var bulCell=bul
+        ? '<div style="font-size:10.5px;font-weight:800;color:#0b3a6f;margin-bottom:3px">'+esc(mois(bul.mois))+'</div>'
+          + '<button class="btn '+(bul.visible?'green':'out')+' sm" onclick="window.__toggleBulletin(\''+esc(e.id)+'\',\''+esc(bul.mois||'')+'\','+(bul.visible?'true':'false')+')">'+(bul.visible?'Publié':'Publier')+'</button>'
+        : '<span class="badge b-gray">—</span>';
+      h+='<tr><td>'+(aCompte?'<span class="badge b-ok">Créé</span>':'<span class="badge b-gray">Aucun</span>')+'</td>'
+        +'<td><b>'+esc(((e.nom||"")+" "+(e.prenoms||"")).trim())+'</b><div class="meta" style="margin:0">'+esc(e.fonction||"")+'</div></td>'
+        +'<td>'+esc(e.matricule||"-")+'</td><td>'+esc(login)+'</td><td>'+pass+'</td><td>'+pin+'</td><td>'+src+'</td>'
+        +'<td>'+esc(ls?fdt(ls.createdAt):"-")+'</td><td style="text-align:center">'+reqCount(e.id)+'</td>'
+        +'<td>'+bulCell+'</td>'
         +'<td><button class="btn out sm" onclick="window.__voirRequetes(\''+esc(e.nom||"")+'\')">Voir requêtes</button></td></tr>';
     });
     h+='</tbody></table></div>';

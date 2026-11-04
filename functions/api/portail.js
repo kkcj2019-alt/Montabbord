@@ -229,6 +229,26 @@ export async function onRequest(context) {
       });
     }
 
+    /* ---------- Publication d'un bulletin (administration) ---------- */
+    if (action === 'adminbulletin') {
+      const paye = await lirePaye(db, uid);
+      const arr = Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : [];
+      const empId = String(body.empId || '');
+      const mois = String(body.mois || '').slice(0, 7);
+      const visible = !!body.visible;
+      let n = 0;
+      arr.forEach(b => {
+        if (!b || String(b.empId) !== empId) return;
+        if (mois && String(b.mois || '').slice(0, 7) !== mois) return;
+        b.visible = visible;
+        n++;
+      });
+      if (!n) return json({ ok: false, code: 'no_bulletin' }, 404);
+      paye.bulletinVerifs = arr;
+      await ecrireCle(db, uid, 'mdb_paye.bulletinVerifs', arr);
+      return json({ ok: true, updated: n, visible });
+    }
+
     /* ---------- Connexion ---------- */
     if (action === 'login') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
@@ -554,7 +574,7 @@ export async function onRequest(context) {
     if (action === 'data') {
       const pointage = (Array.isArray(paye.pointage) ? paye.pointage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
       const montage = (Array.isArray(paye.pointageMontage) ? paye.pointageMontage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
-      const bulletins = (Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).filter(b => b && String(b.empId) === String(emp.id) && allowed.indexOf(String(b.mois || '')) !== -1);
+      const bulletins = (Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).filter(b => b && b.visible === true && String(b.empId) === String(emp.id) && allowed.indexOf(String(b.mois || '')) !== -1);
       const acomptes = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
       const vusAp = {};
       const mesAcomptes = (Array.isArray(acomptes) ? acomptes : []).filter(a => {
