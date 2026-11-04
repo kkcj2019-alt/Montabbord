@@ -67,6 +67,32 @@ async function lireCle(db, uid, cle) {
   ).bind(uid, '"' + uid + '"', cle).first();
   return row ? row.valeur : null;
 }
+/* La paie est stockée DÉCOUPÉE par section dans D1 : mdb_paye.pointage,
+   mdb_paye.bulletinVerifs, mdb_paye.employePins, etc. On recompose ici
+   l'objet complet, sinon pointage et bulletins arrivent vides. */
+async function lirePaye(db, uid) {
+  let out = {};
+  try {
+    const rows = await db.prepare(
+      "SELECT cle, valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND (cle = 'mdb_paye' OR cle LIKE 'mdb_paye.%')"
+    ).bind(uid, '"' + uid + '"').all();
+    const list = (rows && rows.results) || [];
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i];
+      if (!r || r.cle !== 'mdb_paye') continue;
+      const v = parseVal(r.valeur, null);
+      if (v && typeof v === 'object' && !Array.isArray(v)) out = Object.assign(out, v);
+    }
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i];
+      if (!r || !r.cle || r.cle.indexOf('mdb_paye.') !== 0) continue;
+      const sec = r.cle.slice('mdb_paye.'.length);
+      if (!sec) continue;
+      out[sec] = parseVal(r.valeur, null);
+    }
+  } catch (e) {}
+  return out;
+}
 async function ecrireCle(db, uid, cle, valeur) {
   const now = Date.now().toString();
   await db.prepare(
@@ -191,7 +217,7 @@ export async function onRequest(context) {
       if (found.length > 1) return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
       const emp = found[0];
       if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
-      const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+      const paye = await lirePaye(db, uid);
       const compte = trouverPin(paye.employePins, emp);
       return json({
         ok: true,
@@ -206,7 +232,7 @@ export async function onRequest(context) {
     /* ---------- Connexion ---------- */
     if (action === 'login') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
-      const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+      const paye = await lirePaye(db, uid);
       const compte = trouverCompteParLogin(paye.employePins, body.login);
       let emp = null;
       if (compte && compte.empId) {
@@ -242,7 +268,7 @@ export async function onRequest(context) {
     /* ---------- Création de compte employé (auto-inscription contrôlée) ---------- */
     if (action === 'register') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
-      const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+      const paye = await lirePaye(db, uid);
       const found = trouverEmploye(employes, body.login).list;
       if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
       if (found.length > 1) {
@@ -296,7 +322,7 @@ export async function onRequest(context) {
         pinHash: pinHash,
         updatedAt: new Date().toISOString(), self: true
       };
-      await ecrireCle(db, uid, 'mdb_paye', paye);
+      await ecrireCle(db, uid, 'mdb_paye.employePins', paye.employePins);
 
       let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
       if (!Array.isArray(sessions)) sessions = [];
@@ -354,7 +380,7 @@ export async function onRequest(context) {
          dans le pointage, du jour de début au jour de fin. */
       if (statut === 'acceptee' && (req.type === 'permission' || req.type === 'conge')) {
         try {
-          const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+          const paye = await lirePaye(db, uid);
           const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
           const byKey = {};
           pts.forEach(p => { if (p && p.employee_id && p.date) byKey[String(p.employee_id) + '|' + String(p.date).slice(0, 10)] = p; });
@@ -388,14 +414,14 @@ export async function onRequest(context) {
             }
           }
           paye.pointage = pts;
-          await ecrireCle(db, uid, 'mdb_paye', paye);
+          await ecrireCle(db, uid, 'mdb_paye.pointage', paye.pointage);
           req.traitement = Object.assign({}, req.traitement || {}, { pointage: true, jours: n });
         } catch (eP) {}
       }
       /* Contestation de pointage acceptée : on corrige le jour concerné. */
       if (statut === 'acceptee' && req.type === 'pointage') {
         try {
-          const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+          const paye = await lirePaye(db, uid);
           const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
           const ds = String(req.datePointage || '').slice(0, 10);
           if (/^\d{4}-\d{2}-\d{2}$/.test(ds)) {
@@ -419,7 +445,7 @@ export async function onRequest(context) {
             row.source = 'requete';
             row.requeteId = req.id;
             paye.pointage = pts;
-            await ecrireCle(db, uid, 'mdb_paye', paye);
+            await ecrireCle(db, uid, 'mdb_paye.pointage', paye.pointage);
             req.traitement = Object.assign({}, req.traitement || {}, { pointage: true, date: ds });
           }
         } catch (ePt) {}
@@ -508,7 +534,7 @@ export async function onRequest(context) {
     const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
     const emp = (employes || []).find(e => e && String(e.id) === String(sess.empId));
     if (!emp) return json({ ok: false, code: 'not_personnel' }, 404);
-    const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+    const paye = await lirePaye(db, uid);
     const allowed = moisAutorises(emp.id, paye);
 
     /* ---------- Données personnelles ---------- */
@@ -531,6 +557,26 @@ export async function onRequest(context) {
         return true;
       });
       const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
+      const opsCaisse = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
+      const opsList = Array.isArray(opsCaisse) ? opsCaisse : [];
+      const natureDe = function (a) {
+        const t = String(a.type || '').toLowerCase();
+        let op = null;
+        for (let i = 0; i < opsList.length; i++) {
+          const o = opsList[i];
+          if (!o) continue;
+          if ((a.caisseOpId && String(o.id) === String(a.caisseOpId)) ||
+              (a.operationId && String(o.id) === String(a.operationId)) ||
+              (a.numeroPiece && String(o.numeroPiece || '') === String(a.numeroPiece))) { op = o; break; }
+        }
+        const code = String((op && (op.typeOp || op.code || op.apType)) || '').toUpperCase();
+        const lib = String((op && (op.libelle || op.observations)) || a.motif || '').toUpperCase();
+        const hasSolde = code.indexOf('SOLDE') >= 0 || lib.indexOf('SOLDE') >= 0;
+        const hasPret = code.indexOf('PRET') >= 0 || code.indexOf('PRÊT') >= 0 || lib.indexOf('PRET') >= 0 || lib.indexOf('PRÊT') >= 0;
+        if (t === 'solde' || (t !== 'pret' && hasSolde)) return 'solde';
+        if (t === 'pret' || hasPret) return 'pret';
+        return 'acompte';
+      };
       const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
       const mesReq = (Array.isArray(reqs) ? reqs : []).filter(r => r && String(r.empId) === String(emp.id));
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
@@ -540,7 +586,7 @@ export async function onRequest(context) {
         moiAutorises: allowed,
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
         pointage, montage, bulletins,
-        acomptes: mesAcomptes,
+        acomptes: mesAcomptes.map(a => Object.assign({}, a, { nature: natureDe(a) })),
         photo: (photos && photos[emp.id]) || '',
         requetes: mesReq,
         unread: mesReq.reduce((n, r) => n + ((r.messages || []).filter(m => m && m.auteur !== 'employe' && !m.luParEmploye).length), 0)

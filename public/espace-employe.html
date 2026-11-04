@@ -516,7 +516,14 @@
     var m = state.mois || currentMonth();
     var rows = pts.filter(function (p) { return String(p.date || "").slice(0, 7) === m; })
       .sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
-    if (!rows.length) return '<div class="card"><div class="empty">Aucun pointage pour ' + esc(moisLbl(m)) + '.</div></div>';
+    if (!rows.length) {
+      var autres = [];
+      pts.forEach(function (p) { var mm = String(p.date || "").slice(0, 7); if (mm && mm !== m && autres.indexOf(mm) === -1) autres.push(mm); });
+      autres.sort().reverse();
+      return '<div class="card"><div class="empty">Aucun pointage pour ' + esc(moisLbl(m)) + '.'
+        + (autres.length ? '<br><span class="small">Des pointages existent pour ' + autres.slice(0, 3).map(function (x) { return esc(moisLbl(x)); }).join(", ") + '. Changez le « Mois affiché » ci-dessus.</span>' : '')
+        + '</div></div>';
+    }
     var jours = 0, heures = 0, abs = 0;
     rows.forEach(function (p) {
       var hh = (parseFloat(p.h_j_manual) || 0) + (parseFloat(p.h_n_manual) || 0);
@@ -542,7 +549,14 @@
     var buls = (state.data && state.data.bulletins) || [];
     var m = state.mois || currentMonth();
     buls = buls.filter(function (b) { return String(b.mois || "") === m; }).sort(function (a, b) { return String(b.mois).localeCompare(String(a.mois)); });
-    if (!buls.length) return '<div class="card"><div class="empty">Aucun bulletin pour ' + esc(moisLbl(m)) + '.</div></div>';
+    if (!buls.length) {
+      var autresB = [];
+      ((state.data && state.data.bulletins) || []).forEach(function (b) { var mm = String(b.mois || ""); if (mm && mm !== m && autresB.indexOf(mm) === -1) autresB.push(mm); });
+      autresB.sort().reverse();
+      return '<div class="card"><div class="empty">Aucun bulletin pour ' + esc(moisLbl(m)) + '.'
+        + (autresB.length ? '<br><span class="small">Des bulletins existent pour ' + autresB.slice(0, 3).map(function (x) { return esc(moisLbl(x)); }).join(", ") + '. Changez le « Mois affiché » ci-dessus.</span>' : '')
+        + '</div></div>';
+    }
     var h = '<div class="card"><h3>Mes bulletins — ' + esc(moisLbl(m)) + '</h3><table><thead><tr><th>Mois</th><th class="r">Brut</th><th class="r">Net</th><th></th></tr></thead><tbody>';
     buls.forEach(function (b) {
       h += '<tr><td>' + esc(moisLbl(b.mois)) + '</td><td class="r">' + money(b.brut) + '</td><td class="r"><b>' + money(b.net) + '</b></td>'
@@ -571,7 +585,8 @@
     var h = '<div class="card"><h3>Mes acomptes, prêts et dettes — ' + esc(moisLbl(m)) + '</h3><table><thead><tr><th>Date</th><th>Type</th><th class="r">Montant</th><th class="r">Remboursé</th><th class="r">Reste</th><th>Déduction</th></tr></thead><tbody>';
     list.forEach(function (a) {
       var m = parseFloat(a.montant) || 0, r = parseFloat(a.montantRembourse) || 0;
-      var type = a.type === "pret" ? "Prêt" : a.type === "solde" ? "Solde" : "Acompte";
+      var tt = a.nature || a.type;
+      var type = tt === "pret" ? "Prêt" : tt === "solde" ? "Solde de salaire" : "Acompte";
       h += '<tr><td>' + esc(fmtDate(a.date)) + '</td><td>' + type + '</td><td class="r">' + money(m) + '</td><td class="r">' + money(r) + '</td><td class="r"><b>' + money(Math.max(0, m - r)) + '</b></td><td>' + esc(a.moisDeduction ? moisLbl(a.moisDeduction) : "-") + '</td></tr>';
     });
     h += '</tbody></table></div>';
@@ -693,29 +708,27 @@
   /* ---------------- Démarrage ---------------- */
   function boot() {
     if (!uid) { document.body.classList.add("login-mode"); el("app").innerHTML = '<div class="card login"><h2>Lien incomplet</h2><div class="intro">Ouvrez cette page depuis le QR de votre bulletin ou demandez le lien au service paie.</div></div>'; return; }
-    getKey("mdb_entreprise").then(function (ent) {
+    var tok = "";
+    try { tok = sessionStorage.getItem("mdb_portail_token") || ""; } catch (e) {}
+    /* On attend le nom/logo de l'entreprise AVANT le premier rendu :
+       sinon le logo par défaut apparaît une fraction de seconde. */
+    var entReady = getKey("mdb_entreprise").then(function (ent) {
       state.ent = ent || {};
-      try {
-        if (!state.token) {
-          if (document.getElementById("rg-login")) renderRegister();
-          else renderLogin();
-        }
-      } catch (eR) {}
-    });
+      return state.ent;
+    }).catch(function () { state.ent = {}; return state.ent; });
     if (qtoken) {
-      getKey("mdb_paye").then(function (paye) {
+      Promise.all([entReady, getKey("mdb_paye").catch(function () { return null; })]).then(function (res) {
+        var paye = res[1];
         var arr = (paye && Array.isArray(paye.bulletinVerifs)) ? paye.bulletinVerifs : [];
         var b = null;
         for (var i = 0; i < arr.length; i++) { if (arr[i] && String(arr[i].token) === String(qtoken)) { b = arr[i]; break; } }
         state.bulletin = b;
-        var tok = "";
-        try { tok = sessionStorage.getItem("mdb_portail_token") || ""; } catch (e) {}
         if (tok) { state.token = tok; loadData(); } else renderLogin();
-      }).catch(function () { renderLogin(); });
+      });
     } else {
-      var tok = "";
-      try { tok = sessionStorage.getItem("mdb_portail_token") || ""; } catch (e) {}
-      if (tok) { state.token = tok; loadData(); } else renderLogin();
+      entReady.then(function () {
+        if (tok) { state.token = tok; loadData(); } else renderLogin();
+      });
     }
   }
   boot();
