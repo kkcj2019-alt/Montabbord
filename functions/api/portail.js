@@ -401,6 +401,16 @@ export async function onRequest(context) {
       arr.sort(function (a, b) { return String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')); });
       return json({ ok: true, requetes: arr });
     }
+    if (action === 'admindelete') {
+      const id = String(body.requestId || body.id || '');
+      if (!id) return json({ ok: false, code: 'id' }, 400);
+      const list = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
+      const arr = Array.isArray(list) ? list : [];
+      const next = arr.filter(r => !(r && String(r.id) === id));
+      if (next.length === arr.length) return json({ ok: false, code: 'not_found' }, 404);
+      await ecrireCle(db, uid, 'mdb_requetesEmploye', next);
+      return json({ ok: true, deleted: arr.length - next.length });
+    }
     if (action === 'adminreply') {
       const id = String(body.requestId || '');
       const texte = String(body.texte || '').trim();
