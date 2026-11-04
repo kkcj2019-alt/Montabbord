@@ -101,6 +101,22 @@ async function ecrireCle(db, uid, cle, valeur) {
      ON CONFLICT(enterprise_id, cle) DO UPDATE SET valeur = excluded.valeur, updated_at = excluded.updated_at`
   ).bind(uid, cle, JSON.stringify(valeur), now).run();
 }
+/* Comptes créés depuis l'espace employé : stockés à part pour ne jamais être
+   écrasés par une synchronisation de la page Paye. */
+async function lireComptesPortail(db, uid) {
+  const v = parseVal(await lireCle(db, uid, 'mdb_portailComptes'), {});
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+}
+function fusionComptes(payePins, portail) {
+  const out = {};
+  if (payePins && typeof payePins === 'object') {
+    for (const k in payePins) if (Object.prototype.hasOwnProperty.call(payePins, k)) out[k] = payePins[k];
+  }
+  if (portail && typeof portail === 'object') {
+    for (const k in portail) if (Object.prototype.hasOwnProperty.call(portail, k)) out[k] = portail[k];
+  }
+  return out;
+}
 function moisAutorises(empId, paye) {
   const now = new Date();
   const out = [];
@@ -218,7 +234,8 @@ export async function onRequest(context) {
       const emp = found[0];
       if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
       const paye = await lirePaye(db, uid);
-      const compte = trouverPin(paye.employePins, emp);
+      const portail = await lireComptesPortail(db, uid);
+      const compte = trouverPin(fusionComptes(paye.employePins, portail), emp);
       return json({
         ok: true,
         employe: { nom: emp.nom || '', prenoms: emp.prenoms || '', matricule: emp.matricule || '', fonction: emp.fonction || '' },
@@ -253,7 +270,9 @@ export async function onRequest(context) {
     if (action === 'login') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
       const paye = await lirePaye(db, uid);
-      const compte = trouverCompteParLogin(paye.employePins, body.login);
+      const portail = await lireComptesPortail(db, uid);
+      const comptes = fusionComptes(paye.employePins, portail);
+      const compte = trouverCompteParLogin(comptes, body.login);
       let emp = null;
       if (compte && compte.empId) {
         emp = employes.find(e => e && String(e.id) === String(compte.empId)) || null;
@@ -267,7 +286,7 @@ export async function onRequest(context) {
         emp = found[0];
       }
       if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
-      const pinRec = compte || trouverPin(paye.employePins, emp);
+      const pinRec = compte || trouverPin(comptes, emp);
       if (!pinRec || (!pinRec.passwordHash && !pinRec.hash)) return json({ ok: false, code: 'no_access' }, 403);
       let ok = false;
       if (pinRec.passwordHash) ok = await verifierPin(pinRec.passwordHash, body.pin);
@@ -289,6 +308,8 @@ export async function onRequest(context) {
     if (action === 'register') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
       const paye = await lirePaye(db, uid);
+      const portail = await lireComptesPortail(db, uid);
+      const comptes = fusionComptes(paye.employePins, portail);
       const found = trouverEmploye(employes, body.login).list;
       if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
       if (found.length > 1) {
@@ -302,22 +323,22 @@ export async function onRequest(context) {
       if (norm(loginChoisi).length < 3) return json({ ok: false, code: 'login_required' }, 400);
       if (password.length < 4) return json({ ok: false, code: 'password_short' }, 400);
       if (!/^\d{4,8}$/.test(pin)) return json({ ok: false, code: 'bad_format' }, 400);
-      const existing = trouverPin(paye.employePins, emp);
+      const existing = trouverPin(comptes, emp);
       if (existing && (existing.hash || existing.passwordHash)) return json({ ok: false, code: 'already' }, 409);
       /* Un seul compte par personne : on refuse aussi si un compte existe déjà
          pour le même matricule ou le même nom (fiche employé en double). */
       const nq = norm((emp.nom || '') + ' ' + (emp.prenoms || ''));
       const mq = norm(emp.matricule);
-      const pinsObj = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
+      const pinsObj = comptes;
       for (const k in pinsObj) {
-        if (!pinsObj.hasOwnProperty(k)) continue;
+        if (!Object.prototype.hasOwnProperty.call(pinsObj, k)) continue;
         const p = pinsObj[k];
         if (!p || !(p.hash || p.passwordHash)) continue;
         if (String(p.empId || '') === String(emp.id)) return json({ ok: false, code: 'already' }, 409);
         if (mq && norm(p.matricule) === mq) return json({ ok: false, code: 'already' }, 409);
         if (nq && norm(p.nom) === nq) return json({ ok: false, code: 'already' }, 409);
       }
-      const autre = trouverCompteParLogin(paye.employePins, loginChoisi);
+      const autre = trouverCompteParLogin(comptes, loginChoisi);
       if (autre && String(autre.empId || '') !== String(emp.id)) return json({ ok: false, code: 'login_taken' }, 409);
       const qLogin = norm(loginChoisi);
       const conflit = employes.find(function (e) {
@@ -346,7 +367,7 @@ export async function onRequest(context) {
       const pinSalt = newSalt();
       const pinHash = 'sha256:' + pinSalt + ':' + await sha256Hex(pinSalt + '|' + pin);
       paye.employePins = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
-      paye.employePins[emp.id] = {
+      const recCompte = {
         empId: emp.id, matricule: emp.matricule || '',
         nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
         login: loginChoisi,
@@ -355,7 +376,12 @@ export async function onRequest(context) {
         pinHash: pinHash,
         updatedAt: new Date().toISOString(), self: true
       };
+      paye.employePins[emp.id] = recCompte;
       await ecrireCle(db, uid, 'mdb_paye.employePins', paye.employePins);
+      /* Copie dans une clé dédiée : la page Paye ne peut pas l'écraser. */
+      const portailComptes = await lireComptesPortail(db, uid);
+      portailComptes[emp.id] = recCompte;
+      await ecrireCle(db, uid, 'mdb_portailComptes', portailComptes);
 
       let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
       if (!Array.isArray(sessions)) sessions = [];
@@ -497,8 +523,12 @@ export async function onRequest(context) {
         const srcList = sourceType === 'banque' ? banques : caisses;
         const src = (Array.isArray(srcList) ? srcList : []).find(s => s && String(s.id) === sourceId);
         if (!src) return json({ ok: false, code: 'source_not_found' }, 404);
-        const montant = Math.round(parseFloat(req.montant) || 0);
+        const montantDemande = Math.round(parseFloat(req.montant) || 0);
+        let montant = Math.round(parseFloat(body.montant) || montantDemande);
         if (montant <= 0) return json({ ok: false, code: 'montant' }, 400);
+        if (montantDemande > 0 && montant > montantDemande) montant = montantDemande;
+        req.montantDemande = montantDemande;
+        req.montant = montant;
         const date = now.slice(0, 10);
         const heure = now.slice(11, 16);
         const opId = 'OP' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();

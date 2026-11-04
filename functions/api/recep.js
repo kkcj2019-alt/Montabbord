@@ -55,6 +55,15 @@ function trouverPin(pins, rec) {
   return null;
 }
 
+async function lireSection(db, uid, cle) {
+  const row = await db.prepare(
+    'SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1'
+  ).bind(uid, '"' + uid + '"', cle).first();
+  if (!row || row.valeur == null) return null;
+  let v = row.valeur;
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { v = null; } }
+  return v;
+}
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -81,14 +90,20 @@ export async function onRequest(context) {
     }
     if (!paye || typeof paye !== 'object') return json({ ok: false, code: 'not_found' }, 404);
 
-    const verifs = Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : [];
+    const verifsSec = await lireSection(db, uid, 'mdb_paye.bulletinVerifs');
+    const verifs = Array.isArray(verifsSec) && verifsSec.length ? verifsSec : (Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []);
     let rec = null;
     for (let i = 0; i < verifs.length; i++) {
       if (verifs[i] && String(verifs[i].token) === token) { rec = verifs[i]; break; }
     }
     if (!rec) return json({ ok: false, code: 'not_found' }, 404);
 
-    const pinRec = trouverPin(paye.employePins, rec);
+    let pins = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
+    const pinsSec = await lireSection(db, uid, 'mdb_paye.employePins');
+    if (pinsSec && typeof pinsSec === 'object') pins = Object.assign({}, pins, pinsSec);
+    const comptesPortail = await lireSection(db, uid, 'mdb_portailComptes');
+    if (comptesPortail && typeof comptesPortail === 'object') pins = Object.assign({}, pins, comptesPortail);
+    const pinRec = trouverPin(pins, rec);
     if (!pinRec || !pinRec.hash) return json({ ok: false, code: 'no_pin' }, 403);
 
     if (!(await verifierPin(pinRec.hash, pin))) return json({ ok: false, code: 'bad_pin' }, 403);
