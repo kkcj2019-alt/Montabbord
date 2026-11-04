@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-04-484';
+      window.__APP_VERSION = '2026-11-04-486';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -4189,7 +4189,7 @@
                 ✅ Reçus bulletins
               </button>
               <button class="btn btn-sec" onclick="window.open('requetes-employes.html?uid='+encodeURIComponent((typeof getEnterpriseUid==='function'?getEnterpriseUid():'')),'_blank')" title="Requêtes et réclamations des employés">
-                📨 Requêtes employés
+                🌐 Espace employé
               </button>
               <button class="btn" onclick="openEmpModal()">
                 + Nouvel Employé
@@ -5420,6 +5420,10 @@
             <button class="btn" onclick="loadPaySalaires()">
               🔄 Charger les soldes
             </button>
+            <button class="btn" id="psal-cloture-btn" onclick="payeToggleCloture()" title="Clôturer ou déverrouiller la paie du mois (administrateur)">
+              🔒 Clôturer le mois
+            </button>
+            <span id="psal-cloture-etat" style="font-size:.78rem;font-weight:800;padding-bottom:8px"></span>
           </div>
           <div class="card">
             <h3 style="margin-bottom: 0.8rem; font-size: 0.9rem">
@@ -12514,6 +12518,44 @@ function renderPrimeEmpMatrix() {
             (now.getMonth() + 1);
         }
         return saved;
+      }
+      /* ===== CLÔTURE / DÉVERROUILLAGE D'UN MOIS DE PAIE =====
+         Un mois clôturé ne peut plus être modifié (pointage, acomptes,
+         paiements). Seul un administrateur peut le déverrouiller. */
+      function getClotures() {
+        var v = getPayeSection("clotures", {});
+        return (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+      }
+      function payeMoisClos(mois) {
+        var m = String(mois || "").slice(0, 7);
+        if (!m) return false;
+        var c = getClotures()[m];
+        return !!(c && c.clos);
+      }
+      function payeGuardClos(mois, action) {
+        if (!payeMoisClos(mois)) return true;
+        if (typeof ptIsAdmin === "function" && ptIsAdmin()) {
+          return window.confirm("Le mois " + fmtMoisComplet(String(mois).slice(0, 7)) + " est clôturé.\n\nContinuer en tant qu’administrateur ?");
+        }
+        toast("Mois clôturé — " + (action || "modification") + " impossible. Contactez un administrateur.", "error");
+        return false;
+      }
+      function payeToggleCloture() {
+        if (typeof ptIsAdmin === "function" && !ptIsAdmin()) { toast("Action réservée à l’administrateur", "error"); return; }
+        var mois = psalEnsureMonth();
+        var cl = getClotures();
+        var clos = !!(cl[mois] && cl[mois].clos);
+        if (clos) {
+          if (!window.confirm("Déverrouiller la paie de " + fmtMoisComplet(mois) + " ?\n\nLes modifications redeviendront possibles.")) return;
+          delete cl[mois];
+        } else {
+          if (!window.confirm("Clôturer la paie de " + fmtMoisComplet(mois) + " ?\n\nPointage, acomptes et paiements ne pourront plus être modifiés (sauf administrateur).")) return;
+          cl[mois] = { clos: true, closLe: new Date().toISOString(), closPar: (typeof currentUser !== "undefined" && currentUser ? (currentUser.nom || currentUser.login || "") : "") };
+        }
+        setPayeSection("clotures", cl);
+        try { pushPayeCloud(true); } catch (e) {}
+        toast(clos ? "Mois déverrouillé" : "Mois clôturé", "success");
+        loadPaySalaires();
       }
       function syncPayeMonth(mois) {
         if (!mois) mois = getPayeMonth();
@@ -27696,6 +27738,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
           : document.querySelectorAll("#pt-montage-grid input[data-emp], input[data-emp]");
         if (inputs.length === 0) return;
         var day = inputs[0].getAttribute("data-date");
+        var _mMont = String(day || "").slice(0, 7) || getPayeMonth();
+        if (!payeGuardClos(_mMont, "montage")) return;
         var allPts = getPointageMontage();
         /* Modification en PLACE : chaque ligne existante (même employé + même
            article + même jour) est MISE À JOUR (même id, nouveau updatedAt),
@@ -28033,6 +28077,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         return diff(a, d) / 60;
       }
       function savePointage() {
+        var _mPt = (document.getElementById("pt-mois") || {}).value || getPayeMonth();
+        if (!payeGuardClos(_mPt, "pointage")) return;
         var empId = document.getElementById("pt-select-emp").value;
         if (!empId) return;
         var pts = getPointageData();
@@ -30322,6 +30368,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         try { var pp = (getPersonnel() || []).filter(function (x) { return x && x.id === id; })[0]; window._apSearch = pp ? ((pp.nom || "") + " " + (pp.prenoms || "")).trim() : ""; window._apTabP = "tous"; window._apStatutP = "tous"; var _selApF = document.getElementById("ap-filter-statut"); if (_selApF) _selApF.value = "tous"; loadAP(); } catch (eD) {}
       }
       function payeValiderAcomptesPreselection() {
+        var _mAp = window._apMonthP || getPayeMonth();
+        if (!payeGuardClos(_mAp, "acomptes/prêts")) return;
         var checks = document.querySelectorAll(".ap-val-check:checked");
         var ids = [];
         for (var i = 0; i < checks.length; i++)
@@ -30340,6 +30388,8 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         loadAP();
       }
       function payeValiderTousAcomptes() {
+        var _mAp2 = window._apMonthP || getPayeMonth();
+        if (!payeGuardClos(_mAp2, "acomptes/prêts")) return;
         var list = getAPList() || [];
         var ids = [];
         for (var i = 0; i < list.length; i++)
@@ -35067,7 +35117,7 @@ function panierVerserJour() {
           var _totRetS = calc.items.reduce(function (s, i) { return s + (i.ret > 0 ? i.ret : 0); }, 0);
           var _nomS = ((emp.nom || "") + " " + (emp.prenoms || "")).trim();
           var _verifS = bulVerifCreer(emp, mois, calc);
-          var _qrS = _verifS.url ? ("https://api.qrserver.com/v1/create-qr-code/?size=64x64&data=" + encodeURIComponent(_verifS.url)) : ("https://api.qrserver.com/v1/create-qr-code/?size=64x64&data=" + encodeURIComponent("Bulletin " + (emp.matricule || "") + " - " + _nomS + " - " + mois + " - Net " + fmt(calc.totals.net)));
+          var _qrS = _verifS.url ? ("https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(_verifS.url)) : ("https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent("Bulletin " + (emp.matricule || "") + " - " + _nomS + " - " + mois + " - Net " + fmt(calc.totals.net)));
           h += '<div style="display:flex;justify-content:space-between;align-items:stretch;gap:12px;margin-top:1rem;border-radius:12px;overflow:hidden;border:1px solid #dbe3ef;background:#f8fafc">';
           h += '<div style="flex:1;padding:14px 18px;background:#0b3a6f;color:#fff">' +
             '<div style="font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#ecc95f;font-weight:800">Net à payer</div>' +
@@ -35077,7 +35127,7 @@ function panierVerserJour() {
             '<div style="display:flex;justify-content:space-between;gap:12px"><span>Brut</span><b>' + fmt(calc.totals.brut || 0) + ' F</b></div>' +
             '<div style="display:flex;justify-content:space-between;gap:12px"><span>Retenues</span><b style="color:#b91c1c">' + fmt(_totRetS) + ' F</b></div>' +
             '<div style="display:flex;justify-content:space-between;gap:12px;border-top:1px solid #dbe3ef;padding-top:6px"><span>Net</span><b style="color:#0b3a6f">' + fmt(calc.totals.net) + ' F</b></div></div>';
-          h += '<div style="width:86px;padding:6px;text-align:center;border-left:1px solid #dbe3ef;background:#fff"><a href="' + (_verifS.url || '#') + '" target="_blank" title="Ouvrir la vérification / l’espace employé"><img src="' + _qrS + '" alt="QR de vérification" style="width:54px;height:54px;cursor:pointer"></a><div style="font-size:7px;color:#64748b;margin-top:2px">Vérification</div></div>';
+          h += '<div style="width:140px;padding:6px;text-align:center;border-left:1px solid #dbe3ef;background:#fff"><a href="' + (_verifS.url || '#') + '" target="_blank" title="Agrandir le QR / ouvrir la vérification" onclick="if(window.mdbQrAfficher){event.preventDefault();mdbQrAfficher(this.href,\'Bulletin de paie\');}"><img src="' + _qrS + '" alt="QR de vérification" style="width:110px;height:110px;cursor:pointer"></a><div style="font-size:7px;color:#64748b;margin-top:2px">Vérification</div></div>';
           h += '</div>';
           /* Vue après paie : ce qui est déjà payé et le solde restant. */
           h += bulApresPaieHtml(emp, mois, calc, window._bulVue);
@@ -43650,7 +43700,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var _totRetP = calc.items.reduce(function (s, i) { return s + (i.ret > 0 ? i.ret : 0); }, 0);
         var _nomP = ((emp.nom || "") + " " + (emp.prenoms || "")).trim();
         var _verifP = bulVerifCreer(emp, mois, calc);
-        var _qrP = _verifP.url ? ("https://api.qrserver.com/v1/create-qr-code/?size=64x64&data=" + encodeURIComponent(_verifP.url)) : ("https://api.qrserver.com/v1/create-qr-code/?size=64x64&data=" + encodeURIComponent("Bulletin " + (emp.matricule || "") + " - " + _nomP + " - " + mois + " - Net " + fmt(calc.totals.net)));
+        var _qrP = _verifP.url ? ("https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent(_verifP.url)) : ("https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" + encodeURIComponent("Bulletin " + (emp.matricule || "") + " - " + _nomP + " - " + mois + " - Net " + fmt(calc.totals.net)));
         h += '<div style="display:flex;justify-content:space-between;align-items:stretch;gap:12px;margin-top:16px;border-radius:12px;overflow:hidden;border:1px solid #dbe3ef;background:#f8fafc;page-break-inside:avoid">';
         h += '<div style="flex:1;padding:14px 18px;background:#0b3a6f;color:#fff">' +
           '<div style="font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#ecc95f;font-weight:800">Net à payer</div>' +
@@ -43660,7 +43710,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
           '<div style="display:flex;justify-content:space-between;gap:12px"><span>Brut</span><b>' + fmt(calc.totals.brut || 0) + ' F</b></div>' +
           '<div style="display:flex;justify-content:space-between;gap:12px"><span>Retenues</span><b style="color:#b91c1c">' + fmt(_totRetP) + ' F</b></div>' +
           '<div style="display:flex;justify-content:space-between;gap:12px;border-top:1px solid #dbe3ef;padding-top:6px"><span>Net</span><b style="color:#0b3a6f">' + fmt(calc.totals.net) + ' F</b></div></div>';
-        h += '<div style="width:86px;padding:6px;text-align:center;border-left:1px solid #dbe3ef;background:#fff"><a href="' + (_verifP.url || '#') + '" target="_blank" title="Ouvrir la vérification / l’espace employé"><img src="' + _qrP + '" alt="QR de vérification" style="width:54px;height:54px;cursor:pointer"></a><div style="font-size:7px;color:#64748b;margin-top:2px">Vérification</div></div>';
+        h += '<div style="width:140px;padding:6px;text-align:center;border-left:1px solid #dbe3ef;background:#fff"><a href="' + (_verifP.url || '#') + '" target="_blank" title="Agrandir le QR / ouvrir la vérification" onclick="if(window.mdbQrAfficher){event.preventDefault();mdbQrAfficher(this.href,\'Bulletin de paie\');}"><img src="' + _qrP + '" alt="QR de vérification" style="width:110px;height:110px;cursor:pointer"></a><div style="font-size:7px;color:#64748b;margin-top:2px">Vérification</div></div>';
         h += '</div>';
         /* Vue après paie (écran, impression et PDF). */
         h += bulApresPaieHtml(emp, mois, calc, window._bulVuePrint);
@@ -44140,6 +44190,17 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var mois = psalEnsureMonth();
         var lbl = document.getElementById("psal-mois-label");
         if (lbl) lbl.textContent = fmtMoisComplet(mois);
+        var _clos = payeMoisClos(mois);
+        var _clBtn = document.getElementById("psal-cloture-btn");
+        if (_clBtn) {
+          _clBtn.textContent = _clos ? "🔓 Déverrouiller le mois" : "🔒 Clôturer le mois";
+          _clBtn.style.background = _clos ? "#15803d" : "";
+        }
+        var _clEtat = document.getElementById("psal-cloture-etat");
+        if (_clEtat) {
+          _clEtat.textContent = _clos ? "Mois clôturé" : "";
+          _clEtat.style.color = _clos ? "#b91c1c" : "#15803d";
+        }
         psalFillSources();
         var dEl = document.getElementById("psal-date");
         if (dEl && !dEl.value) {
@@ -44224,6 +44285,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
       }
       function validatePaySalaires() {
         var mois = psalEnsureMonth();
+        if (!payeGuardClos(mois, "paiement des salaires")) return;
         var mode = document.getElementById("psal-mode").value;
         var srcId = document.getElementById("psal-source").value;
         var date = document.getElementById("psal-date").value;
@@ -45956,6 +46018,7 @@ function _dsEmbellir() {
   };
 })();
 </script>
+<script src="qr-verif.js?v=4"></script>
 <script src="print-buttons.js?v=6"></script>
 </body>
 </html>

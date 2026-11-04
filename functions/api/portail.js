@@ -128,6 +128,17 @@ function trouverPin(pins, emp) {
   }
   return null;
 }
+function trouverCompteParLogin(pins, login) {
+  if (!pins || typeof pins !== 'object') return null;
+  const q = norm(login);
+  if (!q) return null;
+  for (const k in pins) {
+    if (!pins.hasOwnProperty(k)) continue;
+    const p = pins[k];
+    if (p && p.login && norm(p.login) === q) return p;
+  }
+  return null;
+}
 function validerSession(sessions, token) {
   const now = Date.now();
   for (let i = 0; i < sessions.length; i++) {
@@ -162,16 +173,25 @@ export async function onRequest(context) {
     if (action === 'login') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
       const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
-      const found = trouverEmploye(employes, body.login).list;
-      if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
-      if (found.length > 1) {
-        return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
+      const compte = trouverCompteParLogin(paye.employePins, body.login);
+      let emp = null;
+      if (compte && compte.empId) {
+        emp = employes.find(e => e && String(e.id) === String(compte.empId)) || null;
       }
-      const emp = found[0];
+      if (!emp) {
+        const found = trouverEmploye(employes, body.login).list;
+        if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
+        if (found.length > 1) {
+          return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
+        }
+        emp = found[0];
+      }
       if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
-      const pinRec = trouverPin(paye.employePins, emp);
-      if (!pinRec || !pinRec.hash) return json({ ok: false, code: 'no_access' }, 403);
-      const ok = await verifierPin(pinRec.hash, body.pin);
+      const pinRec = compte || trouverPin(paye.employePins, emp);
+      if (!pinRec || (!pinRec.passwordHash && !pinRec.hash)) return json({ ok: false, code: 'no_access' }, 403);
+      let ok = false;
+      if (pinRec.passwordHash) ok = await verifierPin(pinRec.passwordHash, body.pin);
+      if (!ok && pinRec.hash) ok = await verifierPin(pinRec.hash, body.pin);
       if (!ok) return json({ ok: false, code: 'bad_pin' }, 403);
 
       let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
@@ -196,10 +216,16 @@ export async function onRequest(context) {
       }
       const emp = found[0];
       if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      const loginChoisi = String(body.loginChoisi || '').trim();
+      const password = String(body.password || '').trim();
       const pin = String(body.pin || '').trim();
+      if (norm(loginChoisi).length < 3) return json({ ok: false, code: 'login_required' }, 400);
+      if (password.length < 4) return json({ ok: false, code: 'password_short' }, 400);
       if (!/^\d{4,8}$/.test(pin)) return json({ ok: false, code: 'bad_format' }, 400);
       const existing = trouverPin(paye.employePins, emp);
-      if (existing && existing.hash) return json({ ok: false, code: 'already' }, 409);
+      if (existing && (existing.hash || existing.passwordHash)) return json({ ok: false, code: 'already' }, 409);
+      const autre = trouverCompteParLogin(paye.employePins, loginChoisi);
+      if (autre && String(autre.empId || '') !== String(emp.id)) return json({ ok: false, code: 'login_taken' }, 409);
 
       const tel = String(body.telephone || '').replace(/\D/g, '');
       const dob = String(body.dateNaissance || '').slice(0, 10);
@@ -213,13 +239,19 @@ export async function onRequest(context) {
       const identityOk = (!needTel || telOk) && (!needDob || dobOk);
       if (!identityOk) return json({ ok: false, code: 'identity' }, 403);
 
-      const salt = newSalt();
-      const hash = 'sha256:' + salt + ':' + await sha256Hex(salt + '|' + pin);
+      const passSalt = newSalt();
+      const passHash = 'sha256:' + passSalt + ':' + await sha256Hex(passSalt + '|' + password);
+      const pinSalt = newSalt();
+      const pinHash = 'sha256:' + pinSalt + ':' + await sha256Hex(pinSalt + '|' + pin);
       paye.employePins = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
       paye.employePins[emp.id] = {
         empId: emp.id, matricule: emp.matricule || '',
         nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
-        hash: hash, updatedAt: new Date().toISOString(), self: true
+        login: loginChoisi,
+        passwordHash: passHash,
+        hash: pinHash,
+        pinHash: pinHash,
+        updatedAt: new Date().toISOString(), self: true
       };
       await ecrireCle(db, uid, 'mdb_paye', paye);
 
