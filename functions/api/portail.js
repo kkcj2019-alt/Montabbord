@@ -226,6 +226,15 @@ export async function onRequest(context) {
       if (existing && (existing.hash || existing.passwordHash)) return json({ ok: false, code: 'already' }, 409);
       const autre = trouverCompteParLogin(paye.employePins, loginChoisi);
       if (autre && String(autre.empId || '') !== String(emp.id)) return json({ ok: false, code: 'login_taken' }, 409);
+      const qLogin = norm(loginChoisi);
+      const conflit = employes.find(function (e) {
+        if (!e || String(e.id) === String(emp.id)) return false;
+        return norm(e.matricule) === qLogin
+          || norm(e.telephone || e.tel) === qLogin
+          || norm((e.nom || '') + ' ' + (e.prenoms || '')) === qLogin
+          || norm(e.nom) === qLogin;
+      });
+      if (conflit) return json({ ok: false, code: 'login_taken' }, 409);
 
       const tel = String(body.telephone || '').replace(/\D/g, '');
       const dob = String(body.dateNaissance || '').slice(0, 10);
@@ -236,7 +245,7 @@ export async function onRequest(context) {
       const needTel = !!empTel;
       const needDob = !!empDob;
       if (!needTel && !needDob) return json({ ok: false, code: 'identity_missing' }, 403);
-      const identityOk = (!needTel || telOk) && (!needDob || dobOk);
+      const identityOk = (needTel && telOk) || (needDob && dobOk);
       if (!identityOk) return json({ ok: false, code: 'identity' }, 403);
 
       const passSalt = newSalt();
