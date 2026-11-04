@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-04-553';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-04-554';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -6439,6 +6439,18 @@ function _empPhoto(e) {
     var m = window._photosPortail || DB.get('mdb_photosCache') || DB.get('mdb_portailPhotos');
     if (m && typeof m === 'object' && m[e.id]) return m[e.id];
   } catch (err) {}
+  /* Secours : la photo peut etre rangee sous un AUTRE identifiant (fiche
+     recreee / import). On retrouve alors la photo par nom complet ou matricule. */
+  try {
+    var pn = window._photosParNom || DB.get('mdb_photosParNom');
+    if (pn && typeof pn === 'object') {
+      var _pn = function (s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim(); };
+      var full = _pn((e.nom || '') + ' ' + (e.prenoms || ''));
+      if (full && pn[full]) return pn[full];
+      var mat = _pn(e.matricule || '');
+      if (mat && pn['#' + mat]) return pn['#' + mat];
+    }
+  } catch (err2) {}
   if (e.photo) return e.photo;
   return '';
 }
@@ -6478,6 +6490,23 @@ function _chargerPhotosPortail(cb, force) {
       if (Array.isArray(empArr)) {
         empArr.forEach(function (e) { if (e && e.id && e.photo && !map[e.id]) map[e.id] = e.photo; });
       }
+      /* Index nom complet / matricule -> photo : permet de retrouver la photo
+         meme si l'employe a un autre identifiant dans la base locale. */
+      var _normNom = function (s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim(); };
+      var parNom = {};
+      if (Array.isArray(empArr)) {
+        empArr.forEach(function (e) {
+          if (!e) return;
+          var ph = map[e.id] || e.photo;
+          if (!ph) return;
+          var full = _normNom((e.nom || '') + ' ' + (e.prenoms || ''));
+          if (full) parNom[full] = ph;
+          var mat = _normNom(e.matricule || '');
+          if (mat) parNom['#' + mat] = ph;
+        });
+      }
+      window._photosParNom = parNom;
+      try { DB.set('mdb_photosParNom', parNom); } catch (ePN) {}
       var prev = window._photosPortail || {};
       for (var mk in map) { if (Object.prototype.hasOwnProperty.call(map, mk)) prev[mk] = map[mk]; }
       window._photosPortail = prev;
@@ -10241,6 +10270,28 @@ function showNotifBanner(al) {
 function maybeAskNotifPermission() {
   try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (eP) {}
 }
+function _mdbNotifOptions(parts) {
+  var _base = (location.origin || '') + '/';
+  return {
+    body: parts.join(' \u2022 '),
+    icon: _base + 'notif-icon-192.png',
+    badge: _base + 'notif-badge.png',
+    image: _base + 'notif-icon.png',
+    tag: 'montabbord-rappels',
+    renotify: true,
+    silent: false
+  };
+}
+function _mdbSwRegister() {
+  try {
+    if (!('serviceWorker' in navigator)) return Promise.resolve(null);
+    if (window._mdbSwPromise) return window._mdbSwPromise;
+    window._mdbSwPromise = navigator.serviceWorker.register('/sw.js')
+      .then(function (r) { try { return navigator.serviceWorker.ready; } catch (e) { return r; } })
+      .catch(function () { return null; });
+    return window._mdbSwPromise;
+  } catch (e) { return Promise.resolve(null); }
+}
 function sendBrowserNotif(total, al) {
   try {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -10250,7 +10301,20 @@ function sendBrowserNotif(total, al) {
     if (al.prefins.length) parts.push(al.prefins.length + ' remboursement(s) \u00e9chu(s)');
     if (al.contrats && al.contrats.length) parts.push(al.contrats.length + ' contrat(s) \u00e0 \u00e9ch\u00e9ance');
     if (al.demandes && al.demandes.length) parts.push(al.demandes.length + ' demande(s) utilisateur \u00e0 traiter');
-    new Notification('Montabbord \u2014 Rappels', { body: parts.join(' \u2022 ') });
+    var opts = _mdbNotifOptions(parts);
+    var titre = 'Montabbord \u2014 Rappels';
+    _mdbSwRegister().then(function (reg) {
+      try {
+        if (reg && typeof reg.showNotification === 'function') {
+          reg.showNotification(titre, opts);
+          return;
+        }
+      } catch (eS) {}
+      try {
+        var n = new Notification(titre, opts);
+        try { n.onclick = function () { try { window.focus(); n.close(); } catch (eC) {} }; } catch (eO) {}
+      } catch (eN) {}
+    });
   } catch (eBN) {}
 }
 function runNotifCheck(withBrowser) {
@@ -10261,6 +10325,7 @@ function runNotifCheck(withBrowser) {
   } catch (eNC) {}
 }
 setTimeout(maybeAskNotifPermission, 5000);
+setTimeout(function () { try { _mdbSwRegister(); } catch (eSW) {} }, 1500);
 setTimeout(function(){ runNotifCheck(false); }, 12000);
 setInterval(function(){ runNotifCheck(true); }, 3600000);
 /* ===== Export Excel universel ===== */
@@ -42206,6 +42271,15 @@ function _orgChartCurrentDiff() {
   } catch (e) { return false; }
 }
 function renderOrgCustomPage() {
+  try {
+    if (!window._orgPhotoLoading && (!window._photosPortailAt || (Date.now() - window._photosPortailAt) > 15000)) {
+      window._orgPhotoLoading = true;
+      _chargerPhotosPortail(function () {
+        window._orgPhotoLoading = false;
+        try { if (window._orgMode === 'custom') renderOrgCustomPage(); } catch (eR) {}
+      }, true);
+    }
+  } catch (ePr) {}
   var d = _orgCustomLoad();
   var tab = window._orgTab || 'general';
   var arr = _orgCustomNodes(d);
