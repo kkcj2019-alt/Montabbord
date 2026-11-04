@@ -449,15 +449,28 @@ export async function onRequest(context) {
       const telOk = empTel && tel && empTel.slice(-8) === tel.slice(-8);
       const dobOk = empDob && dob && empDob === dob;
       if (!(telOk || dobOk)) return json({ ok: false, code: 'identity' }, 403);
-      let loginChoisi = String(emp.matricule || '').trim();
+      let loginChoisi = String(body.loginChoisi || '').trim();
       if (norm(loginChoisi).length < 3 && empTel) loginChoisi = String(emp.telephone || emp.tel || '').trim();
+      if (norm(loginChoisi).length < 3) loginChoisi = String(emp.matricule || '').trim();
       if (norm(loginChoisi).length < 3) loginChoisi = 'emp' + String(emp.id || Date.now()).replace(/[^a-z0-9]/gi, '').slice(-6);
+      if (norm(loginChoisi).length < 3) return json({ ok: false, code: 'login_required' }, 400);
       const autre = trouverCompteParLogin(comptes, loginChoisi);
-      if (autre && String(autre.empId || '') !== String(emp.id)) loginChoisi = loginChoisi + String(emp.id || '').replace(/[^a-z0-9]/gi, '').slice(-3);
+      if (autre && String(autre.empId || '') !== String(emp.id)) return json({ ok: false, code: 'login_taken' }, 409);
+      const qLogin = norm(loginChoisi);
+      const conflit = (Array.isArray(employes) ? employes : []).find(function (e) {
+        if (!e || String(e.id) === String(emp.id)) return false;
+        return norm(e.matricule) === qLogin
+          || norm(e.telephone || e.tel) === qLogin
+          || norm((e.nom || '') + ' ' + (e.prenoms || '')) === qLogin
+          || norm(e.nom) === qLogin;
+      });
+      if (conflit) return json({ ok: false, code: 'login_taken' }, 409);
+      const password = String(body.password || '').trim() || pin;
+      if (password.length < 4) return json({ ok: false, code: 'password_short' }, 400);
       const pinSalt = newSalt();
       const pinHash = 'sha256:' + pinSalt + ':' + await sha256Hex(pinSalt + '|' + pin);
       const passSalt = newSalt();
-      const passHash = 'sha256:' + passSalt + ':' + await sha256Hex(passSalt + '|' + pin);
+      const passHash = 'sha256:' + passSalt + ':' + await sha256Hex(passSalt + '|' + password);
       const recCompte = {
         empId: emp.id, matricule: emp.matricule || '',
         nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
