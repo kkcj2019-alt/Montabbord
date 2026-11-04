@@ -4,6 +4,7 @@ import { onRequest as sessionApi } from "../functions/api/session.js";
 import { onRequest as enterpriseApi } from "../functions/api/enterprise.js";
 import { onRequest as backupApi } from "../functions/api/backup.js";
 import { onRequest as recepApi } from "../functions/api/recep.js";
+import { onRequest as portailApi } from "../functions/api/portail.js";
 
 const ROUTES = {
   "/api/sync": syncApi,
@@ -12,6 +13,7 @@ const ROUTES = {
   "/api/enterprise": enterpriseApi,
   "/api/backup": backupApi,
   "/api/recep": recepApi,
+  "/api/portail": portailApi,
 };
 
 export default {
