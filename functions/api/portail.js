@@ -284,6 +284,19 @@ export async function onRequest(context) {
       if (!/^\d{4,8}$/.test(pin)) return json({ ok: false, code: 'bad_format' }, 400);
       const existing = trouverPin(paye.employePins, emp);
       if (existing && (existing.hash || existing.passwordHash)) return json({ ok: false, code: 'already' }, 409);
+      /* Un seul compte par personne : on refuse aussi si un compte existe déjà
+         pour le même matricule ou le même nom (fiche employé en double). */
+      const nq = norm((emp.nom || '') + ' ' + (emp.prenoms || ''));
+      const mq = norm(emp.matricule);
+      const pinsObj = (paye.employePins && typeof paye.employePins === 'object') ? paye.employePins : {};
+      for (const k in pinsObj) {
+        if (!pinsObj.hasOwnProperty(k)) continue;
+        const p = pinsObj[k];
+        if (!p || !(p.hash || p.passwordHash)) continue;
+        if (String(p.empId || '') === String(emp.id)) return json({ ok: false, code: 'already' }, 409);
+        if (mq && norm(p.matricule) === mq) return json({ ok: false, code: 'already' }, 409);
+        if (nq && norm(p.nom) === nq) return json({ ok: false, code: 'already' }, 409);
+      }
       const autre = trouverCompteParLogin(paye.employePins, loginChoisi);
       if (autre && String(autre.empId || '') !== String(emp.id)) return json({ ok: false, code: 'login_taken' }, 409);
       const qLogin = norm(loginChoisi);
