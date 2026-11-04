@@ -4,13 +4,13 @@
    - Se réapplique aux boutons recréés (modales, listes, tableaux, vues).
    - Corrige aussi les boutons marqués par une ancienne version du script. */
 (function () {
-  var VERSION = '4';
+  var VERSION = '5';
   var CSS =
-    ".mdb-print-btn{background:#dc2626!important;border-color:#dc2626!important;color:#fff!important;font-weight:900!important;font-size:0!important;line-height:0!important;letter-spacing:0!important;box-shadow:0 3px 10px rgba(220,38,38,.30)!important;overflow:hidden!important}" +
-    ".mdb-print-btn:hover{background:#b91c1c!important;border-color:#b91c1c!important;color:#fff!important}" +
+    ".mdb-print-btn{background:#eef4fb!important;border:1px solid #cbd5e1!important;color:#0b3a6f!important;font-weight:900!important;font-size:0!important;line-height:0!important;letter-spacing:0!important;box-shadow:0 1px 3px rgba(15,23,42,.08)!important;overflow:hidden!important}" +
+    ".mdb-print-btn:hover{background:#e0ecf8!important;border-color:#93c5fd!important;color:#0b3a6f!important}" +
     ".mdb-print-btn::before,.mdb-print-btn::after{content:none!important;display:none!important}" +
     ".mdb-print-btn *{font-size:0!important;line-height:0!important;letter-spacing:0!important}" +
-    ".mdb-print-btn svg{stroke:#fff!important;color:#fff!important;width:18px!important;height:18px!important;flex:0 0 auto;font-size:initial!important;line-height:normal!important}" +
+    ".mdb-print-btn svg{stroke:#0b3a6f!important;color:#0b3a6f!important;width:18px!important;height:18px!important;flex:0 0 auto;font-size:initial!important;line-height:normal!important}" +
     ".mdb-print-btn .mdb-print-ico{width:18px;height:18px;display:inline-block;vertical-align:middle;margin:0!important;font-size:initial!important;line-height:normal!important}" +
     ".mdb-print-btn.mdb-print-icon-only{padding:0!important;width:38px!important;height:38px!important;min-width:38px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;border-radius:8px!important}" +
     ".mdb-print-btn.mdb-print-icon-only .mdb-print-ico{margin:0!important;width:18px!important;height:18px!important}" +
@@ -40,6 +40,7 @@
 
   function estBoutonImpression(el) {
     if (!el || el.nodeType !== 1) return false;
+    if (el.getAttribute('data-mdb-print-skip') === '1') return false;
     var tag = el.tagName;
     if (tag === 'INPUT') {
       var type = String(el.getAttribute('type') || '').toLowerCase();
@@ -48,7 +49,7 @@
       return false;
     }
     var txt = texteDe(el);
-    if (!/(imprim|impression|pdf|export)/i.test(txt)) return false;
+    if (!/(imprim|impression|pdf)/i.test(txt)) return false;
     /* Un bouton déjà parfaitement icône seule n'a pas besoin d'être retouché. */
     if (el.getAttribute('data-mdb-print-v') === VERSION && el.querySelector('svg.mdb-print-ico') && !(el.textContent || '').trim()) return false;
     return true;
