@@ -27,7 +27,6 @@ self.addEventListener('push', function (e) {
     body: d.body || '',
     icon: '/notif-icon-192.png',
     badge: '/notif-badge.png',
-    image: '/notif-icon.png',
     tag: d.tag || 'montabbord',
     renotify: true,
     data: d.data || {}

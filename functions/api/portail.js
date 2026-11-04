@@ -456,9 +456,27 @@ export async function onRequest(context) {
       if (existing && (existing.hash || existing.passwordHash)) return json({ ok: false, code: 'already' }, 409);
       const empTel = String(emp.telephone || emp.tel || '').replace(/\D/g, '');
       const empDob = String(emp.date_naissance || '').slice(0, 10);
-      const telOk = empTel && tel && empTel.slice(-8) === tel.slice(-8);
+      /* Le numéro saisi sert aussi à créer/renseigner la fiche employé :
+         s'il n'y a encore aucun numéro, on l'accepte et on l'enregistre. */
+      const telOk = empTel ? (!!tel && empTel.slice(-8) === tel.slice(-8)) : (tel.length >= 8);
       const dobOk = empDob && dob && empDob === dob;
       if (!(telOk || dobOk)) return json({ ok: false, code: 'identity' }, 403);
+      /* Mise à jour de la fiche : 1er numéro manquant ou 2e numéro différent. */
+      let empModifie = false;
+      if (tel) {
+        if (!empTel) {
+          emp.telephone = tel; empModifie = true;
+        } else if (empTel.slice(-8) !== tel.slice(-8)) {
+          const tel2 = String(emp.telephone2 || '').replace(/\D/g, '');
+          if (!tel2) { emp.telephone2 = tel; empModifie = true; }
+          else if (tel2.slice(-8) !== tel.slice(-8)) { emp.telephone2 = String(emp.telephone2).trim() + ' / ' + tel; empModifie = true; }
+        }
+      }
+      if (empModifie && Array.isArray(employes)) {
+        const idxEmp = employes.findIndex(e => e && String(e.id) === String(emp.id));
+        if (idxEmp !== -1) employes[idxEmp] = emp;
+        try { await ecrireCle(db, uid, 'mdb_employes', employes); } catch (eEmpUp) {}
+      }
       let loginChoisi = String(body.loginChoisi || '').trim();
       if (norm(loginChoisi).length < 3 && empTel) loginChoisi = String(emp.telephone || emp.tel || '').trim();
       if (norm(loginChoisi).length < 3) loginChoisi = String(emp.matricule || '').trim();
