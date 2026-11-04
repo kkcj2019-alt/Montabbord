@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-04-490';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-04-491';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -8170,13 +8170,32 @@ var local = DB.get(key);
       try { if (typeof _refreshEchangeUi === 'function') _refreshEchangeUi(); } catch (eEchRT) {}
       /* Re-rendu avec debounce : au maximum 1 re-rendu par 400ms (1,2 s sur
          téléphone : les re-rendus trop fréquents rendaient l'appli saccadée). */
+      function _mdbAutoRenderAutorise() {
+        try {
+          if (document.hidden) return false;
+          var ae = document.activeElement;
+          if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable)) return false;
+          var mo = document.querySelector('.modal-overlay.open, .modal-overlay[style*="display: block"], .modal-overlay[style*="display:block"], #modalOverlay[style*="display: block"]');
+          if (mo) return false;
+          /* Anti-saccade : jamais plus d'un rafraîchissement automatique toutes les 8 s. */
+          if (Date.now() - (window._mdbAutoRenderAt || 0) < 8000) return false;
+          return true;
+        } catch (e) { return false; }
+      }
       clearTimeout(window._rtNavTimer);
       window._rtNavTimer = setTimeout(function() {
         if (window._mdbSelfPushAt && (Date.now() - window._mdbSelfPushAt) < 4000) return;
         var isFormActive = _mdbFormActiveGuard();
-        if (!isFormActive && currentPage && !document.hidden) {
+        if (!isFormActive && currentPage && _mdbAutoRenderAutorise()) {
+          window._mdbAutoRenderAt = Date.now();
           if (window._skipNavigate) { window._skipNavigate = false; }
-          else { navigateTo(currentPage); }
+          else if (currentPage === 'facturation' && typeof renderFactures === 'function' && document.getElementById('facturationContent')) {
+            /* Facturation : rafraîchir le contenu seulement, sans recharger la page
+               entière (avant, navigateTo faisait « sauter » l'écran chaque seconde). */
+            try { renderFactures(); } catch (eF) { navigateTo(currentPage); }
+          } else {
+            navigateTo(currentPage);
+          }
         }
       }, (window.innerWidth <= 768 ? 1200 : 400));
     }
@@ -45064,6 +45083,16 @@ function renderRhDashboard() {
     }
   });
   echs.sort(function (a, b) { return a.dl - b.dl; });
+  /* Contrats non remis : on interpelle même pour un CDI. Un CDI sans contrat
+     signé/remis reste une anomalie administrative. */
+  var nonRemis = [];
+  enPoste.forEach(function (e) {
+    var c = null, st = null;
+    try { c = rhContratDe(e.id); } catch (eC) {}
+    try { st = c ? rhContratStatut(c) : null; } catch (eS) {}
+    if (!c || !(st && st.remis)) nonRemis.push({ e: e, c: c, sans: !c });
+  });
+  nonRemis.sort(function (a, b) { return String(a.e.nom || '').localeCompare(String(b.e.nom || '')); });
   /* entrées / sorties de l'année */
   var entrees = es.filter(function (e) { return e && String(e.date_entree || '').slice(0, 4) === annee; });
   var sorties = es.filter(function (e) { return e && String(e.date_sortie || '').slice(0, 4) === annee && String(e.date_sortie).slice(0, 10) <= today; });
@@ -45133,6 +45162,7 @@ function renderRhDashboard() {
   var al = [];
   if (nExp) al.push(['#fee2e2', '#b91c1c', '⛔ ' + nExp + ' contrat(s) expiré(s)', 'contrats']);
   if (nBientot) al.push(['#fef3c7', '#92400e', '⏰ ' + nBientot + ' contrat(s) à échéance ≤ 30 j', 'contrats']);
+  if (nonRemis.length) al.push(['#fee2e2', '#b91c1c', '📄 ' + nonRemis.length + ' contrat(s) NON REMIS (même CDI)', 'contrats']);
   if (enRetard.length) al.push(['#fee2e2', '#b91c1c', '🏖️ ' + enRetard.length + ' retard(s) de reprise de congé', 'conges']);
   if (enAttente.length) al.push(['#fef3c7', '#92400e', '✉️ ' + enAttente.length + ' demande(s) d’explication en attente', 'demandes']);
   if (atNonDecl.length) al.push(['#fee2e2', '#b91c1c', '🩹 ' + atNonDecl.length + ' accident(s) non déclaré(s) à la CNPS', 'accidents']);
@@ -45170,6 +45200,20 @@ function renderRhDashboard() {
   });
   var _nbTiers = 0;
   for (var _st = 0; _st < _salaEmp.length; _st++) { if (_salaEmp[_st].ratio > 33.33) _nbTiers++; }
+  /* Petites cartes de listes (réutilisées en haut et en bas du tableau de bord) */
+  var liste = function (titre, items, rend, vide, go) {
+    var s = '<div class="rhd-card"' + (go ? ' style="cursor:pointer" onclick="navigateTo(\'' + go + '\')"' : '') + '><h4>' + titre + '<span class="n">' + items.length + '</span></h4>';
+    if (!items.length) s += '<div class="rhd-empty">' + vide + '</div>';
+    else items.slice(0, 7).forEach(function (x) { s += rend(x); });
+    if (items.length > 7) s += '<div class="rhd-empty" style="padding:6px 0">+ ' + (items.length - 7) + ' autre(s)…</div>';
+    return s + '</div>';
+  };
+  var tag = function (t, bg, c) { return '<span class="rhd-tag" style="background:' + bg + ';color:' + c + '">' + t + '</span>'; };
+  /* ===== CONTRATS : en tête, car c'est prioritaire ===== */
+  h += '<div class="rhd-grid" style="margin-bottom:16px">';
+  h += liste('⏰ Contrats à échéance (30 j)', echs, function (x) { return '<div class="rhd-li">' + _rhdAvatar(x.e) + '<span class="nm">' + escH(rhEmpLabel(x.e)) + '</span><span class="mt">' + escH(x.e.type_contrat || '') + ' · ' + escH(fmtDate(x.ech)) + '</span>' + tag(x.dl < 0 ? Math.abs(x.dl) + ' j retard' : x.dl + ' j', x.dl < 0 ? '#fee2e2' : '#fef3c7', x.dl < 0 ? '#b91c1c' : '#92400e') + '</div>'; }, 'Aucun contrat à échéance', 'contrats');
+  h += liste('📄 Contrats NON REMIS (même CDI)', nonRemis, function (x) { return '<div class="rhd-li">' + _rhdAvatar(x.e) + '<span class="nm">' + escH(rhEmpLabel(x.e)) + '</span><span class="mt">' + escH(x.e.type_contrat || 'CDI') + (x.sans ? ' · aucun contrat' : ' · à remettre') + '</span>' + tag('À REMETTRE', '#fee2e2', '#b91c1c') + '</div>'; }, '✅ Tous les contrats sont remis', 'contrats');
+  h += '</div>';
   h += '<style>details.rhd-collab>summary{list-style:none;cursor:pointer}details.rhd-collab>summary::-webkit-details-marker{display:none}details.rhd-collab>summary .rhd-arrow{display:inline-block;transition:transform .15s;margin-right:6px;color:#64748b}details.rhd-collab[open]>summary .rhd-arrow{transform:rotate(90deg)}</style>';
   h += '<details class="rhd-card rhd-collab" style="margin-bottom:16px">';
   h += '<summary style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0"><span class="rhd-arrow">▸</span><span style="font-size:13px;font-weight:800;color:#0f172a">\uD83D\uDCB3 Capacit\u00e9 d\u2019acompte / pr\u00eat \u2014 ' + escH(fmtMois(_refMois)) + '</span><span class="n" style="font-size:11px;color:#64748b;font-weight:600">' + _salaEmp.length + ' employ\u00e9(s)' + (_nbTiers ? ' \u00b7 <b style="color:#dc2626">' + _nbTiers + ' au-del\u00e0 du 1/3</b>' : '') + '</span><span style="margin-left:auto;font-size:10.5px;color:#94a3b8">Cliquer pour d\u00e9plier</span></summary>';
@@ -45203,14 +45247,6 @@ function renderRhDashboard() {
   h += '<div class="rhd-card"><h4>🎓 Catégories <span class="n">' + nCadres + ' cadres · ' + nMatrise + ' maîtrise · ' + nExec + ' exécutants' + (nAutresCat ? ' · ' + nAutresCat + ' sans cat.' : '') + '</span></h4><div class="rhd-ch"><canvas id="rhChartCat"></canvas></div></div>';
   h += '</div>';
   /* listes */
-  var liste = function (titre, items, rend, vide, go) {
-    var s = '<div class="rhd-card"' + (go ? ' style="cursor:pointer" onclick="navigateTo(\'' + go + '\')"' : '') + '><h4>' + titre + '<span class="n">' + items.length + '</span></h4>';
-    if (!items.length) s += '<div class="rhd-empty">' + vide + '</div>';
-    else items.slice(0, 7).forEach(function (x) { s += rend(x); });
-    if (items.length > 7) s += '<div class="rhd-empty" style="padding:6px 0">+ ' + (items.length - 7) + ' autre(s)…</div>';
-    return s + '</div>';
-  };
-  var tag = function (t, bg, c) { return '<span class="rhd-tag" style="background:' + bg + ';color:' + c + '">' + t + '</span>'; };
   h += '<div class="rhd-grid">';
   h += liste('🚫 Absents le ' + fmtDate(today), absJour, function (x) { return '<div class="rhd-li">' + _rhdAvatar(x.e) + '<span class="nm">' + escH(rhEmpLabel(x.e)) + '</span>' + tag(escH(x.m), '#fee2e2', '#b91c1c') + '</div>'; }, (jPres + jAbs) ? 'Personne d’absent' : 'Pointage du jour pas encore fait', 'assiduite');
   h += liste('🏖️ Congés en cours / retards', enCours, function (c) { var e = rhEmpById(c.employee_id); var st = rhCongeStatut(c); return '<div class="rhd-li">' + _rhdAvatar(e) + '<span class="nm">' + escH(rhEmpLabel(e)) + '</span><span class="mt">retour ' + escH(fmtDate(c.date_retour)) + '</span>' + tag(st, st === 'En retard' ? '#fee2e2' : '#dcfce7', st === 'En retard' ? '#b91c1c' : '#15803d') + '</div>'; }, 'Aucun congé en cours', 'conges');
