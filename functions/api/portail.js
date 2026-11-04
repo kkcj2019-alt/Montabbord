@@ -117,6 +117,17 @@ function trouverEmploye(employes, login) {
   });
   return { list: exact.length ? exact : partiels.slice(0, 10) };
 }
+function masquerTel(t) {
+  const s = String(t || '').replace(/[^0-9+]/g, '');
+  if (!s) return '—';
+  if (s.length <= 5) return s.slice(0, 2) + '••';
+  return s.slice(0, 4) + '••••' + s.slice(-2);
+}
+function masquerDate(d) {
+  const m = String(d || '').slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '—';
+  return m[3] + '/••/' + m[1];
+}
 function trouverPin(pins, emp) {
   if (!pins || typeof pins !== 'object') return null;
   if (pins[emp.id]) return pins[emp.id];
@@ -168,6 +179,28 @@ export async function onRequest(context) {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
       const found = trouverEmploye(employes, q).list.slice(0, 10);
       return json({ ok: true, choices: found.map(employePublic) });
+    }
+
+    /* ---------- Fiche trouvée (aperçu masqué, avant création de compte) ---------- */
+    if (action === 'lookup') {
+      const q = String(body.login || body.identite || '').trim();
+      if (!q) return json({ ok: false, code: 'identity' }, 400);
+      const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+      const found = trouverEmploye(employes, q).list;
+      if (!found.length) return json({ ok: false, code: 'not_personnel' }, 404);
+      if (found.length > 1) return json({ ok: false, code: 'ambiguous', choices: found.slice(0, 8).map(employePublic) }, 409);
+      const emp = found[0];
+      if (emp.status && emp.status !== 'actif') return json({ ok: false, code: 'inactive' }, 403);
+      const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+      const compte = trouverPin(paye.employePins, emp);
+      return json({
+        ok: true,
+        employe: { nom: emp.nom || '', prenoms: emp.prenoms || '', matricule: emp.matricule || '', fonction: emp.fonction || '' },
+        dejaCompte: !!(compte && (compte.hash || compte.passwordHash)),
+        masque: { telephone: masquerTel(emp.telephone), naissance: masquerDate(emp.date_naissance) },
+        aTelephone: !!String(emp.telephone || '').trim(),
+        aNaissance: !!String(emp.date_naissance || '').trim()
+      });
     }
 
     /* ---------- Connexion ---------- */
@@ -484,11 +517,20 @@ export async function onRequest(context) {
       const montage = (Array.isArray(paye.pointageMontage) ? paye.pointageMontage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
       const bulletins = (Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).filter(b => b && String(b.empId) === String(emp.id) && allowed.indexOf(String(b.mois || '')) !== -1);
       const acomptes = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
+      const vusAp = {};
       const mesAcomptes = (Array.isArray(acomptes) ? acomptes : []).filter(a => {
         if (!a) return false;
         const eid = a.employeId || a.employee_id || '';
-        return String(eid) === String(emp.id);
+        if (String(eid) !== String(emp.id)) return false;
+        const mt = Math.round(parseFloat(a.montant) || 0);
+        const cle = a.requeteId
+          ? 'R|' + String(a.requeteId)
+          : ['C', a.date || '', mt, a.moisDeduction || '', a.type || '', eid].join('|');
+        if (vusAp[cle]) return false;
+        vusAp[cle] = 1;
+        return true;
       });
+      const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
       const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
       const mesReq = (Array.isArray(reqs) ? reqs : []).filter(r => r && String(r.empId) === String(emp.id));
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
@@ -499,9 +541,22 @@ export async function onRequest(context) {
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
         pointage, montage, bulletins,
         acomptes: mesAcomptes,
+        photo: (photos && photos[emp.id]) || '',
         requetes: mesReq,
         unread: mesReq.reduce((n, r) => n + ((r.messages || []).filter(m => m && m.auteur !== 'employe' && !m.luParEmploye).length), 0)
       });
+    }
+
+    /* ---------- Photo de profil ---------- */
+    if (action === 'photo') {
+      const photo = String(body.photo || '');
+      if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(photo)) return json({ ok: false, code: 'photo_format' }, 400);
+      if (photo.length > 900000) return json({ ok: false, code: 'photo_taille' }, 413);
+      const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
+      const arr = (photos && typeof photos === 'object') ? photos : {};
+      arr[emp.id] = photo;
+      await ecrireCle(db, uid, 'mdb_portailPhotos', arr);
+      return json({ ok: true, photo });
     }
 
     /* ---------- Créer une requête ---------- */
