@@ -258,6 +258,70 @@ export async function onRequest(context) {
           req.traitement = Object.assign({}, req.traitement || {}, { pointage: true, jours: n });
         } catch (eP) {}
       }
+      /* Prêt / acompte accepté : l'admin choisit la caisse ou la banque et le
+         mois de prélèvement. On crée la sortie et la ligne d'acompte/prêt. */
+      if (statut === 'acceptee' && (req.type === 'pret' || req.type === 'acompte')) {
+        const sourceType = String(body.sourceType || '').toLowerCase();
+        const sourceId = String(body.sourceId || '');
+        const moisDed = String(body.moisDeduction || req.moisDeduction || '').slice(0, 7);
+        if ((sourceType !== 'caisse' && sourceType !== 'banque') || !sourceId || !/^\d{4}-\d{2}$/.test(moisDed)) {
+          return json({ ok: false, code: 'need_source' }, 400);
+        }
+        const caisses = parseVal(await lireCle(db, uid, 'mdb_caisses'), []);
+        const banques = parseVal(await lireCle(db, uid, 'mdb_banques'), []);
+        const srcList = sourceType === 'banque' ? banques : caisses;
+        const src = (Array.isArray(srcList) ? srcList : []).find(s => s && String(s.id) === sourceId);
+        if (!src) return json({ ok: false, code: 'source_not_found' }, 404);
+        const montant = Math.round(parseFloat(req.montant) || 0);
+        if (montant <= 0) return json({ ok: false, code: 'montant' }, 400);
+        const date = now.slice(0, 10);
+        const heure = now.slice(11, 16);
+        const opId = 'OP' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
+        const apId = 'AP' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
+        const num = 'REQ-' + req.id;
+        const libelle = (req.type === 'pret' ? 'Prêt' : 'Acompte') + ' ' + req.nom + ' — ' + moisDed;
+        if (sourceType === 'banque') {
+          const bops = parseVal(await lireCle(db, uid, 'mdb_banqueOperations'), []);
+          const arr = Array.isArray(bops) ? bops : [];
+          arr.push({
+            id: opId, banqueId: sourceId, date, heure, sens: 'sortie', montant,
+            libelle, reference: num, beneficiaireType: 'employe', beneficiaireId: req.empId,
+            beneficiaireNom: req.nom, moyenPaiement: 'virement', requeteId: req.id
+          });
+          await ecrireCle(db, uid, 'mdb_banqueOperations', arr);
+        } else {
+          const cops = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
+          const arr = Array.isArray(cops) ? cops : [];
+          arr.push({
+            id: opId, caisseId: sourceId, date, heure, sens: 'sortie', montant,
+            libelle, beneficiaireType: 'employe', beneficiaireId: req.empId,
+            beneficiaireNom: req.nom, moyenPaiement: 'espece', numeroPiece: num,
+            typeOp: req.type === 'pret' ? 'pret' : 'acompte',
+            apMoisDeduction: moisDed, apDureeMois: 0, apMontantMensuel: montant,
+            observations: 'Demande employé ' + req.id, requeteId: req.id
+          });
+          await ecrireCle(db, uid, 'mdb_operationsCaisse', arr);
+        }
+        const aps = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
+        const arrAp = Array.isArray(aps) ? aps : [];
+        arrAp.push({
+          id: apId, type: req.type === 'pret' ? 'pret' : 'acompte',
+          employeId: req.empId, employeNom: req.nom, montant,
+          dureeMois: 0, montantMensuel: montant, moisDeduction: moisDed,
+          date, statut: 'en_cours', montantRembourse: 0,
+          caisseOpId: opId, numeroPiece: num,
+          provenance: sourceType, moyen: sourceType === 'banque' ? 'virement' : 'espece',
+          caisseId: sourceType === 'caisse' ? sourceId : '',
+          valide: true, requeteId: req.id, updatedAt: Date.now()
+        });
+        await ecrireCle(db, uid, 'mdb_acomptesPrets', arrAp);
+        req.traitement = Object.assign({}, req.traitement || {}, {
+          paiement: true, sourceType, sourceId,
+          sourceName: src.nom || src.libelle || '',
+          montant, moisDeduction: moisDed,
+          operationId: opId, acompteId: apId
+        });
+      }
       req.messages = Array.isArray(req.messages) ? req.messages : [];
       req.messages.push({
         id: 'M' + Date.now(), auteur: String(body.role || 'admin'), nom: String(body.nom || 'Administration'),

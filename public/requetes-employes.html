@@ -57,6 +57,7 @@
 <script>
 (function(){
   var API="https://montabbord-api.kkcj2019.workers.dev/api/portail";
+  var SYNC="https://montabbord-api.kkcj2019.workers.dev/api/sync";
   function qs(n){try{return new URLSearchParams(location.search).get(n)||""}catch(e){return ""}}
   var uid=qs("uid")||localStorage.getItem("mdb_enterpriseUid")||"";
   try{ if(!uid){var raw=localStorage.getItem("mdb_currentUser")||"";var p=JSON.parse(raw);uid=(typeof p==="string")?p:((p&&p.id)||"");} }catch(e){}
@@ -93,7 +94,9 @@
     if(!r){document.getElementById("detail").innerHTML='<div class="empty">Sélectionnez une requête.</div>';return;}
     var h='<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><h3 style="margin:0">'+esc(typeLbl(r.type))+(r.sujet?" — "+esc(r.sujet):"")+'</h3>'
       +'<div class="meta">'+badge(r.statut)+' · '+esc(r.nom||"")+' ('+esc(r.matricule||"")+') · '+esc(fdt(r.createdAt))+'</div></div>';
-    h+='<div class="row" style="max-width:420px"><button class="btn green sm" onclick="window.__decision(\''+esc(r.id)+'\',\'acceptee\')">✅ Accepter</button>'
+    var _isPay = (r.type === "pret" || r.type === "acompte");
+    h+='<div class="row" style="max-width:420px">'
+      + (_isPay ? '' : '<button class="btn green sm" onclick="window.__decision(\''+esc(r.id)+'\',\'acceptee\')">✅ Accepter</button>')
       +'<button class="btn red sm" onclick="window.__decision(\''+esc(r.id)+'\',\'refusee\')">❌ Refuser</button>'
       +'<button class="btn out sm" onclick="window.__decision(\''+esc(r.id)+'\',\'fermee\')">Fermer</button></div></div>';
     if(r.type==="permission"||r.type==="conge"){
@@ -101,8 +104,18 @@
         +(r.dureeJours?' · '+r.dureeJours+' jour(s)':'')+(r.retourEstime?' · retour estimé '+esc(fdate(r.retourEstime)):'')
         +(r.motif?'<br>Motif : '+esc(r.motif):'')+'</div>';
     }
-    if(r.type==="pret"||r.type==="acompte"){
+    if(_isPay){
       h+='<div class="meta" style="margin-top:8px">Montant demandé : <b>'+money(r.montant)+'</b>'+(r.moisDeduction?' · déduction : '+esc(mois(r.moisDeduction)):'')+'</div>';
+      if(r.statut !== 'acceptee'){
+        h+='<div class="card" style="margin-top:8px;background:#f8fafc"><div class="meta" style="margin:0 0 6px"><b>Validation et paiement</b> — choisissez la source et le mois de prélèvement.</div>'
+          +'<div class="row"><div><label style="font-size:11px;font-weight:800">Source</label><select id="pay-type" onchange="window.__loadSources()"><option value="caisse">Caisse</option><option value="banque">Banque</option></select></div>'
+          +'<div><label style="font-size:11px;font-weight:800">Caisse / banque</label><select id="pay-source"></select></div>'
+          +'<div><label style="font-size:11px;font-weight:800">Mois de déduction</label><input type="month" id="pay-mois" value="'+(r.moisDeduction||"")+'"></div>'
+          +'<div style="max-width:180px"><button class="btn green sm" style="width:100%" onclick="window.__acceptPay(\''+esc(r.id)+'\')">✅ Accepter et payer</button></div></div>'
+          +'<div class="small" style="color:#64748b;margin-top:4px">La sortie sera créée dans la caisse/banque choisie et le montant sera déduit sur le bulletin du mois indiqué.</div></div>';
+      } else if(r.traitement && r.traitement.paiement){
+        h+='<div class="meta" style="margin-top:8px;color:#166534"><b>✅ Paiement enregistré</b> — '+esc(r.traitement.sourceType==="banque"?"Banque":"Caisse")+' '+esc(r.traitement.sourceName||"")+' · '+money(r.traitement.montant)+' · déduction '+esc(mois(r.traitement.moisDeduction||""))+'</div>';
+      }
     }
     h+='<div class="thread">';
     (r.messages||[]).forEach(function(m){
@@ -112,6 +125,7 @@
     h+='</div>';
     h+='<div class="row"><textarea id="rep" rows="3" placeholder="Répondre à l’employé…"></textarea><button class="btn sm" style="max-width:120px" onclick="window.__reply(\''+esc(r.id)+'\')">Envoyer</button></div><div class="err" id="err"></div>';
     document.getElementById("detail").innerHTML=h;
+    if(_isPay && r.statut !== 'acceptee') setTimeout(function(){ try{ window.__loadSources(); }catch(e){} }, 30);
   }
   window.__open=function(id){state.open=id;renderList();renderDetail(state.all.filter(function(r){return r.id===id;})[0]);};
   window.__reply=function(id){
@@ -123,6 +137,32 @@
     var com=window.prompt(statut==="acceptee"?"Commentaire d’acceptation (facultatif) :":statut==="refusee"?"Motif du refus :":"Commentaire :","");
     if(com===null)return;
     api("admindecision",{requestId:id,statut:statut,commentaire:com,nom:me.nom,role:me.role}).then(function(j){if(j&&j.ok){load();state.open=id;setTimeout(function(){window.__open(id);},250);}});
+  };
+  window.__loadSources = function(){
+    var type=(document.getElementById("pay-type")||{}).value||"caisse";
+    var cle=type==="banque"?"mdb_banques":"mdb_caisses";
+    var sel=document.getElementById("pay-source");
+    if(sel) sel.innerHTML='<option value="">Chargement…</option>';
+    fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&cle="+cle+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){
+      var v=j&&j.data&&j.data[cle];
+      if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){v=null}}
+      var arr=Array.isArray(v)?v:[];
+      if(!sel)return;
+      sel.innerHTML=arr.length?arr.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.nom||s.libelle||s.code||"Sans nom")+'</option>';}).join(""):'<option value="">Aucune source</option>';
+    }).catch(function(){ if(sel) sel.innerHTML='<option value="">Erreur de chargement</option>'; });
+  };
+  window.__acceptPay = function(id){
+    var type=(document.getElementById("pay-type")||{}).value||"caisse";
+    var sourceId=(document.getElementById("pay-source")||{}).value||"";
+    var mois=(document.getElementById("pay-mois")||{}).value||"";
+    if(!sourceId){alert("Choisissez la caisse ou la banque.");return;}
+    if(!/^\d{4}-\d{2}$/.test(mois)){alert("Choisissez le mois de déduction.");return;}
+    var com=window.prompt("Commentaire d’acceptation (facultatif) :","");
+    if(com===null)return;
+    api("admindecision",{requestId:id,statut:"acceptee",commentaire:com,sourceType:type,sourceId:sourceId,moisDeduction:mois,nom:me.nom,role:me.role}).then(function(j){
+      if(j&&j.ok){load();state.open=id;setTimeout(function(){window.__open(id);},250);}
+      else alert("Validation impossible : "+(j&&j.code||"erreur"));
+    });
   };
   load();
 })();
