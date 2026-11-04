@@ -824,6 +824,60 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
+    /* ---------- Pointage par code PIN (entrée / sortie) ---------- */
+    if (action === 'pointer') {
+      const pin = String(body.pin || '').trim();
+      const sens = String(body.sens || 'entree').toLowerCase();
+      const paye = await lirePaye(db, uid);
+      const now = new Date();
+      const mois = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+      const clot = (paye.clotures && paye.clotures[mois]) || null;
+      if (clot && clot.clos) return json({ ok: false, code: 'clos' }, 403);
+      const portail = await lireComptesPortail(db, uid);
+      const comptes = fusionComptes(paye.employePins, portail);
+      const rec = trouverPin(comptes, emp);
+      if (!rec || !(rec.hash || rec.passwordHash)) return json({ ok: false, code: 'no_pin' }, 403);
+      let ok = false;
+      if (rec.passwordHash) ok = await verifierPin(rec.passwordHash, pin);
+      if (!ok && rec.hash) ok = await verifierPin(rec.hash, pin);
+      if (!ok) return json({ ok: false, code: 'bad_pin' }, 403);
+      const date = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+      const heure = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+      const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
+      let row = null;
+      for (let i = 0; i < pts.length; i++) {
+        if (pts[i] && String(pts[i].employee_id) === String(emp.id) && String(pts[i].date || '').slice(0, 10) === date) { row = pts[i]; break; }
+      }
+      if (!row) {
+        row = {
+          id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
+          employee_id: emp.id, date, present: true,
+          h_j_manual: 0, h_n_manual: 0, source: 'portail'
+        };
+        pts.push(row);
+      }
+      row.present = true;
+      row.source = 'portail';
+      if (sens === 'sortie') {
+        row.heure_sortie = heure;
+        if (row.heure_entree) {
+          const a = String(row.heure_entree).split(':');
+          const b = heure.split(':');
+          let diff = (parseInt(b[0], 10) * 60 + parseInt(b[1], 10)) - (parseInt(a[0], 10) * 60 + parseInt(a[1], 10));
+          if (diff < 0) diff += 24 * 60;
+          let hh = Math.round((diff / 60) * 100) / 100;
+          if (hh > 6) hh = Math.round((hh - 1) * 100) / 100;
+          row.h_j_manual = Math.max(0, hh);
+        }
+      } else {
+        row.heure_entree = heure;
+      }
+      row.updatedAt = now.toISOString();
+      paye.pointage = pts;
+      await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+      return json({ ok: true, date, heure, sens, entree: row.heure_entree || '', sortie: row.heure_sortie || '', heures: row.h_j_manual || 0 });
+    }
+
     return json({ ok: false, code: 'action' }, 400);
   } catch (e) {
     return json({ ok: false, code: 'error', message: e && e.message ? e.message : String(e) }, 500);
