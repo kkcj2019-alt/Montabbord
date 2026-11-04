@@ -675,6 +675,16 @@ export async function onRequest(context) {
       const arr = (photos && typeof photos === 'object') ? photos : {};
       arr[emp.id] = photo;
       await ecrireCle(db, uid, 'mdb_portailPhotos', arr);
+      /* La photo est aussi copiée sur la fiche employé (mdb_employes) :
+         elle est ainsi visible dans Index, Paye et les autres modules. */
+      try {
+        const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+        if (Array.isArray(employes)) {
+          let touche = false;
+          employes.forEach(x => { if (x && String(x.id) === String(emp.id)) { x.photo = photo; touche = true; } });
+          if (touche) await ecrireCle(db, uid, 'mdb_employes', employes);
+        }
+      } catch (eP) {}
       return json({ ok: true, photo });
     }
 
