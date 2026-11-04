@@ -84,7 +84,8 @@ function employePublic(e) {
     id: e.id, nom: e.nom || '', prenoms: e.prenoms || '',
     matricule: e.matricule || '', telephone: e.telephone || '',
     fonction: e.fonction || '', service: e.service || '',
-    type_contrat: e.type_contrat || '', date_entree: e.date_entree || ''
+    type_contrat: e.type_contrat || '', date_entree: e.date_entree || '',
+    salaire_base: parseFloat(e.salaire_base) || 0
   };
 }
 function trouverEmploye(employes, login) {
