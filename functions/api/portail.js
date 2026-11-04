@@ -317,6 +317,38 @@ export async function onRequest(context) {
           req.traitement = Object.assign({}, req.traitement || {}, { pointage: true, jours: n });
         } catch (eP) {}
       }
+      /* Contestation de pointage acceptée : on corrige le jour concerné. */
+      if (statut === 'acceptee' && req.type === 'pointage') {
+        try {
+          const paye = parseVal(await lireCle(db, uid, 'mdb_paye'), {});
+          const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
+          const ds = String(req.datePointage || '').slice(0, 10);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(ds)) {
+            let row = null;
+            for (let i = 0; i < pts.length; i++) {
+              if (pts[i] && String(pts[i].employee_id) === String(req.empId) && String(pts[i].date || '').slice(0, 10) === ds) { row = pts[i]; break; }
+            }
+            if (!row) {
+              row = {
+                id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
+                employee_id: req.empId, date: ds, present: true, h_j_manual: 0, h_n_manual: 0
+              };
+              pts.push(row);
+            }
+            row.present = true;
+            row.motif = 'Correction pointage — ' + (req.motif || req.sujet || 'requête employé');
+            if (req.correction === 'heures') {
+              row.h_j_manual = parseFloat(req.heuresJour) || 0;
+              row.h_n_manual = parseFloat(req.heuresNuit) || 0;
+            }
+            row.source = 'requete';
+            row.requeteId = req.id;
+            paye.pointage = pts;
+            await ecrireCle(db, uid, 'mdb_paye', paye);
+            req.traitement = Object.assign({}, req.traitement || {}, { pointage: true, date: ds });
+          }
+        } catch (ePt) {}
+      }
       /* Prêt / acompte accepté : l'admin choisit la caisse ou la banque et le
          mois de prélèvement. On crée la sortie et la ligne d'acompte/prêt. */
       if (statut === 'acceptee' && (req.type === 'pret' || req.type === 'acompte')) {
