@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-03-473';
+      window.__APP_VERSION = '2026-11-04-474';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -5464,8 +5464,7 @@
                 margin-bottom: 0.6rem;
               "
             >
-              Le solde proposé par défaut = net à payer du mois − acomptes/prêts
-              déjà déduits. Ajustez chaque montant si besoin avant de valider.
+              Le <b>solde à payer</b> est calculé automatiquement (net du mois − déjà payé) et n’est pas modifiable. La colonne <b>Payé</b> reprend ce solde par défaut : vous pouvez l’ajuster. <b>C’est le montant saisi dans « Payé » qui sera réellement sorti de la caisse / banque.</b>
             </p>
             <div id="psal-list"></div>
             <div
@@ -5482,6 +5481,7 @@
               <div style="font-weight: 800; font-size: 0.95rem">
                 Total à payer :
                 <span id="psal-total" style="color: var(--green)">0 F</span>
+                <span id="psal-ecart" style="font-size: 0.78rem; font-weight: 700; margin-left: 10px"></span>
               </div>
               <div style="display: flex; gap: 0.6rem">
                 <button class="btn btn-sec" onclick="psalResetSoldes()">
@@ -5894,6 +5894,14 @@
             </div>
           </div>
           <div id="tab-emp-paiement" class="grid-3" style="display: none">
+            <div class="form-group" style="grid-column: span 3; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px">
+              <label style="font-weight:800">Mode de paiement du salaire</label>
+              <select name="mode_paiement" style="max-width:320px">
+                <option value="caisse">💵 Caisse (espèces) — par défaut</option>
+                <option value="banque">🏦 Banque (virement)</option>
+              </select>
+              <small style="display:block;color:#64748b;font-size:.7rem;margin-top:4px">En mode <b>Banque</b>, l’employé apparaît automatiquement dans l’<b>Ordre de virement</b> du mois. En mode Caisse, il est payé en espèces.</small>
+            </div>
             <div
               style="
                 grid-column: span 3;
@@ -11326,6 +11334,11 @@ function renderPrimeEmpMatrix() {
           groupeId: a.groupeId || "",
           collective: a.collective === true || !!a.groupeId,
           updatedAt: parseFloat(a.updatedAt) || 0,
+          /* Nom d'origine : indispensable quand l'identifiant employé a changé
+             (import, recréation de la fiche) — la recherche doit quand même
+             retrouver l'acompte par le nom enregistré sur la pièce. */
+          employeNom: a.employeNom || a.nom || a.beneficiaireNom || "",
+          employeIdRaw: a.employeId || a.employee_id || "",
         };
       }
       function fmtMoisAP(m) {
@@ -18108,6 +18121,7 @@ function addArticleMontageFromPt(e) {
           numero_compte: f.elements["numero_compte"]
             ? f.elements["numero_compte"].value
             : "",
+          mode_paiement: f.elements["mode_paiement"] && f.elements["mode_paiement"].value === "banque" ? "banque" : "caisse",
           num_wave: f.elements["num_wave"] ? f.elements["num_wave"].value : "",
           num_moov_money: f.elements["num_moov_money"]
             ? f.elements["num_moov_money"].value
@@ -28570,6 +28584,27 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
         var empById = {};
         for (var i = 0; i < personnel.length; i++)
           empById[personnel[i].id] = personnel[i];
+        /* Les pièces de caisse peuvent porter un ancien identifiant employé
+           (fiche recréée, import...). On retrouve l'employé par son nom
+           enregistré, sinon la recherche et l'affichage montrent « ? ». */
+        try {
+          var _normNomAP = function (x) { return String(x || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z]/g, ""); };
+          var _nomVersIdAP = {};
+          personnel.forEach(function (p) {
+            if (!p || !p.id) return;
+            var n1 = _normNomAP((p.nom || "") + " " + (p.prenoms || ""));
+            var n2 = _normNomAP(p.nom);
+            if (n1) _nomVersIdAP[n1] = p.id;
+            if (n2 && !_nomVersIdAP[n2]) _nomVersIdAP[n2] = p.id;
+          });
+          list.forEach(function (a) {
+            if (!a) return;
+            if (empById[a.employee_id]) return;
+            var k1 = _normNomAP(a.employeNom);
+            if (k1 && _nomVersIdAP[k1]) { a.employee_id = _nomVersIdAP[k1]; return; }
+            if (a.employeIdRaw && empById[a.employeIdRaw]) a.employee_id = a.employeIdRaw;
+          });
+        } catch (eNomAP) {}
         var month = window._apMonthP || "";
         if (window._apTabP === "bulletin") window._apTabP = "mois"; /* onglet fusionné dans « Tableau du mois » */
         var activeTab = window._apTabP || "mois";
@@ -28663,9 +28698,10 @@ out += '<div style="overflow:auto;max-height:58vh;border:2px solid #0f172a;borde
             if (_apEstPretLigne(a) && apRestP(a) <= 0) continue;
           }
           if (search) {
-            var _pMat = (empById[a.employee_id] && empById[a.employee_id].matricule) || "";
-            var _pNom = empName(a.employee_id);
-            var _fullSearchTarget = (_pMat + " " + _pNom).toLowerCase();
+            var _pRec = empById[a.employee_id] || empById[a.employeIdRaw] || null;
+            var _pMat = _pRec ? _pRec.matricule || "" : "";
+            var _pNom = _pRec ? empName(a.employee_id) : (a.employeNom || "");
+            var _fullSearchTarget = (_pMat + " " + _pNom + " " + (a.employeNom || "")).toLowerCase();
             if (_fullSearchTarget.indexOf(search) === -1)
               continue;
           }
@@ -42214,7 +42250,11 @@ function printCongeIndividuel(empId) {
         (apAll || []).forEach(function (a) {
           var r = apNetImpression(a, mois);
           if (r.nature === "pret" && String(a.date || "") <= mois + "-31" && (!(r.restNet > 0) || a.statut === "termine")) soldes.push({ a: a, r: r });
-          if (r.nature === "solde" || !(r.restNet > 0)) return;
+          /* Un acompte entièrement déduit ce mois a un reste dû de 0 : il doit
+             quand même être rappelé dans « Déduit ce mois ». Avant, il
+             disparaissait du détail, d'où l'incohérence entre bulletins. */
+          if (r.nature === "solde") return;
+          if (!(r.restNet > 0) && !(r.deduit > 0)) return;
           var md = "";
           try { md = apMoisPrisEnCompte(a) || ""; } catch (e) {}
           if (!md) md = String(a.moisDeduction || (a.date || "").substring(0, 7) || "");
@@ -42229,8 +42269,10 @@ function printCongeIndividuel(empId) {
             aVenir.forEach(function (e) { if (reste <= 0.5) return; var v = Math.min(e.v, reste); ech.push({ m: e.m, v: v, nonVal: e.m === mois }); reste -= v; });
             lignes.push({ a: a, nat: "Prêt", r: r, mens: parseFloat(a.montantMensuel || a.mensualite) || 0, ech: ech, deja: deja, payes: payes, duree: E.length, deduit: r.deduit || 0 });
           } else {
-            if (!(md >= mois)) return;
-            lignes.push({ a: a, nat: "Acompte", r: r, mens: 0, ech: [{ m: md, v: r.restNet }], deja: parseFloat(a.rembourse) || 0, payes: [], deduit: r.deduit || 0 });
+            if (!(md >= mois) && !(r.deduit > 0)) return;
+            var _soldeCeMois = (r.deduit > 0 && !(r.restNet > 0));
+            var _echAP = (r.restNet > 0 && md && md >= mois) ? [{ m: md, v: r.restNet }] : [];
+            lignes.push({ a: a, nat: "Acompte", r: r, mens: 0, ech: _echAP, deja: parseFloat(a.rembourse) || 0, payes: [], deduit: r.deduit || 0, soldeCeMois: _soldeCeMois });
           }
           total += r.restNet;
         });
@@ -42263,7 +42305,9 @@ function printCongeIndividuel(empId) {
         h += '<table class="bul-dettes-table"><thead><tr><th>Date</th><th>Type</th><th>Objet</th><th style="text-align:right">Montant</th><th style="text-align:right">Déduit ce mois</th><th style="text-align:right">Déjà remboursé<br><small>mois déduits</small></th><th>Durée</th><th style="text-align:right">Reste dû</th><th style="text-align:right">Mensualité</th><th>Déduction prévue</th></tr></thead><tbody>';
         lignes.forEach(function (l) {
           var plan;
-          if (l.ech.length) {
+          if (l.soldeCeMois) {
+            plan = '<b>Déduit sur ce bulletin</b> (' + escH(_bulMoisCourt(mois)) + ') — soldé';
+          } else if (l.ech.length) {
             var deb = l.ech[0].m, fin = l.ech[l.ech.length - 1].m;
             plan = l.ech.length === 1 ? "<b>" + escH(_bulMoisCourt(deb)) + "</b> : " + fmt(l.ech[0].v) + " F" : "<b>" + l.ech.length + " mois</b>, de <b>" + escH(_bulMoisCourt(deb)) + "</b> à <b>" + escH(_bulMoisCourt(fin)) + "</b>";
             if (l.ech.length > 1) plan += '<div style="font-size:9px;color:#475569;margin-top:2px;line-height:1.5">' + l.ech.map(function (e) { return escH(_bulMoisCourt(e.m)) + " : " + fmt(e.v) + (e.nonVal ? ' <span style="color:#b45309">(non validé ce mois)</span>' : ""); }).join(" · ") + "</div>";
@@ -43826,6 +43870,21 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
       }
 
       /* ==================== ORDRE DE VIREMENT ==================== */
+      /* Solde réel à payer d'un employé pour le mois : net calculé − déjà payé.
+         Sert à l'ordre de virement (avant, il lisait un ancien document
+         « paie_AAAA-MM » souvent absent → tous les montants à 0). */
+      function virSoldeMap(mois) {
+        var m = {};
+        try { psalSoldes(mois).forEach(function (r) { if (r && r.emp) m[r.emp.id] = r; }); } catch (e) {}
+        return m;
+      }
+      function virNetEmp(p, mois, map) {
+        try {
+          var r = map && map[p.id];
+          if (r) return Math.max(0, r.reste || 0);
+          return Math.max(0, calculatePayroll(p, mois).totals.net || 0);
+        } catch (e) { return 0; }
+      }
       function loadVirements() {
         var mois = document.getElementById("vir-month").value;
         if (!mois) {
@@ -43838,27 +43897,29 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         }
         var list = getPersonnel();
         var html =
-          '<table><thead><tr><th style="width:40px"><input type="checkbox" id="vir-check-all" onchange="virToggleAll(this.checked)"></th><th>Matricule</th><th>Nom & Prénoms</th><th>Banque</th><th>N° Compte</th><th style="text-align:right">Net à Payer</th></tr></thead><tbody>';
-        var paieData = DB.get("paie_" + mois) || {};
-        var empPaie = paieData.employees || [];
+          '<table><thead><tr><th style="width:40px"><input type="checkbox" id="vir-check-all" onchange="virToggleAll(this.checked)"></th><th>Matricule</th><th>Nom & Prénoms</th><th>Banque</th><th>N° Compte</th><th style="text-align:right">Solde net à payer</th></tr></thead><tbody>';
+        var soldesMap = virSoldeMap(mois);
+        var nbBanque = 0;
         list.forEach(function (p) {
           if (p.en_paie === false || p.status !== "actif") return;
           if (!empVisibleMois(p, mois)) return;
-          var ep = empPaie.find(function (e) {
-            return e.id === p.id;
-          });
-          var net = ep && ep.totals ? ep.totals.net : 0;
+          /* Seuls les employés réglés par virement vont sur l'ordre de virement.
+             Par défaut : caisse. Le mode se règle dans la fiche employé. */
+          var modeP = String(p.mode_paiement || "caisse").toLowerCase();
+          if (modeP !== "banque") return;
+          nbBanque++;
+          var net = virNetEmp(p, mois, soldesMap);
           var nomBanque = p.nom_banque || "";
           var numCompte = p.numero_compte || "";
-          if (!nomBanque && !numCompte) return;
+          var _manque = (!nomBanque || !numCompte) ? ' <span style="color:#b45309;font-weight:800" title="Coordonnées bancaires à compléter dans la fiche employé">⚠</span>' : '';
           html +=
             '<tr><td><input type="checkbox" class="vir-check" data-emp-id="' +
             p.id +
-            '" onchange="updateVirPreview()"></td>';
+            '" checked onchange="updateVirPreview()"></td>';
           html += "<td>" + escH(p.matricule) + "</td>";
           html += "<td>" + escH(p.nom) + " " + escH(p.prenoms) + "</td>";
-          html += "<td>" + escH(nomBanque) + "</td>";
-          html += "<td>" + escH(numCompte) + "</td>";
+          html += "<td>" + escH(nomBanque || "—") + _manque + "</td>";
+          html += "<td>" + escH(numCompte || "—") + "</td>";
           html +=
             '<td style="text-align:right;font-weight:700">' +
             fmtF(net) +
@@ -43866,8 +43927,9 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         });
         html += "</tbody></table>";
         document.getElementById("vir-employees-list").innerHTML =
-          html ||
-          '<p style="color:var(--dim);padding:1rem">Aucun employé avec coordonnées bancaires trouvé.</p>';
+          nbBanque
+            ? html
+            : '<p style="color:var(--dim);padding:1rem">Aucun employé en <b>mode Banque</b>. Ouvrez sa fiche (Personnel → Modifier → onglet Paiement) et choisissez <b>Mode de paiement = Banque (virement)</b>.</p>';
         var defTexte =
           "Par le débit de notre compte, nous vous prions de bien vouloir virer la somme ci-dessous au profit de nos travailleurs, motif: salaire du mois de " +
           fmtMoisComplet(mois);
@@ -43890,8 +43952,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var mois = document.getElementById("vir-month").value || "";
         var texte = document.getElementById("vir-texte").value || "";
         var list = getPersonnel();
-        var paieData = DB.get("paie_" + mois) || {};
-        var empPaie = paieData.employees || [];
+        var soldesMap = virSoldeMap(mois);
         var rows = "";
         var total = 0;
         document.querySelectorAll(".vir-check:checked").forEach(function (cb) {
@@ -43900,10 +43961,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             return x.id === eid;
           });
           if (!p) return;
-          var ep = empPaie.find(function (e) {
-            return e.id === p.id;
-          });
-          var net = ep && ep.totals ? ep.totals.net : 0;
+          var net = virNetEmp(p, mois, soldesMap);
           total += net;
           rows +=
             "<tr><td>" +
@@ -44022,7 +44080,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var rows = psalSoldes(mois);
         var any = false;
         var h =
-          '<table><thead><tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Net du mois</th><th style="text-align:right">Déjà payé</th><th style="text-align:right">Solde à payer</th></tr></thead><tbody>';
+          '<table><thead><tr><th>Matricule</th><th>Nom & Prénoms</th><th style="text-align:right">Net du mois</th><th style="text-align:right">Déjà payé</th><th style="text-align:right">Solde à payer <small style="font-weight:400;color:#64748b">(calculé)</small></th><th style="text-align:right">Payé <small style="font-weight:400;color:#64748b">(reçu)</small></th></tr></thead><tbody>';
         rows.forEach(function (r) {
           if (r.net <= 0 && r.deja <= 0) return;
           any = true;
@@ -44042,15 +44100,20 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             '">' +
             fmtF(r.deja) +
             "</td>" +
+            '<td style="text-align:right;font-weight:800;color:#0b3a6f;background:#f8fafc" title="Solde calculé : net du mois − déjà payé. Non modifiable.">' +
+            fmtF(r.reste) +
+            "</td>" +
             '<td style="text-align:right"><input type="number" min="0" step="25" class="psal-amt" data-emp="' +
             escH(r.emp.id) +
+            '" data-solde="' +
+            r.reste +
             '" value="' +
             r.reste +
-            '" oninput="psalUpdateTotal()" style="width:130px;text-align:right;border:1px solid var(--border);border-radius:6px;padding:.3rem;font-weight:700"></td></tr>';
+            '" title="Montant réellement reçu : c’est ce montant qui sort de la caisse / banque. Modifiable." oninput="psalUpdateTotal()" style="width:130px;text-align:right;border:1px solid var(--border);border-radius:6px;padding:.3rem;font-weight:700"></td></tr>';
         });
         if (!any)
           h +=
-            '<tr><td colspan="5" style="text-align:center;color:var(--dim);padding:1rem">Aucun bulletin à payer pour ce mois.</td></tr>';
+            '<tr><td colspan="6" style="text-align:center;color:var(--dim);padding:1rem">Aucun bulletin à payer pour ce mois.</td></tr>';
         h += "</tbody></table>";
         document.getElementById("psal-list").innerHTML = h;
         psalUpdateTotal();
@@ -44060,12 +44123,19 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         } catch (eRC) {}
       }
       function psalUpdateTotal() {
-        var t = 0;
+        var t = 0, solde = 0;
         document.querySelectorAll(".psal-amt").forEach(function (iX) {
           t += parseFloat(iX.value) || 0;
+          solde += parseFloat(iX.getAttribute("data-solde")) || 0;
         });
         var el = document.getElementById("psal-total");
         if (el) el.textContent = fmtF(Math.round(t));
+        var ec = document.getElementById("psal-ecart");
+        if (ec) {
+          var d = Math.round(t - solde);
+          if (!d) { ec.textContent = "· conforme au solde"; ec.style.color = "#15803d"; }
+          else { ec.textContent = "· écart " + (d > 0 ? "+" : "−") + fmtF(Math.abs(d)) + " par rapport au solde"; ec.style.color = d > 0 ? "#b45309" : "#1d4ed8"; }
+        }
       }
       function psalResetSoldes() {
         var mois = psalEnsureMonth();
@@ -44479,8 +44549,9 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
         var mois = document.getElementById("vir-month").value || "";
         var texte = document.getElementById("vir-texte").value || "";
         var list = getPersonnel();
-        var paieData = DB.get("paie_" + mois) || {};
-        var empPaie = paieData.employees || [];
+        var soldesMap = virSoldeMap(mois);
+        var soc = {};
+        try { soc = getSocieteP() || {}; } catch (eSoc) {}
         var w = window.open("", "_blank");
         var rows = "";
         var total = 0;
@@ -44490,10 +44561,7 @@ h += ".header{align-items:center!important}tr.st td{background:#e0e7ff!important
             return x.id === eid;
           });
           if (!p) return;
-          var ep = empPaie.find(function (e) {
-            return e.id === p.id;
-          });
-          var net = ep && ep.totals ? ep.totals.net : 0;
+          var net = virNetEmp(p, mois, soldesMap);
           total += net;
           rows +=
             "<tr><td>" +
@@ -45814,6 +45882,6 @@ function _dsEmbellir() {
   };
 })();
 </script>
-<script src="print-buttons.js?v=3"></script>
+<script src="print-buttons.js?v=4"></script>
 </body>
 </html>

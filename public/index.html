@@ -29,7 +29,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-03-489';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-04-490';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -11929,9 +11929,10 @@ function openSignatureBeneficiaire(opId) {
     else h += '<div style="font-size:11px;color:#94a3b8;border:1px dashed #cbd5e1;border-radius:8px;padding:18px 8px">Aucune référence : la première signature servira de référence.</div>';
     h += '<div id="sigRefScore" style="font-size:11px;color:#475569;margin-top:6px"></div>';
     if (rec.ref) {
-      if (_adm) h += '<button type="button" class="btn btn-outline" style="margin-top:8px;font-size:10.5px;border-color:#fca5a5;color:#b91c1c" onclick="_sigResetRef(\'' + escJ(opId) + '\')">♻ Réinitialiser la référence</button>';
+      if (_adm) h += '<button type="button" class="btn btn-outline" style="margin-top:8px;font-size:10.5px;border-color:#fca5a5;color:#b91c1c" onclick="_sigResetRef(\'' + escJ(opId) + '\')" title="La prochaine signature deviendra la référence. Les pièces déjà validées restent validées.">♻ Changer la signature de référence</button>';
       else h += '<div style="font-size:9.5px;color:#94a3b8;margin-top:6px">Réinitialisation réservée à l’administrateur.</div>';
     }
+    if (_adm && op.beneficiaireValide) h += '<div style="margin-top:6px"><button type="button" class="btn btn-outline" style="font-size:10px;border-color:#fecaca;color:#b91c1c;padding:4px 9px" onclick="_sigReopenPiece(\'' + escJ(opId) + '\')" title="Seule cette pièce sera remise à signer ; les autres validations restent intactes.">↩ Remettre cette pièce à signer</button></div>';
     if (rec.resetAt) h += '<div style="font-size:9px;color:#94a3b8;margin-top:4px">Dernière réinitialisation : ' + escH(rec.resetBy || '—') + ' le ' + escH(new Date(rec.resetAt).toLocaleDateString('fr-FR')) + '</div>';
     h += '<button type="button" class="btn btn-outline" style="margin-top:8px;font-size:11px" onclick="_sigShowQR(\'' + escJ(opId) + '\')">📱 QR pour le téléphone</button>';
     h += '<div id="sigQr" style="margin-top:8px"></div>';
@@ -12198,26 +12199,57 @@ function _sigResetRef(opId) {
     var store = _sigGetStore();
     var rec = store[key] || {};
     var nom = op.beneficiaireNom || op.remettant || 'Bénéficiaire';
-    if (!window.confirm('Réinitialiser la signature de référence de ' + nom + ' ?\n\nLa prochaine signature deviendra la nouvelle référence. La pièce actuelle sera remise à signer.')) return;
+    var msg = 'Changer la signature de référence de ' + nom + ' ?\n\n'
+      + '• Les pièces déjà validées (janvier, février, …, aujourd’hui) RESTENT validées.\n'
+      + '• La pièce affichée reste validée : elle n’est PAS remise à signer.\n'
+      + '• Le code PIN est conservé.\n'
+      + '• La prochaine signature dessinée deviendra la nouvelle référence.';
+    if (!window.confirm(msg)) return;
     var _u = _sigUserInfo();
+    /* On ne garde que le PIN et l'historique de reset : les anciennes pièces
+       gardent leur signature et leurs champs de validation. */
     store[key] = {
       nom: rec.nom || nom,
+      pinHash: rec.pinHash || '',
       resetAt: new Date().toISOString(),
       resetBy: _u.nom || '',
       resetByLogin: _u.login || '',
       resetByRole: _u.role || ''
     };
     _sigSaveStore(store);
+    try { closeModal(); } catch (eC) {}
+    try { renderTresorerie(); } catch (eR) {}
+    toast('Référence changée. Les validations antérieures sont conservées. PIN conservé.', 'success');
+    setTimeout(function () { openSignatureBeneficiaire(opId); }, 250);
+  } catch (e) { try { toast('Réinitialisation impossible : ' + (e.message || e), 'error'); } catch (e2) {} }
+}
+/* Remet UNIQUEMENT la pièce affichée à signer (les autres restent validées). */
+function _sigReopenPiece(opId) {
+  try {
+    if (!_sigIsAdmin()) { toast('Action réservée à l’administrateur', 'error'); return; }
+    var ops = getOperationsCaisse() || [];
+    var op = null;
+    for (var i = 0; i < ops.length; i++) if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; }
+    if (!op) { toast('Pièce introuvable', 'error'); return; }
+    var msg = 'Remettre UNIQUEMENT cette pièce à signer ?\n\n'
+      + 'Pièce : ' + (op.numeroPiece || '-') + '\n'
+      + 'Bénéficiaire : ' + (op.beneficiaireNom || op.remettant || '-') + '\n'
+      + 'Montant : ' + fmtMoney(op.montant || 0) + ' F\n'
+      + 'Date : ' + (op.date ? fmtDate(op.date) : '-') + '\n\n'
+      + 'Les autres pièces déjà validées ne sont pas modifiées.';
+    if (!window.confirm(msg)) return;
     delete op.signatureData; delete op.signatureNom; delete op.signatureAt; delete op.signatureScore;
     delete op.validePar; delete op.valideParLogin; delete op.valideParRole; delete op.valideParId; delete op.valideLe;
+    delete op.validationParPin; delete op.pinValideLe; delete op.pinValidePar;
+    delete op.signatureForcee; delete op.signatureForceMotif; delete op.signatureForcePar; delete op.signatureForceRole; delete op.signatureForceLe;
     op.beneficiaireValide = false;
     DB.set('mdb_operationsCaisse', ops);
     try { markDirty('mdb_operationsCaisse'); persistPendingSync(); schedulePush(); } catch (eP) {}
     try { closeModal(); } catch (eC) {}
     try { renderTresorerie(); } catch (eR) {}
-    toast('Signature de référence réinitialisée. La pièce est à signer à nouveau.', 'success');
+    toast('Pièce remise à signer. Les autres validations sont conservées.', 'success');
     setTimeout(function () { openSignatureBeneficiaire(opId); }, 250);
-  } catch (e) { try { toast('Réinitialisation impossible : ' + (e.message || e), 'error'); } catch (e2) {} }
+  } catch (e) { try { toast('Action impossible : ' + (e.message || e), 'error'); } catch (e2) {} }
 }
 function _sigHandleHash() {
   try {
@@ -20640,7 +20672,12 @@ function docSommeEnLettres(label, montant) {
   return '<div class="dp-arrete"><u>' + escH(label) + '</u> ' + escH(w.charAt(0).toUpperCase() + w.slice(1) + ' francs CFA.') + '</div>';
 }
 function buildPrintFileHTML(title, bodyHtml, noChrome) {
-  var toolbar = '<div class="dp-toolbar"><button class="dp-tbtn" onclick="window.print()">Imprimer</button><button class="dp-tbtn primary" onclick="(window.__mdbPdf||window.print)()">T\u00e9l\u00e9charger PDF</button></div>';
+  var _icoPrint = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>';
+  var _icoDown = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+  var toolbar = '<div class="dp-toolbar">'
+    + '<button class="dp-tbtn" onclick="window.print()" title="Imprimer" aria-label="Imprimer" style="font-size:0;line-height:0;padding:7px 10px">' + _icoPrint + '</button>'
+    + '<button class="dp-tbtn primary" onclick="(window.__mdbPdf||window.print)()" title="Télécharger en PDF" aria-label="Télécharger en PDF" style="font-size:0;line-height:0;padding:7px 10px">' + _icoDown + '</button>'
+    + '</div>';
   return '<html><head><meta charset="UTF-8"><title>' + escH(title) + '</title>' + docCss() + '</head><body>' + (noChrome ? '' : toolbar) + '<div id="dp-doc" class="dp-doc">' + bodyHtml + '</div></body></html>';
 }
 function openPrintWindow(title, bodyHtml) {
@@ -43732,7 +43769,10 @@ function rhContratsListe() {
           var dt = new Date(parseInt(d.slice(0, 4), 10), parseInt(d.slice(5, 7), 10) - 1, parseInt(d.slice(8, 10), 10));
           return dt.getDate() + ' ' + JM[dt.getMonth()] + ' ' + dt.getFullYear();
         }
-        function rub(t) { return '<p class="rub">' + escH(t) + '</p>'; }
+        function rub(t, noNum) {
+          if (!noNum) _artN++;
+          return '<p class="rub">' + (noNum ? '' : '<span class="rub-n">ARTICLE ' + _artN + '</span> — ') + escH(t) + '</p>';
+        }
         var N = rhEmpLabel(e);
         var civil = (String(e.sexe || '').toUpperCase().charAt(0) === 'F') ? 'Mme' : 'M.';
         var type = String(c.type || 'CDI').toUpperCase();
@@ -43743,6 +43783,7 @@ function rhContratsListe() {
         var fin = String(c.fin || '').slice(0, 10);
         var dureeMois = c.unite === 'ans' ? (parseInt(c.duree, 10) || 0) * 12 : (c.unite === 'jours' ? Math.round((parseInt(c.duree, 10) || 0) / 30) : (parseInt(c.duree, 10) || 0));
         var h = '';
+        var _artN = 0;
         /* ---------- Entre l'employeur ---------- */
         h += '<p class="sans-indent"><b>Entre l\'employeur,</b></p>';
         h += '<p class="sans-indent">La Société <b>' + escH(nomSoc) + '</b>,<br>' +
@@ -43766,7 +43807,7 @@ function rhContratsListe() {
         h += '<p class="parti"><b>D\'autre part,</b></p>';
         h += '<p class="sans-indent">Il a été convenu ce qui suit :</p>';
 
-        h += rub('EXPOSÉ DES MOTIFS');
+        h += rub('EXPOSÉ DES MOTIFS', true);
         h += '<p>En vue de la redynamisation de son service de production, l\'entreprise ACSER a décidé du recrutement du personnel technique. Ainsi, il a été décidé de recruter <b>' + escH(civil + ' ' + N) + '</b> au service <b>' + escH(service) + '</b> à compter du <b>' + escH(dl(deb)) + '</b> aux conditions exposées ci-après.</p>';
 
         h += rub('EMPLOI ET QUALIFICATION');
@@ -43825,7 +43866,6 @@ function rhContratsListe() {
         h += '<p>' + escH(N) + ' ne pourra exercer, sous quelque forme que ce soit, une activité concurrente de celle de son employeur pendant l\'exécution du présent contrat.</p>';
         h += '<p>' + escH(N) + ' s\'engage à faire connaître sans délai, tout changement de situation le concernant.</p>';
 
-        h += '<p class="sans-indent" style="margin-top:14px"><b>ANNEXES</b> \u2014 Font partie intégrante du présent contrat : <b>Annexe 1</b> : fiche de poste signée par les deux parties ; <b>Annexe 2</b> : grille de rémunération par montage des articles (le cas échéant).</p>';
         return h;
       }
       /* Un salarié est « monteur » s'il est au service production ou s'il a
@@ -43874,7 +43914,8 @@ function rhContratsListe() {
           '.corps p.sans-indent{text-indent:0}' +
           '.corps p.apres-titre{text-indent:0}' +
           '.corps b.droit{border-bottom:1.4pt solid #1a1a1a;padding-bottom:1px}' +
-          '.corps h3,.corps .rub{font-size:11pt;font-weight:700;text-transform:uppercase;text-decoration:underline;margin:12px 0 6px;text-indent:0;page-break-after:avoid}' +
+          '.corps h3,.corps .rub{font-size:11pt;font-weight:700;text-transform:uppercase;text-decoration:none;border-bottom:1.4pt solid #1a1a1a;padding-bottom:2px;margin:12px 0 6px;text-indent:0;page-break-after:avoid}' +
+          '.corps .rub-n{font-weight:900;letter-spacing:.02em}' +
           '.corps ul{margin:4px 0 8px 20px;padding:0}.corps li{margin:3px 0;text-align:justify}' +
           '.fiche{margin:10px 0 14px;text-indent:0}' +
           '.fiche table{width:100%;border-collapse:collapse}' +
@@ -43884,16 +43925,15 @@ function rhContratsListe() {
           '.parti{margin:16px 0 12px;text-indent:0;font-size:11pt}' +
           '.nb{margin:20px 0 0;text-indent:0;font-size:10.4pt}' +
           '.nb .box{border:1px solid #999;padding:7px 10px;margin:4px 0 0;background:#fbfbf7}' +
-          '.sign{margin-top:26px;display:flex;gap:40px;text-indent:0}' +
+          '.sign{margin-top:26px;display:flex;gap:40px;text-indent:0;page-break-inside:avoid;break-inside:avoid}' +
           '.sign>div{flex:1;font-size:10.6pt}' +
           '.sign .tete{text-align:center;font-weight:700}' +
           '.sign .nom{margin-top:8px;text-align:center;padding:0 10px}' +
           '.sign .trait{margin-top:44px;border-top:1px solid #1a1a1a;padding-top:3px;font-size:9.6pt}' +
-          '.pied{margin-top:34px;border-top:1.4px solid #9ca3af;padding-top:5px;font-size:7.6pt;color:#4b5563;line-height:1.5;display:flex;gap:9px;align-items:center}' +
-          '.pied .drapeaux{flex:0 0 auto;display:flex;flex-direction:column;gap:1px}' +
-          '.pied .drapeaux i{display:block;width:26px;height:9px}' +
-          '.pied .drapeaux i:first-child{background:#1d4ed8}.pied .drapeaux i:last-child{background:#dc2626}' +
-          '.pied .txt{flex:1}' +
+          '.fait{margin:18px 0 0;text-align:right;text-indent:0;font-size:10.6pt;page-break-after:avoid}' +
+          '.annexes{margin:16px 0 0;padding:8px 11px;border:1px solid #b8c0cc;background:#fbfbf7;font-size:9.6pt;line-height:1.6;text-indent:0;page-break-inside:avoid;break-inside:avoid}' +
+          '.annexes b{font-size:10pt}' +
+          '.pied{margin-top:26px;border-top:1px solid #9ca3af;padding-top:5px;font-size:7.6pt;color:#4b5563;line-height:1.5;text-align:center}' +
           '.pied .mail{font-weight:700}' +
           '.no-print{display:none}' +
           '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0;max-width:none}.pied{position:running(foot)}}';
@@ -43948,24 +43988,26 @@ function rhContratsListe() {
 
         h += '<div class="corps">' + corps + '</div>';
 
+        /* ---- annexes : bloc discret, juste avant les signatures ---- */
+        h += '<div class="annexes"><b>ANNEXES</b> — Font partie intégrante du présent contrat : ' +
+          '<b>Annexe 1</b> : fiche de poste signée par les deux parties ; ' +
+          '<b>Annexe 2</b> : grille de rémunération par montage des articles (le cas échéant).</div>';
+
+        /* ---- lieu et date ---- */
+        h += '<div class="fait">Fait à Abidjan, le ' + escHtml(d) + '</div>';
+
         /* ---- signatures : deux colonnes, trait de signature ---- */
-
         h += '<div class="sign">' +
-
           '<div><div class="tete">Le salarié</div><div class="nom">' + escHtml(rhEmpLabel(e)) + '</div><div class="trait">Signature</div></div>' +
-
           '<div><div class="tete">La société <b>' + escHtml(nomSoc) + '</b></div>' +
-
-          '<div class="nom">' + escHtml((ent.signataire || 'ABOGOU WAWA RICHARD') + ', Directeur Général') + '</div><div class="trait">Signature</div></div>' +
-
+          '<div class="nom">' + escHtml((ent.signataire || 'ABOGOU WAWA RICHARD') + ', Directeur Général') + '</div><div class="trait">Signature et cachet</div></div>' +
           '</div>';
 
-        /* ---- pied de page : coordonnées de la société ---- */
-
-        h += '<div class="pied"><div class="drapeaux"><i></i><i></i></div><div class="txt">' +
-          'SAS Capital 5 000 000 FCFA \u2013 Si\u00e8ge social : Cocody Riviera Palmeraie, Pharmacie Marthe Robin, 08 BP 2054 \u00e0 08 \u2014' +
-          '<br>T\u00e9l : +225 27 23 40 08 / +225 09 17 85 23 \u2013 RCCM N\u00b0 CI-ABJ-2019-B-16880, N\u00b0CC : 1943575 T \u2013 Compte bancaire : (CI13)' +
-          '<br>01001 015009448006 23 Bridge Bank Group CI \u2013 E-mail : <span class="mail">' + escHtml(ent.email || 'sas.acser@gmail.com') + '</span></div></div>';
+        /* ---- pied de page compact (les coordonnées complètes sont déjà en tête) ---- */
+        h += '<div class="pied">' +
+          escHtml(nomSoc) + ' — SAS au capital de 5 000 000 FCFA · RCCM ' + escHtml(ent.rccm || 'CI-ABJ-2019-B-16880') +
+          ' · N°CC 1943575 T · E-mail : <span class="mail">' + escHtml(ent.email || 'sas.acser@gmail.com') + '</span>' +
+          '</div>';
         return h;
       }
 function rhPrintContrat(id) {
@@ -43982,6 +44024,151 @@ function rhPrintContrat(id) {
         w.document.write(h.replace(/^[\s\S]*?<body>/, "").replace(/<\/body>[\s\S]*$/, ""));
         w.document.write('</div><script>window.onload=function(){setTimeout(function(){window.print()},600)}<\/script></body></html>');
         w.document.close();
+      }
+      /* ===== FICHE DE POSTE (Annexe 1 du contrat) =====
+         Saisie ligne par ligne : chaque ligne d'un champ devient une puce.
+         Stockée dans mdb_fichesPoste { [employeId]: { missions:[], ... } }. */
+      function rhFichesPosteStore() {
+        var v = null;
+        try { v = DB.get('mdb_fichesPoste'); } catch (e) {}
+        return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+      }
+      function rhFichePosteDe(id) {
+        var s = rhFichesPosteStore();
+        return s[id] || null;
+      }
+      function rhFicheLignes(txt) {
+        return String(txt || '').split(/\r?\n/).map(function (l) {
+          return String(l || '').replace(/^[\s•\-–—*]+/, '').trim();
+        }).filter(Boolean);
+      }
+      function rhModalFichePoste(id) {
+        var e = rhEmpById(id);
+        if (!e) { toast('Employé introuvable', 'error'); return; }
+        var f = rhFichePosteDe(id) || {};
+        function ta(key, label, ph) {
+          var val = Array.isArray(f[key]) ? f[key].join('\n') : '';
+          return '<div class="form-group" style="grid-column:span 2"><label style="font-weight:800">' + label + '</label>'
+            + '<textarea id="fp_' + key + '" rows="5" placeholder="' + escH(ph) + '" style="width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;line-height:1.5;resize:vertical">' + escH(val) + '</textarea>'
+            + '<small style="color:#64748b;font-size:10.5px">Une ligne = une puce sur la fiche.</small></div>';
+        }
+        var h = '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px">'
+          + '<div><div style="font-size:15px;font-weight:900;color:#0b3a6f">📋 Fiche de poste</div>'
+          + '<div style="font-size:12px;color:#475569;margin-top:2px"><b>' + escH(rhEmpLabel(e)) + '</b>'
+          + (e.matricule ? ' · ' + escH(e.matricule) : '') + (e.fonction ? ' · ' + escH(e.fonction) : '') + '</div></div>'
+          + '<button type="button" class="btn btn-outline" onclick="rhImprimerFichePoste(\'' + escJ(id) + '\')" title="Imprimer / PDF">🖨</button></div>';
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+        h += ta('missions', 'Missions principales', 'Ex : Assurer le montage des palettes selon les fiches techniques');
+        h += ta('activites', 'Activités / tâches quotidiennes', 'Ex : Contrôler la conformité des articles montés');
+        h += ta('responsabilites', 'Responsabilités', 'Ex : Respecter les délais et les règles de sécurité');
+        h += ta('competences', 'Compétences et exigences', 'Ex : Lecture de fiches techniques, rigueur, ponctualité');
+        h += ta('conditions', "Conditions d'exercice", 'Ex : Atelier de production, port des EPI obligatoire');
+        h += '</div>';
+        var foot = '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>'
+          + '<button type="button" class="btn btn-outline" onclick="rhImprimerFichePoste(\'' + escJ(id) + '\')">🖨 Imprimer</button>'
+          + '<button type="button" class="btn btn-primary" onclick="rhSauverFichePoste(\'' + escJ(id) + '\',true)">💾 Enregistrer et imprimer</button>'
+          + '<button type="button" class="btn btn-primary" onclick="rhSauverFichePoste(\'' + escJ(id) + '\',false)">💾 Enregistrer</button>';
+        openFormModal('Fiche de poste — ' + rhEmpLabel(e), h, foot, 'wide');
+      }
+      function rhLireFicheForm() {
+        var keys = ['missions', 'activites', 'responsabilites', 'competences', 'conditions'];
+        var out = {};
+        keys.forEach(function (k) {
+          var el = document.getElementById('fp_' + k);
+          out[k] = rhFicheLignes(el ? el.value : '');
+        });
+        return out;
+      }
+      function rhSauverFichePoste(id, imprimer) {
+        var e = rhEmpById(id);
+        if (!e) { toast('Employé introuvable', 'error'); return; }
+        var store = rhFichesPosteStore();
+        var f = rhLireFicheForm();
+        f.employeId = id;
+        f.updatedAt = new Date().toISOString();
+        store[id] = f;
+        try { DB.set('mdb_fichesPoste', store); } catch (eS) {}
+        try { markDirty('mdb_fichesPoste'); persistPendingSync(); schedulePush(); } catch (eP) {}
+        toast('Fiche de poste enregistrée', 'success');
+        if (imprimer) rhImprimerFichePoste(id);
+      }
+      function rhFichePosteDocument(e) {
+        var ent = {};
+        try { ent = getEntreprise() || {}; } catch (eE) {}
+        var f = rhFichePosteDe(e.id) || {};
+        var nomSoc = ent.nom || 'AFRICAINE DE COMMERCE ET DE SERVICES (ACSER) SAS';
+        var poste = String(e.fonction || 'POSTE À PRÉCISER').toUpperCase();
+        var logo = ent.logo ? '<img src="' + escH(ent.logo) + '" style="max-width:170px;max-height:62px;object-fit:contain">' : '';
+        var missionTxt = (Array.isArray(f.missions) ? f.missions.join(' ') : '').trim();
+        var resp = (Array.isArray(f.responsabilites) ? f.responsabilites : []).concat(Array.isArray(f.activites) ? f.activites : []);
+        var comp = Array.isArray(f.competences) ? f.competences : [];
+        var cond = Array.isArray(f.conditions) ? f.conditions : [];
+        function liste(arr) {
+          if (!arr || !arr.length) return '<div class="vide">À compléter.</div>';
+          return '<ul>' + arr.map(function (x) { return '<li>' + escH(x) + '</li>'; }).join('') + '</ul>';
+        }
+        var css = '@page{size:A4;margin:14mm 16mm 16mm}'
+          + '*{box-sizing:border-box}'
+          + 'body{font-family:Arial,Helvetica,sans-serif;font-size:10.5pt;line-height:1.6;color:#111827;margin:0;background:#eef2f7;padding:18px}'
+          + '.feuille{max-width:820px;margin:0 auto;background:#fff;padding:20px 28px 18px;box-shadow:0 10px 34px rgba(15,23,42,.16);display:flex;flex-direction:column;min-height:1040px}'
+          + '.entete{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding-bottom:6px}'
+          + '.entete .logo{flex:0 0 auto}'
+          + '.entete .marque{flex:1;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:4px}'
+          + '.entete .ligne{flex:1;border-top:2px dashed #16a34a;height:0}'
+          + '.entete .check{color:#16a34a;font-size:18px;font-weight:900;line-height:1}'
+          + '.titre{background:#e5e7eb;border:1px solid #9ca3af;padding:9px 14px;text-align:center;font-size:13.5pt;font-weight:800;letter-spacing:.06em;text-transform:uppercase;margin:6px 0 4px;color:#111827}'
+          + '.titulaire{text-align:center;font-size:9pt;color:#4b5563;margin:0 0 16px}'
+          + '.sec{margin:0 0 14px;page-break-inside:avoid}'
+          + '.sec h3{font-size:11pt;font-weight:800;color:#1d4ed8;text-decoration:underline;text-underline-offset:3px;margin:0 0 6px;text-transform:none}'
+          + '.sec p{margin:0 0 4px;text-align:justify}'
+          + '.sec ul{margin:0 0 0 18px;padding:0}.sec li{margin:2.5px 0;text-align:justify}'
+          + '.vide{color:#94a3b8;font-style:italic}'
+          + '.sign{margin-top:auto;padding-top:18px;display:flex;gap:50px;page-break-inside:avoid}'
+          + '.sign>div{flex:1;text-align:center;font-size:9.5pt;color:#374151}'
+          + '.sign .trait{margin-top:34px;border-top:1px solid #111827;padding-top:4px;font-size:8.6pt}'
+          + '.sign .qui{font-weight:700;color:#111827}'
+          + '.pied{margin-top:14px;border-top:1px solid #9ca3af;padding-top:5px;font-size:7.2pt;color:#4b5563;line-height:1.45;display:flex;gap:7px;align-items:center}'
+          + '.pied .drapeaux{flex:0 0 auto;display:flex;flex-direction:column;gap:1px}'
+          + '.pied .drapeaux i{display:block;width:24px;height:8px}'
+          + '.pied .drapeaux i:first-child{background:#1d4ed8}.pied .drapeaux i:last-child{background:#dc2626}'
+          + '.pied .txt{flex:1}'
+          + '.pied .mail{font-weight:700}'
+          + '@media print{body{background:#fff;padding:0}.feuille{box-shadow:none;padding:0;max-width:none;min-height:auto}.pied{margin-top:auto}}';
+        var h = '<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Fiche de poste — ' + escH(rhEmpLabel(e)) + '</title><style>' + css + '</style></head><body><div class="feuille">';
+        /* ---- en-tête : logo + trait vert pointillé, comme la fiche papier ---- */
+        h += '<div class="entete"><div class="logo">' + logo + '</div>'
+          + '<div class="marque"><span class="ligne"></span><span class="check">✓</span><span class="ligne"></span></div></div>';
+        /* ---- bandeau du titre ---- */
+        h += '<div class="titre">Fiche de poste : ' + escH(poste) + '</div>';
+        h += '<div class="titulaire">Titulaire : <b>' + escH(rhEmpLabel(e)) + '</b>'
+          + (e.matricule ? ' · Matricule ' + escH(e.matricule) : '')
+          + (e.service ? ' · Service ' + escH(e.service) : '')
+          + (rhCatLabel(e) ? ' · Catégorie ' + escH(rhCatLabel(e)) : '') + '</div>';
+        /* ---- sections du modèle ---- */
+        h += '<div class="sec"><h3>Objectif de la mission</h3><p>' + (missionTxt ? escH(missionTxt) : '<span class="vide">À compléter.</span>') + '</p></div>';
+        h += '<div class="sec"><h3>Responsabilités principales</h3>' + liste(resp) + '</div>';
+        h += '<div class="sec"><h3>Compétences attendues</h3>' + liste(comp) + '</div>';
+        h += '<div class="sec"><h3>Conditions d\'exercice</h3>' + liste(cond) + '</div>';
+        /* ---- signatures ---- */
+        h += '<div class="sign"><div><div class="qui">Le salarié</div><div>' + escH(rhEmpLabel(e)) + '</div><div class="trait">Signature</div></div>'
+          + '<div><div class="qui">La Direction</div><div>' + escH(ent.signataire || 'ABOGOU WAWA RICHARD') + '</div><div class="trait">Signature et cachet</div></div></div>';
+        /* ---- pied de page du modèle ---- */
+        h += '<div class="pied"><div class="drapeaux"><i></i><i></i></div><div class="txt">'
+          + 'SAS Capital 5 000 000 FCFA — Siège social : Cocody Riviera Palmeraie, Pharmacie Marthe Robin, 08 BP 2054 à 08'
+          + '<br>Tél : +225 27 23 40 08 / +225 09 17 85 23 · RCCM N° ' + escH(ent.rccm || 'CI-ABJ-2019-B-16880') + ' · N°CC 1943575 T · Compte bancaire : (CI13)'
+          + '<br>01001 015009448006 23 Bridge Bank Group CI — E-mail : <span class="mail">' + escH(ent.email || 'sas.acser@gmail.com') + '</span></div></div>';
+        h += '</div></body></html>';
+        return h;
+      }
+      function rhImprimerFichePoste(id) {
+        var e = rhEmpById(id);
+        if (!e) { toast('Employé introuvable', 'error'); return; }
+        var h = rhFichePosteDocument(e);
+        var w = window.open('', '_blank');
+        if (!w) { toast('Autorisez les popups', 'error'); return; }
+        w.document.write(h);
+        w.document.close();
+        setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 400);
       }
       /* Export WORD : page HTML avec logo au format que Word lit bien.
          Le fichier s'ouvre dans Word / LibreOffice et se met en page seul. */
@@ -44113,7 +44300,8 @@ function renderContratsPage() {
     var _titr = _remis ? 'Contrat remis au travailleur' : 'Contrat créé mais NON remis : cochez-le dans l\'édition';
     action += ' <span class="badge ' + (_remis ? 'badge-success' : 'badge-warning') + '" title="' + escH(_titr) + '">' + (_remis ? '✔ remis' : '⚠ non remis') + '</span>';
     action += ' <button class="btn btn-sm btn-outline" onclick="rhModalContrat(\'' + ee.id + '\',false)" title="Contrat : dates, durée, fin calculée, remis ou non" style="font-size:10px;padding:2px 8px">✏️</button>';
-    action += ' <button class="btn btn-sm btn-outline" onclick="rhPrintContrat(\'' + ee.id + '\')" title="Imprimer le contrat de cet employé" style="font-size:10px;padding:2px 8px">📄</button>'; ' <button class="btn btn-sm btn-outline" onclick="historiqueContratsModal(\'' + ee.id + '\')" title="Voir les contrats pr\u00e9c\u00e9dents" style="font-size:10px;padding:2px 8px">\ud83d\udcdc (' + _histN + ')</button>';
+    action += ' <button class="btn btn-sm btn-outline" onclick="rhPrintContrat(\'' + ee.id + '\')" title="Imprimer le contrat de cet employé" style="font-size:10px;padding:2px 8px">📄</button>';
+    action += ' <button class="btn btn-sm btn-outline" onclick="rhModalFichePoste(\'' + ee.id + '\')" title="Saisir / imprimer la fiche de poste (Annexe 1)" style="font-size:10px;padding:2px 8px">📋</button>';
     html += '<tr data-search="' + escH(list[ci2].q) + '"><td class="fw-600">' + escH(ee.nom) + (ee.prenoms ? ' ' + escH(ee.prenoms) : '') + '<br><span style="font-size:10px;color:var(--dim)">' + escH(ee.matricule || '') + '</span></td><td>' + deptFoncCellI(ee) + '</td><td>' + escH(ee.type_contrat || '-') + '</td><td>' + fmtDate(ee.date_entree) + '</td><td>' + (ee.duree_contrat ? ee.duree_contrat + ' mois' : '-') + '</td><td class="fw-600">' + fmtDate(ech) + '</td><td>' + (dl === null ? '-' : (dl < 0 ? Math.abs(dl) + ' j retard' : dl + ' j')) + '</td><td><span class="badge ' + stBadge + '">' + stLbl + '</span></td><td>' + action + '</td></tr>';
   }
   html += '</tbody></table></div></div></div>';
@@ -44982,9 +45170,10 @@ function renderRhDashboard() {
   });
   var _nbTiers = 0;
   for (var _st = 0; _st < _salaEmp.length; _st++) { if (_salaEmp[_st].ratio > 33.33) _nbTiers++; }
-  h += '<div class="rhd-card" style="margin-bottom:16px">';
-  h += '<h4>\uD83D\uDCB3 Capacit\u00e9 d\u2019acompte / pr\u00eat \u2014 ' + escH(fmtMois(_refMois)) + '<span class="n">' + _salaEmp.length + ' employ\u00e9(s)' + (_nbTiers ? ' \u00b7 <b style="color:#dc2626">' + _nbTiers + ' au-del\u00e0 du 1/3</b>' : '') + '</span></h4>';
-  h += '<div style="font-size:11.5px;color:#64748b;margin:-2px 0 10px">Salaire estim\u00e9 sur le mois plein (base + primes/indemnit\u00e9s de la fiche). Retenues calcul\u00e9es <b>exactement comme la paie</b> : acomptes valid\u00e9s + soldes + \u00e9ch\u00e9ance de pr\u00eat du mois (les montants \u00ab en attente \u00bb sont indiqu\u00e9s \u00e0 part). Alerte si les retenues d\u00e9passent <b>1/3</b> du salaire.</div>';
+  h += '<style>details.rhd-collab>summary{list-style:none;cursor:pointer}details.rhd-collab>summary::-webkit-details-marker{display:none}details.rhd-collab>summary .rhd-arrow{display:inline-block;transition:transform .15s;margin-right:6px;color:#64748b}details.rhd-collab[open]>summary .rhd-arrow{transform:rotate(90deg)}</style>';
+  h += '<details class="rhd-card rhd-collab" style="margin-bottom:16px">';
+  h += '<summary style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0"><span class="rhd-arrow">▸</span><span style="font-size:13px;font-weight:800;color:#0f172a">\uD83D\uDCB3 Capacit\u00e9 d\u2019acompte / pr\u00eat \u2014 ' + escH(fmtMois(_refMois)) + '</span><span class="n" style="font-size:11px;color:#64748b;font-weight:600">' + _salaEmp.length + ' employ\u00e9(s)' + (_nbTiers ? ' \u00b7 <b style="color:#dc2626">' + _nbTiers + ' au-del\u00e0 du 1/3</b>' : '') + '</span><span style="margin-left:auto;font-size:10.5px;color:#94a3b8">Cliquer pour d\u00e9plier</span></summary>';
+  h += '<div style="font-size:11.5px;color:#64748b;margin:10px 0 10px">Salaire estim\u00e9 sur le mois plein (base + primes/indemnit\u00e9s de la fiche). Retenues calcul\u00e9es <b>exactement comme la paie</b> : acomptes valid\u00e9s + soldes + \u00e9ch\u00e9ance de pr\u00eat du mois (les montants \u00ab en attente \u00bb sont indiqu\u00e9s \u00e0 part). Alerte si les retenues d\u00e9passent <b>1/3</b> du salaire.</div>';
   h += '<div style="overflow:auto;max-height:420px;border:1px solid #e2e8f0;border-radius:12px"><table style="width:100%;border-collapse:collapse;font-size:12px">';
   h += '<thead><tr style="background:#0f172a;color:#fff;position:sticky;top:0;z-index:1"><th style="padding:8px 10px;text-align:left">Employ\u00e9</th><th style="padding:8px 10px;text-align:right">Salaire estim\u00e9</th><th style="padding:8px 10px;text-align:right">Acomptes</th><th style="padding:8px 10px;text-align:right">Pr\u00eats</th><th style="padding:8px 10px;text-align:right">Total retenu</th><th style="padding:8px 10px;text-align:right">Disponible</th><th style="padding:8px 10px;text-align:right">% retenu</th><th style="padding:8px 10px;text-align:center">Statut</th></tr></thead><tbody>';
   if (!_salaEmp.length) h += '<tr><td colspan="8" style="padding:20px;text-align:center;color:#94a3b8">Aucun employ\u00e9 en paie</td></tr>';
@@ -45003,7 +45192,7 @@ function renderRhDashboard() {
     h += '<td style="padding:7px 10px;text-align:right;font-weight:800;white-space:nowrap;color:' + col + '">' + (r.sal > 0 ? r.ratio + ' %' : '\u2014') + '</td>';
     h += '<td style="padding:7px 10px;text-align:center">' + badge + '</td></tr>';
   });
-  h += '</tbody></table></div></div>';
+  h += '</tbody></table></div></details>';
   h += '<div id="rhChartsNoLib" style="display:none;font-size:12px;color:var(--gray-500)">Graphiques indisponibles (Chart.js non chargé — vérifiez la connexion internet).</div>';
   h += '<div class="rhd-grid g3">';
   h += '<div class="rhd-card"><h4>📈 Taux de présence (6 mois)</h4><div class="rhd-ch"><canvas id="rhChartTaux"></canvas></div></div>';
@@ -65266,7 +65455,7 @@ function _csVueSync() {
 })();
 </script>
 <script src="qr-verif.js?v=1"></script>
-<script src="print-buttons.js?v=3"></script>
+<script src="print-buttons.js?v=4"></script>
 </body>
 </html>
 <script>
