@@ -630,6 +630,16 @@ export async function onRequest(context) {
         return true;
       });
       const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
+      const maPhoto = (photos && photos[emp.id]) || '';
+      if (maPhoto) {
+        try {
+          const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+          const arrEmp = Array.isArray(employes) ? employes : [];
+          let touche = false;
+          arrEmp.forEach(x => { if (x && String(x.id) === String(emp.id) && x.photo !== maPhoto) { x.photo = maPhoto; touche = true; } });
+          if (touche) await ecrireCle(db, uid, 'mdb_employes', arrEmp);
+        } catch (ePh) {}
+      }
       const opsCaisse = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
       const opsList = Array.isArray(opsCaisse) ? opsCaisse : [];
       const natureDe = function (a) {
