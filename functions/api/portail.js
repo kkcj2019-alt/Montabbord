@@ -111,7 +111,8 @@ function trouverEmploye(employes, login) {
       norm(e.telephone),
       norm(e.id)
     ];
-    if (noms.indexOf(q) !== -1) exact.push(e);
+    const mots = String((e.nom || '') + ' ' + (e.prenoms || '')).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
+    if (noms.indexOf(q) !== -1 || mots.indexOf(q) !== -1) exact.push(e);
     else if (noms.some(x => x && x.indexOf(q) !== -1)) partiels.push(e);
   });
   return { list: exact.length ? exact : partiels.slice(0, 10) };
