@@ -651,9 +651,14 @@ export async function onRequest(context) {
         return true;
       });
       const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
-      const maPhoto = (photos && photos[emp.id]) || '';
+      const maPhoto = (photos && photos[emp.id]) || emp.photo || '';
       if (maPhoto) {
         try {
+          if (!(photos && photos[emp.id])) {
+            const ph = (photos && typeof photos === 'object') ? photos : {};
+            ph[emp.id] = maPhoto;
+            await ecrireCle(db, uid, 'mdb_portailPhotos', ph);
+          }
           const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
           const arrEmp = Array.isArray(employes) ? employes : [];
           let touche = false;
@@ -691,7 +696,7 @@ export async function onRequest(context) {
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
         pointage, montage, bulletins,
         acomptes: mesAcomptes.map(a => Object.assign({}, a, { nature: natureDe(a) })),
-        photo: (photos && photos[emp.id]) || '',
+        photo: maPhoto,
         requetes: mesReq,
         unread: mesReq.reduce((n, r) => n + ((r.messages || []).filter(m => m && m.auteur !== 'employe' && !m.luParEmploye).length), 0)
       });
