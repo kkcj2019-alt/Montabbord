@@ -651,7 +651,7 @@ export async function onRequest(context) {
         return true;
       });
       const photos = parseVal(await lireCle(db, uid, 'mdb_portailPhotos'), {});
-      const maPhoto = (photos && photos[emp.id]) || emp.photo || '';
+      const maPhoto = emp.photo || (photos && photos[emp.id]) || '';
       if (maPhoto) {
         try {
           if (!(photos && photos[emp.id])) {
