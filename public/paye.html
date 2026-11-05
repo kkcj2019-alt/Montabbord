@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-05-540';
+      window.__APP_VERSION = '2026-11-05-541';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -24419,43 +24419,76 @@ function peTogglePst() {
       }
       function _qrPtScanBadge() {
         var root = document.getElementById('qrpt-root'); if (!root) return;
-        var h = '<div style="text-align:center"><div style="font-weight:900;font-size:1rem;margin-bottom:6px">Scanner un badge employ\u00e9</div><div style="font-size:.75rem;color:#64748b;margin-bottom:10px">Pr\u00e9sentez le QR du badge devant la cam\u00e9ra. 1er scan = arriv\u00e9e, 2e scan = sortie (3 h 30 minimum).</div>';
+        var h = '<div style="text-align:center"><div style="font-weight:900;font-size:1rem;margin-bottom:6px">Scanner un badge employé</div><div style="font-size:.75rem;color:#64748b;margin-bottom:10px">Présentez le QR du badge (ou le QR affiché sur le téléphone de l\u2019employé).</div>';
         h += '<div style="position:relative;max-width:460px;margin:0 auto"><video id="qrpt-video" autoplay playsinline muted style="width:100%;border-radius:14px;border:3px solid #7c3aed;background:#0f172a"></video><canvas id="qrpt-canvas" style="display:none"></canvas></div>';
         h += '<div id="qrpt-scan-status" style="margin-top:10px;font-size:.82rem;color:#475569;min-height:24px"></div>';
         h += '<div id="qrpt-confirm-box" style="margin-top:8px"></div>';
-        h += '<button class="btn btn-sec" onclick="_qrPtStopCamera();_qrPtRenderStation()" style="margin-top:10px;padding:8px 18px">Arr\u00eater</button></div>';
+        h += '<div style="max-width:460px;margin:12px auto 0;display:flex;gap:8px"><input id="qrpt-manual-mat" placeholder="Secours : matricule ou nom" style="flex:1;padding:9px 11px;border:1px solid #cbd5e1;border-radius:9px;font-size:.82rem"><button class="btn" onclick="_qrPtManualPoint()" style="padding:9px 14px;background:#0f766e;color:#fff;border:none;border-radius:9px;font-weight:800;font-size:.78rem;cursor:pointer">Pointer</button></div>';
+        h += '<button class="btn btn-sec" onclick="_qrPtStopCamera();_qrPtRenderStation()" style="margin-top:10px;padding:8px 18px">Arrêter</button></div>';
         root.innerHTML = h;
         _qrPtStartCamera('badge');
+      }
+      function _qrPtManualPoint() {
+        var el = document.getElementById('qrpt-manual-mat');
+        var q = String((el && el.value) || '').trim().toLowerCase();
+        if (!q) { toast('Saisissez un matricule ou un nom', 'error'); return; }
+        var emp = null;
+        try {
+          emp = getPersonnel().find(function (p) {
+            var mat = String(p.matricule || '').toLowerCase();
+            var nom = ((p.nom || '') + ' ' + (p.prenoms || '')).toLowerCase();
+            return mat === q || nom.indexOf(q) !== -1 || mat.indexOf(q) !== -1;
+          });
+        } catch (e) {}
+        if (!emp) { toast('Aucun employé trouvé', 'error'); return; }
+        var res = _qrPtPointEmployee(emp, false);
+        if (res.ok) _qrPtShowSuccess(res);
+        else { _qrPtStopCamera(); _qrPtShowConfirm(emp, res); }
       }
       function _qrPtStartCamera(mode) {
         _qrPtStopCamera();
         var video = document.getElementById('qrpt-video');
         var status = document.getElementById('qrpt-scan-status');
         if (!video) return;
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (status) status.textContent = 'Cam\u00e9ra non disponible sur cet appareil.'; return; }
-        if (typeof jsQR === 'undefined') { if (status) status.textContent = 'D\u00e9codeur QR non charg\u00e9. Rechargez la page.'; return; }
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false }).then(function (stream) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (status) status.innerHTML = '<span style="color:#b91c1c">Caméra non disponible sur cet appareil.</span>'; return; }
+        if (typeof jsQR === 'undefined') { if (status) status.innerHTML = '<span style="color:#b91c1c">Décodeur QR non chargé. Rechargez la page.</span>'; return; }
+        if (status) status.innerHTML = '<span style="color:#0ea5e9;font-weight:800">Ouverture de la caméra…</span>';
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }).then(function (stream) {
           _qrPtStream = stream;
           video.srcObject = stream;
           try { video.play(); } catch (e) {}
           var canvas = document.getElementById('qrpt-canvas');
           if (!canvas) return;
           var ctx = canvas.getContext('2d');
+          var lastStatus = 0;
           var tick = function () {
             if (!_qrPtStream) return;
             if (_qrPtPaused) { _qrPtRaf = requestAnimationFrame(tick); return; }
-            if (video.readyState === video.HAVE_ENOUGH_DATA) {
-              canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-              var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-              var code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-              if (code && code.data) { _qrPtOnCode(code.data, mode); return; }
+            if (video.readyState >= 2 && video.videoWidth > 0) {
+              var vw = video.videoWidth, vh = video.videoHeight;
+              var scale = Math.min(1, 900 / Math.max(vw, vh));
+              var cw = Math.round(vw * scale), ch = Math.round(vh * scale);
+              if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+              ctx.drawImage(video, 0, 0, cw, ch);
+              var img = ctx.getImageData(0, 0, cw, ch);
+              var code = null;
+              try { code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' }); } catch (eQ) {}
+              if (code && code.data) {
+                if (status) status.innerHTML = '<span style="color:#0ea5e9;font-weight:800">QR détecté…</span>';
+                _qrPtOnCode(code.data, mode);
+                return;
+              }
+              var now = Date.now();
+              if (status && now - lastStatus > 1500) {
+                lastStatus = now;
+                status.innerHTML = '<span style="color:#64748b">Caméra prête — présentez le QR du badge.</span>';
+              }
             }
             _qrPtRaf = requestAnimationFrame(tick);
           };
           _qrPtRaf = requestAnimationFrame(tick);
         }).catch(function (err) {
-          if (status) status.textContent = 'Impossible d\u2019ouvrir la cam\u00e9ra : ' + (err && err.message ? err.message : err);
+          if (status) status.innerHTML = '<span style="color:#b91c1c;font-weight:800">Impossible d\u2019ouvrir la caméra : ' + (err && err.message ? err.message : err) + '</span>';
         });
       }
       function _qrPtStopCamera() {
@@ -24506,10 +24539,10 @@ function peTogglePst() {
         var status = document.getElementById('qrpt-scan-status');
         var label = res.label || 'Pointage';
         var extra = (res.heures != null && res.heures > 0) ? ' \u00b7 ' + res.heures + ' h' : '';
-        if (status) status.innerHTML = '<div style="padding:12px;background:#052e16;border:2px solid #16a34a;border-radius:12px;color:#fff"><div style="font-size:1.25rem">\u2705 ' + _qrPtEsc(label) + ' ' + (res.shift === 'nuit' ? 'NUIT' : 'JOUR') + '</div><div style="font-weight:900;color:#4ade80;font-size:1rem">' + _qrPtEsc(res.nom) + '</div><div style="color:#bbf7d0;font-size:.82rem">point\u00e9 \u00e0 ' + _qrPtEsc(res.heure) + extra + '</div></div>';
+        var ph = res.photo ? '<img src="' + _qrPtEsc(res.photo) + '" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2px solid #4ade80;margin:0 auto 4px;display:block">' : '';
+        if (status) status.innerHTML = '<div style="padding:12px;background:#052e16;border:2px solid #16a34a;border-radius:12px;color:#fff">' + ph + '<div style="font-size:1.25rem">\u2705 ' + _qrPtEsc(label) + ' ' + (res.shift === 'nuit' ? 'NUIT' : 'JOUR') + '</div><div style="font-weight:900;color:#4ade80;font-size:1rem">' + _qrPtEsc(res.nom) + '</div><div style="color:#bbf7d0;font-size:.82rem">point\u00e9 \u00e0 ' + _qrPtEsc(res.heure) + extra + '</div></div>';
         var spoken = res.step === 'fin' ? (res.shift === 'nuit' ? 'fin de nuit enregistr\u00e9e' : 'fin de journ\u00e9e enregistr\u00e9e') : (String(label).toLowerCase() + ' enregistr\u00e9e');
         _qrPtSpeak(res.nom + ', ' + spoken);
-        /* Cam\u00e9ra maintenue ouverte : le superviseur encha\u00eene avec le badge suivant. */
       }
       function _qrPtShowConfirm(emp, res) {
         _qrPtPending = { emp: emp, res: res };
@@ -24563,7 +24596,7 @@ function peTogglePst() {
         for (var s = 0; s < steps.length; s++) { if (!row[pre + steps[s]]) { next = s; break; } }
         var overwrite = false;
         if (next === -1) {
-          if (!force) return { ok: false, code: 'deja', nom: nom, heure: row[pre + 'fin'], entree: row[pre + 'arrivee'], pause: row[pre + 'pause'], reprise: row[pre + 'reprise'], fin: row[pre + 'fin'], shift: shift, step: 'fin' };
+          if (!force) return { ok: false, code: 'deja', nom: nom, heure: row[pre + 'fin'], entree: row[pre + 'arrivee'], pause: row[pre + 'pause'], reprise: row[pre + 'reprise'], fin: row[pre + 'fin'], shift: shift, step: 'fin', photo: emp.photo || '' };
           next = 3; overwrite = true;
         }
         var step = steps[next];
@@ -24571,7 +24604,7 @@ function peTogglePst() {
         if (!force && (step === 'pause' || step === 'fin')) {
           var ref = step === 'pause' ? row[pre + 'arrivee'] : row[pre + 'reprise'];
           var gap = _qrPtDurMin(ref, heure);
-          if (gap < QR_PT_GAP_MIN) return { ok: false, code: 'court', nom: nom, heure: ref, gapMin: gap, minGap: QR_PT_GAP_MIN, step: step, shift: shift };
+          if (gap < QR_PT_GAP_MIN) return { ok: false, code: 'court', nom: nom, heure: ref, gapMin: gap, minGap: QR_PT_GAP_MIN, step: step, shift: shift, photo: emp.photo || '' };
         }
         row[pre + step] = heure;
         row.present = true;
