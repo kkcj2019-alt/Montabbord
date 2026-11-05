@@ -837,6 +837,18 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
+    /* ---------- Validation de la fiche de pointage par l'employé ---------- */
+    if (action === 'validatepointage') {
+      const mois = String(body.mois || '').slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(mois)) return json({ ok: false, code: 'mois' }, 400);
+      let map = parseVal(await lireCle(db, uid, 'mdb_paye.pointageValidations'), {});
+      if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
+      const key = String(emp.id) + '|' + mois;
+      map[key] = { at: new Date().toISOString(), nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim() };
+      await ecrireCle(db, uid, 'mdb_paye.pointageValidations', map);
+      return json({ ok: true, at: map[key].at, mois: mois });
+    }
+
     /* ---------- Données personnelles ---------- */
     if (action === 'data') {
       const pointage = (Array.isArray(paye.pointage) ? paye.pointage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
@@ -928,11 +940,18 @@ export async function onRequest(context) {
       try { rhConges = parseVal(await lireCle(db, uid, 'mdb_rh_conges'), []) || []; } catch (eRh4) {}
       try { rhPerms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []) || []; } catch (eRh5) {}
       const mineRh = (arr) => (Array.isArray(arr) ? arr : []).filter(x => x && String(x.employee_id) === String(emp.id));
+      let pvAll = {};
+      try { pvAll = parseVal(await lireCle(db, uid, 'mdb_paye.pointageValidations'), {}) || {}; } catch (ePV) {}
+      const myValidations = {};
+      for (const pvk in pvAll) {
+        if (String(pvk).indexOf(String(emp.id) + '|') === 0) myValidations[pvk] = pvAll[pvk];
+      }
       let pointageToken = '';
       try { pointageToken = (await sha256Hex(uid + '|' + emp.id + '|MDB-POINTAGE-V1')).slice(0, 32); } catch (ePT) {}
       return json({
         ok: true,
         pointageToken: pointageToken,
+        pointageValidations: myValidations,
         evaluations: mineRh(rhEvals),
         sanctions: mineRh(rhSanctions),
         demandes: mineRh(rhDemandes),
