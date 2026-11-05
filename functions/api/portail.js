@@ -602,11 +602,14 @@ export async function onRequest(context) {
           let n = 0;
           if (/^\d{4}-\d{2}-\d{2}$/.test(start)) {
             let d = new Date(start + 'T00:00:00Z');
-            const fin = new Date((/^\d{4}-\d{2}-\d{2}$/.test(end) ? end : start) + 'T00:00:00Z');
+            const _startD = new Date(start + 'T00:00:00Z');
+            let fin = new Date((/^\d{4}-\d{2}-\d{2}$/.test(end) ? end : start) + 'T00:00:00Z');
+            if (!(fin > _startD)) fin = new Date(_startD.getTime() + 86400000);
             let guard = 0;
-            while (d <= fin && guard < 370) {
+            while (d < fin && guard < 370) {
               guard++;
               const ds = d.toISOString().slice(0, 10);
+              if (d.getUTCDay() === 0 || d.getUTCDay() === 6) { d = new Date(d.getTime() + 86400000); continue; }
               const k = String(req.empId) + '|' + ds;
               const motif = (req.type === 'conge' ? 'Congé approuvé' : 'Permission approuvée') + (req.motif ? ' — ' + req.motif : '');
               if (byKey[k]) {
