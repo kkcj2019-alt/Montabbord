@@ -755,6 +755,37 @@ export async function onRequest(context) {
     const paye = await lirePaye(db, uid);
     const allowed = moisAutorises(emp.id, paye);
 
+    /* ---------- Demande de permission (espace employé) ---------- */
+    if (action === 'permission') {
+      const p = body.permission || {};
+      const motif = String(p.motif || '').trim();
+      const debut = String(p.dateDebut || '').slice(0, 10);
+      if (!motif || !/^\d{4}-\d{2}-\d{2}$/.test(debut)) return json({ ok: false, code: 'champs' }, 400);
+      const list = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+      const arr = Array.isArray(list) ? list : [];
+      const rec = {
+        id: 'PM' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase(),
+        employee_id: emp.id,
+        matricule: emp.matricule || '',
+        nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim(),
+        type: String(p.type || 'permission'),
+        motif: motif,
+        date_debut: debut,
+        date_fin: String(p.dateFin || debut).slice(0, 10),
+        heure_debut: String(p.heureDebut || ''),
+        heure_fin: String(p.heureFin || ''),
+        retour: String(p.retour || '').slice(0, 10),
+        commentaire: String(p.commentaire || ''),
+        nb_jours: parseFloat(p.nbJours) || 0,
+        statut: 'en_attente',
+        created_at: new Date().toISOString(),
+        created_by: 'employe'
+      };
+      arr.push(rec);
+      await ecrireCle(db, uid, 'mdb_rh_permissions', arr);
+      return json({ ok: true, permission: rec });
+    }
+
     /* ---------- Données personnelles ---------- */
     if (action === 'data') {
       const pointage = (Array.isArray(paye.pointage) ? paye.pointage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
@@ -837,6 +868,8 @@ export async function onRequest(context) {
         };
       };
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
+      const permsAll = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+      const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && String(p.employee_id) === String(emp.id));
       return json({
         ok: true,
         employe: employePublic(emp),
@@ -846,6 +879,7 @@ export async function onRequest(context) {
         acomptes: mesAcomptes.map(a => Object.assign({}, a, enrichDe(a))),
         photo: maPhoto,
         requetes: mesReq,
+        mesPermissions,
         unread: mesReq.reduce((n, r) => n + ((r.messages || []).filter(m => m && m.auteur !== 'employe' && !m.luParEmploye).length), 0)
       });
     }
