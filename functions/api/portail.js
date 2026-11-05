@@ -793,6 +793,50 @@ export async function onRequest(context) {
       return json({ ok: true, permission: rec });
     }
 
+    /* ---------- Changement du code PIN de l'employé ---------- */
+    if (action === 'changepin') {
+      const oldPin = String(body.oldPin || '').trim();
+      const newPin = String(body.newPin || '').trim();
+      if (!oldPin || !newPin) return json({ ok: false, code: 'params' }, 400);
+      if (!/^\d{4,8}$/.test(newPin)) return json({ ok: false, code: 'format' }, 400);
+      const payeCh = await lirePaye(db, uid);
+      const portailCh = await lireComptesPortail(db, uid);
+      const comptesCh = fusionComptes(payeCh.employePins, portailCh);
+      const recCh = trouverPin(comptesCh, emp);
+      if (!recCh) return json({ ok: false, code: 'no_pin' }, 403);
+      let okOld = false;
+      if (recCh.passwordHash) okOld = await verifierPin(recCh.passwordHash, oldPin);
+      if (!okOld && recCh.hash) okOld = await verifierPin(recCh.hash, oldPin);
+      if (!okOld) return json({ ok: false, code: 'bad_pin' }, 403);
+      const salt = newSalt();
+      const newHash = 'sha256:' + salt + ':' + (await sha256Hex(salt + '|' + newPin));
+      let pKey = null;
+      for (const k in portailCh) {
+        const p = portailCh[k];
+        if (p && (String(p.empId || '') === String(emp.id) || (emp.matricule && String(p.matricule || '') === String(emp.matricule)))) { pKey = k; break; }
+      }
+      if (!pKey) pKey = emp.id;
+      const baseNom = ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim();
+      portailCh[pKey] = Object.assign({}, portailCh[pKey] || {}, {
+        empId: emp.id, matricule: emp.matricule || '', nom: baseNom,
+        hash: newHash, passwordHash: newHash, self: true,
+        updatedAt: new Date().toISOString()
+      });
+      await ecrireCle(db, uid, 'mdb_portailComptes', portailCh);
+      try {
+        if (payeCh.employePins && typeof payeCh.employePins === 'object') {
+          for (const k2 in payeCh.employePins) {
+            const p2 = payeCh.employePins[k2];
+            if (p2 && (String(p2.empId || '') === String(emp.id) || (emp.matricule && String(p2.matricule || '') === String(emp.matricule)))) {
+              p2.hash = newHash; p2.passwordHash = newHash; p2.updatedAt = new Date().toISOString();
+            }
+          }
+          await ecrireCle(db, uid, 'mdb_paye.employePins', payeCh.employePins);
+        }
+      } catch (ePins) {}
+      return json({ ok: true });
+    }
+
     /* ---------- Données personnelles ---------- */
     if (action === 'data') {
       const pointage = (Array.isArray(paye.pointage) ? paye.pointage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
@@ -877,11 +921,23 @@ export async function onRequest(context) {
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
       const permsAll = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
       const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && String(p.employee_id) === String(emp.id));
+      let rhEvals = [], rhSanctions = [], rhDemandes = [], rhConges = [], rhPerms = [];
+      try { rhEvals = parseVal(await lireCle(db, uid, 'mdb_rh_evaluations'), []) || []; } catch (eRh1) {}
+      try { rhSanctions = parseVal(await lireCle(db, uid, 'mdb_rh_sanctions'), []) || []; } catch (eRh2) {}
+      try { rhDemandes = parseVal(await lireCle(db, uid, 'mdb_rh_demandes'), []) || []; } catch (eRh3) {}
+      try { rhConges = parseVal(await lireCle(db, uid, 'mdb_rh_conges'), []) || []; } catch (eRh4) {}
+      try { rhPerms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []) || []; } catch (eRh5) {}
+      const mineRh = (arr) => (Array.isArray(arr) ? arr : []).filter(x => x && String(x.employee_id) === String(emp.id));
       let pointageToken = '';
       try { pointageToken = (await sha256Hex(uid + '|' + emp.id + '|MDB-POINTAGE-V1')).slice(0, 32); } catch (ePT) {}
       return json({
         ok: true,
         pointageToken: pointageToken,
+        evaluations: mineRh(rhEvals),
+        sanctions: mineRh(rhSanctions),
+        demandes: mineRh(rhDemandes),
+        conges: mineRh(rhConges),
+        permissionsValidees: mineRh(rhPerms).filter(p => p && p.statut === 'valide'),
         employe: employePublic(emp),
         moiAutorises: allowed,
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
