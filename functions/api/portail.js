@@ -592,6 +592,7 @@ export async function onRequest(context) {
       /* Permission / congé accepté : on pose automatiquement les absences
          dans le pointage, du jour de début au jour de fin. */
       if (statut === 'acceptee' && (req.type === 'permission' || req.type === 'conge')) {
+        const payer = body.payer === true;
         try {
           const paye = await lirePaye(db, uid);
           const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
@@ -617,11 +618,14 @@ export async function onRequest(context) {
                 byKey[k].motif = motif;
                 byKey[k].source = 'requete';
                 byKey[k].requeteId = req.id;
+                if (payer) { byKey[k].absent_paye = true; byKey[k].paye_sans_travail = true; byKey[k].h_j_manual = 8; byKey[k].h_n_manual = ''; byKey[k].rattrap_gagnees = 0; }
+                else { byKey[k].absent_paye = false; byKey[k].paye_sans_travail = false; byKey[k].h_j_manual = 0; byKey[k].h_n_manual = 0; }
               } else {
                 const row = {
                   id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
                   employee_id: req.empId, date: ds, present: false,
-                  h_j_manual: 0, h_n_manual: 0, motif, source: 'requete', requeteId: req.id
+                  h_j_manual: payer ? 8 : 0, h_n_manual: 0, motif, source: 'requete', requeteId: req.id,
+                  absent_paye: payer, paye_sans_travail: payer, rattrap_gagnees: 0
                 };
                 pts.push(row); byKey[k] = row;
               }
