@@ -873,8 +873,11 @@ export async function onRequest(context) {
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
       const permsAll = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
       const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && String(p.employee_id) === String(emp.id));
+      let pointageToken = '';
+      try { pointageToken = (await sha256Hex(uid + '|' + emp.id + '|MDB-POINTAGE-V1')).slice(0, 32); } catch (ePT) {}
       return json({
         ok: true,
+        pointageToken: pointageToken,
         employe: employePublic(emp),
         moiAutorises: allowed,
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
@@ -964,6 +967,140 @@ export async function onRequest(context) {
       });
       if (changed) await ecrireCle(db, uid, 'mdb_requetesEmploye', list);
       return json({ ok: true });
+    }
+
+    /* ---------- Pointage par QR de session (espace employe) ----------
+       L'employe, connecte a son espace, scanne le QR affiche par la
+       personne autorisee (Paye > QR Pointage). Le QR contient
+       MDBPOINT|v1|<uid>|<sessionId>|<token> : il ne transporte aucune
+       donnee personnelle et ne peut etre rejoue hors de sa session.
+
+       Regle des creneaux :
+         - 1er scan du creneau = arrivee ;
+         - 2e scan = sortie, a condition qu'il y ait au moins 3 h 30
+           entre les deux. Sinon on refuse et on demande une confirmation
+           explicite (body.confirm = true), car l'employe a peut-etre eu
+           un malaise et quitte son poste. */
+    if (action === 'pointageqr') {
+      const qr = String(body.qr || '').trim();
+      const parts = qr.split('|');
+      if (parts.length < 5 || parts[0] !== 'MDBPOINT') return json({ ok: false, code: 'qr_invalide' }, 400);
+      const qrUid = String(parts[2] || '').trim();
+      const sid = String(parts[3] || '').trim();
+      const stoken = String(parts[4] || '').trim();
+      if (qrUid !== uid) return json({ ok: false, code: 'autre_entreprise' }, 403);
+      const payeQr = await lirePaye(db, uid);
+      let sessions = payeQr.pointageSessions;
+      if (sessions && !Array.isArray(sessions) && typeof sessions === 'object') {
+        sessions = Object.keys(sessions).map(function (k) { return sessions[k]; });
+      }
+      if (!Array.isArray(sessions)) sessions = [];
+      let sess = null;
+      for (let i = 0; i < sessions.length; i++) {
+        const s = sessions[i];
+        if (s && String(s.id) === sid && String(s.token) === stoken) { sess = s; break; }
+      }
+      if (!sess) return json({ ok: false, code: 'session_invalide' }, 403);
+      if (sess.active === false) return json({ ok: false, code: 'session_fermee' }, 403);
+      if (sess.expiresAt && Date.now() > Number(sess.expiresAt)) return json({ ok: false, code: 'session_expiree' }, 403);
+      const now = new Date();
+      const date = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+      const mois = date.slice(0, 7);
+      const clot = (payeQr.clotures && payeQr.clotures[mois]) || null;
+      if (clot && clot.clos) return json({ ok: false, code: 'clos' }, 403);
+      const shift = sess.shift === 'nuit' ? 'nuit' : 'jour';
+      const heure = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+      const nom = ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim() || emp.matricule || 'Employe';
+      const hField = shift === 'nuit' ? 'h_n_manual' : 'h_j_manual';
+      const entryField = shift === 'nuit' ? 'heure_entree_nuit' : 'heure_entree';
+      const exitField = shift === 'nuit' ? 'heure_sortie_nuit' : 'heure_sortie';
+      const superviseur = String(sess.openedBy || '');
+      const confirm = body.confirm === true;
+      const MIN_GAP = 210;
+      const toMin = function (t) {
+        const m = String(t || '').match(/^(\d{1,2})[:hH](\d{2})/);
+        if (!m) return null;
+        return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+      };
+      const gapDe = function (entry) {
+        const e = toMin(entry);
+        if (e == null) return 0;
+        let g = nowMin - e;
+        if (g < 0) g += 1440;
+        return g;
+      };
+      const pts = Array.isArray(payeQr.pointage) ? payeQr.pointage : [];
+      let row = null;
+      for (let i = 0; i < pts.length; i++) {
+        if (pts[i] && String(pts[i].employee_id) === String(emp.id) && String(pts[i].date || '').slice(0, 10) === date) { row = pts[i]; break; }
+      }
+      const baseRep = { nom: nom, matricule: emp.matricule || '', shift: shift, date: date, superviseur: superviseur };
+      const ecrireLog = async function (creneau, hh) {
+        try {
+          const log = Array.isArray(payeQr.pointageQrLog) ? payeQr.pointageQrLog : [];
+          log.push({ id: sid, employee_id: emp.id, nom: nom, matricule: emp.matricule || '', date: date, heure: heure, shift: shift, creneau: creneau, heures: hh, superviseur: superviseur, at: now.toISOString() });
+          while (log.length > 800) log.shift();
+          await ecrireCle(db, uid, 'mdb_paye.pointageQrLog', log);
+        } catch (eLog) {}
+      };
+
+      /* Aucun pointage du creneau : 1er creneau = arrivee. */
+      if (!row || !row[entryField]) {
+        if (!row) {
+          row = {
+            id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
+            employee_id: emp.id, date, present: true, h_j_manual: 0, h_n_manual: 0
+          };
+          pts.push(row);
+        }
+        row.present = true;
+        row[entryField] = heure;
+        row[hField] = Math.round((nowMin / 60) * 100) / 100;
+        row.source = 'qr';
+        row.shift = shift;
+        row.sessionId = sid;
+        row.superviseur = superviseur;
+        row.updatedAt = now.toISOString();
+        payeQr.pointage = pts;
+        await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+        await ecrireLog(1, row[hField]);
+        return json(Object.assign({ ok: true, creneau: 1, heure: heure }, baseRep));
+      }
+
+      const gap = gapDe(row[entryField]);
+
+      /* Arrivee deja pointee, sortie absente : 2e creneau. */
+      if (!row[exitField]) {
+        if (gap < MIN_GAP && !confirm) {
+          return json(Object.assign({ ok: false, code: 'court', heure: row[entryField], gapMin: gap, minGap: MIN_GAP }, baseRep));
+        }
+        row[exitField] = heure;
+        let hh = gap / 60;
+        if (hh > 6) hh = hh - 1;
+        row[hField] = Math.max(0, Math.round(hh * 100) / 100);
+        row.updatedAt = now.toISOString();
+        row.superviseur = superviseur;
+        payeQr.pointage = pts;
+        await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+        await ecrireLog(2, row[hField]);
+        return json(Object.assign({ ok: true, creneau: 2, heure: heure, entree: row[entryField], heures: row[hField], force: !!confirm }, baseRep));
+      }
+
+      /* Arrivee ET sortie deja pointees : il faut confirmer pour corriger. */
+      if (!confirm) {
+        return json(Object.assign({ ok: false, code: 'deja', heure: row[exitField], entree: row[entryField] }, baseRep));
+      }
+      row[exitField] = heure;
+      let hh2 = gap / 60;
+      if (hh2 > 6) hh2 = hh2 - 1;
+      row[hField] = Math.max(0, Math.round(hh2 * 100) / 100);
+      row.updatedAt = now.toISOString();
+      row.superviseur = superviseur;
+      payeQr.pointage = pts;
+      await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+      await ecrireLog(2, row[hField]);
+      return json(Object.assign({ ok: true, creneau: 2, heure: heure, entree: row[entryField], heures: row[hField], force: true }, baseRep));
     }
 
     /* ---------- Pointage par code PIN (entrée / sortie) ---------- */

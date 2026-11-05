@@ -160,6 +160,7 @@
 <div id="top" class="top hidden"></div>
 <div id="app" class="wrap"></div>
 <div id="pop" class="pop hidden"></div>
+<script src="vendor/jsqr.min.js"></script>
 <script>
 (function () {
   var API = "https://montabbord-api.kkcj2019.workers.dev/api/portail";
@@ -503,9 +504,9 @@
     renderLogin();
   };
 
-  function loadData() {
+  function loadData(silent) {
     document.body.classList.remove("login-mode");
-    el("app").innerHTML = '<div class="card"><div class="empty">Chargement de votre espace…</div></div>';
+    if (!silent) el("app").innerHTML = '<div class="card"><div class="empty">Chargement de votre espace…</div></div>';
     post("data", {}).then(function (j) {
       if (!j || !j.ok) {
         if (j && j.code === "inactive") { try { alert("Votre compte est désactivé (employé inactif). Contactez le service paie."); } catch (eA) {} }
@@ -577,6 +578,139 @@
       }
     }).catch(function () { if (err) { err.style.color = "#b91c1c"; err.textContent = "Connexion impossible."; } });
   };
+  /* ===== Pointage par QR de session (QR affiche par l'administration) ===== */
+  var _qrEmpStream = null, _qrEmpRaf = null, _qrEmpBusy = false, _qrEmpLast = { code: '', at: 0 };
+  function _qrEmpStop() {
+    try { if (_qrEmpRaf) cancelAnimationFrame(_qrEmpRaf); } catch (e) {}
+    _qrEmpRaf = null;
+    try { if (_qrEmpStream) _qrEmpStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); } catch (e) {}
+    _qrEmpStream = null;
+    var v = document.getElementById('qr-scan-video');
+    if (v) { try { v.pause(); } catch (e) {} try { v.srcObject = null; } catch (e) {} }
+    var ov = document.getElementById('qr-scan-overlay');
+    if (ov) { try { ov.parentNode.removeChild(ov); } catch (e) {} }
+    _qrEmpBusy = false;
+  }
+  window.__qrStop = _qrEmpStop;
+  window.__qrPoint = function () {
+    _qrEmpStop();
+    var ov = document.createElement('div');
+    ov.id = 'qr-scan-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px';
+    ov.innerHTML = '<div style="color:#fff;font-weight:900;font-size:1.05rem;margin-bottom:4px">Pointer avec le QR</div>'
+      + '<div style="color:#94a3b8;font-size:.78rem;text-align:center;margin-bottom:10px;max-width:420px">Visez le QR affich&eacute; par la personne autoris&eacute;e (Paye &rarr; QR Pointage).</div>'
+      + '<div style="position:relative;width:100%;max-width:420px"><video id="qr-scan-video" autoplay playsinline muted style="width:100%;border-radius:16px;background:#000;border:3px solid #0ea5e9"></video><canvas id="qr-scan-canvas" style="display:none"></canvas></div>'
+      + '<div id="qr-scan-status" style="color:#e2e8f0;font-size:.85rem;margin-top:12px;text-align:center;min-height:40px;max-width:420px"></div>'
+      + '<button onclick="window.__qrStop()" style="margin-top:10px;padding:10px 26px;border:none;border-radius:10px;background:#334155;color:#fff;font-weight:800;cursor:pointer">Fermer</button>';
+    document.body.appendChild(ov);
+    var status = document.getElementById('qr-scan-status');
+    var video = document.getElementById('qr-scan-video');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (status) status.textContent = 'Cam\u00e9ra non disponible. Utilisez le pointage par PIN.';
+      return;
+    }
+    if (typeof jsQR === 'undefined') {
+      if (status) status.textContent = 'D\u00e9codeur QR non charg\u00e9. Rechargez la page.';
+      return;
+    }
+    if (status) status.textContent = 'Ouverture de la cam\u00e9ra\u2026';
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false }).then(function (stream) {
+      _qrEmpStream = stream;
+      video.srcObject = stream;
+      try { video.play(); } catch (e) {}
+      var canvas = document.getElementById('qr-scan-canvas');
+      var ctx = canvas.getContext('2d');
+      if (status) status.textContent = 'Cam\u00e9ra pr\u00eate : visez le QR.';
+      var tick = function () {
+        if (!_qrEmpStream) return;
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          var code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+          if (code && code.data) { _qrEmpOnCode(code.data, status); return; }
+        }
+        _qrEmpRaf = requestAnimationFrame(tick);
+      };
+      _qrEmpRaf = requestAnimationFrame(tick);
+    }).catch(function (err) {
+      if (status) status.textContent = 'Impossible d\u2019ouvrir la cam\u00e9ra : ' + (err && err.message ? err.message : err) + '. Utilisez le PIN.';
+    });
+  };
+  function _qrEmpOnCode(data, status) {
+    var now = Date.now();
+    if (_qrEmpBusy) return;
+    if (_qrEmpLast.code === data && now - _qrEmpLast.at < 2500) return;
+    _qrEmpLast = { code: data, at: now };
+    if (String(data).indexOf('MDBPOINT|') !== 0) {
+      if (status) status.innerHTML = '<span style="color:#fca5a5">Ce n\u2019est pas un QR de pointage.</span>';
+      setTimeout(function () { _qrEmpLast = { code: '', at: 0 }; }, 1800);
+      return;
+    }
+    _qrEmpBusy = true;
+    if (status) status.innerHTML = '<span style="color:#7dd3fc">V\u00e9rification\u2026</span>';
+    try { if (_qrEmpStream) _qrEmpStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); } catch (e) {}
+    _qrEmpStream = null;
+    post('pointageqr', { qr: String(data) }).then(function (j) {
+      _qrEmpHandle(j, data, status);
+    }).catch(function () {
+      if (status) status.innerHTML = '<span style="color:#fca5a5">Connexion impossible.</span>';
+      _qrEmpBusy = false;
+    });
+  }
+  function _qrEmpGapLabel(min) {
+    min = Math.max(0, Math.round(min || 0));
+    var h = Math.floor(min / 60), m = min % 60;
+    return (h ? h + ' h ' : '') + (m ? m + ' min' : (h ? '' : '0 min'));
+  }
+  function _qrEmpHandle(j, data, status) {
+    if (j && j.ok) {
+      var label = j.creneau === 2 ? 'Sortie' : 'Arriv\u00e9e';
+      var extra = (j.creneau === 2 && j.heures != null) ? ' \u00b7 ' + j.heures + ' h' : '';
+      if (status) status.innerHTML = '<div style="padding:12px;background:#052e16;border:2px solid #16a34a;border-radius:12px"><div style="font-size:1.5rem">\u2705 ' + label + ' ' + (j.shift === 'nuit' ? 'NUIT' : 'JOUR') + '</div><div style="font-weight:900;color:#4ade80;font-size:1rem">' + esc(j.nom || '') + '</div><div style="color:#bbf7d0;font-size:.85rem;margin-top:2px">Point\u00e9 \u00e0 ' + esc(j.heure || '') + extra + '</div></div>';
+      try { if (window.speechSynthesis) { var u = new SpeechSynthesisUtterance((j.nom || '') + ', ' + label.toLowerCase() + ' enregistr\u00e9e'); u.lang = 'fr-FR'; window.speechSynthesis.speak(u); } } catch (e) {}
+      setTimeout(function () { _qrEmpStop(); loadData(); }, 2200);
+      return;
+    }
+    var code = j && j.code;
+    if (code === 'court' || code === 'deja') {
+      var msg = '';
+      if (code === 'court') {
+        msg = '<b>' + esc(j.nom || '') + '</b> a d\u00e9j\u00e0 point\u00e9 \u00e0 <b>' + esc(j.heure || '') + '</b> (il y a ' + _qrEmpGapLabel(j.gapMin) + ').<br>Le 2e cr\u00e9neau doit \u00eatre \u00e0 au moins <b>3 h 30</b>.<br>Voulez-vous vraiment enregistrer ce pointage ?';
+      } else {
+        msg = '<b>' + esc(j.nom || '') + '</b> a d\u00e9j\u00e0 point\u00e9 son arriv\u00e9e (' + esc(j.entree || '') + ') et sa sortie (' + esc(j.heure || '') + ').<br>Voulez-vous vraiment corriger ce pointage ?';
+      }
+      window._qrEmpPendingQr = data;
+      if (status) status.innerHTML = '<div style="max-width:420px;margin:0 auto;padding:12px;background:#fffbeb;border:2px solid #f59e0b;border-radius:12px;color:#78350f;font-size:.8rem;text-align:left">' + msg + '<button onclick="window.__qrConfirm()" style="width:100%;margin-top:10px;padding:10px;border:none;border-radius:10px;background:#b45309;color:#fff;font-weight:900;cursor:pointer">Confirmer ce pointage</button></div>';
+      try { if (window.speechSynthesis) { var u2 = new SpeechSynthesisUtterance((j.nom || '') + ', ' + (code === 'court' ? 'cr\u00e9neau trop rapproch\u00e9' : 'd\u00e9j\u00e0 point\u00e9')); u2.lang = 'fr-FR'; window.speechSynthesis.speak(u2); } } catch (e) {}
+      return;
+    }
+    var m = 'Pointage impossible.';
+    var col = '#fca5a5';
+    if (code === 'session_invalide') m = 'QR non reconnu. Demandez \u00e0 l\u2019administration d\u2019ouvrir une session.';
+    else if (code === 'session_fermee') m = 'La session de pointage est ferm\u00e9e.';
+    else if (code === 'session_expiree') m = 'La session de pointage a expir\u00e9. Demandez-en une nouvelle.';
+    else if (code === 'clos') m = 'Le mois est cl\u00f4tur\u00e9. Contactez l\u2019administration.';
+    else if (code === 'autre_entreprise') m = 'Ce QR appartient \u00e0 une autre entreprise.';
+    if (status) status.innerHTML = '<span style="color:' + col + ';font-weight:800">' + esc(m) + '</span>';
+    _qrEmpBusy = false;
+    _qrEmpLast = { code: '', at: 0 };
+    setTimeout(function () { try { window.__qrStop(); window.__qrPoint(); } catch (e) {} }, 2200);
+  }
+  window.__qrConfirm = function () {
+    var data = window._qrEmpPendingQr;
+    if (!data) return;
+    window._qrEmpPendingQr = null;
+    var status = document.getElementById('qr-scan-status');
+    if (status) status.innerHTML = '<span style="color:#7dd3fc">Confirmation\u2026</span>';
+    post('pointageqr', { qr: String(data), confirm: true }).then(function (j) {
+      _qrEmpHandle(j, data, status);
+    }).catch(function () {
+      if (status) status.innerHTML = '<span style="color:#fca5a5">Connexion impossible.</span>';
+      _qrEmpBusy = false;
+    });
+  };
+
   window.__detailAcompte = function (id) {
     var list = (state.data && state.data.acomptes) || [];
     var a = list.filter(function (x) { return String(x.id) === String(id); })[0];
@@ -760,11 +894,23 @@ window.envoyerPermission = envoyerPermission;
     for (var ti = 0; ti < pts.length; ti++) {
       if (pts[ti] && String(pts[ti].date || '').slice(0, 10) === todayKey) { todayRow = pts[ti]; break; }
     }
-    var h = '<div class="card"><h3>Pointer maintenant</h3>'
+    var empObj = (state.data && state.data.employe) || state.emp || {};
+    var ptToken = (state.data && state.data.pointageToken) || '';
+    var h = '';
+    if (ptToken) {
+      h += '<div class="card" style="text-align:center"><h3>Mon QR de pointage</h3>'
+        + '<div class="small muted" style="margin-bottom:8px">Pr\u00e9sentez ce QR au superviseur : il le scanne et votre pointage appara\u00eet ici automatiquement.</div>'
+        + '<img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=8&data=' + encodeURIComponent('MDBEMP|v1|' + uid + '|' + (empObj.id || '') + '|' + ptToken) + '" alt="QR pointage" style="width:220px;height:220px;border:1px solid #e2e8f0;border-radius:12px;background:#fff;padding:6px">'
+        + '<div style="font-weight:800;margin-top:6px">' + esc(((empObj.nom || '') + ' ' + (empObj.prenoms || '')).trim()) + '</div>'
+        + '<div class="small muted">Mat. ' + esc(empObj.matricule || '\u2014') + '</div></div>';
+    }
+    h += '<div class="card"><h3>Pointer maintenant</h3>'
       + '<div class="small muted" style="margin-bottom:8px">Aujourd’hui : ' + esc(fmtDate(todayKey))
       + (todayRow && todayRow.heure_entree ? ' · Entrée ' + esc(todayRow.heure_entree) : '')
       + (todayRow && todayRow.heure_sortie ? ' · Sortie ' + esc(todayRow.heure_sortie) : '')
       + (!todayRow || !todayRow.heure_entree ? ' · Non pointé' : '') + '</div>'
+      + '<button class="btn" onclick="window.__qrPoint()" style="width:100%;margin:12px 0 6px;background:linear-gradient(135deg,#0ea5e9,#0369a1);color:#fff;border:none;padding:12px;border-radius:10px;font-weight:800;font-size:.9rem;cursor:pointer">📷 Pointer avec le QR de l’administration</button>'
+      + '<div class="small muted" style="margin-bottom:10px">Scannez le QR affiché par la personne autorisée (Paye → QR Pointage). Sans badge, c’est votre compte qui est pointé.</div>'
       + '<div class="row" style="align-items:flex-end"><div><label>Code PIN</label><input id="pt-pin" type="password" inputmode="numeric" maxlength="8" placeholder="Votre PIN"></div>'
       + '<div style="flex:0 0 auto;display:flex;gap:8px"><button class="btn" onclick="window.__pointer(\'entree\')">Entrée</button><button class="btn out" onclick="window.__pointer(\'sortie\')">Sortie</button></div></div>'
       + '<div class="err" id="pt-err"></div>'
@@ -960,6 +1106,17 @@ window.envoyerPermission = envoyerPermission;
   };
 
   function currentMonth() { var d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); }
+
+  /* Rafra\u00eechissement silencieux : le superviseur scanne le QR, le pointage appara\u00eet ici. */
+  setInterval(function () {
+    try {
+      if (!state.token) return;
+      var ae = document.activeElement;
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return;
+      if (document.getElementById('qr-scan-overlay')) return;
+      loadData(true);
+    } catch (e) {}
+  }, 10000);
 
   /* ---------------- Démarrage ---------------- */
   function boot() {
