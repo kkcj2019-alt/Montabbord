@@ -119,6 +119,11 @@
   .kpi .l{font-size:10.5px;color:var(--muted);text-transform:uppercase;font-weight:800;letter-spacing:.05em;padding-right:34px}
   .kpi .s{font-size:11px;color:var(--muted);margin-top:4px}
   table{width:100%;border-collapse:collapse}
+  .tableWrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;border-radius:10px}
+  .tableWrap table{min-width:620px}
+  .card{max-width:100%}
+  html,body{max-width:100%;overflow-x:hidden}
+  @media(max-width:560px){.empHero{padding:16px}.empHero .hello{font-size:18px}.empHero .date{white-space:normal}.kpi .v{font-size:17px}}
   tbody tr{transition:background .15s}
   tbody tr:hover{background:#f8fbff}
   th,td{padding:8px 9px;border-bottom:1px solid #eef2f7;text-align:left;font-size:12.5px}
@@ -727,10 +732,10 @@
     var a = list.filter(function (x) { return String(x.id) === String(id); })[0];
     if (!a) return;
     var m = parseFloat(a.montant) || 0;
-    var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : a.montantRembourse) || 0;
-    var reste = Math.max(0, m - r);
-    var tt = a.nature || a.type;
-    var type = tt === "pret" ? "Prêt" : tt === "solde" ? "Solde de salaire" : "Acompte";
+    var reste = _apResteEffectif(a, state.mois || currentMonth());
+    var r = Math.max(0, m - reste);
+    var tt = String(a.nature || a.type || 'acompte').toLowerCase();
+    var type = tt === "pret" ? "Prêt" : tt === "solde" ? "Solde de salaire (versé)" : "Acompte";
     var src = (a.sourceType === "banque" ? "Banque" : "Caisse") + (a.sourceNom ? " — " + a.sourceNom : "");
     var moyen = a.moyen === "virement" ? "Virement" : a.moyen === "espece" ? "Espèces" : (a.moyen || "-");
     var rows = [
@@ -851,6 +856,30 @@ function envoyerPermission() {
 }
 
 window.envoyerPermission = envoyerPermission;
+  /* Reste effectif d'un acompte/prêt/solde :
+     - un SOLDE de salaire est un versement, jamais une dette ;
+     - un acompte dont le mois de déduction est passé est soldé ;
+     - un prêt ne garde que les échéances non prélevées. */
+  function _apResteEffectif(a, nowM) {
+    if (!a) return 0;
+    var nat = String(a.nature || a.type || 'acompte').toLowerCase();
+    if (nat === 'solde' || a.type === 'solde') return 0;
+    var montant = parseFloat(a.montant) || 0;
+    var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : (a.montantRembourse != null ? a.montantRembourse : a.rembourse)) || 0;
+    var reste = Math.max(0, montant - r);
+    if (nat === 'pret') {
+      var totPre = 0;
+      (a.echeances || []).forEach(function (e) { if (e && e.preleve === true) totPre += parseFloat(e.montant) || 0; });
+      return Math.max(0, montant - Math.max(r, totPre));
+    }
+    var md = String(a.moisDeduction || a.date || '').slice(0, 7);
+    if (md && nowM && md < nowM) {
+      /* Avant octobre 2026 la déduction était automatique ; après, il faut
+         que l'acompte soit validé pour être considéré comme retenu. */
+      if (md < '2026-10' || a.valide === true) return 0;
+    }
+    return reste;
+  }
   function tabAccueil() {
     var d = state.data || {}, e = d.employe || state.emp || {};
     var pts = d.pointage || [], nowM = state.mois || currentMonth();
@@ -861,14 +890,10 @@ window.envoyerPermission = envoyerPermission;
     var dette = 0, vusD = {};
     (d.acomptes || []).forEach(function (a) {
       if (!a) return;
-      var nat = a.nature || a.type;
-      if (nat === "solde") return;
       var cle = a.requeteId ? "R|" + a.requeteId : ["C", a.date || "", Math.round(parseFloat(a.montant) || 0), String(a.moisDeduction || ""), a.type || ""].join("|");
       if (vusD[cle]) return;
       vusD[cle] = 1;
-      var m = parseFloat(a.montant) || 0;
-      var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : a.montantRembourse) || 0;
-      dette += Math.max(0, m - r);
+      dette += _apResteEffectif(a, nowM);
     });
     var base = parseFloat(e.salaire_base) || 0;
     var tauxH = base > 0 ? base / 173.33 : 0;
@@ -983,31 +1008,34 @@ window.envoyerPermission = envoyerPermission;
   }
 
   function tabAcomptes() {
-    var m = state.mois || currentMonth();
+    var mois = state.mois || currentMonth();
     var all = (state.data && state.data.acomptes) || [];
     var vus = {}, list = [];
     all.forEach(function (a) {
       if (!a) return;
       var md = String(a.moisDeduction || "").slice(0, 7);
       var dm = String(a.date || "").slice(0, 7);
-      if (!(md === m || dm === m)) return;
+      if (!(md === mois || dm === mois)) return;
       var cle = a.requeteId ? "R|" + a.requeteId : ["C", a.date || "", Math.round(parseFloat(a.montant) || 0), md, a.type || ""].join("|");
       if (vus[cle]) return;
       vus[cle] = 1;
       list.push(a);
     });
-    if (!list.length) return '<div class="card"><div class="empty">Aucun acompte ou prêt pour ' + esc(moisLbl(m)) + '.</div></div>';
+    if (!list.length) return '<div class="card"><div class="empty">Aucun acompte ou prêt pour ' + esc(moisLbl(mois)) + '.</div></div>';
     list.sort(function (a, b) { return String(b.date || "").localeCompare(String(a.date || "")); });
-    var h = '<div class="card"><h3>Mes acomptes, prêts et dettes — ' + esc(moisLbl(m)) + '</h3><table><thead><tr><th>Date</th><th>Type</th><th>Statut</th><th class="r">Montant</th><th class="r">Remboursé</th><th class="r">Reste</th><th>Déduction</th></tr></thead><tbody>';
+    var h = '<div class="card"><h3>Mes acomptes, prêts et dettes — ' + esc(moisLbl(mois)) + '</h3>';
+    h += '<div class="tableWrap"><table><thead><tr><th>Date</th><th>Type</th><th>Statut</th><th class="r">Montant</th><th class="r">Remboursé</th><th class="r">Reste</th><th>Déduction</th></tr></thead><tbody>';
     list.forEach(function (a) {
-      var m = parseFloat(a.montant) || 0;
-      var r = parseFloat(a.montantRembourseEffectif != null ? a.montantRembourseEffectif : a.montantRembourse) || 0;
-      var reste = Math.max(0, m - r);
-      var tt = a.nature || a.type;
-      var type = tt === "pret" ? "Prêt" : tt === "solde" ? "Solde de salaire" : "Acompte";
-      h += '<tr style="cursor:pointer" title="Cliquer pour voir le détail" onclick="window.__detailAcompte(\'' + esc(a.id) + '\')"><td>' + esc(fmtDate(a.date)) + '</td><td>' + type + '</td><td>' + (reste <= 0 ? '<span class="badge b-ok">Soldé</span>' : '<span class="badge b-wait">En cours</span>') + '</td><td class="r">' + money(m) + '</td><td class="r">' + money(r) + '</td><td class="r"><b>' + money(reste) + '</b></td><td>' + esc(a.moisDeduction ? moisLbl(a.moisDeduction) : "-") + '</td></tr>';
+      var montant = parseFloat(a.montant) || 0;
+      var tt = String(a.nature || a.type || 'acompte').toLowerCase();
+      var reste = _apResteEffectif(a, mois);
+      var remb = Math.max(0, montant - reste);
+      var isSolde = tt === 'solde';
+      var type = isSolde ? 'Solde de salaire (versé)' : tt === 'pret' ? 'Prêt' : 'Acompte';
+      var statut = isSolde ? '<span class="badge b-info">Versé</span>' : (reste <= 0 ? '<span class="badge b-ok">Soldé</span>' : '<span class="badge b-wait">En cours</span>');
+      h += '<tr style="cursor:pointer" title="Cliquer pour voir le détail" onclick="window.__detailAcompte(\'' + esc(a.id) + '\')"><td>' + esc(fmtDate(a.date)) + '</td><td>' + type + '</td><td>' + statut + '</td><td class="r">' + money(montant) + '</td><td class="r">' + money(remb) + '</td><td class="r"><b>' + money(reste) + '</b></td><td>' + esc(a.moisDeduction ? moisLbl(a.moisDeduction) : "-") + '</td></tr>';
     });
-    h += '</tbody></table></div>';
+    h += '</tbody></table></div><div class="small muted" style="margin-top:8px">Un solde de salaire est un versement, pas une dette. Les acomptes déjà déduits sont soldés.</div></div>';
     return h;
   }
 
