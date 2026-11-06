@@ -34,7 +34,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-06-653';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-06-654';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -62162,14 +62162,15 @@ function render_cout_revient() {
        _acTable + '</details>';
   h += '</div>';
   /* Vue « Compte d'exploitation » en haut : mêmes chiffres que le tableau */
-  try { h = h.replace('<!--AC_CASCADE-->', acCascadeHtml(window.__acRes)); } catch (eCx) { h = h.replace('<!--AC_CASCADE-->', ''); }
+  /* En haut : le TABLEAU DE BORD automatique (production réelle, brut Paie, charges) */
+  try { h = h.replace('<!--AC_CASCADE-->', rbTableauDeBordHtml()); } catch (eCx) { h = h.replace('<!--AC_CASCADE-->', ''); }
 
   return h;
 }
 
 /* ===== Compte d'exploitation en cascade (présentation seule) ===== */
 function acCascadeHtml(R) {
-  if (!R || !(R.Q > 0)) return '';
+  if (!R) return '';
   var f = function (n) { return fmt(Math.round(n || 0)); };
   var pc = function (n) { return R.ca > 0 ? (n / R.ca * 100).toFixed(2).replace('.', ',') + ' %' : '—'; };
   var pcN = function (n) { return R.ca > 0 ? Math.max(0, Math.min(100, n / R.ca * 100)) : 0; };
@@ -62193,6 +62194,7 @@ function acCascadeHtml(R) {
     '.acx-det{margin-top:10px;border:1px solid #e2e8f0;border-radius:12px;background:#fff}.acx-det>summary{cursor:pointer;padding:12px 16px;font-weight:800;font-size:13.5px;list-style:none}' +
     '.acx-det>summary small{font-weight:500;color:#64748b;margin-left:6px;font-size:12px}.acx-det[open]>summary{border-bottom:1px solid #e2e8f0}' +
     '</style>';
+  if (!(R.Q > 0)) return h; /* styles seuls */
   h += '<div class="acx">';
   /* 1. La réponse */
   h += '<div class="acx-k">' +
@@ -69644,6 +69646,339 @@ try {
     document.addEventListener('keydown', function(e){ if(e.key==='Escape') window.toggleGlobalSearch(false); });
   });
 })();
+</script>
+<script>
+/* =====================================================================
+   TABLEAU DE BORD RENTABILITÉ (automatique)
+   - Articles : jour par jour, la FICHE DE PRODUCTION prime ; sans fiche
+     ce jour-là, on prend le POINTAGE MONTAGE (Paye).
+   - Chiffre d'affaires : quantités × prix de vente (nomenclature).
+   - Matières : bois au prix d'achat de la période + consommables.
+   - Masse salariale : BRUT calculé par la Paie (bulletin) sur le mois,
+     ramené à la période par les jours de présence pointés.
+       Direct  : manutentionnaires, machinistes, monteurs
+                 (monteurs = paie montage réelle + accessoires de salaire)
+       Indirect: tous les autres employés.
+   - Charges : par palette, ou montant mensuel ÷ jours ouvrés du mois
+     pour chaque jour ouvré de la période.
+   ===================================================================== */
+function rbJours(du, au) {
+  var out = [], d = new Date(du + 'T00:00:00'), f = new Date(au + 'T00:00:00');
+  for (var i = 0; d <= f && i < 400; i++) { out.push(d.toISOString ? (d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2)) : ''); d.setDate(d.getDate() + 1); }
+  return out;
+}
+function rbOuvre(dk) { var dw = new Date(dk + 'T00:00:00').getDay(); return dw !== 0 && dw !== 6; }
+function rbPaye() { try { return JSON.parse(localStorage.getItem('mdb_paye') || '{}') || {}; } catch (e) { return {}; } }
+function rbPeriode() {
+  var du = window._rbDu, au = window._rbAu;
+  if (!du || !au) { try { var s = JSON.parse(localStorage.getItem('mdb_rbPeriode') || 'null'); if (s && s.du && s.au) { du = s.du; au = s.au; } } catch (e) {} }
+  if (!du || !au) { var t = today(); du = t.slice(0, 8) + '01'; au = t; }
+  if (du > au) { var x = du; du = au; au = x; }
+  window._rbDu = du; window._rbAu = au;
+  return { du: du, au: au };
+}
+function rbSetPeriode(du, au) {
+  window._rbDu = du; window._rbAu = au;
+  try { localStorage.setItem('mdb_rbPeriode', JSON.stringify({ du: du, au: au })); } catch (e) {}
+  try { renderPage(); } catch (e2) {}
+}
+function rbRaccourci(k) {
+  var t = today(), d = new Date(t + 'T00:00:00');
+  var iso = function (x) { return x.getFullYear() + '-' + ('0' + (x.getMonth() + 1)).slice(-2) + '-' + ('0' + x.getDate()).slice(-2); };
+  if (k === 'jour') return rbSetPeriode(t, t);
+  if (k === 'hier') { d.setDate(d.getDate() - 1); return rbSetPeriode(iso(d), iso(d)); }
+  if (k === 'semaine') { var l = new Date(d); l.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return rbSetPeriode(iso(l), t); }
+  if (k === 'mois') return rbSetPeriode(t.slice(0, 8) + '01', t);
+  if (k === 'moisPrec') { var a = new Date(d.getFullYear(), d.getMonth() - 1, 1), b = new Date(d.getFullYear(), d.getMonth(), 0); return rbSetPeriode(iso(a), iso(b)); }
+}
+
+function rbCalculer(du, au) {
+  var P = rbPaye();
+  var alertes = [];
+  var jours = rbJours(du, au);
+  var arts = (typeof getArticles === 'function' ? getArticles() : []) || [];
+  var parCode = {}; arts.forEach(function (a) { if (a && a.code) parCode[String(a.code).trim().toUpperCase()] = a; });
+  var idDeCode = function (code) { var a = parCode[code]; if (a) return a.id; var t = (typeof acTrouverArticle === 'function') ? acTrouverArticle(code) : null; return (t && t.id) || code; };
+
+  /* ---------- 1. Production jour par jour (fiche > pointage montage) ---------- */
+  var prods = (typeof getProductions === 'function' ? getProductions() : []).filter(function (x) {
+    if (!x || !x.date || x.statut === 'draft') return false; var d = String(x.date).slice(0, 10); return d >= du && d <= au;
+  });
+  var mont = (typeof acGetPointageMontagePeriode === 'function') ? (acGetPointageMontagePeriode(du, au) || {}) : {};
+  var montLignes = Array.isArray(mont.lignes) ? mont.lignes : (Array.isArray(mont.res) ? mont.res : (Array.isArray(mont) ? mont : []));
+  if (!montLignes.length && mont && typeof mont === 'object') { for (var mk in mont) if (Array.isArray(mont[mk]) && mont[mk].length && mont[mk][0] && mont[mk][0].article_code !== undefined) { montLignes = mont[mk]; break; } }
+  var J = {};
+  jours.forEach(function (d) { J[d] = { d: d, ouvre: rbOuvre(d), src: '', arts: {}, Q: 0, ca: 0, bois: 0, conso: 0, montage: 0, sal: 0, charges: 0 }; });
+  /* ---- Bois RÉEL : chaque colis sorti sur la fiche, au prix de SON achat ---- */
+  var colisPx = {};
+  try {
+    (getAchats() || []).forEach(function (a) {
+      (a && Array.isArray(a.items) ? a.items : []).forEach(function (it) {
+        var c = String((it && (it.colis_number || it.code)) || '').trim(); if (!c) return;
+        var vol = parseFloat(it.volume) || 0, pu = parseFloat(it.unit_price) || 0, tp = parseFloat(it.total_price) || 0, q = parseFloat(it.quantity) || 0;
+        var px = 0;
+        if (String(it.prix_base || 'm3') === 'm3' && pu > 0) px = pu;
+        else if (tp > 0 && vol > 0) px = tp / vol;
+        else if (pu > 0 && q > 0 && vol > 0) px = pu * q / vol;
+        var prev = colisPx[c];
+        if (!prev || (!(prev.px > 0) && px > 0)) colisPx[c] = { px: px, essence: it.essence || '', date: String(a.date || '').slice(0, 10) };
+      });
+    });
+  } catch (eAch) {}
+  var pxEssMois = {};
+  var prixEssence = function (ess, d) {
+    var m = d.slice(0, 7);
+    if (!pxEssMois[m]) { try { pxEssMois[m] = acEssencesPrix(m + '-01', (typeof acFinMois === 'function' ? acFinMois(m) : m + '-31')); } catch (e) { pxEssMois[m] = { map: {}, prixM3General: 0 }; } }
+    var info = pxEssMois[m], k = String(ess || '').trim().toLowerCase();
+    return (info.map && info.map[k] > 0) ? info.map[k] : (parseFloat(info.prixM3General) || 0);
+  };
+  var colisSansPrix = {}, colisInconnus = {};
+  prods.forEach(function (x) {
+    var d = String(x.date).slice(0, 10); if (!J[d]) return;
+    (Array.isArray(x.sortie_bois) ? x.sortie_bois : []).forEach(function (sb) {
+      var vol = parseFloat(sb && sb.volume) || 0; if (!(vol > 0)) return;
+      var c = String(sb.code || sb.colis_number || '').trim(), info = colisPx[c];
+      var px = info && info.px > 0 ? info.px : 0;
+      if (!px) {
+        px = prixEssence(sb.essence || (info && info.essence), d);
+        if (info) colisSansPrix[c] = 1; else colisInconnus[c || '?'] = 1;
+      }
+      J[d].ficheBois = true; J[d].volReel = (J[d].volReel || 0) + vol; J[d].boisReel = (J[d].boisReel || 0) + vol * px;
+    });
+  });
+  prods.forEach(function (x) {
+    var d = String(x.date).slice(0, 10); if (!J[d]) return;
+    (x.assemblage || []).forEach(function (r) {
+      var code = String((r && r.code) || '').trim().toUpperCase(), q = parseFloat(r && r.qte) || 0;
+      if (!code || !(q > 0)) return;
+      J[d].src = 'fiche'; J[d].arts[code] = (J[d].arts[code] || 0) + q;
+    });
+  });
+  montLignes.forEach(function (m) {
+    if (!m || !m.date || !J[m.date]) return;
+    J[m.date].montage += parseFloat(m.montant) || 0;
+    if (J[m.date].src === 'fiche') return; /* la fiche prime */
+    var code = String(m.article_code || '').trim().toUpperCase(); var q = parseFloat(m.quantite) || 0;
+    if (!code || !(q > 0)) return;
+    J[m.date].src = J[m.date].src || 'montage'; J[m.date].arts[code] = (J[m.date].arts[code] || 0) + q;
+  });
+
+  /* ---------- 2. CA, bois, consommables, charges par palette ---------- */
+  var cacheArt = {};
+  var coutUnitaire = function (code) {
+    if (cacheArt[code]) return cacheArt[code];
+    var id = idDeCode(code), c1 = {};
+    try { c1 = acCoutArticleCampagne(id, 1) || {}; } catch (e) {}
+    var ch = {}; try { ch = acGetChargesModele(id) || {}; } catch (e2) {}
+    var rub = 0; try { (acGetCustomRows(id) || []).forEach(function (r) { rub += parseFloat(r.montant) || 0; }); } catch (e3) {}
+    var a = parCode[code] || {};
+    var u = { code: code, id: id, nom: a.designation || a.nom || '', pv: parseFloat(c1.ca) || 0, bois: parseFloat(c1.coutBois) || 0, vol: parseFloat(c1.volAchat) || parseFloat(c1.volNet) || 0, conso: parseFloat(c1.coutConso) || 0, ch: ch, rub: rub };
+    if (!(u.pv > 0)) alertes.push('Article ' + code + ' : pas de prix de vente (chiffre d’affaires à 0).');
+    if (!(u.bois > 0)) alertes.push('Article ' + code + ' : coût du bois introuvable (nomenclature ou prix du bois du mois manquant).');
+    cacheArt[code] = u; return u;
+  };
+  /* Charges : par palette (mode « palette ») ou mensuelles (÷ jours ouvrés) */
+  var CHG = [['electricite', 'Électricité / énergie atelier', 'fab'], ['distribution', 'Transport, livraison client', 'cvd'],
+    ['fraisBancaires', null, 'str'], ['commissionDU', null, 'str'], ['commissionLog', null, 'str'], ['loyer', null, 'str'], ['divers', null, 'str']];
+  var chT = {}; CHG.forEach(function (c) { chT[c[0]] = 0; });
+  var rubT = 0;
+  var artTot = {};
+  var chGlobal = {}; try { chGlobal = acGetChargesModele('') || {}; } catch (eG) {}
+  var mensuelFait = {};
+  var BOIS = { reel: 0, theoFiche: 0, volReel: 0, volTheo: 0, joursEstimes: 0 };
+  jours.forEach(function (d) {
+    var j = J[d];
+    var theo = {}, theoT = 0, volT = 0, qT = 0;
+    Object.keys(j.arts).forEach(function (code) { var u0 = coutUnitaire(code), q0 = j.arts[code]; theo[code] = u0.bois * q0; theoT += u0.bois * q0; volT += u0.vol * q0; qT += q0; });
+    /* Bois réel (fiche avec sortie de bois) réparti au prorata du bois prévu */
+    var reel = j.ficheBois && qT > 0;
+    if (reel) { BOIS.reel += j.boisReel; BOIS.theoFiche += theoT; BOIS.volReel += j.volReel; BOIS.volTheo += volT; }
+    else if (qT > 0) BOIS.joursEstimes++;
+    j.boisSrc = reel ? 'reel' : (qT > 0 ? 'estime' : '');
+    Object.keys(j.arts).forEach(function (code) {
+      var q = j.arts[code], u = coutUnitaire(code);
+      var bArt = reel ? (theoT > 0 ? j.boisReel * theo[code] / theoT : j.boisReel * q / qT) : u.bois * q;
+      j.Q += q; j.ca += u.pv * q; j.bois += bArt; j.conso += u.conso * q;
+      var at = artTot[code] = artTot[code] || { code: code, nom: u.nom, qte: 0, ca: 0, bois: 0 };
+      at.qte += q; at.ca += u.pv * q; at.bois += bArt;
+      CHG.forEach(function (c) {
+        if ((u.ch['mode_' + c[0]] || 'palette') === 'mensuel') return;
+        var v = (parseFloat(u.ch[c[0]]) || 0) * q; chT[c[0]] += v; j.charges += v;
+      });
+      rubT += u.rub * q; j.charges += u.rub * q;
+    });
+    /* charges mensuelles : 1 part par jour ouvré */
+    if (j.ouvre) {
+      var jo = acJoursOuvresMois(d.slice(0, 7) + '-01');
+      CHG.forEach(function (c) {
+        if ((chGlobal['mode_' + c[0]] || 'palette') !== 'mensuel') return;
+        var v = (parseFloat(chGlobal[c[0]]) || 0) / jo; chT[c[0]] += v; j.charges += v; mensuelFait[c[0]] = true;
+      });
+    }
+  });
+
+  var csp = Object.keys(colisSansPrix), cin = Object.keys(colisInconnus);
+  if (csp.length) alertes.push(csp.length + ' colis de bois sans prix d’achat : ' + csp.slice(0, 12).join(', ') + (csp.length > 12 ? '…' : '') + ' — prix moyen de l’essence du mois utilisé. Complétez le prix dans l’achat.');
+  if (cin.length) alertes.push(cin.length + ' colis sortis introuvables dans les achats : ' + cin.slice(0, 12).join(', ') + (cin.length > 12 ? '…' : '') + ' — prix moyen de l’essence utilisé.');
+  if (BOIS.joursEstimes) alertes.push(BOIS.joursEstimes + ' jour(s) sans sortie de bois sur fiche : bois ESTIMÉ (nomenclature × prix moyen du mois).');
+
+  /* ---------- 3. Masse salariale depuis le BRUT de la Paie ---------- */
+  var emps = (typeof getPersonnel === 'function' ? getPersonnel() : []) || [];
+  if (!emps.length && Array.isArray(P.employes)) emps = P.employes;
+  var pts = (typeof getPointagePaye === 'function' ? getPointagePaye() : (P.pointage || [])) || [];
+  var presence = {}; /* emp|jour -> true */
+  var presMois = {}; /* emp|mois -> nb jours */
+  pts.forEach(function (p) {
+    if (!p || !p.employee_id || !p.date || p.present === false) return;
+    var dk = String(p.date).slice(0, 10), k = String(p.employee_id) + '|' + dk;
+    if (presence[k]) return; presence[k] = true;
+    var km = String(p.employee_id) + '|' + dk.slice(0, 7); presMois[km] = (presMois[km] || 0) + 1;
+  });
+  var bruts = P.brutsMois || {};
+  var moisTouches = {}; jours.forEach(function (d) { moisTouches[d.slice(0, 7)] = true; });
+  var sansBrut = [], salEmp = [];
+  var TOT = { manutentionnaire: 0, machiniste: 0, montage: 0, accessoires: 0, indirect: 0 };
+  Object.keys(moisTouches).forEach(function (m) {
+    if (!bruts[m] || !bruts[m].emps) alertes.push('Paie de ' + m + ' : salaires bruts pas encore calculés — ouvrez le module Paie une fois pour les mettre à jour.');
+  });
+  emps.forEach(function (e) {
+    if (!e || !e.id) return;
+    if (e.en_paie === false) return;
+    var sortie = String(e.date_sortie || '').slice(0, 10); if (sortie && sortie < du) return;
+    var poste = (typeof acGuessPosteFromFonction === 'function') ? acGuessPosteFromFonction(e.fonction) : 'indirect';
+    var nom = ((e.nom || '') + ' ' + (e.prenoms || '')).trim() || e.matricule || e.id;
+    var rec = { id: e.id, nom: nom, matricule: e.matricule || '', fonction: e.fonction || '', poste: poste, jours: 0, montant: 0, montage: 0, accessoires: 0 };
+    var aBrut = false;
+    jours.forEach(function (d) {
+      var m = d.slice(0, 7), b = bruts[m] && bruts[m].emps ? bruts[m].emps[e.id] : null;
+      if (!b) return; aBrut = true;
+      var brut = parseFloat(b.brut) || 0, montM = parseFloat(b.montage) || 0;
+      if (!(brut > 0)) rec.brutZero = true;
+      var nbJ = presMois[e.id + '|' + m] || 0, present = !!presence[e.id + '|' + d];
+      var part = 0;
+      if (nbJ > 0) { if (!present) return; part = 1 / nbJ; }
+      else { if (!J[d].ouvre) return; part = 1 / acJoursOuvresMois(m + '-01'); } /* sans pointage : réparti sur les jours ouvrés */
+      rec.jours++;
+      if (poste === 'monteur') {
+        var acc = Math.max(0, brut - montM) * part;
+        rec.accessoires += acc; J[d].sal += acc;
+      } else {
+        var v = brut * part; rec.montant += v; J[d].sal += v;
+      }
+    });
+    if (poste === 'monteur') {
+      montLignes.forEach(function (ml) { if (ml && String(ml.employee_id) === String(e.id) && J[ml.date]) rec.montage += parseFloat(ml.montant) || 0; });
+    }
+    var present = rec.jours > 0 || rec.montage > 0;
+    if ((!aBrut || rec.brutZero) && present && !(rec.montage > 0 && poste === 'monteur')) sansBrut.push(nom);
+    if (!aBrut && !present) {
+      /* employé sans pointage ni brut : vérifier qu'il a bien un salaire */
+      if (!(parseFloat(e.salaire_base) > 0) && !(parseFloat(e.taux_journalier) > 0)) sansBrut.push(nom + ' (aucun salaire)');
+      return;
+    }
+    if (!present) return;
+    if (poste === 'monteur') { TOT.montage += rec.montage; TOT.accessoires += rec.accessoires; }
+    else if (poste === 'machiniste' || poste === 'manutentionnaire') TOT[poste] += rec.montant;
+    else TOT.indirect += rec.montant;
+    salEmp.push(rec);
+  });
+  jours.forEach(function (d) { J[d].sal += J[d].montage; });
+  if (sansBrut.length) alertes.push(sansBrut.length + ' employé(s) sans salaire brut calculé : ' + sansBrut.slice(0, 8).join(', ') + (sansBrut.length > 8 ? '…' : '') + ' — comptés à 0. Vérifiez leur fiche et leur bulletin dans la Paie.');
+  var sansPointage = jours.filter(function (d) { return J[d].Q > 0 && !Object.keys(presence).some(function (k) { return k.slice(-10) === d; }); });
+  if (sansPointage.length) alertes.push(sansPointage.length + ' jour(s) avec production mais sans pointage de présence : ' + sansPointage.map(function (d) { return fmtD(d); }).slice(0, 6).join(', ') + '.');
+
+  /* ---------- 4. Assemblage du compte d'exploitation ---------- */
+  var Q = 0, ca = 0, bois = 0, conso = 0; jours.forEach(function (d) { Q += J[d].Q; ca += J[d].ca; bois += J[d].bois; conso += J[d].conso; });
+  var lib = function (k, def) { return chGlobal['libelle_' + k] || def; };
+  var cvamp = Math.round(bois);
+  var fabL = [['Consommables (pointes, clous…)', conso], ['Manutentionnaires', TOT.manutentionnaire], ['Machinistes', TOT.machiniste],
+    ['Monteurs — paie montage', TOT.montage], ['Monteurs — accessoires de salaire', TOT.accessoires],
+    ['Main-d’œuvre indirecte (autres employés)', TOT.indirect], ['Électricité / énergie atelier', chT.electricite]];
+  var cvppf = Math.round(fabL.reduce(function (s, l) { return s + (l[1] || 0); }, 0));
+  var cvd = Math.round(chT.distribution);
+  var strL = [[lib('fraisBancaires', 'Frais bancaires'), chT.fraisBancaires], [lib('commissionDU', 'Commission DU'), chT.commissionDU], [lib('commissionLog', 'Commission logisticien'), chT.commissionLog], [lib('loyer', 'Loyer atelier & dépôt'), chT.loyer], [lib('divers', 'Divers & imprévus'), chT.divers]];
+  var structure = Math.round(strL.reduce(function (s, l) { return s + (l[1] || 0); }, 0));
+  var cout = cvamp + cvppf + cvd + structure + Math.round(rubT);
+  var R = {
+    du: du, au: au, Q: Q, ca: Math.round(ca),
+    articles: Object.keys(artTot).map(function (k) { var a = artTot[k]; return { code: a.code, nom: a.nom, qte: a.qte, ca: Math.round(a.ca), bois: Math.round(a.bois) }; }).sort(function (a, b) { return b.qte - a.qte; }),
+    cvamp: cvamp, margeCvamp: Math.round(ca) - cvamp,
+    cvppf: cvppf, margeCvppf: Math.round(ca) - cvamp - cvppf, cvppfLignes: fabL,
+    cvd: cvd, margeCvd: Math.round(ca) - cvamp - cvppf - cvd, cvdLignes: [['Transport, livraison client', chT.distribution]],
+    structure: structure, structureLignes: strL,
+    rubriques: Math.round(rubT), rubriquesLignes: Math.round(rubT) ? [['Rubriques ajoutées (par palette)', rubT]] : [],
+    cout: cout, resultat: Math.round(ca) - cout,
+    jours: jours.map(function (d) { var j = J[d]; return { d: d, ouvre: j.ouvre, src: j.src, boisSrc: j.boisSrc, bois: j.bois, Q: j.Q, ca: j.ca, cout: j.bois + j.conso + j.sal + j.charges, res: j.ca - (j.bois + j.conso + j.sal + j.charges) }; }),
+    salaries: salEmp, totSal: TOT, alertes: alertes, boisInfo: BOIS,
+    majPaie: Object.keys(moisTouches).map(function (m) { return bruts[m] && bruts[m].maj ? bruts[m].maj : 0; })
+  };
+  return R;
+}
+
+function rbTableauDeBordHtml() {
+  var p = rbPeriode();
+  var R = null, err = '';
+  try { R = rbCalculer(p.du, p.au); } catch (e) { err = e.message || String(e); }
+  var f = function (n) { return fmt(Math.round(n || 0)); };
+  var ch = function (k, l) { return '<button class="btn btn-sm" style="font-size:.72rem;padding:3px 10px;border-radius:999px" onclick="rbRaccourci(\'' + k + '\')">' + l + '</button>'; };
+  var h = '<div class="card" style="padding:14px 16px;margin-bottom:14px;border:2px solid #0f172a;border-radius:14px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">' +
+    '<div><div style="font-size:1.1rem;font-weight:900;color:#0f172a">📊 Rentabilité — tableau de bord automatique</div>' +
+    '<div style="font-size:.74rem;color:#64748b">Production (fiches, sinon pointage montage) · salaires bruts de la Paie · charges au prorata des jours ouvrés</div></div>' +
+    '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">' + ch('jour', 'Aujourd’hui') + ch('hier', 'Hier') + ch('semaine', 'Cette semaine') + ch('mois', 'Ce mois') + ch('moisPrec', 'Mois dernier') +
+    '<input type="date" value="' + p.du + '" onchange="rbSetPeriode(this.value, window._rbAu)" style="font-size:.75rem;padding:3px 6px;border:1px solid #cbd5e1;border-radius:6px">' +
+    '<span style="font-size:.75rem">→</span><input type="date" value="' + p.au + '" onchange="rbSetPeriode(window._rbDu, this.value)" style="font-size:.75rem;padding:3px 6px;border:1px solid #cbd5e1;border-radius:6px"></div></div>';
+  if (err) return h + '<div style="color:#b91c1c;font-size:.8rem">Calcul impossible : ' + escH(err) + '</div></div>';
+  if (!(R.Q > 0)) {
+    h += '<div style="padding:14px;border:1px dashed #cbd5e1;border-radius:10px;color:#64748b;font-size:.85rem;text-align:center">Aucune production trouvée du ' + fmtD(p.du) + ' au ' + fmtD(p.au) + ' (ni fiche de production, ni pointage montage).</div>';
+  } else {
+    h += acCascadeHtml(R);
+  }
+  /* Bois : réel (colis sortis) contre prévu (nomenclature) */
+  var B = R.boisInfo || {};
+  if (B.volReel > 0) {
+    var ecV = B.volReel - B.volTheo, pxMoyR = B.volReel > 0 ? B.reel / B.volReel : 0, ecF = ecV * pxMoyR;
+    var mauvais = ecV > 0.0005;
+    h += '<div style="margin-top:10px;padding:10px 14px;border:1px solid ' + (mauvais ? '#fecaca;background:#fef2f2' : '#bbf7d0;background:#f0fdf4') + ';border-radius:12px;font-size:.82rem">' +
+      '🪵 <b>Bois réellement sorti (fiches) :</b> ' + B.volReel.toFixed(3).replace('.', ',') + ' m³ pour ' + f(B.reel) + ' F (prix réel de chaque colis, moyenne ' + f(pxMoyR) + ' F/m³)' +
+      ' · <b>prévu par la nomenclature :</b> ' + B.volTheo.toFixed(3).replace('.', ',') + ' m³' +
+      ' · <b style="color:' + (mauvais ? '#b91c1c' : '#15803d') + '">écart : ' + (ecV >= 0 ? '+' : '') + ecV.toFixed(3).replace('.', ',') + ' m³ (' + (ecF >= 0 ? '+' : '') + f(ecF) + ' F)</b>' +
+      (mauvais ? ' — plus de bois consommé que prévu (chute, perte, erreur de saisie ?)' : '') +
+      (B.joursEstimes ? '<div style="font-size:.72rem;color:#64748b;margin-top:3px">' + B.joursEstimes + ' jour(s) sans sortie de bois : bois estimé pour ces jours (non compté dans cet écart).</div>' : '') + '</div>';
+  }
+  /* Jour par jour */
+  var jp = R.jours.filter(function (j) { return j.Q > 0 || j.cout > 0; });
+  if (jp.length > 1) {
+    h += '<details style="margin-top:10px;border:1px solid #e2e8f0;border-radius:12px"><summary style="cursor:pointer;padding:10px 14px;font-weight:800;font-size:.85rem">📅 Résultat jour par jour <small style="font-weight:500;color:#64748b">' + jp.length + ' jour(s)</small></summary>' +
+      '<table class="acx-t" style="border:0"><thead><tr><th>Jour</th><th>Source</th><th>Palettes</th><th>Chiffre d’affaires</th><th>Bois</th><th>Coût total</th><th>Résultat</th></tr></thead><tbody>';
+    jp.forEach(function (j) {
+      h += '<tr><td>' + fmtD(j.d) + (j.ouvre ? '' : ' <span style="color:#94a3b8">(week-end)</span>') + '</td><td>' + (j.src === 'fiche' ? 'Fiche de production' : j.src === 'montage' ? 'Pointage montage' : '—') + '</td><td>' + f(j.Q) + '</td><td>' + f(j.ca) + '</td><td>' + (j.bois ? f(j.bois) + ' <span style="font-size:.68rem;color:' + (j.boisSrc === 'reel' ? '#15803d">réel' : '#b45309">estimé') + '</span>' : '—') + '</td><td>' + f(j.cout) + '</td><td class="' + (j.res < 0 ? 'acx-neg' : 'acx-pos') + '"><b>' + (j.res >= 0 ? '+' : '') + f(j.res) + '</b></td></tr>';
+    });
+    h += '</tbody></table></details>';
+  }
+  /* Masse salariale */
+  if (R.salaries.length) {
+    var ordre = { manutentionnaire: 1, machiniste: 2, monteur: 3, indirect: 4 };
+    var libP = { manutentionnaire: 'Direct — manutention', machiniste: 'Direct — machiniste', monteur: 'Direct — monteur', indirect: 'Indirect' };
+    var tot = 0; R.salaries.forEach(function (s) { tot += s.montant + s.montage + s.accessoires; });
+    h += '<details style="margin-top:10px;border:1px solid #e2e8f0;border-radius:12px"><summary style="cursor:pointer;padding:10px 14px;font-weight:800;font-size:.85rem">👥 Masse salariale de la période <small style="font-weight:500;color:#64748b">' + R.salaries.length + ' employé(s) · ' + f(tot) + ' F (brut Paie)</small></summary>' +
+      '<table class="acx-t" style="border:0"><thead><tr><th>Employé</th><th>Catégorie</th><th>Jours</th><th>Paie montage</th><th>Accessoires / salaire</th><th>Total période</th></tr></thead><tbody>';
+    R.salaries.slice().sort(function (a, b) { return (ordre[a.poste] - ordre[b.poste]) || String(a.nom).localeCompare(String(b.nom)); }).forEach(function (s) {
+      h += '<tr><td>' + escH((s.matricule ? s.matricule + ' — ' : '') + s.nom) + '<div style="font-size:.68rem;color:#94a3b8">' + escH(s.fonction) + '</div></td><td>' + libP[s.poste] + '</td><td>' + s.jours + '</td><td>' + (s.poste === 'monteur' ? f(s.montage) : '—') + '</td><td>' + f(s.poste === 'monteur' ? s.accessoires : s.montant) + '</td><td><b>' + f(s.montant + s.montage + s.accessoires) + '</b></td></tr>';
+    });
+    h += '</tbody></table></details>';
+  }
+  /* Alertes */
+  if (R.alertes.length) {
+    h += '<div style="margin-top:10px;padding:10px 14px;border:1px solid #fcd34d;background:#fffbeb;border-radius:12px;font-size:.78rem;color:#92400e"><b>⚠ À vérifier pour un résultat juste :</b><ul style="margin:.3rem 0 0 1rem;padding:0">' +
+      R.alertes.slice(0, 12).map(function (a) { return '<li>' + escH(a) + '</li>'; }).join('') + '</ul></div>';
+  }
+  var maj = Math.max.apply(null, (R.majPaie || [0]).concat([0]));
+  if (maj) h += '<div style="font-size:.7rem;color:#94a3b8;margin-top:6px">Salaires bruts calculés par la Paie le ' + new Date(maj).toLocaleString('fr-FR') + '.</div>';
+  h += '<div style="font-size:.72rem;color:#64748b;margin-top:8px">Plus bas : <b>simulation et réglages</b> (prix du bois, charges par palette ou par mois, rubriques) — ce sont ces réglages que le tableau de bord utilise.</div>';
+  h += '</div>';
+  return h;
+}
 </script>
 </body>
 </html>

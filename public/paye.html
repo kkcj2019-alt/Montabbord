@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-05-549';
+      window.__APP_VERSION = '2026-11-06-550';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -6797,6 +6797,9 @@ function payeObj(key) {
         var p = getPayeData();
         p[section] = val;
         setPayeData(p);
+        /* Toute modification (pointage, primes…) : on republie les salaires
+           bruts du mois pour le tableau de bord « Rentabilité ». */
+        try { if (section !== 'brutsMois' && typeof payePublierBrutsBientot === 'function') payePublierBrutsBientot(); } catch (eBr) {}
         /* Invalidation du cache de calcul de paie : toute modification des
            donnees (pointage, primes, conges...) doit forcer un recalcul. */
         try { if (window._payrollCache) window._payrollCache = {}; } catch(eC) {}
@@ -47220,6 +47223,75 @@ function _dsEmbellir() {
   }
   function start(){ strip(); try{ new MutationObserver(function(){ clearTimeout(window._mdbStripT2); window._mdbStripT2=setTimeout(strip,120); }).observe(document.body,{childList:true,subtree:true}); }catch(e){} }
   if(document.readyState!=='loading') setTimeout(start,0); else document.addEventListener('DOMContentLoaded',start);
+})();
+</script>
+<script>
+/* ===== Publication des SALAIRES BRUTS du mois pour le tableau de bord
+   « Rentabilité » de l'application principale. Pour chaque employé :
+   brut du bulletin, part « Rémunération Montage » (rubrique 27) et nombre
+   de jours de présence pointés dans le mois. Recalcul automatique au
+   démarrage et après chaque modification (pointage, primes…). ===== */
+(function () {
+  function moisDecale(m, n) { var y = +m.slice(0, 4), mo = +m.slice(5, 7) - 1 + n; var d = new Date(y, mo, 1); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); }
+  function calculerMois(mois) {
+    var pers = []; try { pers = getPersonnel() || []; } catch (e) { return null; }
+    var pts = []; try { pts = getPointageData() || []; } catch (e2) {}
+    var jours = {};
+    pts.forEach(function (p) {
+      if (!p || !p.employee_id || !p.date || p.present === false) return;
+      var d = String(p.date).slice(0, 10); if (d.slice(0, 7) !== mois) return;
+      (jours[p.employee_id] = jours[p.employee_id] || {})[d] = 1;
+    });
+    var out = {};
+    pers.forEach(function (emp) {
+      if (!emp || !emp.id || emp.en_paie === false) return;
+      var c = null; try { c = calculatePayroll(emp, mois); } catch (e3) { return; }
+      if (!c || !c.totals) return;
+      var mont = 0; (c.items || []).forEach(function (it) { if (it && String(it.n) === '27') mont += parseFloat(it.gain) || 0; });
+      out[emp.id] = { brut: Math.round(c.totals.brut || 0), montage: Math.round(mont), jours: Object.keys(jours[emp.id] || {}).length };
+    });
+    return out;
+  }
+  var _timer = null, _enCours = false, _dernier = 0, _retry = false;
+  window.payePublierBruts = function (force) {
+    if (_enCours) return;
+    /* au plus un calcul toutes les 15 s (les rafales de saisies sont regroupées) */
+    if (!force && Date.now() - _dernier < 15000) {
+      if (!_retry) { _retry = true; setTimeout(function () { _retry = false; try { if (Date.now() - _dernier >= 15000) payePublierBruts(); } catch (e) {} }, 16000); }
+      return;
+    }
+    try { if (payeBootstrapping) return; } catch (eB) {}
+    _dernier = Date.now(); _enCours = true;
+    try {
+      var m0 = (typeof getPayeMonth === 'function' && getPayeMonth()) || new Date().toISOString().slice(0, 7);
+      var now = new Date().toISOString().slice(0, 7);
+      var liste = {}; [now, moisDecale(now, -1), m0].forEach(function (m) { if (/^\d{4}-\d{2}$/.test(m)) liste[m] = 1; });
+      var all = {}; try { all = JSON.parse(JSON.stringify(getPayeSection('brutsMois', {}) || {})); } catch (e) { all = {}; }
+      var change = false;
+      Object.keys(liste).forEach(function (m) {
+        var r = calculerMois(m); if (!r) return;
+        var avant = all[m] && all[m].emps ? JSON.stringify(all[m].emps) : '';
+        if (avant !== JSON.stringify(r)) { all[m] = { maj: Date.now(), emps: r }; change = true; }
+      });
+      /* on garde 14 mois au plus */
+      var ks = Object.keys(all).sort(); while (ks.length > 14) { delete all[ks.shift()]; change = true; }
+      if (change) setPayeSection('brutsMois', all);
+    } catch (eP) {} finally { _enCours = false; }
+  };
+  /* Toujours DIFFÉRÉ (jamais pendant l'écriture en cours) : regroupe les rafales. */
+  window.payePublierBrutsBientot = function () {
+    Promise.resolve().then(function () { clearTimeout(_timer); _timer = setTimeout(function () { try { payePublierBruts(); } catch (e) {} }, 20000); });
+  };
+  /* Premier calcul quand la Paie a fini de charger ses données */
+  var _essais = 0;
+  function demarrer() {
+    _essais++;
+    var pret = true; try { pret = !payeBootstrapping; } catch (e) {}
+    if (!pret) { if (_essais < 20) setTimeout(demarrer, 15000); return; }
+    try { payePublierBruts(); } catch (e2) {}
+  }
+  setTimeout(demarrer, 15000);
+  setInterval(function () { try { if (!document.hidden) payePublierBruts(); } catch (e) {} }, 10 * 60 * 1000);
 })();
 </script>
 </body>
