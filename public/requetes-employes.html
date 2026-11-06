@@ -186,7 +186,7 @@
 
   function loadAll(){
     if(!uid){document.getElementById("app").innerHTML='<div class="card"><div class="empty">Identifiant entreprise introuvable.</div></div>';return;}
-    Promise.all([getKey("mdb_employes"),getKey("mdb_paye"),getPrefix("mdb_paye."),getKey("mdb_requetesEmploye"),getKey("mdb_portailSessions"),getKey("mdb_portailComptes"),getPrefix("mdb_portailPhoto:"),getKey("mdb_portailPhotos"),getKey("mdb_rh_permissions")]).then(function(res){
+    Promise.all([getKey("mdb_employes"),getKey("mdb_paye"),getPrefix("mdb_paye."),getKey("mdb_requetesEmploye"),getKey("mdb_portailSessions"),getKey("mdb_portailComptes"),getPrefix("mdb_portailPhoto:"),getKey("mdb_portailPhotos"),getKey("mdb_rh_permissions"),getKey("mdb_requetesDeleted")]).then(function(res){
       state.employes=Array.isArray(res[0])?res[0]:[];
       var paye=(res[1]&&typeof res[1]==="object")?res[1]:{};
       var sec=res[2]||{};
@@ -200,8 +200,10 @@
       var oldPhotos=(res[7]&&typeof res[7]==="object")?res[7]:{};
       for(var ok in oldPhotos){ if(!oldPhotos.hasOwnProperty(ok)) continue; if(!photos[ok]) photos[ok]=oldPhotos[ok]; }
       state.photos=Object.assign({}, state.photos||{}, photos);
-      state.rhPermissions=Array.isArray(res[8])?res[8]:[];
-      var _genReq=Array.isArray(res[3])?res[3]:[];
+      var _delIds=(Array.isArray(res[9])?res[9]:[]).map(function(x){return String(x);});
+      state.deletedReq=_delIds;
+      state.rhPermissions=(Array.isArray(res[8])?res[8]:[]).filter(function(p){return p && _delIds.indexOf(String(p.id))===-1;});
+      var _genReq=(Array.isArray(res[3])?res[3]:[]).filter(function(r){return r && _delIds.indexOf(String(r.id))===-1;});
       /* Les permissions envoyées depuis « Permissions » de l'espace employé
          vivent dans mdb_rh_permissions (D1). On les affiche ici aussi, sinon
          l'administration ne les voit jamais dans « Requêtes employés ». */
@@ -573,12 +575,25 @@
       /* Une permission fusionnée peut exister dans mdb_rh_permissions ET
          mdb_requetesEmploye : on supprime des deux côtés pour ne plus avoir
          « not found » et ne laisser aucune fiche orpheline. */
-      var gens=(state.genericRequests||[]).filter(function(r){return String(r.id)!==String(id);});
-      var perms=(state.rhPermissions||[]).filter(function(p){return String(p.id)!==String(id);});
-      postSync({mdb_requetesEmploye:gens,mdb_rh_permissions:perms}).then(function(j){
-        if(j&&j.ok){state.open=null;loadAll();}else alert('Suppression impossible. Réessayez.');
-      }).catch(function(){alert('Connexion impossible. Réessayez.');});
-    });
+      var target=(state.requetes||[]).filter(function(r){return String(r.id)===String(id);})[0]||null;
+      var ids={}; ids[String(id)]=1;
+      /* Meme permission presente sous un autre identifiant : on la supprime aussi. */
+      if(target){
+        var _sig=[target.empId,target.type,target.dateDebut,target.motif||target.sujet].join('|');
+        (state.requetes||[]).forEach(function(r){
+          if(!r) return;
+          var sig=[r.empId,r.type,r.dateDebut,r.motif||r.sujet].join('|');
+          if(sig===_sig) ids[String(r.id)]=1;
+        });
+      }
+      var gens=(state.genericRequests||[]).filter(function(r){return !ids[String(r.id)];});
+      var perms=(state.rhPermissions||[]).filter(function(p){return !ids[String(p.id)];});
+      var tombs=(state.deletedReq||[]).slice();
+      Object.keys(ids).forEach(function(x){ if(tombs.indexOf(x)===-1) tombs.push(x); });
+      postSync({mdb_requetesEmploye:gens,mdb_rh_permissions:perms,mdb_requetesDeleted:tombs}).then(function(j){
+        if(j&&j.ok){ state.deletedReq=tombs; state.open=null; loadAll(); }
+        else alert('Suppression impossible. Réessayez.');
+      }).catch(function(){ alert('Connexion impossible. Réessayez.'); });    });
   };
   window.__loadSources=function(){var type=(document.getElementById("pay-type")||{}).value||"caisse";var cle=type==="banque"?"mdb_banques":"mdb_caisses";var sel=document.getElementById("pay-source");if(sel)sel.innerHTML='<option value="">Chargement…</option>';fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&cle="+cle+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var v=j&&j.data&&j.data[cle];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){v=null}}var arr=Array.isArray(v)?v:[];if(!sel)return;sel.innerHTML=arr.length?arr.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.nom||s.libelle||s.code||"Sans nom")+'</option>';}).join(""):'<option value="">Aucune source</option>';}).catch(function(){if(sel)sel.innerHTML='<option value="">Erreur</option>';});};
   window.__acceptPay=function(id){

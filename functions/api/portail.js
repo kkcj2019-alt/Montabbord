@@ -541,7 +541,12 @@ export async function onRequest(context) {
     /* ---------- Côté administration (Paye / RH) ---------- */
     if (action === 'adminlist') {
       const list = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
-      const arr = Array.isArray(list) ? list.slice() : [];
+      let arr = Array.isArray(list) ? list.slice() : [];
+      try {
+        const tombs = parseVal(await lireCle(db, uid, 'mdb_requetesDeleted'), []);
+        const ds = new Set((Array.isArray(tombs) ? tombs : []).map(String));
+        if (ds.size) arr = arr.filter(r => r && !ds.has(String(r.id)));
+      } catch (eAdmDel) {}
       arr.sort(function (a, b) { return String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')); });
       return json({ ok: true, requetes: arr });
     }
@@ -932,7 +937,12 @@ export async function onRequest(context) {
         return 'acompte';
       };
       const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
-      const mesReq = (Array.isArray(reqs) ? reqs : []).filter(r => r && String(r.empId) === String(emp.id));
+      let _delSet = new Set();
+      try {
+        const _tombs = parseVal(await lireCle(db, uid, 'mdb_requetesDeleted'), []);
+        _delSet = new Set((Array.isArray(_tombs) ? _tombs : []).map(String));
+      } catch (eDelSet) {}
+      const mesReq = (Array.isArray(reqs) ? reqs : []).filter(r => r && !_delSet.has(String(r.id)) && String(r.empId) === String(emp.id));
       const caisses = parseVal(await lireCle(db, uid, 'mdb_caisses'), []);
       const banques = parseVal(await lireCle(db, uid, 'mdb_banques'), []);
       const reqMap = {};
@@ -968,7 +978,7 @@ export async function onRequest(context) {
       };
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
       const permsAll = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
-      const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && String(p.employee_id) === String(emp.id));
+      const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && !_delSet.has(String(p.id)) && String(p.employee_id) === String(emp.id));
       let rhEvals = [], rhSanctions = [], rhDemandes = [], rhConges = [], rhPerms = [];
       try { rhEvals = parseVal(await lireCle(db, uid, 'mdb_rh_evaluations'), []) || []; } catch (eRh1) {}
       try { rhSanctions = parseVal(await lireCle(db, uid, 'mdb_rh_sanctions'), []) || []; } catch (eRh2) {}
@@ -992,7 +1002,7 @@ export async function onRequest(context) {
         sanctions: mineRh(rhSanctions),
         demandes: mineRh(rhDemandes),
         conges: mineRh(rhConges),
-        permissionsValidees: mineRh(rhPerms).filter(p => p && p.statut === 'valide'),
+        permissionsValidees: mineRh(rhPerms).filter(p => p && p.statut === 'valide' && !_delSet.has(String(p.id))),
         employe: employePublic(emp),
         moiAutorises: allowed,
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
