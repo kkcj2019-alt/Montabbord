@@ -34,7 +34,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-06-655';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-06-656';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -69843,7 +69843,10 @@ function rbCalculer(du, au) {
   var bruts = P.brutsMois || {};
   var moisTouches = {}; jours.forEach(function (d) { moisTouches[d.slice(0, 7)] = true; });
   var sansBrut = [], salEmp = [];
-  var TOT = { manutentionnaire: 0, machiniste: 0, montage: 0, accessoires: 0, indirect: 0 };
+  var TOT = { manutentionnaire: 0, machiniste: 0, montage: 0, accessoires: 0, prime: 0, indirect: 0 };
+  /* jours de montage par employé (pointage montage Paye) */
+  var montJourEmp = {};
+  montLignes.forEach(function (ml) { if (ml && ml.employee_id && ml.date) montJourEmp[String(ml.employee_id) + '|' + ml.date] = (montJourEmp[String(ml.employee_id) + '|' + ml.date] || 0) + (parseFloat(ml.montant) || 0); });
   Object.keys(moisTouches).forEach(function (m) {
     if (!bruts[m] || !bruts[m].emps) alertes.push('Paie de ' + m + ' : salaires bruts pas encore calculés — ouvrez le module Paie une fois pour les mettre à jour.');
   });
@@ -69853,7 +69856,7 @@ function rbCalculer(du, au) {
     var sortie = String(e.date_sortie || '').slice(0, 10); if (sortie && sortie < du) return;
     var poste = (typeof acGuessPosteFromFonction === 'function') ? acGuessPosteFromFonction(e.fonction) : 'indirect';
     var nom = ((e.nom || '') + ' ' + (e.prenoms || '')).trim() || e.matricule || e.id;
-    var rec = { id: e.id, nom: nom, matricule: e.matricule || '', fonction: e.fonction || '', poste: poste, jours: 0, montant: 0, montage: 0, accessoires: 0 };
+    var rec = { id: e.id, nom: nom, matricule: e.matricule || '', fonction: e.fonction || '', poste: poste, jours: 0, joursMontage: 0, montant: 0, montage: 0, accessoires: 0, prime: 0 };
     var aBrut = false;
     jours.forEach(function (d) {
       var m = d.slice(0, 7), b = bruts[m] && bruts[m].emps ? bruts[m].emps[e.id] : null;
@@ -69865,16 +69868,20 @@ function rbCalculer(du, au) {
       if (nbJ > 0) { if (!present) return; part = 1 / nbJ; }
       else { if (!J[d].ouvre) return; part = 1 / acJoursOuvresMois(m + '-01'); } /* sans pointage : réparti sur les jours ouvrés */
       rec.jours++;
-      if (poste === 'monteur') {
-        var acc = Math.max(0, brut - montM) * part;
-        rec.accessoires += acc; J[d].sal += acc;
-      } else {
-        var v = brut * part; rec.montant += v; J[d].sal += v;
-      }
+      /* Base du jour = bulletin SAUF rémunération montage et prime de production.
+         Un jour où il a monté des palettes, le travailleur compte comme MONTEUR
+         (même s'il n'est pas au rendement) : paie montage réelle + accessoires. */
+      var primeM = parseFloat(b.prime) || 0;
+      var base = Math.max(0, brut - montM - primeM) * part, pr = primeM * part;
+      var monteurCeJour = poste === 'monteur' || !!montJourEmp[e.id + '|' + d];
+      if (montJourEmp[e.id + '|' + d]) rec.joursMontage++;
+      if (monteurCeJour) { rec.accessoires += base; TOT.accessoires += base; }
+      else { rec.montant += base; var bk = (poste === 'machiniste' || poste === 'manutentionnaire') ? poste : 'indirect'; TOT[bk] += base; }
+      rec.prime += pr; TOT.prime += pr;
+      J[d].sal += base + pr;
     });
-    if (poste === 'monteur') {
-      montLignes.forEach(function (ml) { if (ml && String(ml.employee_id) === String(e.id) && J[ml.date]) rec.montage += parseFloat(ml.montant) || 0; });
-    }
+    montLignes.forEach(function (ml) { if (ml && String(ml.employee_id) === String(e.id) && J[ml.date]) rec.montage += parseFloat(ml.montant) || 0; });
+    TOT.montage += rec.montage;
     var present = rec.jours > 0 || rec.montage > 0;
     if ((!aBrut || rec.brutZero) && present && !(rec.montage > 0 && poste === 'monteur')) sansBrut.push(nom);
     if (!aBrut && !present) {
@@ -69883,9 +69890,6 @@ function rbCalculer(du, au) {
       return;
     }
     if (!present) return;
-    if (poste === 'monteur') { TOT.montage += rec.montage; TOT.accessoires += rec.accessoires; }
-    else if (poste === 'machiniste' || poste === 'manutentionnaire') TOT[poste] += rec.montant;
-    else TOT.indirect += rec.montant;
     salEmp.push(rec);
   });
   jours.forEach(function (d) { J[d].sal += J[d].montage; });
@@ -69898,7 +69902,7 @@ function rbCalculer(du, au) {
   var lib = function (k, def) { return chGlobal['libelle_' + k] || def; };
   var cvamp = Math.round(bois);
   var fabL = [['Consommables (pointes, clous…)', conso], ['Manutentionnaires', TOT.manutentionnaire], ['Machinistes', TOT.machiniste],
-    ['Monteurs — paie montage', TOT.montage], ['Monteurs — accessoires de salaire', TOT.accessoires],
+    ['Monteurs — paie montage', TOT.montage], ['Monteurs — accessoires de salaire', TOT.accessoires], ['Primes de production', TOT.prime],
     ['Main-d’œuvre indirecte (autres employés)', TOT.indirect], ['Électricité / énergie atelier', chT.electricite]];
   var cvppf = Math.round(fabL.reduce(function (s, l) { return s + (l[1] || 0); }, 0));
   var cvd = Math.round(chT.distribution);
@@ -69920,7 +69924,6 @@ function rbCalculer(du, au) {
   };
   return R;
 }
-
 
 /* Impression du TABLEAU DE BORD de rentabilité (période choisie) */
 function rbImprimer() {
@@ -69992,11 +69995,12 @@ function rbTableauDeBordHtml() {
   if (R.salaries.length) {
     var ordre = { manutentionnaire: 1, machiniste: 2, monteur: 3, indirect: 4 };
     var libP = { manutentionnaire: 'Direct — manutention', machiniste: 'Direct — machiniste', monteur: 'Direct — monteur', indirect: 'Indirect' };
-    var tot = 0; R.salaries.forEach(function (s) { tot += s.montant + s.montage + s.accessoires; });
+    var tot = 0; R.salaries.forEach(function (s) { tot += s.montant + s.montage + s.accessoires + (s.prime || 0); });
     h += '<details style="margin-top:10px;border:1px solid #e2e8f0;border-radius:12px"><summary style="cursor:pointer;padding:10px 14px;font-weight:800;font-size:.85rem">👥 Masse salariale de la période <small style="font-weight:500;color:#64748b">' + R.salaries.length + ' employé(s) · ' + f(tot) + ' F (brut Paie)</small></summary>' +
-      '<table class="acx-t" style="border:0"><thead><tr><th>Employé</th><th>Catégorie</th><th>Jours</th><th>Paie montage</th><th>Accessoires / salaire</th><th>Total période</th></tr></thead><tbody>';
+      '<table class="acx-t" style="border:0"><thead><tr><th>Employé</th><th>Catégorie</th><th>Jours</th><th>Paie montage</th><th>Accessoires (jours de montage)</th><th>Salaire (autres jours)</th><th>Prime de production</th><th>Total période</th></tr></thead><tbody>';
     R.salaries.slice().sort(function (a, b) { return (ordre[a.poste] - ordre[b.poste]) || String(a.nom).localeCompare(String(b.nom)); }).forEach(function (s) {
-      h += '<tr><td>' + escH((s.matricule ? s.matricule + ' — ' : '') + s.nom) + '<div style="font-size:.68rem;color:#94a3b8">' + escH(s.fonction) + '</div></td><td>' + libP[s.poste] + '</td><td>' + s.jours + '</td><td>' + (s.poste === 'monteur' ? f(s.montage) : '—') + '</td><td>' + f(s.poste === 'monteur' ? s.accessoires : s.montant) + '</td><td><b>' + f(s.montant + s.montage + s.accessoires) + '</b></td></tr>';
+      var catS = libP[s.poste] + (s.poste !== 'monteur' && s.joursMontage ? ' <span style="color:#ea580c;font-weight:700">+ monteur ' + s.joursMontage + ' j</span>' : '');
+      h += '<tr><td>' + escH((s.matricule ? s.matricule + ' — ' : '') + s.nom) + '<div style="font-size:.68rem;color:#94a3b8">' + escH(s.fonction) + '</div></td><td>' + catS + '</td><td>' + s.jours + '</td><td>' + (s.montage ? f(s.montage) : '—') + '</td><td>' + (s.accessoires ? f(s.accessoires) : '—') + '</td><td>' + (s.montant ? f(s.montant) : '—') + '</td><td>' + (s.prime ? f(s.prime) : '—') + '</td><td><b>' + f(s.montant + s.montage + s.accessoires + (s.prime || 0)) + '</b></td></tr>';
     });
     h += '</tbody></table></details>';
   }
