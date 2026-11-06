@@ -90,7 +90,8 @@
     var u = JSON.parse(localStorage.getItem('mdb_userDisplay') || '{}');
     if (u && u.nom) ADMIN = u.nom;
   } catch (e) {}
-  var S = { ent: {}, gallery: [], accounts: {}, quotes: [], orders: [], threads: [], presence: null, tab: 'galerie', thread: null, busy: false };
+  var S = { ent: {}, gallery: [], accounts: {}, quotes: [], orders: [], threads: [], presence: null, tab: 'galerie', thread: null, busy: false,
+    catalog: [], catalogLoaded: false, tombs: {}, meta: null, legacy: [], gallerySearch: '' };
   function el(id) { return document.getElementById(id); }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function fmt(n) { try { return new Intl.NumberFormat('fr-FR').format(Math.round(parseFloat(n) || 0)); } catch (e) { return String(Math.round(parseFloat(n) || 0)); } }
@@ -138,6 +139,17 @@
       await syncSet('mdb_clientPublic', pub);
     } catch (ePub) {}
     S.gallery = (await syncGet('mdb_clientGallery')) || [];
+    /* Galerie = produits finis du catalogue Index (Nomenclature), plus les
+       retouches locales (photo / description / masqué). Aucune saisie de
+       produit ici : l'Index en est la seule source. */
+    S.catalog = (await syncGet('mdb_nomenclature')) || [];
+    S.catalogLoaded = Array.isArray(S.catalog);
+    S.catalog = S.catalogLoaded ? S.catalog : [];
+    S.tombs = (await syncGet('mdb_tombstones')) || {};
+    S.meta = await syncGet('mdb_clientGalleryMeta');
+    S.legacy = (await syncGet('mdb_clientGalleryLegacy')) || [];
+    if (!S.meta || typeof S.meta !== 'object' || Array.isArray(S.meta)) await migrateGalerie(S.gallery);
+    await publishGalerie(true);
     S.accounts = (await syncGet('mdb_clientAccounts')) || {};
     S.quotes = (await syncGet('mdb_clientQuotes')) || [];
     S.orders = (await syncGet('mdb_clientOrders')) || [];
@@ -172,65 +184,256 @@
     else body.innerHTML = tabClients();
   }
 
-  function tabGalerie() {
-    var h = '<div class="adCard"><h2>Ajouter un produit à la galerie</h2><div class="adNote" style="margin-bottom:10px">Les clients verront ces photos dans leur catalogue. Images compressées automatiquement.</div>'
-      + '<div class="adForm">'
-      + '<div class="adField"><label>Titre *</label><input id="gTitre" placeholder="Ex : Palette Europe 1200×800"></div>'
-      + '<div class="adField"><label>Prix indicatif (F)</label><input id="gPrix" type="number" min="0" placeholder="0"></div>'
-      + '<div class="adField"><label>Code article (optionnel)</label><input id="gCode" placeholder="Ex : PAL120"></div>'
-      + '<div class="adField"><label>Photo</label><input id="gFile" type="file" accept="image/*"></div>'
-      + '<div class="adField wide"><label>Description</label><textarea id="gDesc" placeholder="Dimensions, essence du bois, traitement, conditionnement…"></textarea></div>'
-      + '<div class="adField wide"><button class="adBtn dark" id="gAdd">Ajouter à la galerie</button> <span class="adErr" id="gErr"></span></div></div></div>';
-    h += '<div class="adCard"><h2>Ma galerie (' + S.gallery.length + ')</h2>';
-    if (!S.gallery.length) return h + '<div class="adEmpty">Aucun produit pour le moment.</div></div>';
-    h += '<div class="adGrid">';
-    S.gallery.forEach(function (g) {
-      h += '<div class="adThumb"><div class="im">' + (g.image ? '<img src="' + esc(g.image) + '" alt="">' : '📦') + '</div><div class="bd"><b>' + esc(g.titre || 'Produit') + '</b><div class="pr">' + (g.prix ? money(g.prix) : 'Prix sur demande') + '</div><div class="adNote">' + esc(String(g.description || '').slice(0, 90)) + '</div>'
-        + '<div style="display:flex;gap:5px;margin-top:7px;flex-wrap:wrap"><button class="adBtn ghost sm" style="background:#f1f5f9;color:#334155;border:1px solid #e2e8f0" onclick="adToggleGallery(\'' + esc(g.id) + '\')">' + (g.actif === false ? 'Afficher' : 'Masquer') + '</button><button class="adBtn dang sm" onclick="adDeleteGallery(\'' + esc(g.id) + '\')">Supprimer</button></div></div></div>';
+  /* ================= Catalogue Index → galerie client ================= */
+  function normCode(c) { return String(c == null ? '' : c).trim().toUpperCase(); }
+  function normTxt(s) { return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+  function numTxt(n) { return String(n).replace('.', ','); }
+  function dimsArticle(a) {
+    var l = parseFloat(a && (a.longueur != null ? a.longueur : a.length)) || 0;
+    var w = parseFloat(a && (a.largeur != null ? a.largeur : a.width)) || 0;
+    var t = parseFloat(a && (a.epaisseur != null ? a.epaisseur : a.thickness)) || 0;
+    var p = [];
+    if (l > 0) p.push(numTxt(l));
+    if (w > 0) p.push(numTxt(w));
+    if (t > 0) p.push(numTxt(t));
+    return p.join(' × ') + (p.length ? ' cm' : '');
+  }
+  function prixArticle(a) {
+    var per = (a && a.prixPeriodes) || [];
+    var today = new Date().toISOString().slice(0, 10);
+    for (var i = 0; i < per.length; i++) {
+      var p = per[i] || {};
+      if (p.dateDebut && p.dateFin && today >= p.dateDebut && today <= p.dateFin) return parseFloat(p.prixUnitaire) || 0;
+    }
+    if (per.length) return parseFloat(per[per.length - 1].prixUnitaire) || 0;
+    return parseFloat(a && (a.prix_vente || a.prixUnitaire || a.prix)) || 0;
+  }
+  function estProduitFini(a) {
+    var t = String((a && a.typeArticle) || '').toLowerCase();
+    var c = String((a && a.categorie) || '').toLowerCase();
+    return t === 'produit_fini' || t === 'produit fini' || c === 'finished' || c === 'produit_fini';
+  }
+  function catalogueFinis() {
+    var arr = Array.isArray(S.catalog) ? S.catalog : [];
+    var ts = (S.tombs && S.tombs['mdb_nomenclature']) || {};
+    var tc = (S.tombs && S.tombs['mdb_nomenclature_code']) || {};
+    return arr.filter(function (a) {
+      if (!a || !a.code) return false;
+      if (!estProduitFini(a)) return false;
+      if (a.commercialise === false) return false;
+      if (a.id && ts[a.id]) return false;
+      if ((+tc[normCode(a.code)] || 0) > 0) return false;
+      return true;
+    }).sort(function (a, b) {
+      return String(a.designation || a.code).localeCompare(String(b.designation || b.code), 'fr', { numeric: true });
     });
-    return h + '</div></div>';
+  }
+  function metaDe(code) {
+    var m = S.meta && S.meta[normCode(code)];
+    return (m && typeof m === 'object') ? m : {};
+  }
+  function descAuto(a) {
+    var d = dimsArticle(a);
+    return d ? 'Dimensions : ' + d : '';
+  }
+  function galerieItems() {
+    return catalogueFinis().map(function (a) {
+      var code = normCode(a.code);
+      var m = metaDe(code);
+      var imgs = [];
+      if (Array.isArray(a.photos) && a.photos.length) imgs = a.photos.filter(Boolean).slice(0, 6);
+      else if (a.photo) imgs = [a.photo];
+      else if (Array.isArray(m.photos) && m.photos.length) imgs = m.photos.filter(Boolean).slice(0, 6);
+      else if (m.photo) imgs = [m.photo];
+      return {
+        id: 'pf_' + code.replace(/[^A-Z0-9_-]/g, '_'),
+        code: a.code,
+        titre: a.designation || a.code,
+        prix: prixArticle(a),
+        description: (a.descriptionClient ? a.descriptionClient : (m.description != null ? m.description : descAuto(a))),
+        image: imgs[0] || '',
+        images: imgs,
+        actif: m.actif !== false,
+        source: 'index'
+      };
+    });
+  }
+  var _galSig = null;
+  async function publishGalerie(force) {
+    /* Sans catalogue lisible (hors ligne, erreur réseau), on ne publie RIEN :
+       sinon la galerie client serait vidée par une simple coupure. */
+    if (!S.catalogLoaded) return false;
+    var items = galerieItems();
+    var sig = JSON.stringify(items);
+    S.gallery = items;
+    if (!force && sig === _galSig) return false;
+    _galSig = sig;
+    try { await syncSet('mdb_clientGallery', items); } catch (e) { return false; }
+    return true;
+  }
+  async function refreshCatalogue() {
+    var cat = await syncGet('mdb_nomenclature');
+    if (Array.isArray(cat)) { S.catalog = cat; S.catalogLoaded = true; }
+    var tombstones = await syncGet('mdb_tombstones');
+    if (tombstones && typeof tombstones === 'object') S.tombs = tombstones;
+    return publishGalerie(false);
+  }
+  /* Première ouverture : on récupère les photos/descriptions déjà saisies
+     dans l'ancienne galerie (association par code, puis par désignation).
+     Les produits qui ne viennent pas de l'Index ne sont plus publiés, mais
+     ils sont conservés dans « legacy » pour ne rien perdre. */
+  async function migrateGalerie(old) {
+    var meta = {}, legacy = [];
+    var pf = catalogueFinis();
+    var byCode = {}, byName = {};
+    pf.forEach(function (a) {
+      byCode[normCode(a.code)] = a;
+      var n = normTxt(a.designation);
+      if (n) byName[n] = a;
+    });
+    (Array.isArray(old) ? old : []).forEach(function (g) {
+      if (!g) return;
+      var a = byCode[normCode(g.code)] || byName[normTxt(g.titre)] || null;
+      if (a) {
+        var m = { photo: g.image || '', description: g.description || '', actif: g.actif !== false };
+        if (m.photo || m.description || m.actif === false) meta[normCode(a.code)] = m;
+      } else {
+        legacy.push({
+          id: g.id || uid(), titre: g.titre || g.code || 'Produit', code: g.code || '',
+          prix: parseFloat(g.prix) || 0, description: g.description || '',
+          image: g.image || '', createdAt: g.createdAt || Date.now()
+        });
+      }
+    });
+    S.meta = meta;
+    if (legacy.length) {
+      var seen = {};
+      S.legacy = (S.legacy || []).concat(legacy).filter(function (x) {
+        var k = x.id || (x.titre + '|' + x.code);
+        if (seen[k]) return false;
+        seen[k] = true;
+        return true;
+      });
+      try { await syncSet('mdb_clientGalleryLegacy', S.legacy); } catch (e) {}
+    }
+    try { await syncSet('mdb_clientGalleryMeta', S.meta); } catch (e) {}
+  }
+  async function setMeta(code, patch) {
+    var c = normCode(code);
+    if (!S.meta || typeof S.meta !== 'object') S.meta = {};
+    var m = {};
+    var cur = metaDe(c);
+    for (var k in cur) { if (Object.prototype.hasOwnProperty.call(cur, k)) m[k] = cur[k]; }
+    for (var k2 in patch) { if (Object.prototype.hasOwnProperty.call(patch, k2)) m[k2] = patch[k2]; }
+    /* On garde la clé tant qu'une retouche existe (photo, description saisie
+       même vide, ou produit masqué). Sinon le produit reste « tel quel ». */
+    if (!m.photo && m.description === undefined && m.actif !== false) delete S.meta[c];
+    else S.meta[c] = m;
+    try { await syncSet('mdb_clientGalleryMeta', S.meta); } catch (e) {}
+    await publishGalerie(false);
+    render();
+  }
+
+  function galerieCarte(it) {
+    var c = normCode(it.code);
+    var m = metaDe(c);
+    var ancienneRetouche = !!(m.photo || m.description !== undefined);
+    return '<div class="adThumb gCard" data-search="' + esc(normTxt(it.code + ' ' + it.titre + ' ' + (it.description || ''))) + '"' + (it.actif ? '' : ' style="opacity:.55"') + '>'
+      + '<div class="im" style="position:relative">'
+      + (it.image ? '<img src="' + esc(it.image) + '" alt="" loading="lazy">' : '<span style="font-size:34px">📦</span>')
+      + ((it.images || []).length > 1 ? '<span class="adBadge b-new" style="position:absolute;bottom:6px;right:6px">' + it.images.length + ' photos</span>' : '')
+      + (it.actif ? '' : '<span class="adBadge b-gray" style="position:absolute;top:6px;left:6px">Masqué</span>')
+      + '</div><div class="bd"><b>' + esc(it.titre) + '</b>'
+      + '<div class="adNote" style="font-weight:900;color:#0b3a6f;letter-spacing:.03em">' + esc(it.code) + '</div>'
+      + '<div class="pr">' + (it.prix ? money(it.prix) : 'Prix sur demande') + '</div>'
+      + '<div class="adNote">' + esc(it.description || '') + '</div>'
+      + '<div style="display:flex;gap:5px;margin-top:7px;flex-wrap:wrap">'
+      + '<button class="adBtn ghost sm" style="background:#f1f5f9;color:#334155;border:1px solid #e2e8f0" data-act="toggle" data-code="' + esc(it.code) + '">' + (it.actif ? 'Masquer' : 'Afficher') + '</button>'
+      + (ancienneRetouche ? '<button class="adBtn dang sm" data-act="reset" data-code="' + esc(it.code) + '" title="Effacer l’ancienne photo/description saisie ici (la fiche Index reprend la main)">Effacer l’ancienne fiche</button>' : '')
+      + '</div></div></div>';
+  }
+
+  function tabGalerie() {
+    var pf = catalogueFinis();
+    var items = galerieItems();
+    var vis = items.filter(function (x) { return x.actif; }).length;
+    var h = '<div class="adCard"><h2>Catalogue produits finis (' + pf.length + ')</h2>'
+      + '<div class="adNote" style="margin-bottom:10px">Cette liste vient <b>automatiquement de l’Index</b> (Facturation › Nomenclature › Produits finis). Les <b>photos et descriptions se saisissent dans la fiche de l’article</b> (bouton ✏️ Modifier). Ici, vous pouvez seulement masquer un produit pour le retirer du catalogue client.</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+      + '<input id="gSearch" placeholder="Rechercher (code, désignation)…" value="' + esc(S.gallerySearch || '') + '" style="flex:1;min-width:200px;padding:9px 11px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px">'
+      + '<button class="adBtn dark sm" id="gRefresh">Actualiser</button>'
+      + '<span class="adNote">' + vis + ' visible(s) · ' + (items.length - vis) + ' masqué(s)</span></div>';
+    if (!pf.length) {
+      h += S.catalogLoaded
+        ? '<div class="adEmpty">Aucun produit fini dans l’Index.<br>Ouvrez l’Index et créez vos produits (Facturation › Nomenclature › type « Produit fini ») : ils apparaîtront ici automatiquement.<br><br><button class="adBtn dark sm" onclick="location.href=\'index.html\'">Ouvrir l’Index</button></div></div>'
+        : '<div class="adEmpty">Catalogue Index illisible pour l’instant (connexion ?). La galerie déjà publiée n’a <b>pas</b> été modifiée : cliquez sur « Actualiser » dès que la connexion revient.</div></div>';
+    } else {
+      h += '<div class="adGrid" id="gGrid">' + items.map(galerieCarte).join('') + '</div>'
+        + '<div class="adNote" style="margin-top:10px">Photo/description : Index › Nomenclature › fiche de l’article. Le catalogue client est mis à jour automatiquement (≤ 45 s).</div></div>';
+    }
+    if ((S.legacy || []).length) {
+      h += '<div class="adCard"><h2>Anciens produits hors Index (' + S.legacy.length + ')</h2>'
+        + '<div class="adNote" style="margin-bottom:10px">Ces produits avaient été ajoutés à la main avant le branchement sur l’Index. Ils ne sont <b>plus publiés</b> aux clients. Supprimez-les, ou recréez-les dans l’Index pour qu’ils reviennent automatiquement.</div>'
+        + '<div class="adList">';
+      S.legacy.forEach(function (g) {
+        h += '<div class="adItem"><div style="flex:1"><div class="t">' + esc(g.titre || 'Produit') + (g.code ? ' <span class="adBadge b-gray">' + esc(g.code) + '</span>' : '') + '</div>'
+          + '<div class="m">' + (g.prix ? money(g.prix) : 'Prix sur demande') + (g.description ? ' · ' + esc(String(g.description).slice(0, 90)) : '') + '</div></div>'
+          + '<button class="adBtn dang sm" data-act="del-legacy" data-id="' + esc(g.id) + '">Supprimer</button></div>';
+      });
+      h += '</div></div>';
+    }
+    return h;
+  }
+
+  function filtrageGalerie() {
+    var q = normTxt(S.gallerySearch || '');
+    var cards = document.querySelectorAll('#gGrid .gCard');
+    Array.prototype.forEach.call(cards, function (c) {
+      var s = c.getAttribute('data-search') || '';
+      c.style.display = (!q || s.indexOf(q) !== -1) ? '' : 'none';
+    });
   }
 
   function bindGalerie() {
-    var add = el('gAdd'); if (!add) return;
-    add.onclick = function () {
-      var titre = (el('gTitre').value || '').trim();
-      var prix = parseFloat(el('gPrix').value) || 0;
-      var code = (el('gCode').value || '').trim();
-      var desc = (el('gDesc').value || '').trim();
-      var file = el('gFile').files && el('gFile').files[0];
-      var err = el('gErr');
-      if (!titre) { err.textContent = 'Le titre est obligatoire.'; return; }
-      err.textContent = '';
-      function push(image) {
-        S.gallery.unshift({ id: uid(), titre: titre, prix: prix, code: code, description: desc, image: image || '', actif: true, createdAt: Date.now() });
-        syncSet('mdb_clientGallery', S.gallery).then(function () { render(); }).catch(function () { err.textContent = 'Enregistrement impossible.'; });
-      }
-      if (!file) { push(''); return; }
-      compressImage(file, 900, function (data) { push(data); });
+    var zone = el('adTabBody');
+    if (!zone) return;
+    var search = el('gSearch');
+    if (search) search.oninput = function () { S.gallerySearch = search.value || ''; filtrageGalerie(); };
+    var refresh = el('gRefresh');
+    if (refresh) refresh.onclick = async function () {
+      refresh.disabled = true;
+      refresh.textContent = '…';
+      await refreshCatalogue();
+      refresh.disabled = false;
+      refresh.textContent = 'Actualiser';
+      render();
     };
-  }
-
-  function compressImage(file, max, cb) {
-    try {
-      var rd = new FileReader();
-      rd.onload = function (ev) {
-        var img = new Image();
-        img.onload = function () {
-          try {
-            var r = Math.min(1, max / Math.max(img.width, img.height));
-            var c = document.createElement('canvas');
-            c.width = Math.max(1, Math.round(img.width * r));
-            c.height = Math.max(1, Math.round(img.height * r));
-            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-            cb(c.toDataURL('image/jpeg', 0.78));
-          } catch (e) { cb(''); }
-        };
-        img.onerror = function () { cb(''); };
-        img.src = ev.target.result;
-      };
-      rd.readAsDataURL(file);
-    } catch (e) { cb(''); }
+    zone.addEventListener('click', function (ev) {
+      var b = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+      if (!b) return;
+      var act = b.getAttribute('data-act');
+      var code = b.getAttribute('data-code') || '';
+      if (act === 'toggle') {
+        var actif = metaDe(code).actif !== false;
+        setMeta(code, { actif: !actif });
+        return;
+      }
+      if (act === 'reset') {
+        if (!confirm('Effacer l’ancienne photo/description saisie dans cet espace ? La fiche de l’Index reprendra la main.')) return;
+        var c = normCode(code);
+        if (S.meta) delete S.meta[c];
+        syncSet('mdb_clientGalleryMeta', S.meta || {}).then(publishGalerie).then(render).catch(function () {});
+        return;
+      }
+      if (act === 'del-legacy') {
+        var id = b.getAttribute('data-id');
+        if (!confirm('Supprimer cet ancien produit ?')) return;
+        S.legacy = (S.legacy || []).filter(function (x) { return String(x.id) !== String(id); });
+        syncSet('mdb_clientGalleryLegacy', S.legacy).then(render).catch(function () {});
+        return;
+      }
+    });
+    filtrageGalerie();
   }
 
   function tabCotations() {
@@ -328,16 +531,6 @@
   }
 
   /* ---------- actions globales ---------- */
-  window.adToggleGallery = function (id) {
-    var g = S.gallery.filter(function (x) { return x.id === id; })[0]; if (!g) return;
-    g.actif = g.actif === false;
-    syncSet('mdb_clientGallery', S.gallery).then(render).catch(function () {});
-  };
-  window.adDeleteGallery = function (id) {
-    if (!confirm('Supprimer ce produit de la galerie ?')) return;
-    S.gallery = S.gallery.filter(function (x) { return x.id !== id; });
-    syncSet('mdb_clientGallery', S.gallery).then(render).catch(function () {});
-  };
   window.adSetQuoteStatus = function (id, st) {
     var q = S.quotes.filter(function (x) { return x.id === id; })[0]; if (!q) return;
     q.statut = st; q.updatedAt = Date.now();
@@ -416,11 +609,13 @@
     }, 60000);
     setInterval(async function () {
       try {
+        var changed = await refreshCatalogue();
         var q = await syncGet('mdb_clientQuotes') || [];
         var o = await syncGet('mdb_clientOrders') || [];
         var t = await syncGet('mdb_clientThreads') || [];
         var before = S.quotes.length + ':' + S.orders.length + ':' + S.threads.length;
-        if (q.length + ':' + o.length + ':' + t.length !== before) { S.quotes = q; S.orders = o; S.threads = t; render(); }
+        if (q.length + ':' + o.length + ':' + t.length !== before) { S.quotes = q; S.orders = o; S.threads = t; changed = true; }
+        if (changed && S.tab === 'galerie' && !S.thread) render();
       } catch (e) {}
     }, 45000);
   }
