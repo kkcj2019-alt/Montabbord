@@ -12117,16 +12117,16 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
   });
 
   r.push({
-    nom: 'Coût de production : hypothèses de calcul repliées, palette visible',
+    nom: 'Coût de production : hypothèses de calcul repliées, articles automatiques',
     app: 'index.html', store: storeRealiste,
     code: `
       var h = render_cout_revient.toString();
       var replie = /_acMonoOpen/.test(h) && /Hypoth/.test(h);
-      var libelle = /Palette \\(produit fini\\)/.test(h);
-      /* l'article reste visible, les 3 hypotheses sont derriere un bouton */
-      var articleHorsBloc = h.indexOf('id="acCArt"') !== -1;
+      /* Depuis le 06/11/2026 : plus de choix d'article — détectés automatiquement */
+      var libelle = /détectés automatiquement/.test(h);
+      var articleHorsBloc = h.indexOf('id="acCArt"') === -1;
       (replie && libelle && articleHorsBloc)
-        ? 'OK : hypotheses derriere un bouton, article toujours visible'
+        ? 'OK : hypotheses derriere un bouton, articles detectes automatiquement'
         : 'ECHEC replie=' + replie + ' libelle=' + libelle + ' article=' + articleHorsBloc
     `,
     attenduPrefixe: 'OK'

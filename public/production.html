@@ -10,7 +10,7 @@
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
 <script>
-window.__APP_VERSION='2026-11-06-384';
+window.__APP_VERSION='2026-11-06-385';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -5402,6 +5402,26 @@ function acInterrogerProduction(mode, d1, d2) {
     }
   } catch (eMont) {}
 
+  /* Jours SANS fiche de production : on prend le POINTAGE MONTAGE de la
+     Paie (la fiche prime quand les deux existent). */
+  try {
+    var _pm = acGetPointageMontagePeriode(du, au) || {};
+    (_pm.lignes || []).forEach(function (ml) {
+      if (!ml || !ml.date || joursProductifsSet[ml.date]) return;
+      var codeM = String(ml.article_code || '').trim().toUpperCase(), qM = parseFloat(ml.quantite) || 0;
+      if (!codeM || !(qM > 0)) return;
+      var artM = parCode[codeM];
+      var idM = artM ? artM.id : ((typeof acTrouverArticle === 'function' && (acTrouverArticle(codeM) || {}).id) || codeM);
+      if (!cumul[idM]) cumul[idM] = { article_id: idM, code: codeM, designation: (artM && artM.designation) || codeM, qte: 0, tauxPerte: 0, fiches: [] };
+      cumul[idM].qte += qM; totQ += qM;
+      if (cumul[idM].fiches.indexOf('montage ' + ml.date) === -1) cumul[idM].fiches.push('montage ' + ml.date);
+      window.__acJoursMontage = window.__acJoursMontage || {};
+      window.__acJoursMontage[ml.date] = true;
+    });
+    if (window.__acJoursMontage) { Object.keys(window.__acJoursMontage).forEach(function (dM) { if (dM >= du && dM <= au) joursProductifsSet[dM] = true; }); window.__acJoursMontage = null; }
+  } catch (ePM) {}
+  /* Le tableau de bord du haut suit la même période */
+  try { window._rbDu = du; window._rbAu = au; localStorage.setItem('mdb_rbPeriode', JSON.stringify({ du: du, au: au })); } catch (eRb) {}
   var nbJours = Math.max(1, Object.keys(joursProductifsSet).length);
   if (isJour) nbJours = 1;
 
@@ -5450,8 +5470,8 @@ function acInterrogerProduction(mode, d1, d2) {
     ? ('Journée du ' + fmtD(jourX) + ' : ' + prods.length + ' fiche(s), ' + comp.length + ' article(s), ' + fmt(totQ) + ' palette(s)')
     : ('Période du ' + fmtD(du) + ' au ' + fmtD(au) + ' : ' + prods.length + ' fiche(s), ' + comp.length + ' article(s), ' + fmt(totQ) + ' palette(s), ' + nbJours + ' j');
   /* Sans fiche : on le DIT, au lieu d'un toast vert « 0 palette(s) ». */
-  if (prods.length === 0) {
-    msgToast('Aucune fiche de production sur cette periode - composition et quantite remises a 0.', 'error');
+  if (prods.length === 0 && !(totQ > 0)) {
+    msgToast('Aucune fiche de production ni pointage montage sur cette periode - composition et quantite remises a 0.', 'error');
   } else {
     msgToast(notif, 'success');
   }
@@ -9107,7 +9127,7 @@ function render_cout_revient() {
   h += '<div><h2 style="font-size:1.15rem;font-weight:900;color:#0f172a;margin:0">Coût de Production Analytique — Tableau Continu & Rentabilité</h2>' +
        '<div style="font-size:.72rem;color:var(--dim)">Modèle d’exploitation complet (CVAMP · CVPPF · CVD · Structure & Marge nette)</div></div>';
   h += '<div style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap">';
-  h += '<button class="btn btn-sm" onclick="printCoutCampagneTable()" style="background:#0f172a;color:#fff;font-weight:800" title="Imprimer le tableau complet de coût de revient de la campagne">🖨️ Imprimer Tableau Campagne</button>';
+  h += '<button class="btn btn-sm" onclick="rbImprimer()" style="background:#0f172a;color:#fff;font-weight:800" title="Imprimer le tableau complet de coût de revient de la campagne">🖨️ Imprimer Tableau Campagne</button>';
   var artIdPrint = (document.getElementById('acCArt') || {}).value || cfg.articleId || (curArt && curArt.id) || '';
   h += '<button class="btn btn-sm btn-sec" onclick="printCoutArticle(\'' + escJ(artIdPrint) + '\')" title="Imprimer la fiche condensée pour 1 seule palette">📄 Fiche 1 palette</button>';
   h += '</div></div>';
@@ -9142,12 +9162,7 @@ function render_cout_revient() {
       h += '<div style="background:#f8fafc;border:1px dashed #94a3b8;border-radius:8px;padding:.6rem .8rem;margin-bottom:.8rem">';
       h += '<div style="font-size:.7rem;font-weight:800;color:#475569;margin-bottom:.4rem">⚙️ Sélection mono-palette (pour impression fiche 1 palette unitaire) :</div>';
       h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem;align-items:flex-end">';
-      h += '<div><label style="font-size:.66rem;font-weight:800;color:#1e293b;display:block;margin-bottom:2px">1. Palette (Article)</label><select id="acCArt" onchange="acChangePalette(this.value)" style="width:100%;padding:.38rem .5rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.82rem;font-weight:700">';
-      for (var i = 0; i < arts.length; i++) {
-        var a = arts[i] || {};
-        h += '<option value="' + escH(a.id) + '"' + (String(a.id) === String(cfg.articleId) ? ' selected' : '') + '>' + escH((a.code ? a.code + ' · ' : '') + (a.designation || 'Article')) + '</option>';
-      }
-      h += '</select></div>';
+      h += '<div style="font-size:.74rem;color:#334155;flex:1;min-width:220px;padding:.3rem 0"><b>Articles :</b> détectés automatiquement (fiches de production, sinon pointage montage) — aucun choix à faire.</div>';
       h += '<div><label style="font-size:.66rem;font-weight:800;color:#92400e;display:block;margin-bottom:2px">2. Prix Bois au m³ (FCFA)</label>' +
            '<input type="number" id="acCPxM3" min="0" step="5000" value="' + prixM3Defaut + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #d97706;border-radius:6px;font-size:.82rem;font-weight:700;color:#92400e;background:#fffbeb">' +
            '</div>';
@@ -9179,12 +9194,7 @@ function render_cout_revient() {
   } else {
     /* Mode Mono-article standard (si 0 ou 1 seul article) */
     h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem;align-items:flex-end;margin-bottom:.8rem">';
-    h += '<div><label style="font-size:.66rem;font-weight:800;color:#1e293b;display:block;margin-bottom:2px">1. Palette (Article)</label><select id="acCArt" onchange="acChangePalette(this.value)" style="width:100%;padding:.38rem .5rem;border:1.5px solid #0f172a;border-radius:6px;font-size:.82rem;font-weight:700">';
-    for (var i = 0; i < arts.length; i++) {
-      var a = arts[i] || {};
-      h += '<option value="' + escH(a.id) + '"' + (String(a.id) === String(cfg.articleId) ? ' selected' : '') + '>' + escH((a.code ? a.code + ' · ' : '') + (a.designation || 'Article')) + '</option>';
-    }
-    h += '</select></div>';
+    h += '<div style="font-size:.74rem;color:#334155;flex:1;min-width:220px;padding:.3rem 0"><b>Articles :</b> détectés automatiquement (fiches de production, sinon pointage montage) — aucun choix à faire.</div>';
     h += '<div><label style="font-size:.66rem;font-weight:800;color:#92400e;display:block;margin-bottom:2px">2. Prix Bois au m³ (FCFA)</label>' +
          '<input type="number" id="acCPxM3" min="0" step="5000" value="' + prixM3Defaut + '" onchange="acLaborSave()" style="width:100%;padding:.38rem .5rem;border:1.5px solid #d97706;border-radius:6px;font-size:.82rem;font-weight:700;color:#92400e;background:#fffbeb">' +
          '</div>';
@@ -32603,22 +32613,48 @@ function rbCalculer(du, au) {
   return R;
 }
 
+
+/* Impression du TABLEAU DE BORD de rentabilité (période choisie) */
+function rbImprimer() {
+  var el = document.getElementById('rbBoard');
+  if (!el) { try { toast('Tableau de bord introuvable', 'error'); } catch (e) {} return; }
+  var c = el.cloneNode(true);
+  c.querySelectorAll('details').forEach(function (d) { d.setAttribute('open', ''); });
+  c.querySelectorAll('button,input,select,.rb-noprint').forEach(function (b) { b.remove(); });
+  c.querySelectorAll('tr[style*="display:none"],tr[style*="display: none"]').forEach(function (t) { t.style.display = ''; });
+  var css = document.getElementById('acxCss');
+  var p = rbPeriode();
+  var ent = ''; try { var E = getEntreprise() || {}; ent = E.nom || E.raisonSociale || E.name || ''; } catch (eE) {}
+  var titre = 'Rentabilité ' + fmtD(p.du) + (p.au !== p.du ? ' au ' + fmtD(p.au) : '');
+  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + escH(titre) + '</title>' + (css ? css.outerHTML : '') +
+    '<style>@page{size:A4 portrait;margin:10mm}body{font-family:Arial,Helvetica,sans-serif;color:#0f172a;margin:0;padding:8px;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    '.card{border:0!important;padding:0!important}details>summary{list-style:none;font-weight:800;margin:10px 0 4px}h1{font-size:18px;margin:0 0 2px}' +
+    '.acx-t{font-size:11px}.acx-t td,.acx-t th{padding:5px 8px}.pb{display:flex;justify-content:flex-end;margin-bottom:8px}@media print{.pb{display:none}}</style></head><body>' +
+    '<div class="pb"><button onclick="window.print()" style="padding:8px 14px;font-weight:700;background:#0f172a;color:#fff;border:none;border-radius:8px;cursor:pointer">🖨 Imprimer / Enregistrer en PDF</button></div>' +
+    '<h1>' + escH((ent ? ent + ' — ' : '') + 'Compte d’exploitation · ' + titre) + '</h1><div style="font-size:11px;color:#64748b;margin-bottom:10px">Édité le ' + fmtD(today()) + '</div>' +
+    c.innerHTML + '</body></html>';
+  var w = window.open('', '_blank');
+  if (!w) { alert('Autorisez les fenêtres pop-up pour imprimer.'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+  setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 400);
+}
 function rbTableauDeBordHtml() {
   var p = rbPeriode();
   var R = null, err = '';
   try { R = rbCalculer(p.du, p.au); } catch (e) { err = e.message || String(e); }
   var f = function (n) { return fmt(Math.round(n || 0)); };
   var ch = function (k, l) { return '<button class="btn btn-sm" style="font-size:.72rem;padding:3px 10px;border-radius:999px" onclick="rbRaccourci(\'' + k + '\')">' + l + '</button>'; };
-  var h = '<div class="card" style="padding:14px 16px;margin-bottom:14px;border:2px solid #0f172a;border-radius:14px">';
+  var h = '<div id="rbBoard" class="card" style="padding:14px 16px;margin-bottom:14px;border:2px solid #0f172a;border-radius:14px">';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">' +
     '<div><div style="font-size:1.1rem;font-weight:900;color:#0f172a">📊 Rentabilité — tableau de bord automatique</div>' +
     '<div style="font-size:.74rem;color:#64748b">Production (fiches, sinon pointage montage) · salaires bruts de la Paie · charges au prorata des jours ouvrés</div></div>' +
-    '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">' + ch('jour', 'Aujourd’hui') + ch('hier', 'Hier') + ch('semaine', 'Cette semaine') + ch('mois', 'Ce mois') + ch('moisPrec', 'Mois dernier') +
+    '<div class="rb-noprint" style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">' + ch('jour', 'Aujourd’hui') + ch('hier', 'Hier') + ch('semaine', 'Cette semaine') + ch('mois', 'Ce mois') + ch('moisPrec', 'Mois dernier') +
     '<input type="date" value="' + p.du + '" onchange="rbSetPeriode(this.value, window._rbAu)" style="font-size:.75rem;padding:3px 6px;border:1px solid #cbd5e1;border-radius:6px">' +
     '<span style="font-size:.75rem">→</span><input type="date" value="' + p.au + '" onchange="rbSetPeriode(window._rbDu, this.value)" style="font-size:.75rem;padding:3px 6px;border:1px solid #cbd5e1;border-radius:6px"></div></div>';
   if (err) return h + '<div style="color:#b91c1c;font-size:.8rem">Calcul impossible : ' + escH(err) + '</div></div>';
   if (!(R.Q > 0)) {
-    h += '<div style="padding:14px;border:1px dashed #cbd5e1;border-radius:10px;color:#64748b;font-size:.85rem;text-align:center">Aucune production trouvée du ' + fmtD(p.du) + ' au ' + fmtD(p.au) + ' (ni fiche de production, ni pointage montage).</div>';
+    h += '<div style="padding:14px;border:1px dashed #cbd5e1;border-radius:10px;color:#64748b;font-size:.85rem;text-align:center">Aucune production trouvée du ' + fmtD(p.du) + ' au ' + fmtD(p.au) + ' (ni fiche de production, ni pointage montage).' +
+      '<div style="margin-top:8px;display:flex;gap:8px;justify-content:center"><button class="btn btn-sm" style="background:#0f172a;color:#fff;border:none;font-weight:700" onclick="rbRaccourci(\'mois\')">Voir ce mois</button><button class="btn btn-sm" onclick="rbRaccourci(\'moisPrec\')">Voir le mois dernier</button></div></div>';
   } else {
     h += acCascadeHtml(R);
   }
