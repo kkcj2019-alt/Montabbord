@@ -82,6 +82,17 @@
 .adDlvRow{display:flex;gap:6px;margin:6px 0 4px}
 .adDlvRow input{flex:1;min-width:0;padding:6px 8px;border:1px solid #cbd5e1;border-radius:7px;font-size:11.5px}
 .adDlvForm .note{font-size:10px;color:#94a3b8;margin:4px 0 6px;line-height:1.4}
+<style>
+.adClientLogo{width:52px;height:52px;border-radius:12px;border:1px solid #e2e8f0;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;flex:0 0 auto}
+.adClientLogo img{width:100%;height:100%;object-fit:contain;padding:4px}
+.adClientLogo span{font-size:18px;font-weight:900;color:#0b3a6f;background:#eef4fb;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+<style id="adArchiveCss">
+.adFilter{display:inline-flex;gap:5px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:9px;padding:3px}
+.adFilter button{border:none;background:transparent;border-radius:7px;padding:5px 10px;font-size:11px;font-weight:900;color:#64748b;cursor:pointer;white-space:nowrap}
+.adFilter button.on{background:#0b3a6f;color:#fff;box-shadow:0 2px 6px rgba(11,58,111,.25)}
+.adArchBadge{display:inline-block;border-radius:999px;padding:2px 8px;font-size:9.5px;font-weight:900;background:#e2e8f0;color:#475569;margin-left:4px}
+.adRowActions{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px}
+.adRowActions button{flex:1 1 auto}
 </style></style>
 </head>
 <body>
@@ -143,6 +154,15 @@
     var r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) throw new Error('sync');
     return true;
+  }
+  async function publishClientLogos() {
+    try {
+      var arr = Object.keys(S.accounts || {}).map(function (k) {
+        var c = S.accounts[k] || {};
+        return c.logo ? { nom: c.societe || c.nom || k, logo: c.logo } : null;
+      }).filter(Boolean);
+      await syncSet('mdb_clientLogos', arr);
+    } catch (e) {}
   }
   async function loadAll() {
     S.ent = (await syncGet('mdb_entreprise')) || {};
@@ -578,13 +598,54 @@
     filtrageGalerie();
   }
 
+  function isArchived(x) { return !!(x && (x.archiveAt || x.archived === true)); }
+  function archiveChips(kind, cur, actifs, archives) {
+    var total = actifs + archives;
+    return '<div class="adFilter">'
+      + '<button type="button" class="' + (cur === 'actifs' ? 'on' : '') + '" onclick="adSetListFilter(\'' + kind + '\',\'actifs\')">En cours (' + actifs + ')</button>'
+      + '<button type="button" class="' + (cur === 'archives' ? 'on' : '') + '" onclick="adSetListFilter(\'' + kind + '\',\'archives\')">Archivés (' + archives + ')</button>'
+      + '<button type="button" class="' + (cur === 'tous' ? 'on' : '') + '" onclick="adSetListFilter(\'' + kind + '\',\'tous\')">Tous (' + total + ')</button>'
+      + '</div>';
+  }
+  window.adSetListFilter = function (kind, val) {
+    if (kind === 'orders') S.orderFilter = val; else S.quoteFilter = val;
+    render();
+  };
+  window.adArchiveOrder = function (id, on) {
+    var o = (S.orders || []).filter(function (x) { return x && x.id === id; })[0]; if (!o) return;
+    if (on) { o.archiveAt = Date.now(); o.archived = true; } else { o.archiveAt = null; o.archived = false; }
+    o.updatedAt = Date.now();
+    syncSet('mdb_clientOrders', S.orders).then(render).catch(function () {});
+  };
+  window.adArchiveQuote = function (id, on) {
+    var q = (S.quotes || []).filter(function (x) { return x && x.id === id; })[0]; if (!q) return;
+    if (on) { q.archiveAt = Date.now(); q.archived = true; } else { q.archiveAt = null; q.archived = false; }
+    q.updatedAt = Date.now();
+    syncSet('mdb_clientQuotes', S.quotes).then(render).catch(function () {});
+  };
+  window.adDeleteOrder = function (id) {
+    if (!confirm('Supprimer définitivement cette commande ? Cette action est irréversible.')) return;
+    S.orders = (S.orders || []).filter(function (x) { return !x || x.id !== id; });
+    syncSet('mdb_clientOrders', S.orders).then(render).catch(function () {});
+  };
+  window.adDeleteQuote = function (id) {
+    if (!confirm('Supprimer définitivement cette demande de cotation ? Cette action est irréversible.')) return;
+    S.quotes = (S.quotes || []).filter(function (x) { return !x || x.id !== id; });
+    syncSet('mdb_clientQuotes', S.quotes).then(render).catch(function () {});
+  };
   function tabCotations() {
-    var list = (S.quotes || []).slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
-    var h = '<div class="adCard"><h2>Demandes de cotation (' + list.length + ')</h2>';
-    if (!list.length) return h + '<div class="adEmpty">Aucune demande.</div></div>';
+    var all = (S.quotes || []).slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+    var actifs = all.filter(function (q) { return !isArchived(q); });
+    var archives = all.filter(isArchived);
+    var mode = S.quoteFilter || 'actifs';
+    var list = mode === 'archives' ? archives : (mode === 'tous' ? all : actifs);
+    var h = '<div class="adCard"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px"><h2 style="margin:0">Demandes de cotation (' + list.length + ')</h2>' + archiveChips('quotes', mode, actifs.length, archives.length) + '</div>';
+    h += '<div class="adNote" style="margin-bottom:8px">Une cotation validée ou annulée est automatiquement classée dans <b>Archivés</b>. Vous pouvez aussi archiver, restaurer ou supprimer un dossier.</div>';
+    if (!list.length) return h + '<div class="adEmpty">Aucune demande dans cette catégorie.</div></div>';
     h += '<div class="adList">';
     list.forEach(function (q) {
-      h += '<div class="adItem"><div style="flex:1;min-width:220px"><div class="t">' + esc(q.numero || 'Cotation') + statusBadge(q.statut) + '</div>'
+      var arch = isArchived(q);
+      h += '<div class="adItem"><div style="flex:1;min-width:220px"><div class="t">' + esc(q.numero || 'Cotation') + statusBadge(q.statut) + (arch ? ' <span class="adArchBadge">Archivé</span>' : '') + '</div>'
         + '<div class="m"><b>' + esc(q.clientNom || '') + '</b> · ' + esc(q.email || '') + (q.tel ? ' · ' + esc(q.tel) : '') + '</div>'
         + '<div class="m">' + (q.items || []).map(function (it) { return esc(it.titre || '') + ' × ' + (it.qte || 0); }).join(' · ') + (q.dateBesoin ? ' · souhaité ' + esc(q.dateBesoin) : '') + '</div>'
         + (function(){
@@ -598,10 +659,12 @@
           })()
         + ((q.tech && q.tech.composants) || q.composants ? '<div class="m"><b>Composants :</b> ' + esc((q.tech && q.tech.composants) || q.composants) + '</div>' : '')
         + (q.besoin ? '<div class="m"><b>Besoin :</b> ' + esc(q.besoin) + '</div>' : '')
-        + '<div class="m">Reçue le ' + fmtDT(q.createdAt) + '</div></div>'
-        + '<div style="display:flex;flex-direction:column;gap:6px;min-width:190px"><select onchange="adSetQuoteStatus(\'' + esc(q.id) + '\',this.value)" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px"><option value="nouvelle"' + (q.statut === 'nouvelle' ? ' selected' : '') + '>Nouvelle</option><option value="en_cours"' + (q.statut === 'en_cours' ? ' selected' : '') + '>En cours</option><option value="validee"' + (q.statut === 'validee' ? ' selected' : '') + '>Validée</option><option value="annulee"' + (q.statut === 'annulee' ? ' selected' : '') + '>Annulée</option></select>'
+        + '<div class="m">Reçue le ' + fmtDT(q.createdAt) + (arch && q.archiveAt ? ' · archivée le ' + fmtDT(q.archiveAt) : '') + '</div></div>'
+        + '<div style="display:flex;flex-direction:column;gap:6px;min-width:200px"><select onchange="adSetQuoteStatus(\'' + esc(q.id) + '\',this.value)" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px"><option value="nouvelle"' + (q.statut === 'nouvelle' ? ' selected' : '') + '>Nouvelle</option><option value="en_cours"' + (q.statut === 'en_cours' ? ' selected' : '') + '>En cours</option><option value="validee"' + (q.statut === 'validee' ? ' selected' : '') + '>Validée</option><option value="annulee"' + (q.statut === 'annulee' ? ' selected' : '') + '>Annulée</option></select>'
         + '<textarea id="qa_' + esc(q.id) + '" placeholder="Réponse au client…" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;min-height:52px"></textarea>'
-        + '<button class="adBtn dark sm" onclick="adReplyQuote(\'' + esc(q.id) + '\')">Envoyer la réponse</button></div></div>';
+        + '<button class="adBtn dark sm" onclick="adReplyQuote(\'' + esc(q.id) + '\')">Envoyer la réponse</button>'
+        + '<div class="adRowActions"><button class="adBtn ' + (arch ? 'ghost' : 'dark') + ' sm" onclick="adArchiveQuote(\'' + esc(q.id) + '\',' + (arch ? 'false' : 'true') + ')">' + (arch ? '↩ Restaurer' : '📦 Archiver') + '</button>'
+        + '<button class="adBtn dang sm" onclick="adDeleteQuote(\'' + esc(q.id) + '\')">🗑 Supprimer</button></div></div></div>';
     });
     return h + '</div></div>';
   }
@@ -750,14 +813,21 @@
   };
 
   function tabCommandes() {
-    var list = (S.orders || []).slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
-    var h = '<div class="adCard"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0">Commandes (' + list.length + ')</h2><button class="adBtn dark sm" onclick="adSyncAllDeliveries(true)">↻ Récupérer les BL de l\'Index</button></div>';
-    if (!list.length) return h + '<div class="adEmpty">Aucune commande.</div></div>';
+    var all = (S.orders || []).slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+    var actifs = all.filter(function (o) { return !isArchived(o); });
+    var archives = all.filter(isArchived);
+    var mode = S.orderFilter || 'actifs';
+    var list = mode === 'archives' ? archives : (mode === 'tous' ? all : actifs);
+    var h = '<div class="adCard"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px"><h2 style="margin:0">Commandes (' + list.length + ')</h2><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' + archiveChips('orders', mode, actifs.length, archives.length) + '<button class="adBtn dark sm" onclick="adSyncAllDeliveries(true)">↻ Récupérer les BL de l\'Index</button></div></div>';
+    h += '<div class="adNote" style="margin-bottom:8px">Une commande <b>livrée</b> ou <b>annulée</b> est automatiquement classée dans <b>Archivés</b>. Vous pouvez archiver, restaurer ou supprimer un dossier.</div>';
+    if (!list.length) return h + '<div class="adEmpty">Aucune commande dans cette catégorie.</div></div>';
     h += '<div class="adList">';
     list.forEach(function (o) {
       var pr = orderProgress(o);
       var open = S.deliverFor === o.id;
+      var arch = isArchived(o);
       h += '<div class="adItem"><div style="flex:1;min-width:240px"><div class="t">' + esc(o.numero || 'Commande') + statusBadge(o.statut)
+        + (arch ? ' <span class="adArchBadge">Archivé</span>' : '')
         + (pr.complete ? '<span class="adBadge b-ok">Livraison terminée</span>' : (pr.delivered > 0 ? '<span class="adBadge b-wait">Partielle</span>' : '')) + '</div>'
         + '<div class="m"><b>' + esc(o.clientNom || '') + '</b> · ' + esc(o.email || '') + (o.tel ? ' · ' + esc(o.tel) : '') + '</div>'
         + '<div class="m">' + (o.items || []).map(function (it) { return esc(it.titre || '') + ' × ' + (it.qte || 0); }).join(' · ') + '</div>'
@@ -769,13 +839,15 @@
         + (o.bcImported ? '<div class="m" style="color:#15803d;font-weight:900">✅ BC créé dans l\'Index : ' + esc(o.bcIndexNumero || '') + '</div>' : '')
         + progressHtml(pr)
         + deliveryHistoryHtml(o)
-        + '<div class="m">Reçue le ' + fmtDT(o.createdAt) + '</div></div>'
+        + '<div class="m">Reçue le ' + fmtDT(o.createdAt) + (arch && o.archiveAt ? ' · archivée le ' + fmtDT(o.archiveAt) : '') + '</div></div>'
         + '<div style="display:flex;flex-direction:column;gap:6px;min-width:200px">'
         + '<select onchange="adSetOrderStatus(\'' + esc(o.id) + '\',this.value)" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px"><option value="nouvelle"' + (o.statut === 'nouvelle' ? ' selected' : '') + '>Nouvelle</option><option value="en_cours"' + (o.statut === 'en_cours' ? ' selected' : '') + '>En cours</option><option value="validee"' + (o.statut === 'validee' ? ' selected' : '') + '>Confirmée</option><option value="livree"' + (o.statut === 'livree' ? ' selected' : '') + '>Livrée</option><option value="annulee"' + (o.statut === 'annulee' ? ' selected' : '') + '>Annulée</option></select>'
         + '<button class="adBtn dark sm" onclick="adToggleDelivery(\'' + esc(o.id) + '\')">' + (open ? '✕ Fermer' : '📦 Enregistrer une livraison') + '</button>'
         + (open ? deliveryFormHtml(o) : '')
         + '<textarea id="oa_' + esc(o.id) + '" placeholder="Message au client…" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;min-height:52px"></textarea>'
-        + '<button class="adBtn dark sm" onclick="adReplyOrder(\'' + esc(o.id) + '\')">Envoyer</button></div></div>';
+        + '<button class="adBtn dark sm" onclick="adReplyOrder(\'' + esc(o.id) + '\')">Envoyer</button>'
+        + '<div class="adRowActions"><button class="adBtn ' + (arch ? 'ghost' : 'dark') + ' sm" onclick="adArchiveOrder(\'' + esc(o.id) + '\',' + (arch ? 'false' : 'true') + ')">' + (arch ? '↩ Restaurer' : '📦 Archiver') + '</button>'
+        + '<button class="adBtn dang sm" onclick="adDeleteOrder(\'' + esc(o.id) + '\')">🗑 Supprimer</button></div></div></div>';
     });
     return h + '</div></div>';
   }
@@ -866,7 +938,7 @@
     h += '<div class="adList">';
     keys.forEach(function (k) {
       var c = S.accounts[k] || {};
-      h += '<div class="adItem"><div><div class="t">' + esc(c.societe || c.nom || k) + (c.actif === false ? ' <span class="adBadge b-bad">Désactivé</span>' : ' <span class="adBadge b-ok">Actif</span>') + '</div><div class="m">Contact : ' + esc(c.contact || c.nom || '-') + '</div><div class="m">' + esc(c.email || k) + (c.tel ? ' · ' + esc(c.tel) : '') + '</div><div class="m">Inscrit le ' + fmtDT(c.createdAt) + '</div></div>'
+      h += '<div class="adItem"><div style="display:flex;gap:12px;align-items:center;min-width:0;flex:1"><div class="adClientLogo">' + (c.logo ? '<img src="' + esc(c.logo) + '" alt="logo ' + esc(c.societe || k) + '">' : '<span>' + esc(String(c.societe || c.nom || k).charAt(0).toUpperCase()) + '</span>') + '</div><div style="min-width:0"><div class="t">' + esc(c.societe || c.nom || k) + (c.actif === false ? ' <span class="adBadge b-bad">Désactivé</span>' : ' <span class="adBadge b-ok">Actif</span>') + '</div><div class="m">Contact : ' + esc(c.contact || c.nom || '-') + '</div><div class="m">' + esc(c.email || k) + (c.tel ? ' · ' + esc(c.tel) : '') + '</div><div class="m">Inscrit le ' + fmtDT(c.createdAt) + '</div></div></div>'
         + '<button class="adBtn ' + (c.actif === false ? 'dark' : 'dang') + ' sm" onclick="adToggleClient(\'' + esc(k) + '\')">' + (c.actif === false ? 'Réactiver' : 'Désactiver') + '</button></div>';
     });
     return h + '</div></div>';
@@ -876,11 +948,15 @@
   window.adSetQuoteStatus = function (id, st) {
     var q = S.quotes.filter(function (x) { return x.id === id; })[0]; if (!q) return;
     q.statut = st; q.updatedAt = Date.now();
+    if (st === 'validee' || st === 'annulee') { q.archiveAt = q.archiveAt || Date.now(); q.archived = true; }
+    else { q.archiveAt = null; q.archived = false; }
     syncSet('mdb_clientQuotes', S.quotes).then(function () { render(); }).catch(function () {});
   };
   window.adSetOrderStatus = function (id, st) {
     var o = S.orders.filter(function (x) { return x.id === id; })[0]; if (!o) return;
     o.statut = st; o.updatedAt = Date.now();
+    if (st === 'livree' || st === 'annulee') { o.archiveAt = o.archiveAt || Date.now(); o.archived = true; }
+    else { o.archiveAt = null; o.archived = false; }
     /* Acceptation = création automatique du BC dans l'Index (Facturation → BC). */
     if (String(st) === 'validee' && !o.bcImported) {
       var bc = null;
@@ -1000,6 +1076,7 @@
     }
     await loadAll();
     try { await adSyncAllDeliveries(false); } catch (eDlv) {}
+    await publishClientLogos();
     await adMarkDelivered();
     await setPresence(true);
     render();
