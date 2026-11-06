@@ -5339,6 +5339,38 @@ function acInterrogerProduction(mode, d1, d2) {
     if (aFait) joursProductifsSet[d] = true;
   });
 
+  /* Aucune fiche de production sur la periode : la campagne doit quand
+     meme refleter les palettes REELLEMENT pointees dans Paye > Montage. */
+  if (prods.length === 0) {
+    try {
+      var pm = acGetPointageMontagePeriode(du, au);
+      (pm.lignes || []).forEach(function (l) {
+        if (l && l.date) joursProductifsSet[String(l.date).slice(0, 10)] = true;
+      });
+      Object.keys(pm.parArticle || {}).forEach(function (code) {
+        var it = pm.parArticle[code];
+        var q = parseFloat(it && it.qte) || 0;
+        if (!(q > 0)) return;
+        var codeU = String(code || '').trim().toUpperCase();
+        var art = parCode[codeU];
+        var id = art ? art.id : codeU;
+        var cleC = 'C::' + codeU;
+        if (!cumul[cleC]) {
+          cumul[cleC] = {
+            article_id: id,
+            code: codeU,
+            designation: (art && art.designation) || it.designation || codeU,
+            qte: 0,
+            tauxPerte: 0,
+            fiches: []
+          };
+        }
+        cumul[cleC].qte += q;
+        totQ += q;
+      });
+    } catch (eMont) {}
+  }
+
   var nbJours = Math.max(1, Object.keys(joursProductifsSet).length);
   if (isJour) nbJours = 1;
 
@@ -5348,6 +5380,12 @@ function acInterrogerProduction(mode, d1, d2) {
   compIds.forEach(function(id) {
     var item = cumul[id];
     var pv = acPrixNomenclature(item.article_id);
+    if (!(pv > 0)) {
+      try {
+        var _am = acTrouverArticle(item.article_id) || acTrouverArticle(item.code) || {};
+        pv = parseFloat(_am.prix_vente || _am.prixVente || _am.pv || _am.prixUnitaire || 0) || 0;
+      } catch (ePv) {}
+    }
     comp.push({
       article_id: item.article_id,
       qte: Math.round(item.qte),
@@ -7651,6 +7689,28 @@ function imprimerBaseReparation(id) {
 
 
 
+function _acCompClean(comp) {
+  var arts = (typeof getArticles === 'function' ? getArticles() : []) || [];
+  var out = [], map = {};
+  (Array.isArray(comp) ? comp : []).forEach(function (l) {
+    if (!l || !l.article_id) return;
+    var aid = String(l.article_id);
+    var a = null;
+    for (var i = 0; i < arts.length; i++) { if (arts[i] && String(arts[i].id) === aid) { a = arts[i]; break; } }
+    if (!a) {
+      for (var j = 0; j < arts.length; j++) { if (arts[j] && String(arts[j].code || '').trim().toUpperCase() === aid.trim().toUpperCase()) { a = arts[j]; break; } }
+    }
+    if (a && !acIsProduitFini(a)) return;
+    var key = String(a.id);
+    if (!map[key]) {
+      map[key] = { article_id: a.id, qte: 0, prixVente: l.prixVente, tauxPerte: l.tauxPerte };
+      out.push(map[key]);
+    }
+    map[key].qte += (parseFloat(l.qte) || 0);
+    if (l.prixVente !== undefined && l.prixVente !== null && l.prixVente !== '' && !map[key].prixVente) map[key].prixVente = l.prixVente;
+  });
+  return out;
+}
 function acComposition() {
   var comp = getSection('costComposition', []);
   if (!Array.isArray(comp)) comp = [];
