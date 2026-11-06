@@ -151,7 +151,8 @@ function run(rapport) {
     setPointageData(pts);
     var emp = getPersonnel().filter(function (p) { return p.id === 'en'; })[0];
     var st = getMonthStats(emp, '2026-10');
-    (Math.abs(st.normalHours - 40) < 0.01 && Math.abs(st.hs75 - 8) < 0.01) ? 'OK : 48 h de nuit = 40 h normales + 8 h a +75 %'
+    /* Regle choisie le 06/11/2026 : toute heure de NUIT est majoree +75 % des la 1re heure. */
+    (Math.abs(st.normalHours - 0) < 0.01 && Math.abs(st.hs75 - 48) < 0.01) ? 'OK : 48 h de nuit = 48 h a +75 % (des la 1re heure)'
       : 'ECHEC : normales=' + st.normalHours + ' hs75=' + st.hs75`);
   cas("Prime d'anciennete : plafond 25 % et base = minimum de la categorie (art. 55)", `
     var cats = getCategories(); cats.push({ code: 'TCAT', libelle: 'Test', salaire_min: 100000 }); setPayeSection('categories', cats);

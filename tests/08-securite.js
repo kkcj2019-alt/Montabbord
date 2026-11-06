@@ -165,7 +165,7 @@ function run(rapport) {
     `);
 
   /* ---------- 8. Connexion Super Admin : pas de bypass permanent ---------- */
-  dyn('Securite : connexion Super Admin hors-ligne — code faux refuse, code par defaut octroye une fois',
+  dyn('Securite : connexion Super Admin hors-ligne — code faux refuse, plus de code par defaut',
     storeRealiste,
     `
       try { localStorage.removeItem('mdb_saPassHash'); } catch (e0) {}
@@ -179,8 +179,9 @@ function run(rapport) {
       try { doSaQuickLogin(); } catch (e2) {}
       var accorde = !!(currentUser && currentUser.isSuperAdmin === true)
         && document.getElementById('loginError').style.display === 'none';
-      (rejete && accorde)
-        ? 'OK : faux code refuse sans session, code par defaut accepte hors-ligne (bootstrap)'
+      /* Durcissement : le code par defaut n'ouvre plus de session hors-ligne. */
+      (rejete && !accorde)
+        ? 'OK : faux code refuse sans session, code par defaut refuse hors-ligne'
         : 'ECHEC rejete=' + rejete + ' accorde=' + accorde
     `);
 

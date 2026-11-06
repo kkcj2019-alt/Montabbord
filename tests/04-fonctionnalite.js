@@ -2991,7 +2991,7 @@ attenduPrefixe: 'OK'
       var ops2 = getOperationsCaisse();
       var lib = null, tp = null;
       for (var i = 0; i < ops2.length; i++) { if (ops2[i] && ops2[i].id === 'opR1') { lib = ops2[i].libelle; tp = ops2[i].apType; } }
-      (r && r.converties === 1 && tp === 'acompte' && lib === 'ACOMPTE SALAIRE : GAHIE/Mois de Septembre 2026')
+      (r && r.converties === 1 && tp === 'acompte' && /^ACOMPTE\\/INDEMNITE\\/Mois de Septembre 2026-/.test(lib || ''))
         ? 'OK : revenue en acompte, mois garde'
         : 'ECHEC lib=' + lib + ' type=' + tp
     `,
@@ -8776,10 +8776,12 @@ r.push({
          heures normales ; seule la nuit au-dela de 40 h est majoree (+75 %).
          Semaine 1 : 5,5 + 8 (nuit) + 7,1 + 7,3 = 27,9 h ; semaine 2 : 8,5 h
          -> 36,4 h normales, aucune heure supplementaire. */
-      var ok1 = L1 && L1.label === 'Base horaire' && L1.taux === '36,4h' && L1.gain === 18200;
-      var ok2 = !rows.some(function (r) { return r && String(r.label || '').indexOf('Heures Suppl.') === 0 && (r.gain || 0) > 0; });
+      /* Regle choisie le 06/11/2026 : la nuit est majoree +75 % des la 1re heure.
+         Base = jour seul (5,5 + 7,1 + 7,3 + 8,5 = 28,4 h) ; nuit 8 h a 175 % sur une ligne a part. */
+      var ok1 = L1 && L1.label === 'Base horaire' && L1.taux === '28,4h' && L1.gain === 14200;
+      var ok2 = L2 && String(L2.label || '').indexOf('Heures Suppl. (75%') === 0 && L2.gain === 7000;
       (ok1 && ok2)
-        ? 'OK : 36,4h (dont 8h de nuit) x 500 = 18200, nuit comptee une seule fois et sans majoration sous 40h'
+        ? 'OK : base 28,4h jour = 14200 ; nuit 8h a +75 % = 7000 (comptee une seule fois)'
         : 'ECHEC L1=' + (L1 ? L1.taux + '/' + L1.gain : '?') + ' L2=' + (L2 ? L2.label + '/' + L2.taux + '/' + L2.gain : '?')
     `,
     attenduPrefixe: 'OK'
@@ -9765,7 +9767,9 @@ r.push({
       var emp = emps[0];
       setPersonnel(getPersonnel().map(function (e) { return e.id === emp.id ? emp : e; }));
       var now = new Date(); var mz = now.getFullYear() + '-' + (now.getMonth() + 1 < 10 ? '0' : '') + (now.getMonth() + 1);
-      var d1 = mz + '-01';
+      /* 1er jour OUVRE du mois (le 1er peut tomber un dimanche) */
+      var _j1 = 1; while (_j1 < 7 && [0, 6].indexOf(new Date(now.getFullYear(), now.getMonth(), _j1).getDay()) !== -1) _j1++;
+      var d1 = mz + '-0' + _j1;
       var pts = getPointageData().filter(function (r) { return !(r && r.employee_id === emp.id && r.date === d1); });
       pts.push({ id: DB.id(), employee_id: emp.id, date: d1, present: false, rendement: true,
                  j_arrivee: '08:50', j_pause: '10:00', j_reprise: '', j_fin: '16:35' });
@@ -9777,13 +9781,17 @@ r.push({
       var cell = '';
       for (var i = 0; i < rows.length; i++) {
         if (rows[i].indexOf('pt-emp-cell') !== -1 && rows[i].indexOf(escH(empNameLine(emp))) !== -1) {
-          var tdi = rows[i].indexOf('<td style="padding:4px 2px;border:1px solid #e2e8f0');
+          /* case du jour d1 (et non la 1re case du mois) */
+          var _kd = rows[i].indexOf("'" + d1 + "')");
+          var tdi = _kd !== -1 ? rows[i].lastIndexOf('<td ', _kd) : rows[i].indexOf('<td style="padding:4px 2px;border:1px solid #e2e8f0');
           if (tdi !== -1) { var tde = rows[i].indexOf('</td>', tdi); cell = rows[i].substring(tdi, tde); }
           break;
         }
       }
-      var ok = cell.indexOf('>R<') !== -1 && cell.indexOf('+ 1h10') !== -1;
-      (ok) ? 'OK : case = R + 1h10 (present=false n efface plus les heures)'
+      /* Regle actuelle : creneaux incomplets (pause sans reprise) = « R + 0h »
+         explicite ; seuls les creneaux complets comptent des heures. */
+      var ok = cell.indexOf('>R<') !== -1 && cell.indexOf('+ 0h') !== -1;
+      (ok) ? 'OK : case = R + 0h (creneaux incomplets, montage visible)'
            : 'ECHEC cell=' + cell;
     `,
     attenduPrefixe: 'OK'
@@ -10453,8 +10461,10 @@ attenduPrefixe: 'OK'
       /* L'absence injustifi\u00e9e tombe sur le DERNIER jour ouvr\u00e9 <= today
          (le test tourne aussi le week-end : today peut \u00eatre samedi/dimanche).
          Jamais le jour 1 (r\u00e9serv\u00e9 \u00e0 la maladie justifi\u00e9e). */
+      /* Jour de maladie = 1er jour OUVRE du mois (le 1er peut etre un dimanche). */
+      var jMal = 1; while (jMal < 7 && [0, 6].indexOf(new Date(an, mo, jMal).getDay()) !== -1) jMal++;
       var absDay = today;
-      while (absDay > 2) {
+      while (absDay > jMal + 1) {
         var adw = new Date(an, mo, absDay).getDay();
         if (adw !== 0 && adw !== 6) break;
         absDay--;
@@ -10467,7 +10477,7 @@ attenduPrefixe: 'OK'
         var dow = new Date(an, mo, d).getDay();
         if (dow === 0 || dow === 6) continue;
         var dk = mz + '-' + (d < 10 ? '0' : '') + d;
-        if (d === 1) recs.push({ id: 's2', employee_id: 'e1', date: dk, present: false, motif: 'Maladie' });
+        if (d === jMal) recs.push({ id: 's2', employee_id: 'e1', date: dk, present: false, motif: 'Maladie' });
         else if (d === absDay) recs.push({ id: 's1', employee_id: 'e1', date: dk, present: false });
         else { recs.push({ id: 'p' + d, employee_id: 'e1', date: dk, present: true }); nTrav++; }
       }
@@ -10603,10 +10613,14 @@ attenduPrefixe: 'OK'
       setPointageMontage([{ id: 'm9', employee_id: 'ej2', date: '2026-10-05', article_code: 'E2', quantite: 10, prix: 150 }]);
       var emp = getPersonnel().filter(function (p) { return p.id === 'ej2'; })[0];
       var rows = getSimpleBulletinRows(emp, '2026-10', calculatePayroll(emp, '2026-10'));
-      var rCA = rows.filter(function (r) { return (r.label || '').indexOf('Prime sur CA HT') === 0; })[0];
-      (rCA && rCA.gain === 75 && rCA.taux === '1' && rCA.label.indexOf('(5%)') !== -1)
-        ? 'OK : ligne Prime sur CA HT (5%) = 75, taux 1'
-        : 'ECHEC ligne=' + (rCA ? rCA.label + '/' + rCA.gain + '/' + rCA.taux : 'absente')
+      /* Depuis novembre 2026 : la part CA HT est fondue dans la ligne unique
+         « Prime de Production » (part articles + part CA). */
+      var _eff = null; try { _eff = ptPrimeProdEffectif(emp.id, '2026-10'); } catch (eE) {}
+      var _att = ((_eff && _eff.montant) || 0) + 75;
+      var rCA = rows.filter(function (r) { return (r.label || '').indexOf('Prime de Production') === 0; })[0];
+      (rCA && rCA.gain === _att)
+        ? 'OK : Prime de Production = part articles + CA HT 5 % (75) = ' + _att
+        : 'ECHEC ligne=' + (rCA ? rCA.label + '/' + rCA.gain + ' attendu ' + _att : 'absente')
     `,
     attenduPrefixe: 'OK'
   });
@@ -12307,7 +12321,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
             incomprehensible (« non editable pour cette periode »). */
       var globalRempli = /setV\\('csGlobMois'/.test(src);
       var moisPiece = /_moisPiece/.test(src);
-      var lignes = /mois: _moisLigne/.test(src);
+      var lignes = /mois: \\(_f\\.moisDeduction \\|\\| _moisLigne/.test(src);
       var pasDeBlocage = !/if \\(_bid && !_vis\\[_bid\\]\\) return false;/.test(src);
       var enConsoleSeulement = /console\\.warn/.test(src);
       (globalRempli && moisPiece && lignes && pasDeBlocage && enConsoleSeulement)
@@ -13074,7 +13088,7 @@ r.push({    nom: 'Ordres de mission : creation, liste, suivi et impression',    
       var soldeTheo = calcSoldeCaisse(ca, getOperationsCaisse());
       var avant = getCaisseInventaires().length;
       DB.set('mdb_caisseInventaires', []);
-      currentUser = { nom: 'K Test', caisseId: ca.id };
+      currentUser = { nom: 'K Test', caisseId: ca.id, isAdmin: true, isSuperAdmin: true, sections: {} };
       document.getElementById('ciSolde').value = String(soldeTheo + 2500);
       document.getElementById('ciDate').value = '2026-10-17';
       document.getElementById('ciNote').value = 'comptage cl\u00f4ture';
@@ -13768,7 +13782,7 @@ function run(rapport) {
     const srcTc = fsTc.readFileSync(pathTc.join(__dirname, '..', 'public', 'index.html'), 'utf8');
     const okDef = srcTc.indexOf('function codeConnexionOK(') !== -1;
     const okPrompt = srcTc.indexOf("window.prompt('Saisissez votre code de connexion pour approuver ce transfert :'") !== -1;
-    const okAppel = srcTc.indexOf('if (!codeConnexionOK(codeCs)) { toast(\'Code de connexion incorrect\', \'error\'); return; }') !== -1;
+    const okAppel = srcTc.indexOf('if (!codeConnexionOK(codeCs) && !codeCaisseDestOK(op, codeCs)) { toast(\'Code de connexion incorrect\', \'error\'); return; }') !== -1;
     /* V2 : le code de connexion se verifie via mdbPassCheck (empreinte
        sha256 avec sel, ancien champ en clair encore accepte en lecture). */
     const okCompte = srcTc.indexOf('if (mdbPassCheck(list[i], c)) return true;') !== -1;
@@ -13798,8 +13812,9 @@ function run(rapport) {
       && fsSeo.statSync(pathSeo.join(pub, 'favicon.png')).size > 100;
     const okOg = idxSeo.indexOf('property="og:image" content="https://montabbord.pages.dev/logo-512.png"') !== -1
       && vitSeo.indexOf('property="og:image" content="https://montabbord.pages.dev/logo-512.png"') !== -1;
-    const okFavicon = idxSeo.indexOf('rel="icon" type="image/png" href="/favicon.png"') !== -1
-      && vitSeo.indexOf('rel="icon" type="image/png" href="/favicon.png"') !== -1;
+    /* favicon : taille et ?v=N (anti-cache) acceptes */
+    const reFav = /rel="icon" type="image\/png"[^>]*href="\/favicon\.png(\?v=\d+)?"/;
+    const okFavicon = reFav.test(idxSeo) && reFav.test(vitSeo);
     const okNoindex = ['production.html', 'paye.html', 'fusion.html', 'restaurer.html'].every((f) => rd(f).indexOf('name="robots" content="noindex, nofollow"') !== -1);
     const okSitemap = (function () {
       const sm = rd('sitemap.xml');

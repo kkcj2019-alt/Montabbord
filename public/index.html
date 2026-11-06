@@ -34,7 +34,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-05-651';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-06-653';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -8968,7 +8968,13 @@ function _mdbStartSonde(uid) {
              recharger et de r\u00e9afficher toute la page (c'\u00e9tait le clignotement
              visible apr\u00e8s chaque saisie). */
           if (window._mdbSelfPushAt && (Date.now() - window._mdbSelfPushAt) < 20000) {
-            window._mdbVuTs = ts;
+            /* Un AUTRE poste a pu écrire pendant ces 20 s : on fusionne quand
+               même les données du cloud, mais SANS réafficher la page (pas de
+               clignotement). Avant, le changement de l'autre poste était
+               ignoré jusqu'à la modification suivante. */
+            if (window._mdbChargementCloud || _mdbFormActiveGuard()) return;
+            window._lastCloudAt = 0;
+            loadCloudData(uid, function () { if (window._mdbLastLoadOk) window._mdbVuTs = ts; });
             return;
           }
           if (window._mdbChargementCloud) return;
@@ -12485,7 +12491,11 @@ function codeCaisseDestOK(op, code) {
       var u = users[i];
       if (!u) continue;
       /* Utilisateur rattaché à l'agent de la caisse destination */
-      if (empId && String(u.employeId || u.employe_id || u.employeeId || '') !== empId) continue;
+      /* Caisse sans agent attribué : aucun code d'utilisateur ne vaut code de
+         la caisse destination (avant : le code de N'IMPORTE QUEL utilisateur
+         validait le transfert). */
+      if (!empId) return false;
+      if (String(u.employeId || u.employe_id || u.employeeId || '') !== empId) continue;
       if (mdbPassCheck(u, c)) return true;
     }
   } catch (e) {}
@@ -56097,10 +56107,36 @@ try {
 } catch (eP7) {}
 function crGetSection(key, def) {
   if (crIsUiKey(key)) return crUiPrefGet(key, def);
-  return getProdSection(key, def);
+  var v = getProdSection(key, def);
+  if (key === 'costComposition') v = acCompNormaliser(v);
+  return v;
+}
+/* Composition de campagne : UNE ligne par article, avec un id stable.
+   Sans id, la fusion entre postes (union des tableaux) recopiait les lignes :
+   on a vu la même campagne BBAG + PAL114 + COUV114 répétée 5 fois
+   (930 palettes au lieu de 186, CA et bois multipliés par 5). */
+function acCompNormaliser(arr) {
+  if (!Array.isArray(arr)) return arr;
+  var out = [], pos = {};
+  for (var i = 0; i < arr.length; i++) {
+    var l = arr[i];
+    if (!l || typeof l !== 'object') continue;
+    var aid = String(l.article_id || '');
+    if (!aid) { out.push(l); continue; }          /* ligne en cours de saisie */
+    var cle = 'cc_' + aid;
+    if (l.id !== cle) { l = Object.assign({}, l, { id: cle }); }
+    if (pos[cle] === undefined) { pos[cle] = out.length; out.push(l); }
+    else {
+      /* doublon : on garde la version la plus récente (sinon la dernière) */
+      var prev = out[pos[cle]];
+      if ((+l._maj || 0) >= (+prev._maj || 0)) out[pos[cle]] = l;
+    }
+  }
+  return out;
 }
 function crSetSection(key, val) {
   if (crIsUiKey(key)) { crUiPrefSet(key, val); return; }
+  if (key === 'costComposition') val = acCompNormaliser(val);
   try {
     var dbP = dbObj('mdb_production') || {};
     dbP[key] = val;
@@ -60597,6 +60633,14 @@ function acEtapesHtml(articleId, cAuto, compact) {
   var hasArt = !!(articleId && art && (art.id || art.code));
   var labor = acLaborCfg();
   var qSaisie = parseFloat(labor.quantite) || 0;
+  /* Campagne multi-articles : la quantité est TOUJOURS le total de la
+     composition (avant, les sections 2 à 4 gardaient l'ancienne quantité
+     saisie alors que le CA et le bois suivaient la composition). */
+  try {
+    var _cq = (acComposition() || []).filter(function (l) { return (parseFloat(l.qte) || 0) > 0; });
+    var _cqT = _cq.reduce(function (s0, l) { return s0 + (parseFloat(l.qte) || 0); }, 0);
+    if (_cq.length > 1 && _cqT > 0) qSaisie = _cqT;
+  } catch (eCq) {}
   var Q = qSaisie > 0 ? qSaisie : (hasArt ? 1 : 0);
   var J = parseFloat(labor.jours) || 0;
   var isCampagneQ = (qSaisie > 1);
@@ -61195,6 +61239,42 @@ function acEtapesHtml(articleId, cAuto, compact) {
      7. RÉSULTAT DE L’ACTIVITÉ ORDINAIRE (BÉNÉFICE / PERTE)
      ========================================================= */
   var resultatNetTotal = Math.round(caAffiche) - coutRevientTotal;
+  /* Résultats exposés pour la vue « Compte d'exploitation » (lecture seule :
+     aucun calcul n'est refait ailleurs). */
+  try {
+    var _lib = function (cle, def) { return ch['libelle_' + cle] || def; };
+    window.__acRes = {
+      Q: Q, ca: Math.round(caAffiche),
+      articles: compActifs.map(function (l, i) {
+        var cc = compCouts[comp.indexOf(l)] || {};
+        var a0 = arts.find(function (x) { return String(x.id) === String(l.article_id); }) || null;
+        if (!a0 && typeof acTrouverArticle === 'function') { try { a0 = acTrouverArticle(l.article_id); } catch (eTa) {} }
+        a0 = a0 || {};
+        var code0 = a0.code || (typeof acCodeArticle === 'function' ? acCodeArticle(l.article_id) : l.article_id);
+        code0 = String(code0 || '').replace(/^(PF_|ID_REST_)/i, '').replace(/_\d{6,}$/, '');
+        return { code: code0, nom: a0.designation || a0.nom || '', qte: parseFloat(l.qte) || 0, ca: Math.round(cc.ca || 0), bois: Math.round(cc.coutBois || 0) };
+      }),
+      cvamp: cvampTotal, margeCvamp: margeCvampTotal,
+      cvppf: totalCvppfTotal, margeCvppf: margeCvppfTotal,
+      cvppfLignes: [
+        ['Consommables (pointes, clous, colle…)', mtConsoTotal], ['Manutentionnaire', mtManut], ['Machiniste', mtMach],
+        ['Clouage / montage (tarifs Paye)', mtClouageTotal], ['Accessoires salaire main-d’œuvre clouage', mtAccClouageTotal],
+        ['Main-d’œuvre indirecte (chef d’atelier, magasinier…)', mtIndir], ['Électricité / énergie atelier', mtElecTotal]
+      ],
+      cvd: totalCvdTotal, margeCvd: margeCvdTotal, cvdLignes: [['Transport, livraison client', mtDistribTotal]],
+      structure: totalDiversesTotal,
+      structureLignes: [
+        [_lib('fraisBancaires', 'Frais bancaires & tenue de compte'), _mtStruct('fraisBancaires', 200)],
+        [_lib('commissionDU', 'Commission DU'), _mtStruct('commissionDU', 200)],
+        [_lib('commissionLog', 'Commission logisticien'), _mtStruct('commissionLog', 200)],
+        [_lib('loyer', 'Loyer atelier & dépôt'), _mtStruct('loyer', 650)],
+        [_lib('divers', 'Divers & imprévus'), _mtStruct('divers', 1000)]
+      ],
+      rubriques: totalCustomTotal,
+      rubriquesLignes: customRows.map(function (r) { return [r.rubrique || 'Rubrique', Math.round((parseFloat(r.montant) || 0) * Q)]; }),
+      cout: coutRevientTotal, resultat: resultatNetTotal
+    };
+  } catch (eRes) { window.__acRes = null; }
   var resultatColor = resultatNetTotal >= 0 ? '#166534' : '#991b1b';
   var resultatBg = resultatNetTotal >= 0 ? '#f0fdf4' : '#fef2f2';
   var resultatBadgeBg = resultatNetTotal >= 0 ? '#bbf7d0' : '#fecaca';
@@ -61829,6 +61909,7 @@ function render_cout_revient() {
   h += '</div></div>';
 
   /* Interrogation de la production et pointage montage (Jour X ou Plage de dates) */
+  h += '<!--AC_CASCADE-->';
   h += acInterrogationBlocHtml();
 
   /* Affichage Campagne Multi-Articles : UNIQUEMENT si au moins 2 articles et compQ > 0 */
@@ -62073,9 +62154,102 @@ function render_cout_revient() {
   h += acLaborSourceHtml();
   h += acCompositionEditor();
   h += acBandeauResumeHtml();
-  h += acEtapesHtml(cfg.articleId, cArticle, false);
+  window.__acRes = null;
+  var _acTable = acEtapesHtml(cfg.articleId, cArticle, false);
+  var _acOuvert = false; try { _acOuvert = localStorage.getItem('mdb_acDetailOuvert') === '1'; } catch (eO) {}
+  h += '<details class="acx-det"' + (_acOuvert ? ' open' : '') + ' ontoggle="try{localStorage.setItem(\'mdb_acDetailOuvert\',this.open?\'1\':\'0\')}catch(e){}">' +
+       '<summary>📋 Détail comptable complet <small>le grand tableau (CVAMP · CVPPF · CVD · structure · rubriques) — c’est ici qu’on modifie énergie, transport, frais généraux et rubriques</small></summary>' +
+       _acTable + '</details>';
   h += '</div>';
+  /* Vue « Compte d'exploitation » en haut : mêmes chiffres que le tableau */
+  try { h = h.replace('<!--AC_CASCADE-->', acCascadeHtml(window.__acRes)); } catch (eCx) { h = h.replace('<!--AC_CASCADE-->', ''); }
 
+  return h;
+}
+
+/* ===== Compte d'exploitation en cascade (présentation seule) ===== */
+function acCascadeHtml(R) {
+  if (!R || !(R.Q > 0)) return '';
+  var f = function (n) { return fmt(Math.round(n || 0)); };
+  var pc = function (n) { return R.ca > 0 ? (n / R.ca * 100).toFixed(2).replace('.', ',') + ' %' : '—'; };
+  var pcN = function (n) { return R.ca > 0 ? Math.max(0, Math.min(100, n / R.ca * 100)) : 0; };
+  var ok = R.resultat >= 0;
+  var autresPal = R.Q > 0 ? (R.cout - R.cvamp) / R.Q : 0;
+  var h = '<style id="acxCss">' +
+    '.acx{margin:0 0 14px}.acx-k{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}' +
+    '.acx-k>div{border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;background:#fff}.acx-k .l{font-size:10.5px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:.04em}' +
+    '.acx-k .v{font-size:19px;font-weight:900;margin-top:3px;font-variant-numeric:tabular-nums;color:#0f172a}.acx-k .n{font-size:11px;color:#64748b}' +
+    '.acx-k .g{background:#f0fdf4;border-color:#bbf7d0}.acx-k .g .v{color:#15803d}.acx-k .r{background:#fef2f2;border-color:#fecaca}.acx-k .r .v{color:#b91c1c}' +
+    '.acx-ver{border-radius:12px;padding:10px 14px;margin:10px 0;font-size:13.5px}' +
+    '.acx-t{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden}' +
+    '.acx-t th{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;padding:8px 12px;border-bottom:2px solid #e2e8f0;text-align:right;background:#f8fafc}.acx-t th:first-child{text-align:left}' +
+    '.acx-t td{padding:9px 12px;border-bottom:1px solid #eef2f7;text-align:right;font-size:13.5px}.acx-t td:first-child{text-align:left}' +
+    '.acx-ca td{font-weight:900;background:#f8fafc}.acx-c td{font-weight:800;cursor:pointer}.acx-c td:first-child small{font-weight:500;color:#64748b}' +
+    '.acx-m td{font-weight:800;font-style:italic;background:#f0fdf4}.acx-m.neg td{background:#fef2f2}' +
+    '.acx-d td{font-size:12.5px;color:#334155;padding:6px 12px;background:#fcfcfd}.acx-d td:first-child{padding-left:40px}' +
+    '.acx-res td{font-weight:900;font-size:15px;color:#fff;border:0}' +
+    '.acx-bar{height:7px;border-radius:4px;background:#e2e8f0;overflow:hidden;width:90px;display:inline-block;vertical-align:middle;margin-left:8px}.acx-bar span{display:block;height:100%}' +
+    '.acx-neg{color:#b91c1c}.acx-pos{color:#15803d}' +
+    '.acx-det{margin-top:10px;border:1px solid #e2e8f0;border-radius:12px;background:#fff}.acx-det>summary{cursor:pointer;padding:12px 16px;font-weight:800;font-size:13.5px;list-style:none}' +
+    '.acx-det>summary small{font-weight:500;color:#64748b;margin-left:6px;font-size:12px}.acx-det[open]>summary{border-bottom:1px solid #e2e8f0}' +
+    '</style>';
+  h += '<div class="acx">';
+  /* 1. La réponse */
+  h += '<div class="acx-k">' +
+    '<div><div class="l">Chiffre d’affaires</div><div class="v">' + f(R.ca) + ' F</div><div class="n">' + f(R.Q) + ' palettes</div></div>' +
+    '<div><div class="l">Coût total</div><div class="v">' + f(R.cout) + ' F</div><div class="n">' + pc(R.cout) + ' du CA</div></div>' +
+    '<div><div class="l">Coût par palette</div><div class="v">' + f(R.cout / R.Q) + ' F</div><div class="n">vente moyenne ' + f(R.ca / R.Q) + ' F</div></div>' +
+    '<div class="' + (ok ? 'g' : 'r') + '"><div class="l">Résultat</div><div class="v">' + (ok ? '+' : '') + f(R.resultat) + ' F</div><div class="n">' + (ok ? '+' : '') + f(R.resultat / R.Q) + ' F par palette</div></div>' +
+    '<div class="' + (ok ? 'g' : 'r') + '"><div class="l">Marge nette</div><div class="v">' + pc(R.resultat) + '</div><div class="n">du chiffre d’affaires</div></div>' +
+    '</div>';
+  /* Article qui coûte le plus (perte) */
+  var pire = null;
+  (R.articles || []).forEach(function (a) {
+    a.cout = a.bois + autresPal * a.qte; a.res = a.ca - a.cout;
+    if (a.res < 0 && (!pire || a.res < pire.res)) pire = a;
+  });
+  var gros = [['le bois', R.cvamp], ['la fabrication', R.cvppf], ['la livraison', R.cvd], ['les frais généraux', R.structure + R.rubriques]].sort(function (x, y) { return y[1] - x[1]; })[0];
+  h += '<div class="acx-ver" style="background:' + (ok ? '#f0fdf4;border:1px solid #bbf7d0' : '#fef2f2;border:1px solid #fecaca') + '">' +
+    (ok ? '✅ <b style="color:#15803d">Production rentable.</b> Il reste ' + pc(R.resultat) + ' du chiffre d’affaires une fois tous les coûts payés.'
+        : '⚠️ <b style="color:#b91c1c">Cette production perd de l’argent.</b>' + (pire ? ' La perte vient surtout de <b>' + escH(pire.code) + '</b> (vendu ' + f(pire.qte ? pire.ca / pire.qte : 0) + ' F, il coûte ≈ ' + f(pire.qte ? pire.cout / pire.qte : 0) + ' F).' : '') +
+          ' Prix moyen conseillé pour 10 % de marge : <b>' + f((R.cout / R.Q) / 0.9) + ' F / palette</b>.') +
+    ' Le plus gros poste est ' + gros[0] + ' (' + pc(gros[1]) + ').</div>';
+  /* 2. La cascade (comme le fichier Excel) */
+  var etage = function (num, titre, sigle, couleur, montant, lignes) {
+    var id = 'acx' + num;
+    var r = '<tr class="acx-c" onclick="document.querySelectorAll(\'.' + id + '\').forEach(function(x){x.style.display=x.style.display===\'none\'?\'\':\'none\'})" style="border-left:4px solid ' + couleur + '">' +
+      '<td>▸ ' + num + '. ' + titre + ' <small>— ' + sigle + '</small></td><td></td><td class="acx-neg">− ' + f(montant) + '</td>' +
+      '<td>' + pc(montant) + '<span class="acx-bar"><span style="width:' + pcN(montant) + '%;background:' + couleur + '"></span></span></td></tr>';
+    (lignes || []).forEach(function (l) {
+      if (!(Math.round(l[1] || 0))) return;
+      r += '<tr class="acx-d ' + id + '" style="display:none"><td>' + escH(l[0]) + '</td><td>' + f(l[1]) + '</td><td></td><td>' + pc(l[1]) + '</td></tr>';
+    });
+    return r;
+  };
+  var marge = function (lib, v) { return '<tr class="acx-m' + (v < 0 ? ' neg' : '') + '"><td>&nbsp;&nbsp;→ ' + lib + '</td><td></td><td class="' + (v < 0 ? 'acx-neg' : 'acx-pos') + '">' + (v >= 0 ? '' : '− ') + f(Math.abs(v)) + '</td><td>' + pc(v) + '</td></tr>'; };
+  h += '<table class="acx-t" style="margin-top:4px"><thead><tr><th>Compte d’exploitation · ' + f(R.Q) + ' palettes <span style="text-transform:none;letter-spacing:0;font-weight:500">(cliquer sur un étage pour le détail)</span></th><th>Calcul</th><th>Montant</th><th>% du CA</th></tr></thead><tbody>';
+  h += '<tr class="acx-ca"><td>Chiffre d’affaires HT</td><td></td><td>' + f(R.ca) + '</td><td>100 %</td></tr>';
+  h += etage(1, 'Matières (bois)', 'CVAMP', '#b45309', R.cvamp, (R.articles || []).map(function (a) { return ['Bois ' + a.code + ' · ' + f(a.qte) + ' pal', a.bois]; }));
+  h += marge('Marge après matières', R.margeCvamp);
+  h += etage(2, 'Fabrication', 'CVPPF · consommables, salaires, énergie', '#2563eb', R.cvppf, R.cvppfLignes);
+  h += marge('Marge après fabrication', R.margeCvppf);
+  h += etage(3, 'Livraison', 'CVD', '#0d9488', R.cvd, R.cvdLignes);
+  h += marge('Marge après livraison', R.margeCvd);
+  h += etage(4, 'Frais généraux', 'structure', '#7c3aed', R.structure, R.structureLignes);
+  if (R.rubriques) h += etage(5, 'Rubriques ajoutées', 'charges complémentaires', '#047857', R.rubriques, R.rubriquesLignes);
+  h += '<tr class="acx-res" style="background:' + (ok ? '#14532d' : '#7f1d1d') + '"><td>Résultat de l’activité ordinaire</td><td></td><td>' + (ok ? '+' : '− ') + f(Math.abs(R.resultat)) + '</td><td>' + pc(R.resultat) + '</td></tr>';
+  h += '</tbody></table>';
+  /* 3. Rentabilité par article */
+  if ((R.articles || []).length > 1) {
+    h += '<table class="acx-t" style="margin-top:12px"><thead><tr><th>Rentabilité par article</th><th>Palettes</th><th>Prix de vente</th><th>Bois / pal</th><th>Autres coûts / pal</th><th>Coût / pal</th><th>Marge / pal</th><th>Résultat</th></tr></thead><tbody>';
+    R.articles.forEach(function (a) {
+      var q = a.qte || 1, mp = (a.ca - a.cout) / q;
+      h += '<tr><td><b>' + escH(a.code) + '</b>' + (a.nom ? ' <span style="color:#64748b">— ' + escH(a.nom) + '</span>' : '') + '</td><td>' + f(a.qte) + '</td><td>' + f(a.ca / q) + ' F</td><td>' + f(a.bois / q) + ' F</td><td>' + f(autresPal) + ' F</td><td>' + f(a.cout / q) + ' F</td>' +
+        '<td class="' + (mp < 0 ? 'acx-neg' : 'acx-pos') + '">' + (mp >= 0 ? '+' : '') + f(mp) + ' F</td><td class="' + (a.res < 0 ? 'acx-neg' : 'acx-pos') + '"><b>' + (a.res >= 0 ? '+' : '') + f(a.res) + ' F</b></td></tr>';
+    });
+    h += '</tbody></table><div style="font-size:11.5px;color:#64748b;margin-top:4px">Le bois est propre à chaque article ; fabrication, livraison, frais généraux et rubriques sont répartis par palette.</div>';
+  }
+  h += '</div>';
   return h;
 }
 
@@ -69047,9 +69221,9 @@ try {
         + '<div class="lk-date" id="lkDate"></div><div class="lk-time" id="lkTime"></div>'
         + '<div class="lk-form"><label for="lkPass">Mot de passe pour déverrouiller</label>'
         + '<input id="lkPass" type="password" autocomplete="current-password" placeholder="Votre mot de passe" onkeydown="if(event.key===\'Enter\'){event.preventDefault();window.mdbUnlockSession();}">'
-        + '<button class="lk-btn" onclick="window.mdbUnlockSession()"><svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg> Déverrouiller</button>'
+        + '<button class="lk-btn" title="Déverrouiller la session" aria-label="Déverrouiller la session" onclick="window.mdbUnlockSession()"><svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg> Déverrouiller</button>'
         + '<div class="lk-err" id="lkErr"></div></div>'
-        + '<div class="lk-foot"><button onclick="window.mdbLockLogout()"><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 5.8a9 9 0 1 0 11.4 0"/></svg> Se déconnecter</button></div>'
+        + '<div class="lk-foot"><button title="Se déconnecter" aria-label="Se déconnecter" onclick="window.mdbLockLogout()"><svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 5.8a9 9 0 1 0 11.4 0"/></svg> Se déconnecter</button></div>'
         + '</div>';
       document.body.appendChild(ov);
       document.body.classList.add('mdb-locked');

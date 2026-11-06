@@ -182,7 +182,9 @@ function run(rapport) {
   const manquesE = [];
   if (payeJs.indexOf('function bulUpdateBase(') === -1) manquesE.push('bulUpdateBase non défini');
   if (payeJs.indexOf('onchange="bulUpdateBase(') === -1) manquesE.push('base non branchée au rendu');
-  if (payeJs.indexOf('onchange="bulUpdateGain(') !== -1) manquesE.push('ancien champ gain encore branché');
+  /* Les lignes MANUELLES ajoutees a la main gardent leur saisie (type 'manual') ;
+     seul l'ancien champ gain des rubriques calculees est interdit. */
+  (function () { var re = /onchange="bulUpdateGain\(/g, m, bad = false; while ((m = re.exec(payeJs))) { if (payeJs.slice(m.index, m.index + 260).indexOf('manual') === -1) bad = true; } if (bad) manquesE.push('ancien champ gain encore branché'); })();
   if (payeJs.indexOf('Valeur enregistrée') === -1) manquesE.push('pas d\u2019accusé de sauvegarde');
   if (!manquesE.length) rapport.ok('bulletin paie : base saisissable, gain calculé, sauvegarde accusée');
   else rapport.ko('bulletin paie : ' + manquesE.join(' ; '));
