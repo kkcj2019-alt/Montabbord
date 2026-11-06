@@ -601,6 +601,7 @@
         + (o.notes ? '<div class="m">Notes : ' + esc(o.notes) + '</div>' : '')
         + (o.bcNumero ? '<div class="m">BC client : <b>' + esc(o.bcNumero) + '</b></div>' : '')
         + (o.bcData ? '<div class="m">📎 <a href="' + esc(o.bcData) + '" target="_blank" rel="noopener" download="' + esc(o.bcName || 'bon-commande') + '">' + esc(o.bcName || 'Bon de commande joint') + '</a></div>' : '')
+        + (o.bcImported ? '<div class="m" style="color:#15803d;font-weight:900">✅ BC créé dans l’Index : ' + esc(o.bcIndexNumero || '') + '</div>' : '')
         + '<div class="m">Reçue le ' + fmtDT(o.createdAt) + '</div></div>'
         + '<div style="display:flex;flex-direction:column;gap:6px;min-width:190px"><select onchange="adSetOrderStatus(\'' + esc(o.id) + '\',this.value)" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px"><option value="nouvelle"' + (o.statut === 'nouvelle' ? ' selected' : '') + '>Nouvelle</option><option value="en_cours"' + (o.statut === 'en_cours' ? ' selected' : '') + '>En cours</option><option value="validee"' + (o.statut === 'validee' ? ' selected' : '') + '>Confirmée</option><option value="livree"' + (o.statut === 'livree' ? ' selected' : '') + '>Livrée</option><option value="annulee"' + (o.statut === 'annulee' ? ' selected' : '') + '>Annulée</option></select>'
         + '<textarea id="oa_' + esc(o.id) + '" placeholder="Message au client…" style="padding:7px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;min-height:52px"></textarea>'
@@ -710,6 +711,39 @@
   window.adSetOrderStatus = function (id, st) {
     var o = S.orders.filter(function (x) { return x.id === id; })[0]; if (!o) return;
     o.statut = st; o.updatedAt = Date.now();
+    /* Acceptation = création automatique du BC dans l'Index (Facturation → BC). */
+    if (String(st) === 'validee' && !o.bcImported) {
+      var bc = null;
+      try {
+        if (window.opener && !window.opener.closed && typeof window.opener.mdbImportClientOrder === 'function') {
+          bc = window.opener.mdbImportClientOrder(o);
+        }
+      } catch (eImp) {}
+      if (!bc) {
+        /* Repli : le BC est écrit dans le stockage partagé de l'application. */
+        try {
+          var bcs = JSON.parse(localStorage.getItem('mdb_bc') || '[]');
+          if (!Array.isArray(bcs)) bcs = [];
+          var exists = false;
+          for (var i = 0; i < bcs.length; i++) { if (bcs[i] && String(bcs[i].clientOrderId) === String(o.id)) { exists = true; bc = bcs[i]; break; } }
+          if (!exists) {
+            var bcId = 'BC' + Date.now().toString(36).toUpperCase();
+            bc = {
+              id: bcId, numero: o.bcNumero || ('BC-' + (o.numero || bcId)),
+              clientId: '', dateBC: new Date().toISOString().slice(0, 10), delaiLivraison: 30,
+              statut: 'valide', tvaActive: false, tauxTva: 18,
+              observations: 'Créé depuis l’espace client — commande ' + (o.numero || '') + (o.notes ? ' — ' + o.notes : ''),
+              lignes: (o.items || []).map(function (it) { var q = parseFloat(it.qte) || 0, pu = parseFloat(it.prix) || 0; return { articleId: '', code: it.code || '', designation: it.titre || it.code || 'Article', quantite: q, prixUnitaire: pu, total: q * pu }; }),
+              clientOrderId: o.id, clientOrderNumero: o.numero || '', bcClientNumero: o.bcNumero || '',
+              source: 'espace-client', dateCreation: new Date().toISOString().slice(0, 10)
+            };
+            bcs.push(bc);
+            localStorage.setItem('mdb_bc', JSON.stringify(bcs));
+          }
+        } catch (eLs) {}
+      }
+      if (bc) { o.bcImported = true; o.bcIndexNumero = bc.numero || ''; }
+    }
     syncSet('mdb_clientOrders', S.orders).then(function () { render(); }).catch(function () {});
   };
   window.adToggleClient = function (email) {
