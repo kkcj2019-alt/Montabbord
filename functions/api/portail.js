@@ -880,14 +880,32 @@ export async function onRequest(context) {
 
     /* ---------- Validation de la fiche de pointage par l'employé ---------- */
     if (action === 'validatepointage') {
-      const mois = String(body.mois || '').slice(0, 7);
-      if (!/^\d{4}-\d{2}$/.test(mois)) return json({ ok: false, code: 'mois' }, 400);
       let map = parseVal(await lireCle(db, uid, 'mdb_paye.pointageValidations'), {});
       if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
-      const key = String(emp.id) + '|' + mois;
-      map[key] = { at: new Date().toISOString(), nom: ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim() };
+      const at = new Date().toISOString();
+      const nom = ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim();
+      const date = String(body.date || '').slice(0, 10);
+      const semaine = String(body.semaine || '').trim();
+      const mois = String(body.mois || '').slice(0, 7);
+      let key = '', kind = '', extra = {};
+      if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        key = String(emp.id) + '|' + date;
+        kind = 'jour';
+        extra = { jour: date };
+      } else if (/^\d{4}-W\d{2}$/.test(semaine)) {
+        key = String(emp.id) + '|W' + semaine;
+        kind = 'semaine';
+        extra = { semaine: semaine, debut: String(body.debut || ''), fin: String(body.fin || '') };
+      } else if (/^\d{4}-\d{2}$/.test(mois)) {
+        key = String(emp.id) + '|' + mois;
+        kind = 'mois';
+        extra = { mois: mois };
+      } else {
+        return json({ ok: false, code: 'periode' }, 400);
+      }
+      map[key] = Object.assign({ at: at, nom: nom, type: kind }, extra);
       await ecrireCle(db, uid, 'mdb_paye.pointageValidations', map);
-      return json({ ok: true, at: map[key].at, mois: mois });
+      return json({ ok: true, at: at, key: key, type: kind, jour: date, semaine: semaine, mois: mois });
     }
 
     /* ---------- Données personnelles ---------- */
