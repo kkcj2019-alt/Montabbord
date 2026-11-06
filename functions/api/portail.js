@@ -570,6 +570,25 @@ export async function onRequest(context) {
       if (req.statut === 'ouverte') req.statut = 'en_cours';
       req.updatedAt = now;
       await ecrireCle(db, uid, 'mdb_requetesEmploye', list);
+      if (req.type === 'permission' || req.type === 'conge') {
+        try {
+          const perms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+          const arrP = Array.isArray(perms) ? perms : [];
+          for (let ip = 0; ip < arrP.length; ip++) {
+            const pp = arrP[ip];
+            if (!pp) continue;
+            if (String(pp.id) === String(req.id) || String(pp.requeteId) === String(req.id)) {
+              pp.statut = statut === 'acceptee' ? 'valide' : (statut === 'refusee' ? 'refuse' : pp.statut);
+              pp.payer = !!body.payer;
+              pp.valide_par = String(body.nom || 'Administration');
+              pp.date_validation = now;
+              if (body.commentaire) pp.commentaire_admin = String(body.commentaire);
+              await ecrireCle(db, uid, 'mdb_rh_permissions', arrP);
+              break;
+            }
+          }
+        } catch (eSyncPerm3) {}
+      }
       return json({ ok: true, requete: req });
     }
     if (action === 'admindecision') {
@@ -790,6 +809,23 @@ export async function onRequest(context) {
       };
       arr.push(rec);
       await ecrireCle(db, uid, 'mdb_rh_permissions', arr);
+      try {
+        const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
+        const arrR = Array.isArray(reqs) ? reqs : [];
+        if (!arrR.some(r => r && String(r.id) === String(rec.id))) {
+          arrR.push({
+            id: rec.id, uid, empId: emp.id, matricule: rec.matricule,
+            nom: rec.nom, type: rec.type, sujet: rec.motif,
+            message: rec.commentaire || rec.motif,
+            dateDebut: rec.date_debut, dateFin: rec.date_fin,
+            dureeJours: rec.nb_jours, motif: rec.motif,
+            retourEstime: rec.retour, statut: 'ouverte',
+            createdAt: rec.created_at, updatedAt: rec.created_at,
+            messages: [{ id: 'M' + Date.now(), auteur: 'employe', nom: rec.nom, texte: rec.commentaire || rec.motif, at: rec.created_at }]
+          });
+          await ecrireCle(db, uid, 'mdb_requetesEmploye', arrR);
+        }
+      } catch (eSyncPerm) {}
       return json({ ok: true, permission: rec });
     }
 
@@ -1009,6 +1045,23 @@ export async function onRequest(context) {
       list.push(req);
       if (list.length > 4000) list = list.slice(list.length - 4000);
       await ecrireCle(db, uid, 'mdb_requetesEmploye', list);
+      if (type === 'permission' || type === 'conge') {
+        try {
+          const perms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+          const arrP = Array.isArray(perms) ? perms : [];
+          if (!arrP.some(p => p && String(p.id) === String(req.id))) {
+            arrP.push({
+              id: req.id, employee_id: emp.id, matricule: req.matricule,
+              nom: req.nom, type: type, motif: req.motif || req.sujet || texte,
+              date_debut: req.dateDebut || '', date_fin: req.dateFin || req.dateDebut || '',
+              heure_debut: '', heure_fin: '', retour: req.retourEstime || '',
+              commentaire: req.message || '', nb_jours: req.dureeJours || 0,
+              statut: 'en_attente', created_at: now, created_by: 'employe', requeteId: req.id
+            });
+            await ecrireCle(db, uid, 'mdb_rh_permissions', arrP);
+          }
+        } catch (eSyncPerm2) {}
+      }
       return json({ ok: true, requete: req });
     }
 

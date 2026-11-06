@@ -145,6 +145,7 @@
   function mois(m){try{var d=new Date(String(m)+"-01T00:00:00");return d.toLocaleDateString("fr-FR",{month:"long",year:"numeric"})}catch(e){return m}}
   function api(action,payload){return fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({uid:uid,action:action},payload||{}))}).then(function(r){return r.json().catch(function(){return {ok:false}})});}
   function getKey(cle){return fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&cle="+encodeURIComponent(cle)+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var v=j&&j.data&&j.data[cle];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){v=null}}return v;}).catch(function(){return null;});}
+  function postSync(updates){return fetch(SYNC,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({uid:uid,updates:updates})}).then(function(r){return r.ok?r.json():null;});}
   function getPrefix(prefix){return fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&prefix="+encodeURIComponent(prefix)+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var d=(j&&j.data)||{},out={};for(var k in d){if(!d.hasOwnProperty(k))continue;var v=d[k];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){}}out[k]=v;}return out;}).catch(function(){return {};});}
   function badge(s){if(s==="acceptee")return '<span class="badge b-ok">Acceptée</span>';if(s==="refusee")return '<span class="badge b-bad">Refusée</span>';if(s==="en_cours")return '<span class="badge b-info">En cours</span>';if(s==="fermee")return '<span class="badge b-gray">Fermée</span>';return '<span class="badge b-wait">Ouverte</span>';}
   function typeLbl(t){return {reclamation:"Réclamation",permission:"Permission / absence",conge:"Congé",pret:"Prêt",acompte:"Acompte",pointage:"Contestation de pointage",autre:"Autre"}[t]||"Demande";}
@@ -211,7 +212,15 @@
           messages:[]
         };
       });
-      state.requetes=_genReq.concat(_permReq);
+      /* Même identifiant des deux côtés (permission + requête) : on ne
+         garde qu'une seule fiche pour éviter un doublon à l'écran. */
+      var _seenReq = {};
+      state.genericRequests=_genReq.slice();
+      state.requetes=_genReq.concat(_permReq).filter(function(r){
+        if(!r || !r.id) return false;
+        if(_seenReq[r.id]) return false;
+        _seenReq[r.id]=1; return true;
+      });
       state.sessions=Array.isArray(res[4])?res[4]:[];
       document.getElementById("who").textContent=me.nom+" · "+state.employes.length+" employé(s) · "+state.requetes.length+" requête(s)";
       renderAll();
@@ -553,9 +562,14 @@
   };
   window.__deleteReq=function(id){
     window.__mdbConfirm('Supprimer la requête', 'Cette action est définitive. La discussion et les pièces liées seront supprimées.', 'Supprimer', function () {
-      api('admindelete', { requestId: id }).then(function (j) {
-        if (j && j.ok) { state.open = null; loadAll(); } else alert('Suppression impossible : ' + ((j && j.code) || 'erreur'));
-      }).catch(function () { alert('Connexion impossible. Réessayez.'); });
+      /* Une permission fusionnée peut exister dans mdb_rh_permissions ET
+         mdb_requetesEmploye : on supprime des deux côtés pour ne plus avoir
+         « not found » et ne laisser aucune fiche orpheline. */
+      var gens=(state.genericRequests||[]).filter(function(r){return String(r.id)!==String(id);});
+      var perms=(state.rhPermissions||[]).filter(function(p){return String(p.id)!==String(id);});
+      postSync({mdb_requetesEmploye:gens,mdb_rh_permissions:perms}).then(function(j){
+        if(j&&j.ok){state.open=null;loadAll();}else alert('Suppression impossible. Réessayez.');
+      }).catch(function(){alert('Connexion impossible. Réessayez.');});
     });
   };
   window.__loadSources=function(){var type=(document.getElementById("pay-type")||{}).value||"caisse";var cle=type==="banque"?"mdb_banques":"mdb_caisses";var sel=document.getElementById("pay-source");if(sel)sel.innerHTML='<option value="">Chargement…</option>';fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&cle="+cle+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var v=j&&j.data&&j.data[cle];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){v=null}}var arr=Array.isArray(v)?v:[];if(!sel)return;sel.innerHTML=arr.length?arr.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.nom||s.libelle||s.code||"Sans nom")+'</option>';}).join(""):'<option value="">Aucune source</option>';}).catch(function(){if(sel)sel.innerHTML='<option value="">Erreur</option>';});};
