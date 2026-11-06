@@ -1811,6 +1811,7 @@ var NAV = [
   { group: 'GÉNÉRAL', items: [
     { id: 'qualite', label: 'Service Qualité & NC', icon: '🎯' },
     { id: 'convention', label: 'Convention collective', icon: '⚖️' },
+    { id: 'bilan-production', label: "Bilan d'activité", icon: '📊' },
     { id: 'reports', label: 'Rapports', icon: '📈' },
     { id: 'rh', label: 'RH & Présence', icon: '👤' }
   ]}
@@ -2179,6 +2180,7 @@ var PROD_PAGE_PERM = {
   'achats': 'prodAchats', 'achats-history': 'prodAchats',
   'livraisons': 'prodLivraisons',
   'preventive': 'prodMaintenance', 'corrective': 'prodMaintenance',
+  'bilan-production': 'prodRapports',
   'reports': 'prodRapports',
   'analyse-couts': 'prodRapports',
   'cout-revient': 'prodCoutRevient',
@@ -2641,6 +2643,7 @@ var PAGE_TITLES = {
   'preventive': 'Maintenance Préventive',
   'corrective': 'Maintenance Corrective',
   'reparations-clients': 'Reparation palettes',
+  'bilan-production': "Bilan d'activité",
   'reports': 'Rapports',
   'analyse-couts': 'Calcul du Coût de Revient — fixer le prix et lire la marge',
   'cout-revient': 'Coût de Production — Fabrication de Palettes',
@@ -27040,8 +27043,298 @@ function render_qualite() {
   return h;
 }
 
+
+/* =====================================================================
+   BILAN D'ACTIVITE PRODUCTION
+   Matiere premiere consommee, palettes / couvercles produits, bois perdu
+   (volume + valeur), pointes consommees en cartons par numero, analyse
+   de rationalite et de rentabilite. Periode libre + impression / PDF.
+   ===================================================================== */
+function _bilanNorm(s) { return String(s == null ? '' : s).trim().toUpperCase(); }
+function _bilanN(n) { n = parseFloat(n) || 0; return Math.round(n * 1000) / 1000; }
+function _bilanQ(n) { try { return (parseFloat(n) || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 }); } catch (e) { return String(_bilanN(n)); } }
+function _bilanMoney(n) { return fmt(Math.round(parseFloat(n) || 0)) + ' F'; }
+function _bilanPct(n) { return (Math.round((parseFloat(n) || 0) * 10) / 10).toFixed(1) + ' %'; }
+function _bilanCartons(nb, code) {
+  var pp = 0, pc = 0;
+  try { pp = parseFloat(acPointesParPaquet(code)) || 0; } catch (e) {}
+  try { pc = parseFloat(acPaquetsParCarton()) || 0; } catch (e2) {}
+  var parCarton = pp * pc;
+  return parCarton > 0 ? (parseFloat(nb) || 0) / parCarton : 0;
+}
+function _bilanDefaut() {
+  var du = '', au = '';
+  try { du = localStorage.getItem('mdb_bilan_du') || ''; au = localStorage.getItem('mdb_bilan_au') || ''; } catch (e) {}
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(du)) du = acDebutMois(thisMonth());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(au)) au = today();
+  return { du: du, au: au };
+}
+function bilanSetPeriode(du, au) {
+  du = String(du || '').slice(0, 10);
+  au = String(au || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(du) || !/^\d{4}-\d{2}-\d{2}$/.test(au)) return;
+  if (du > au) { var t = du; du = au; au = t; }
+  window._bilanDu = du; window._bilanAu = au;
+  try { localStorage.setItem('mdb_bilan_du', du); localStorage.setItem('mdb_bilan_au', au); } catch (e) {}
+  renderPage();
+}
+function bilanCeMois() { bilanSetPeriode(acDebutMois(thisMonth()), today()); }
+function bilanMoisDernier() {
+  var d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1);
+  var ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  var fin = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  bilanSetPeriode(acDebutMois(ym), fin.getFullYear() + '-' + String(fin.getMonth() + 1).padStart(2, '0') + '-' + String(fin.getDate()).padStart(2, '0'));
+}
+function bilan30Jours() {
+  var d = new Date(); d.setDate(d.getDate() - 29);
+  var du = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  bilanSetPeriode(du, today());
+}
+function _bilanCompute() {
+  var per = _bilanDefaut();
+  var du = window._bilanDu || per.du, au = window._bilanAu || per.au;
+  if (du > au) { var t = du; du = au; au = t; }
+  window._bilanDu = du; window._bilanAu = au;
+
+  var prods = getProductions().filter(function (p) {
+    if (!p || !p.date || p.statut === 'draft') return false;
+    var d = String(p.date).slice(0, 10);
+    return d >= du && d <= au;
+  });
+  var arts = getArticles() || [];
+  var map = {};
+  arts.forEach(function (a) { if (a && a.code) map[_bilanNorm(a.code)] = a; });
+
+  var items = {}, nails = {};
+  var tot = { qte: 0, vol: 0, nails: 0, nailCost: 0, ca: 0 };
+  prods.forEach(function (p) {
+    var taux = parseFloat(p.taux_perte) || 0;
+    (p.assemblage || []).forEach(function (r) {
+      var code = _bilanNorm(r && r.code);
+      var q = parseFloat(r && r.qte) || 0;
+      if (!code || !(q > 0)) return;
+      var art = map[code] || null;
+      var artId = art ? art.id : code;
+      var nom = { volNet: 0, nbPointes: 0, coutPointes: 0, detail: [], trouve: false };
+      try { nom = acNomenclatureArticle(artId) || nom; } catch (eN) {}
+      if (!nom.trouve && art) { try { var n2 = acNomenclatureArticle(art.code); if (n2 && n2.trouve) nom = n2; } catch (eN2) {} }
+      var des = (art && art.designation) || (r && r.designation) || code;
+      var vol = (parseFloat(nom.volNet) || 0) * q;
+      var nbQ = (parseFloat(nom.nbPointes) || 0) * q;
+      var nc = (parseFloat(nom.coutPointes) || 0) * q;
+      var pv = 0; try { pv = parseFloat(acPrixNomenclature(artId)) || 0; } catch (eP) {}
+      var it = items[code];
+      if (!it) it = items[code] = { code: code, designation: des, article: art, qte: 0, vol: 0, nails: 0, nailCost: 0, ca: 0, taux: taux };
+      it.qte += q; it.vol += vol; it.nails += nbQ; it.nailCost += nc; it.ca += pv * q;
+      if (taux > 0) it.taux = taux;
+      tot.qte += q; tot.vol += vol; tot.nails += nbQ; tot.nailCost += nc; tot.ca += pv * q;
+      (nom.detail || []).forEach(function (d) {
+        if (String(d && d.type || '').toUpperCase() !== 'POINTE') return;
+        var nc2 = _bilanNorm(d.code);
+        if (!nc2) return;
+        var rec = nails[nc2];
+        if (!rec) rec = nails[nc2] = { code: d.code || nc2, nb: 0, cost: 0, pu: parseFloat(d.pu) || 0, parArt: {} };
+        var nb2 = (parseFloat(d.qte) || 0) * q;
+        rec.nb += nb2; rec.cost += (parseFloat(d.mont) || 0) * q;
+        var pa = rec.parArt[code];
+        if (!pa) pa = rec.parArt[code] = { code: code, designation: des, qte: 0, nb: 0 };
+        pa.qte += q; pa.nb += nb2;
+      });
+    });
+  });
+
+  var losses = (typeof getLosses === 'function' ? getLosses() : []).filter(function (l) {
+    var d = String(l && l.date || '').slice(0, 10);
+    return d >= du && d <= au;
+  });
+  var totalLoss = 0, lossRows = [];
+  losses.forEach(function (l) {
+    var art = null;
+    for (var i = 0; i < arts.length; i++) { if (String(arts[i].id) === String(l.article_id)) { art = arts[i]; break; } }
+    var q = parseFloat(l.quantite) || 0;
+    var uv = art ? artUnitVol(art) : 0;
+    var v = uv > 0 ? uv * q : (parseFloat(l.volume) || 0);
+    if (!(v > 0)) return;
+    totalLoss += v;
+    lossRows.push({ date: l.date, art: art, des: art ? (art.designation || art.code) : (l.designation || l.article_id || ''), qte: q, vol: v });
+  });
+
+  var prixM3 = 0; try { prixM3 = parseFloat(acPrixM3Auto()) || 0; } catch (eM) {}
+  var seuil = 0; try { seuil = parseFloat(getTauxPerteFor(au)) || 0; } catch (eS) {}
+  var netVol = tot.vol;
+  var lossRate = (netVol + totalLoss) > 0 ? (totalLoss / (netVol + totalLoss)) * 100 : 0;
+  var lostValue = totalLoss * prixM3;
+  var matValue = netVol * prixM3;
+  var costTotal = matValue + tot.nailCost;
+  var lossValueRate = costTotal > 0 ? (lostValue / costTotal) * 100 : 0;
+  var marge = tot.ca - costTotal;
+  var margeRate = tot.ca > 0 ? (marge / tot.ca) * 100 : 0;
+  var palQ = 0, couvQ = 0;
+  Object.keys(items).forEach(function (k) {
+    var it = items[k];
+    var s = (k + ' ' + it.designation).toUpperCase();
+    if (s.indexOf('COUV') >= 0) couvQ += it.qte; else palQ += it.qte;
+  });
+  var cartonsTotal = 0;
+  Object.keys(nails).forEach(function (k) { cartonsTotal += _bilanCartons(nails[k].nb, nails[k].code); });
+
+  return { du: du, au: au, prods: prods, items: items, nails: nails, tot: tot, losses: lossRows, totalLoss: totalLoss, prixM3: prixM3, seuil: seuil, netVol: netVol, lossRate: lossRate, lostValue: lostValue, matValue: matValue, costTotal: costTotal, lossValueRate: lossValueRate, marge: marge, margeRate: margeRate, palQ: palQ, couvQ: couvQ, cartonsTotal: cartonsTotal };
+}
+function _bilanCell(v, right, bold) {
+  return '<td style="border:1px solid #e2e8f0;padding:6px 7px;vertical-align:top;' + (right ? 'text-align:right;' : '') + (bold ? 'font-weight:800;' : '') + '">' + v + '</td>';
+}
+function _bilanHead(labels) {
+  var h = '<tr>';
+  labels.forEach(function (l, i) { h += '<th style="border:1px solid #e2e8f0;padding:6px 7px;background:#f1f5f9;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#475569;text-align:' + (i >= 2 ? 'right' : 'left') + '">' + escH(l) + '</th>'; });
+  return h + '</tr>';
+}
+function _bilanKpi(label, val, sub, color, bg) {
+  return '<div style="background:' + (bg || '#fff') + ';border:1px solid #e2e8f0;border-radius:14px;padding:13px 15px;border-left:4px solid ' + color + ';box-shadow:0 2px 8px rgba(15,23,42,.05)">'
+    + '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:800">' + escH(label) + '</div>'
+    + '<div style="font-size:21px;font-weight:900;color:' + color + ';line-height:1.2;margin-top:2px">' + val + '</div>'
+    + (sub ? '<div style="font-size:11px;color:#64748b;margin-top:3px">' + sub + '</div>' : '') + '</div>';
+}
+function _bilanReportHtml(d, forPrint) {
+  var h = '';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px">';
+  h += _bilanKpi('Palettes / produits finis', fmt(d.palQ), 'Quantité produite sur la période', '#0b3a6f', '#f8fafc');
+  h += _bilanKpi('Couvercles produits', fmt(d.couvQ), 'Articles identifiés COUV', '#0e7490', '#f8fafc');
+  h += _bilanKpi('Volume bois consommé', _bilanN(d.netVol).toFixed(3) + ' m³', 'Volume net des articles produits', '#15803d', '#f8fafc');
+  h += _bilanKpi('Bois perdu', _bilanN(d.totalLoss).toFixed(3) + ' m³', 'Volume réellement perdu', '#b45309', '#fffbeb');
+  h += _bilanKpi('Valeur du bois perdu', _bilanMoney(d.lostValue), d.prixM3 > 0 ? ('Prix ' + _bilanMoney(d.prixM3) + ' / m³') : 'Prix du m³ non renseigné', '#b91c1c', '#fef2f2');
+  h += _bilanKpi('Pointes consommées', fmt(d.tot.nails), _bilanQ(d.cartonsTotal) + ' carton(s)', '#7c3aed', '#f8fafc');
+  h += _bilanKpi('Coût des pointes', _bilanMoney(d.tot.nailCost), 'Selon la nomenclature', '#b45309', '#fffbeb');
+  h += _bilanKpi('CA estimé', d.tot.ca > 0 ? _bilanMoney(d.tot.ca) : '—', d.tot.ca > 0 ? ('Marge ' + _bilanMoney(d.marge) + ' (' + _bilanPct(d.margeRate) + ')') : 'Prix de vente non renseigné', d.marge >= 0 ? '#15803d' : '#b91c1c', '#f8fafc');
+  h += '</div>';
+
+  var verdict, tone;
+  if (d.totalLoss <= 0) { verdict = 'Aucune perte de bois enregistrée sur la période : utilisation maîtrisée.'; tone = '#15803d'; }
+  else if (d.seuil > 0 && d.lossRate <= d.seuil) { verdict = 'Utilisation rationnelle : perte de ' + _bilanPct(d.lossRate) + ', sous le seuil accepté de ' + _bilanPct(d.seuil) + '.'; tone = '#15803d'; }
+  else { verdict = 'Perte à surveiller : ' + _bilanPct(d.lossRate) + (d.seuil > 0 ? (', au-dessus du seuil accepté de ' + _bilanPct(d.seuil) + '.') : ' (aucun seuil configuré).'); tone = '#b91c1c'; }
+  var rent = d.tot.ca > 0
+    ? ('Rentabilité estimée : marge de ' + _bilanMoney(d.marge) + ' sur ' + _bilanMoney(d.tot.ca) + ' de CA, soit ' + _bilanPct(d.margeRate) + '.')
+    : 'Rentabilité : prix de vente non renseigné pour les articles produits.';
+  var lossCost = 'Le bois perdu représente ' + _bilanPct(d.lossValueRate) + ' du coût matière + pointes (' + _bilanMoney(d.lostValue) + ' sur ' + _bilanMoney(d.costTotal) + ').';
+
+  h += '<div style="background:#fff;border:1px solid #e2e8f0;border-left:5px solid ' + tone + ';border-radius:14px;padding:14px 16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(15,23,42,.05)">'
+    + '<div style="font-size:12.5px;font-weight:900;color:' + tone + '">' + escH(verdict) + '</div>'
+    + '<div style="font-size:11.5px;color:#475569;margin-top:5px">' + escH(rent) + '</div>'
+    + '<div style="font-size:11.5px;color:#475569;margin-top:3px">' + escH(lossCost) + '</div>'
+    + '</div>';
+
+  /* Production par article */
+  var rows = Object.keys(d.items).map(function (k) { return d.items[k]; }).sort(function (a, b) { return b.qte - a.qte; });
+  h += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(15,23,42,.05)">'
+    + '<h3 style="margin:0 0 8px;font-size:13px;font-weight:900;color:#0f172a">Production par article</h3>';
+  if (!rows.length) h += '<div style="font-size:12px;color:#64748b;padding:8px">Aucune production sur la période.</div>';
+  else {
+    h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead>' + _bilanHead(['Code', 'Désignation', 'Qté', 'Volume bois (m³)', 'Pointes', 'Cartons', 'Coût pointes', 'CA estimé']) + '</thead><tbody>';
+    rows.forEach(function (it) {
+      var cart = _bilanCartons(it.nails, it.code);
+      h += '<tr>' + _bilanCell(escH(it.code)) + _bilanCell(escH(it.designation)) + _bilanCell(fmt(it.qte), true)
+        + _bilanCell(_bilanN(it.vol).toFixed(3), true) + _bilanCell(fmt(it.nails), true)
+        + _bilanCell(cart > 0 ? _bilanQ(cart) : '—', true)
+        + _bilanCell(_bilanMoney(it.nailCost), true) + _bilanCell(it.ca > 0 ? _bilanMoney(it.ca) : '—', true) + '</tr>';
+    });
+    h += '<tr style="background:#f8fafc;font-weight:800">' + _bilanCell('TOTAL') + _bilanCell('') + _bilanCell(fmt(d.tot.qte), true, true)
+      + _bilanCell(_bilanN(d.netVol).toFixed(3), true, true) + _bilanCell(fmt(d.tot.nails), true, true)
+      + _bilanCell(_bilanQ(d.cartonsTotal), true, true) + _bilanCell(_bilanMoney(d.tot.nailCost), true, true)
+      + _bilanCell(d.tot.ca > 0 ? _bilanMoney(d.tot.ca) : '—', true, true) + '</tr>';
+    h += '</tbody></table></div>';
+  }
+  h += '</div>';
+
+  /* Pointes par numero */
+  var nrows = Object.keys(d.nails).map(function (k) { return d.nails[k]; }).sort(function (a, b) { return b.nb - a.nb; });
+  h += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(15,23,42,.05)">'
+    + '<h3 style="margin:0 0 4px;font-size:13px;font-weight:900;color:#0f172a">Consommables — pointes par numéro</h3>'
+    + '<div style="font-size:11px;color:#64748b;margin-bottom:8px">' + (forPrint ? 'Détail par numéro de pointe.' : 'Cliquez sur un numéro de pointe pour voir la consommation de chaque article.') + '</div>';
+  if (!nrows.length) h += '<div style="font-size:12px;color:#64748b;padding:8px">Aucune pointe consommée (nomenclature non renseignée ou aucune production).</div>';
+  else {
+    h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead>' + _bilanHead(['N° pointe', 'Pointes', 'Paquets', 'Cartons', 'Coût']) + '</thead><tbody>';
+    nrows.forEach(function (nr) {
+      var pp = 0; try { pp = parseFloat(acPointesParPaquet(nr.code)) || 0; } catch (e) {}
+      var cart = _bilanCartons(nr.nb, nr.code);
+      var codeHtml = forPrint ? escH(nr.code) : '<a href="#" onclick="event.preventDefault();openBilanPointe(\'' + escJ(nr.code) + '\')" style="color:#0b3a6f;font-weight:900;text-decoration:underline">' + escH(nr.code) + '</a>';
+      h += '<tr>' + _bilanCell(codeHtml) + _bilanCell(fmt(nr.nb), true) + _bilanCell(pp > 0 ? fmt(nr.nb / pp) : '—', true)
+        + _bilanCell(cart > 0 ? _bilanQ(cart) : '—', true) + _bilanCell(_bilanMoney(nr.cost), true) + '</tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  h += '</div>';
+
+  /* Bois perdu detail */
+  h += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;box-shadow:0 2px 8px rgba(15,23,42,.05)">'
+    + '<h3 style="margin:0 0 8px;font-size:13px;font-weight:900;color:#0f172a">Bois perdu — détail</h3>';
+  if (!d.losses.length) h += '<div style="font-size:12px;color:#64748b;padding:8px">Aucune perte de bois enregistrée sur la période.</div>';
+  else {
+    h += '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead>' + _bilanHead(['Date', 'Article', 'Qté', 'Volume perdu (m³)', 'Valeur']) + '</thead><tbody>';
+    d.losses.sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).forEach(function (l) {
+      h += '<tr>' + _bilanCell(escH(fmtD(l.date))) + _bilanCell(escH(l.des)) + _bilanCell(fmt(l.qte), true)
+        + _bilanCell(_bilanN(l.vol).toFixed(3), true) + _bilanCell(d.prixM3 > 0 ? _bilanMoney(l.vol * d.prixM3) : '—', true) + '</tr>';
+    });
+    h += '<tr style="background:#f8fafc;font-weight:800">' + _bilanCell('TOTAL') + _bilanCell('') + _bilanCell('', true)
+      + _bilanCell(_bilanN(d.totalLoss).toFixed(3), true, true) + _bilanCell(d.prixM3 > 0 ? _bilanMoney(d.lostValue) : '—', true, true) + '</tr>';
+    h += '</tbody></table></div>';
+  }
+  h += '</div>';
+  return h;
+}
+function render_bilan_production() {
+  var d = _bilanCompute();
+  window._bilanData = d;
+  window._bilanPointeMap = d.nails;
+  var h = '<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">'
+    + '<div><label style="display:block;font-size:11px;font-weight:800;color:#475569;margin-bottom:4px">Du</label><input type="date" id="bilanDu" value="' + escH(d.du) + '" onchange="bilanSetPeriode(this.value, document.getElementById(\'bilanAu\').value)" style="padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;font-weight:700"></div>'
+    + '<div><label style="display:block;font-size:11px;font-weight:800;color:#475569;margin-bottom:4px">Au</label><input type="date" id="bilanAu" value="' + escH(d.au) + '" onchange="bilanSetPeriode(document.getElementById(\'bilanDu\').value, this.value)" style="padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;font-weight:700"></div>'
+    + '<button class="btn" onclick="bilanCeMois()" style="font-size:12px">Ce mois</button>'
+    + '<button class="btn" onclick="bilanMoisDernier()" style="font-size:12px">Mois dernier</button>'
+    + '<button class="btn" onclick="bilan30Jours()" style="font-size:12px">30 jours</button>'
+    + '<span style="flex:1"></span>'
+    + '<button class="btn" onclick="printBilanProduction()" style="font-size:12px">🖨️ Imprimer</button>'
+    + '<button class="btn btn-accent" onclick="printBilanProduction()" style="font-size:12px">📄 PDF</button>'
+    + '</div>';
+  h += '<div id="bilanBox">' + _bilanReportHtml(d, false) + '</div>';
+  return h;
+}
+function openBilanPointe(code) {
+  var rec = (window._bilanPointeMap || {})[code];
+  if (!rec) { toast('Détail indisponible', 'error'); return; }
+  var rows = Object.keys(rec.parArt || {}).map(function (k) { return rec.parArt[k]; }).sort(function (a, b) { return b.nb - a.nb; });
+  var h = '<div class="card" style="max-height:80vh;overflow:auto">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:0">🔩 Pointes ' + escH(rec.code) + '</h3><button class="btn" onclick="closeModal()">Fermer</button></div>'
+    + '<div style="font-size:12px;color:#64748b;margin:6px 0 10px">' + fmt(rec.nb) + ' pointes consommées · ' + (_bilanCartons(rec.nb, rec.code) > 0 ? _bilanQ(_bilanCartons(rec.nb, rec.code)) + ' carton(s)' : 'conditionnement non renseigné') + ' · ' + _bilanMoney(rec.cost) + '</div>'
+    + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead>' + _bilanHead(['Code article', 'Désignation', 'Palettes', 'Pointes consommées']) + '</thead><tbody>';
+  rows.forEach(function (r2) {
+    h += '<tr>' + _bilanCell(escH(r2.code)) + _bilanCell(escH(r2.designation)) + _bilanCell(fmt(r2.qte), true) + _bilanCell(fmt(r2.nb), true) + '</tr>';
+  });
+  h += '</tbody></table></div></div>';
+  openModal(h);
+}
+function printBilanProduction() {
+  var d = window._bilanData || _bilanCompute();
+  var body = _bilanReportHtml(d, true);
+  var ent = {};
+  try { ent = dbObj('mdb_entreprise') || {}; } catch (e) {}
+  var w = window.open('', '_blank', 'width=1050,height=760');
+  if (!w || !w.document) { toast('Autorisez les fenêtres pour imprimer', 'error'); return; }
+  w.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Bilan d\'activité</title>'
+    + '<style>body{font-family:Arial,Helvetica,sans-serif;padding:18px;color:#0f172a;font-size:12px}'
+    + 'table{width:100%;border-collapse:collapse}th,td{border:1px solid #cbd5e1;padding:5px 6px;vertical-align:top}'
+    + 'h1{font-size:20px;margin:0}h3{font-size:13px}'
+    + '@page{size:A4 landscape;margin:10mm}'
+    + '</style></head><body>'
+    + '<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0b3a6f;padding-bottom:8px;margin-bottom:12px">'
+    + '<div><h1>' + escH(ent.nom || 'Montabbord') + '</h1><div style="font-size:12px;color:#475569;margin-top:3px">Bilan d\'activité — du ' + escH(fmtD(d.du)) + ' au ' + escH(fmtD(d.au)) + '</div></div>'
+    + '<div style="font-size:10.5px;color:#64748b;text-align:right">Édité le ' + escH(fmtD(today())) + '<br>' + fmt(d.prods.length) + ' fiche(s) de production</div></div>'
+    + body + '</body></html>');
+  w.document.close();
+  setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 400);
+}
+
 function render_reports() {
   var h = '<div class="stats-grid">';
+  h += '<div class="card" style="cursor:pointer" onclick="navigate(\'bilan-production\')"><h3>📊 Bilan d\'activité</h3><p style="font-size:.75rem;color:var(--dim)">Matière, pertes, pointes et rentabilité</p></div>';
   h += '<div class="card" style="cursor:pointer" onclick="generateReport(\'production\')"><h3>📊 Rapport Production</h3><p style="font-size:.75rem;color:var(--dim)">Synthèse production par mois</p></div>';
   h += '<div class="card" style="cursor:pointer" onclick="generateReport(\'stock\')"><h3>📦 Rapport Stock</h3><p style="font-size:.75rem;color:var(--dim)">Mouvements de stock</p></div>';
   h += '<div class="card" style="cursor:pointer" onclick="generateReport(\'presence\')"><h3>⏱️ Rapport Présence</h3><p style="font-size:.75rem;color:var(--dim)">Taux de présence</p></div>';
