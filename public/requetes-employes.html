@@ -178,7 +178,7 @@
 
   function loadAll(){
     if(!uid){document.getElementById("app").innerHTML='<div class="card"><div class="empty">Identifiant entreprise introuvable.</div></div>';return;}
-    Promise.all([getKey("mdb_employes"),getKey("mdb_paye"),getPrefix("mdb_paye."),getKey("mdb_requetesEmploye"),getKey("mdb_portailSessions"),getKey("mdb_portailComptes"),getPrefix("mdb_portailPhoto:"),getKey("mdb_portailPhotos")]).then(function(res){
+    Promise.all([getKey("mdb_employes"),getKey("mdb_paye"),getPrefix("mdb_paye."),getKey("mdb_requetesEmploye"),getKey("mdb_portailSessions"),getKey("mdb_portailComptes"),getPrefix("mdb_portailPhoto:"),getKey("mdb_portailPhotos"),getKey("mdb_rh_permissions")]).then(function(res){
       state.employes=Array.isArray(res[0])?res[0]:[];
       var paye=(res[1]&&typeof res[1]==="object")?res[1]:{};
       var sec=res[2]||{};
@@ -192,7 +192,26 @@
       var oldPhotos=(res[7]&&typeof res[7]==="object")?res[7]:{};
       for(var ok in oldPhotos){ if(!oldPhotos.hasOwnProperty(ok)) continue; if(!photos[ok]) photos[ok]=oldPhotos[ok]; }
       state.photos=Object.assign({}, state.photos||{}, photos);
-      state.requetes=Array.isArray(res[3])?res[3]:[];
+      state.rhPermissions=Array.isArray(res[8])?res[8]:[];
+      var _genReq=Array.isArray(res[3])?res[3]:[];
+      /* Les permissions envoyées depuis « Permissions » de l'espace employé
+         vivent dans mdb_rh_permissions (D1). On les affiche ici aussi, sinon
+         l'administration ne les voit jamais dans « Requêtes employés ». */
+      var _permReq=(state.rhPermissions||[]).map(function(p){
+        var st=p&&p.statut;
+        var mapped=st==='valide'?'acceptee':(st==='refuse'?'refusee':'ouverte');
+        return {
+          id:p.id, empId:p.employee_id, matricule:p.matricule||'',
+          nom:p.nom||'', type:p.type||'permission', sujet:p.motif||'',
+          message:p.motif||p.commentaire||'', motif:p.motif||'',
+          statut:mapped, _perm:true, _permStatut:st,
+          dateDebut:p.date_debut||'', dateFin:p.date_fin||'', dureeJours:p.nb_jours||0,
+          retourEstime:p.retour||'', payer:!!p.payer,
+          createdAt:p.created_at||p.createdAt||'', updatedAt:p.date_validation||p.created_at||p.updatedAt||'',
+          messages:[]
+        };
+      });
+      state.requetes=_genReq.concat(_permReq);
       state.sessions=Array.isArray(res[4])?res[4]:[];
       document.getElementById("who").textContent=me.nom+" · "+state.employes.length+" employé(s) · "+state.requetes.length+" requête(s)";
       renderAll();
@@ -510,6 +529,22 @@
       title: title, label: label, value: '', okText: ok,
       checkbox: (isPerm && statut === 'acceptee') ? { id: 'mdbPayPerm', label: 'Payer ces jours malgré l’absence (8 h/jour, sans retenue)', checked: false } : null,
       onOk: function (com, payer) {
+        if (req._perm) {
+          var perms = (state.rhPermissions || []).slice();
+          var pp = null;
+          for (var i = 0; i < perms.length; i++) { if (perms[i] && String(perms[i].id) === String(id)) { pp = perms[i]; break; } }
+          if (!pp) { alert('Permission introuvable.'); return; }
+          pp.statut = statut === 'acceptee' ? 'valide' : (statut === 'refusee' ? 'refuse' : (pp.statut || 'en_attente'));
+          pp.payer = !!payer;
+          pp.valide_par = me.nom;
+          pp.date_validation = new Date().toISOString();
+          if (com) pp.commentaire_admin = com;
+          fetch(SYNC, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: uid, updates: { mdb_rh_permissions: perms } }) })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (j) { if (j && j.ok) { loadAll(); state.open = id; } else alert('Validation impossible.'); })
+            .catch(function () { alert('Connexion impossible. Réessayez.'); });
+          return;
+        }
         api('admindecision', { requestId: id, statut: statut, commentaire: com, payer: !!payer, nom: me.nom, role: me.role }).then(function (j) {
           if (j && j.ok) { loadAll(); state.open = id; } else alert('Validation impossible : ' + ((j && j.code) || 'erreur'));
         });
