@@ -166,7 +166,9 @@ export async function onRequest(context) {
       }
       /* Copies de bulletins (espace employé) : jamais dans la synchro générale,
          sinon chaque appareil téléchargerait tous les bulletins. */
-      if (!cle && !cles && !prefix) sql += " AND cle NOT LIKE 'mdb_bulSnap:%'";
+      if (!cle && !cles && !prefix) sql += " AND cle NOT LIKE 'mdb_bulSnap:%' AND cle NOT IN ('paye', 'operationsCaisse', 'production', 'factures')";
+      /* ('paye', 'operationsCaisse'… sans « mdb_ ») : vieilles copies (≈ 3 Mo)
+         que plus aucun écran ne lit ; elles alourdissaient chaque connexion. */
 
       if (since && since !== '0') {
         sql += ' AND updated_at > ?';
