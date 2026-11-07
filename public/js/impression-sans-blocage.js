@@ -50,9 +50,39 @@
       '})();<\/script>';
   }
 
+  /* PIED DE PAGE SUR CHAQUE PAGE imprimée : le dernier bloc « .pied » du
+     document est répété en bas de chaque feuille (bloc fixe + réserve de
+     place via un tableau dont le pied se répète à chaque page). À l'écran,
+     il reste affiché une seule fois en bas du document. */
+  function repeterPied(h) {
+    try {
+      if (!/class="[^"]*\bpied\b/.test(h) || typeof DOMParser === 'undefined') return h;
+      var doc = new DOMParser().parseFromString(h, 'text/html');
+      var pieds = doc.querySelectorAll('.pied');
+      if (!pieds.length) return h;
+      var pied = pieds[pieds.length - 1];
+      var parent = pied.parentNode;
+      if (!parent || parent.querySelector('.mdb-page')) return h;
+      parent.removeChild(pied);
+      var tab = doc.createElement('table'); tab.className = 'mdb-page';
+      tab.innerHTML = '<tbody><tr><td class="mdb-page-c"></td></tr></tbody><tfoot><tr><td><div class="mdb-pied-espace"></div></td></tr></tfoot>';
+      var cell = tab.querySelector('.mdb-page-c');
+      while (parent.firstChild) cell.appendChild(parent.firstChild);
+      parent.appendChild(tab);
+      pied.className += ' mdb-pied-fixe';
+      parent.appendChild(pied);
+      var st = doc.createElement('style');
+      st.textContent = '.mdb-page{width:100%;border-collapse:collapse;border:0}.mdb-page>tbody>tr>td,.mdb-page>tfoot>tr>td{padding:0;border:0}'
+        + '.mdb-pied-espace{display:none}'
+        + '@media print{.mdb-pied-espace{display:block;height:24mm}.mdb-pied-fixe{position:fixed;left:0;right:0;bottom:0;margin:0!important;background:#fff;padding-bottom:2mm}}';
+      (doc.head || doc.documentElement).appendChild(st);
+      return '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+    } catch (e) { return h; }
+  }
+
   function ouvrirIndependant(html, imprimer, titre) {
     try {
-      var h = String(html || '');
+      var h = repeterPied(String(html || ''));
       if (/<\/body>/i.test(h)) h = h.replace(/<\/body>/i, outilsDocument() + '</body>'); else h += outilsDocument();
       /* Bouton « Fermer » toujours présent : sur téléphone (application
          installée), cet onglet s'ouvre en plein écran sans retour ni croix. */
@@ -135,4 +165,5 @@
     return origOpen.apply(window, arguments);
   };
   window.mdbOuvrirDocumentIndependant = ouvrirIndependant;
+  window.mdbRepeterPied = repeterPied;
 })();
