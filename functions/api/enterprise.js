@@ -1,4 +1,36 @@
 // Cloudflare Pages Function: /api/enterprise
+/* ===== SÉCURITÉ : badge de connexion (remis par /api/auth à la connexion) =====
+   Jeton lu dans l'en-tête « Authorization: Bearer … » ou le paramètre « _tk ».
+   Jusqu'à MDB_SECU_DES on laisse encore passer sans badge (le temps que tous
+   les appareils se reconnectent) ; ensuite, sans badge valide : refus (401). */
+const MDB_SECU_DES = Date.parse('2026-11-09T06:00:00Z');
+let _mdbTableAuth = false;
+async function mdbSession(request, db, url, body) {
+  let t = '';
+  try { const h = request.headers.get('Authorization') || ''; if (h.indexOf('Bearer ') === 0) t = h.slice(7).trim(); } catch (e) {}
+  if (!t && url) t = url.searchParams.get('_tk') || '';
+  if (!t && body && body._tk) t = String(body._tk);
+  if (!t) return null;
+  if (!_mdbTableAuth) {
+    try { await db.prepare('CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, enterprise_id TEXT, user_id TEXT, login TEXT, role TEXT, created_at INTEGER, expires_at INTEGER, last_seen INTEGER)').run(); } catch (e) {}
+    _mdbTableAuth = true;
+  }
+  const s = await db.prepare('SELECT * FROM auth_sessions WHERE token = ?').bind(t).first();
+  if (!s || !(s.expires_at > Date.now())) return null;
+  return s;
+}
+function mdbSecuActive() { return Date.now() >= MDB_SECU_DES; }
+/* { ok, s } : ok = autorisé pour cette entreprise (ou période de transition). */
+async function mdbAutorise(request, db, url, uid, body, adminSeulement) {
+  const s = await mdbSession(request, db, url, body);
+  const bonne = s && (s.role === 'superadmin' || String(s.enterprise_id) === String(uid));
+  if (bonne && (!adminSeulement || s.role === 'admin' || s.role === 'superadmin')) return { ok: true, s };
+  return { ok: !mdbSecuActive(), s: bonne ? s : null };
+}
+function mdbRefus(cors, status) {
+  return new Response(JSON.stringify({ ok: false, code: 'auth', error: 'Connexion requise' }), { status: status || 401, headers: cors });
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -28,6 +60,9 @@ export async function onRequest(context) {
     if (request.method === 'GET') {
       const list = url.searchParams.get('list');
       if (list === '1' || list === 'true') {
+        /* Liste de TOUTES les entreprises : Super Admin uniquement (même en transition). */
+        const sL = await mdbSession(request, db, url, null);
+        if (!sL || sL.role !== 'superadmin') return mdbRefus(corsHeaders, 403);
         const stmt = db.prepare('SELECT id, identifiant, email, nom, updated_at FROM enterprises ORDER BY nom ASC');
         const res = await stmt.all();
         return new Response(JSON.stringify({
@@ -70,6 +105,11 @@ export async function onRequest(context) {
 
       let parsedData = {};
       try { parsedData = JSON.parse(ent.data || '{}'); } catch (e) {}
+      /* Sans badge de CETTE entreprise : seulement ce qu'il faut pour se connecter. */
+      const auE = await mdbAutorise(request, db, url, ent.id, null, false);
+      if (!auE.ok) {
+        return new Response(JSON.stringify({ found: true, enterprise: { id: ent.id, identifiant: ent.identifiant, nom: ent.nom, data: {}, updated_at: ent.updated_at } }), { headers: corsHeaders });
+      }
 
       return new Response(JSON.stringify({
         found: true,
@@ -96,6 +136,18 @@ export async function onRequest(context) {
 
       if (!id) {
         return new Response(JSON.stringify({ error: 'Missing id' }), { status: 400, headers: corsHeaders });
+      }
+      /* Création libre d'une NOUVELLE entreprise ; modifier une entreprise
+         existante demande un administrateur connecté de celle-ci. Un
+         identifiant déjà pris par une autre entreprise ne peut pas être volé
+         (sinon on détournait les connexions vers un autre dossier). */
+      const exist = await db.prepare('SELECT id FROM enterprises WHERE id = ? LIMIT 1').bind(id).first();
+      const sP = await mdbSession(request, db, url, body);
+      const adminP = sP && (sP.role === 'superadmin' || (sP.role === 'admin' && String(sP.enterprise_id) === String(id)));
+      if (exist && !adminP && mdbSecuActive()) return mdbRefus(corsHeaders, 403);
+      const prisPar = await db.prepare('SELECT enterprise_id FROM enterprise_index WHERE identifiant = ? COLLATE NOCASE').bind(identifiant).first();
+      if (prisPar && prisPar.enterprise_id && String(prisPar.enterprise_id) !== String(id) && !(sP && sP.role === 'superadmin')) {
+        return new Response(JSON.stringify({ ok: false, code: 'identifiant_pris', error: 'Identifiant déjà utilisé' }), { status: 409, headers: corsHeaders });
       }
 
       const stmt = db.prepare(`
@@ -129,6 +181,9 @@ export async function onRequest(context) {
       if (!id) {
         return new Response(JSON.stringify({ error: 'Missing id' }), { status: 400, headers: corsHeaders });
       }
+      /* Supprimer une entreprise ENTIÈRE : Super Admin, ou admin connecté de cette entreprise. Toujours. */
+      const sD = await mdbSession(request, db, url, null);
+      if (!sD || !(sD.role === 'superadmin' || (sD.role === 'admin' && String(sD.enterprise_id) === String(id)))) return mdbRefus(corsHeaders, 403);
       await db.batch([
         db.prepare('DELETE FROM enterprises WHERE id = ?').bind(id),
         db.prepare('DELETE FROM enterprise_index WHERE enterprise_id = ?').bind(id),

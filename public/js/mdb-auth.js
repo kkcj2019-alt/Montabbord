@@ -42,6 +42,12 @@
         .then(function (j) { if (j && j.ok && j.token) MDB_AUTH.enregistrer(uid, j); return j || { ok: false }; })
         .catch(function () { return { ok: false, code: 'reseau' }; });
     },
+    /* Appel direct au service de connexion (configuration du Super Admin…). */
+    appel: function (body) {
+      return _fetchOrig(racine() + '/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+        .then(function (r) { return r.json().catch(function () { return { ok: false, code: 'http' + r.status }; }); })
+        .catch(function () { return { ok: false, code: 'reseau' }; });
+    },
     logout: function () {
       var t = MDB_AUTH.jeton();
       MDB_AUTH.effacer();
@@ -129,13 +135,14 @@
         if (!pw) return;
         var m = document.getElementById('mdbAuthMsg'); m.style.color = '#cbd5e1'; m.textContent = 'Vérification…';
         MDB_AUTH.login(uid, ll.login, pw).then(function (j) {
-          if (j && j.ok) { d.remove(); return; }
+          if (j && j.ok) { d.remove(); MDB_AUTH._oblige = false; MDB_AUTH._refusEnCours = false; try { if (typeof window.mdbAuthRetabli === 'function') window.mdbAuthRetabli(); } catch (eR) {} return; }
           m.style.color = '#fecaca';
           m.textContent = (j && j.code === 'bloque') ? 'Trop d’essais : réessayez dans 15 minutes.' : (j && j.code === 'mdp') ? 'Mot de passe incorrect.' : 'Serveur injoignable, réessayez plus tard.';
         });
       };
       document.getElementById('mdbAuthOk').onclick = go;
       document.getElementById('mdbAuthPw').onkeydown = function (ev) { if (ev.key === 'Enter') go(); };
+      if (MDB_AUTH._oblige) { var pt = document.getElementById('mdbAuthPlusTard'); if (pt) pt.style.display = 'none'; var tx = d.querySelector('span'); if (tx) tx.textContent = 'Votre connexion a expiré : retapez votre mot de passe pour continuer à synchroniser. Vos saisies sont gardées sur cet appareil.'; }
       document.getElementById('mdbAuthPlusTard').onclick = function () { d.remove(); MDB_AUTH._plusTard = Date.now(); };
     } catch (e) {}
   }

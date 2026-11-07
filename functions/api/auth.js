@@ -180,7 +180,17 @@ export async function onRequest(context) {
     /* ---------- Mot de passe du Super Admin (par un admin de l'entreprise propriétaire) ---------- */
     if (action === 'sa_config') {
       const s = await lireSession(db, token);
-      const autorise = s && ((s.role === 'admin' && s.enterprise_id === ENT_PROPRIETAIRE) || s.role === 'superadmin');
+      let autorise = s && ((s.role === 'admin' && s.enterprise_id === ENT_PROPRIETAIRE) || s.role === 'superadmin');
+      if (!autorise && body.adminLogin && body.adminPass) {
+        /* Ou : identifiants d'un ADMINISTRATEUR de l'entreprise propriétaire, vérifiés ici. */
+        const k = 'u|' + ENT_PROPRIETAIRE + '|' + lc(body.adminLogin);
+        if (await bloque(db, k)) return json({ ok: false, code: 'bloque' }, 429);
+        const us = await lireCle(db, ENT_PROPRIETAIRE, 'mdb_users');
+        const u = (Array.isArray(us) ? us : []).filter(function (x) { return x && x.isAdmin && (lc(x.login) === lc(body.adminLogin) || (x.email && lc(x.email) === lc(body.adminLogin))); })[0];
+        if (!u || !(await verifierHash(u, body.adminPass))) { await echec(db, k); return json({ ok: false, code: 'mdp' }, 403); }
+        await reussite(db, k);
+        autorise = true;
+      }
       if (!autorise) return json({ ok: false, code: 'interdit' }, 403);
       const login = String(body.login || '').trim(), pass = String(body.pass || '');
       if (!login || pass.length < 10) return json({ ok: false, code: 'mdp_court' }, 400);

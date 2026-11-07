@@ -192,21 +192,24 @@ function run(rapport) {
     const ancien1 = (src.match(/pass !== config\.password/g) || []).length;
     const ancien2 = (src.match(/doc\.data\(\)\.password === pass/g) || []).length;
     const ancien3 = (src.match(/users\[i\]\.password === pass/g) || []).length;
-    const nouveau1 = src.indexOf('mdbPassCheck(cfg, pass)') !== -1;
-    const nouveau2 = src.indexOf('mdbPassCheck(config, pass)') !== -1;
+    /* Super Admin : vérifié par le SERVEUR (/api/auth) sur les deux écrans. */
+    const nouveau1 = src.indexOf("mdbSaServeur('admin', pass") !== -1;
+    const nouveau2 = src.indexOf('mdbSaServeur(login, pass') !== -1;
     if (ancien1 === 0 && ancien2 === 0 && ancien3 === 0 && nouveau1 && nouveau2) {
-      rapport.ok('Securite (statique) : comparaisons en clair supprimees, mdbPassCheck en place (SA quick + SA login)');
+      rapport.ok('Securite (statique) : comparaisons en clair supprimees, Super Admin verifie par le serveur');
     } else {
       rapport.ko('Securite (statique) anciens=' + [ancien1, ancien2, ancien3].join(',') + ' nouveaux=' + nouveau1 + '/' + nouveau2);
     }
   });
 
-  stat('Securite (statique) : « admin123 » uniquement en bootstrap (4 occurrences toutes conditionnees)', function () {
+  stat('Securite (statique) : « admin123 » n’ouvre plus le Super Admin', function () {
+    /* Plus AUCUN accès Super Admin par « admin123 » : seul reste le premier
+       compte d'une entreprise toute neuve (liste d'utilisateurs vide). */
     const total = (src.match(/pass === 'admin123'/g) || []).length;
-    const porte = src.indexOf('!_anyCache && pass === \'admin123\'') !== -1;
+    const porte = src.indexOf('!_anyCache && pass === \'admin123\'') === -1;
     const seedClair = (src.match(/password: 'admin123'/g) || []).length;
-    if (total === 4 && porte && seedClair === 0) {
-      rapport.ok('Securite (statique) : 4 acceptations bootstrap conditionn\u00e9es (hors-ligne sans cache ou config absente), 0 seed en clair');
+    if (total <= 1 && porte && seedClair === 0) {
+      rapport.ok('Securite (statique) : admin123 n\u2019ouvre plus le Super Admin (serveur), 0 seed en clair');
     } else {
       rapport.ko('Securite (statique) admin123 total=' + total + ' porteHorsLigne=' + porte + ' seedClair=' + seedClair);
     }

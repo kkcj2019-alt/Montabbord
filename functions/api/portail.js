@@ -231,6 +231,38 @@ function validerSession(sessions, token) {
   return null;
 }
 
+/* ===== SÉCURITÉ : badge de connexion (remis par /api/auth à la connexion) =====
+   Jeton lu dans l'en-tête « Authorization: Bearer … » ou le paramètre « _tk ».
+   Jusqu'à MDB_SECU_DES on laisse encore passer sans badge (le temps que tous
+   les appareils se reconnectent) ; ensuite, sans badge valide : refus (401). */
+const MDB_SECU_DES = Date.parse('2026-11-09T06:00:00Z');
+let _mdbTableAuth = false;
+async function mdbSession(request, db, url, body) {
+  let t = '';
+  try { const h = request.headers.get('Authorization') || ''; if (h.indexOf('Bearer ') === 0) t = h.slice(7).trim(); } catch (e) {}
+  if (!t && url) t = url.searchParams.get('_tk') || '';
+  if (!t && body && body._tk) t = String(body._tk);
+  if (!t) return null;
+  if (!_mdbTableAuth) {
+    try { await db.prepare('CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, enterprise_id TEXT, user_id TEXT, login TEXT, role TEXT, created_at INTEGER, expires_at INTEGER, last_seen INTEGER)').run(); } catch (e) {}
+    _mdbTableAuth = true;
+  }
+  const s = await db.prepare('SELECT * FROM auth_sessions WHERE token = ?').bind(t).first();
+  if (!s || !(s.expires_at > Date.now())) return null;
+  return s;
+}
+function mdbSecuActive() { return Date.now() >= MDB_SECU_DES; }
+/* { ok, s } : ok = autorisé pour cette entreprise (ou période de transition). */
+async function mdbAutorise(request, db, url, uid, body, adminSeulement) {
+  const s = await mdbSession(request, db, url, body);
+  const bonne = s && (s.role === 'superadmin' || String(s.enterprise_id) === String(uid));
+  if (bonne && (!adminSeulement || s.role === 'admin' || s.role === 'superadmin')) return { ok: true, s };
+  return { ok: !mdbSecuActive(), s: bonne ? s : null };
+}
+function mdbRefus(cors, status) {
+  return new Response(JSON.stringify({ ok: false, code: 'auth', error: 'Connexion requise' }), { status: status || 401, headers: cors });
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -242,6 +274,11 @@ export async function onRequest(context) {
     const uid = String(body.uid || '').replace(/^["']+|["']+$/g, '').trim();
     if (!uid) return json({ ok: false, code: 'uid' }, 400);
     const action = String(body.action || '').toLowerCase();
+    /* Actions de l'administration (Paie / RH) : badge de connexion de cette entreprise. */
+    if (action.indexOf('admin') === 0) {
+      const auA = await mdbAutorise(request, db, null, uid, body, false);
+      if (!auA.ok) return json({ ok: false, code: 'auth' }, 401);
+    }
 
     /* ---------- Suggestions de noms ---------- */
     if (action === 'suggest') {

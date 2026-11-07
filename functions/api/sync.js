@@ -15,6 +15,43 @@ async function assurerIndex(db) {
     _indexPrets = true;
   } catch (e) {}
 }
+/* ===== SÉCURITÉ : badge de connexion (remis par /api/auth à la connexion) =====
+   Jeton lu dans l'en-tête « Authorization: Bearer … » ou le paramètre « _tk ».
+   Jusqu'à MDB_SECU_DES on laisse encore passer sans badge (le temps que tous
+   les appareils se reconnectent) ; ensuite, sans badge valide : refus (401). */
+const MDB_SECU_DES = Date.parse('2026-11-09T06:00:00Z');
+let _mdbTableAuth = false;
+async function mdbSession(request, db, url, body) {
+  let t = '';
+  try { const h = request.headers.get('Authorization') || ''; if (h.indexOf('Bearer ') === 0) t = h.slice(7).trim(); } catch (e) {}
+  if (!t && url) t = url.searchParams.get('_tk') || '';
+  if (!t && body && body._tk) t = String(body._tk);
+  if (!t) return null;
+  if (!_mdbTableAuth) {
+    try { await db.prepare('CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, enterprise_id TEXT, user_id TEXT, login TEXT, role TEXT, created_at INTEGER, expires_at INTEGER, last_seen INTEGER)').run(); } catch (e) {}
+    _mdbTableAuth = true;
+  }
+  const s = await db.prepare('SELECT * FROM auth_sessions WHERE token = ?').bind(t).first();
+  if (!s || !(s.expires_at > Date.now())) return null;
+  return s;
+}
+function mdbSecuActive() { return Date.now() >= MDB_SECU_DES; }
+/* { ok, s } : ok = autorisé pour cette entreprise (ou période de transition). */
+async function mdbAutorise(request, db, url, uid, body, adminSeulement) {
+  const s = await mdbSession(request, db, url, body);
+  const bonne = s && (s.role === 'superadmin' || String(s.enterprise_id) === String(uid));
+  if (bonne && (!adminSeulement || s.role === 'admin' || s.role === 'superadmin')) return { ok: true, s };
+  return { ok: !mdbSecuActive(), s: bonne ? s : null };
+}
+function mdbRefus(cors, status) {
+  return new Response(JSON.stringify({ ok: false, code: 'auth', error: 'Connexion requise' }), { status: status || 401, headers: cors });
+}
+
+/* Clés gérées UNIQUEMENT par le serveur : jamais renvoyées ni écrites par /api/sync. */
+const CLES_SERVEUR = ['mdb_espaceSessions', 'mdb_espaceEchecs'];
+const CLES_SERVEUR_ECRITURE = ['mdb_espaceSessions', 'mdb_espaceEchecs', 'mdb_portailSessions'];
+function parseV(v) { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch (e) { return null; } }
+
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -23,6 +60,7 @@ export async function onRequest(context) {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
     'Content-Type': 'application/json'
   };
 
@@ -60,6 +98,33 @@ export async function onRequest(context) {
         }
       }
 
+      /* Vérification publique d'un document (QR imprimé) : on renvoie SEULEMENT
+         la fiche de ce jeton, plus jamais le registre complet ni la paie. */
+      const verifTok = url.searchParams.get('verif');
+      if (verifTok) {
+        const lireK = async (k) => { const r = await db.prepare('SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1').bind(uid, '"' + uid + '"', k).first(); return r ? parseV(r.valeur) : null; };
+        const trouve = (l) => (Array.isArray(l) ? l : []).filter(x => x && String(x.token) === String(verifTok))[0] || null;
+        let rec = trouve(await lireK('mdb_qr_verifs')), bulletin = false;
+        if (!rec) {
+          let bv = await lireK('mdb_paye.bulletinVerifs');
+          if (!Array.isArray(bv)) { const p = await lireK('mdb_paye'); bv = p && Array.isArray(p.bulletinVerifs) ? p.bulletinVerifs : []; }
+          rec = trouve(bv); bulletin = !!rec;
+        }
+        let reception = null;
+        if (rec && bulletin) reception = trouve(await lireK('mdb_receptionsBulletins'));
+        const garder = bulletin ? ['token', 'nom', 'matricule', 'mois', 'brut', 'net', 'netAvantSolde', 'date', 'hash'] : ['token', 'type', 'ref', 'tiers', 'libelle', 'date', 'montant', 'dateCreation', 'hash'];
+        const out = rec ? {} : null;
+        if (rec) garder.forEach(k => { if (rec[k] !== undefined) out[k] = rec[k]; });
+        return new Response(JSON.stringify({ ok: true, rec: out, bulletin, reception: reception ? { dateReception: reception.dateReception || '' } : null }), { headers: corsHeaders });
+      }
+
+      /* SÉCURITÉ : badge obligatoire (après la période de transition). */
+      const _au = await mdbAutorise(request, db, url, uid, null, false);
+      const CLES_PUBLIQUES = ['mdb_clientLogos'];
+      const cleDemandee = url.searchParams.get('cle');
+      if (!_au.ok && !(cleDemandee && CLES_PUBLIQUES.indexOf(cleDemandee) !== -1)) return mdbRefus(corsHeaders);
+      if (uid === '__SUPER_ADMIN__' && !(_au.s && _au.s.role === 'superadmin')) return mdbRefus(corsHeaders, 403);
+
       const since = url.searchParams.get('since') || '0';
       const cle = url.searchParams.get('cle');
       const cles = url.searchParams.get('cles');
@@ -67,7 +132,7 @@ export async function onRequest(context) {
       const limitParam = url.searchParams.get('limit');
 
       // Normaliser l'uid pour matcher les enregistrements existants (avec ou sans guillemets)
-      let sql = 'SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id IN (?, ?)';
+      let sql = "SELECT cle, valeur, updated_at FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle NOT IN ('mdb_espaceSessions', 'mdb_espaceEchecs')";
       const params = [uid, '"' + uid + '"'];
 
       // Mode meta : ne renvoie que les clés + tailles (réponse minuscule, quasi aucun CPU)
@@ -186,6 +251,36 @@ export async function onRequest(context) {
       if (!uid) {
         return new Response(JSON.stringify({ error: 'Missing uid' }), { status: 400, headers: corsHeaders });
       }
+      const _auP = await mdbAutorise(request, db, url, uid, body, false);
+      if (!_auP.ok) {
+        /* Seule exception : une entreprise TOUTE NEUVE (aucun compte utilisateur
+           encore enregistré) peut recevoir ses premières données, sinon on ne
+           pourrait jamais créer de nouvelle entreprise. */
+        const dejaComptes = await db.prepare("SELECT 1 AS x FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = 'mdb_users' LIMIT 1").bind(uid, '"' + uid + '"').first();
+        if (dejaComptes) return mdbRefus(corsHeaders);
+      }
+      if (uid === '__SUPER_ADMIN__' && !(_auP.s && _auP.s.role === 'superadmin')) return mdbRefus(corsHeaders, 403);
+      CLES_SERVEUR_ECRITURE.forEach(k => { delete updates[k]; });
+      /* Comptes utilisateurs : plus aucun mot de passe ni code de pointage en clair au cloud. */
+      if (updates.mdb_users !== undefined) {
+        try {
+          let us = parseV(updates.mdb_users);
+          if (Array.isArray(us)) {
+            for (const u of us) {
+              if (!u || typeof u !== 'object') continue;
+              if (u.password && u.passwordHash) u.password = '';
+              if (u.pointageCode) {
+                if (!u.pointageCodeHash) {
+                  const dg = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(u.pointageCode)));
+                  u.pointageCodeHash = Array.from(new Uint8Array(dg)).map(b => ('0' + b.toString(16)).slice(-2)).join('');
+                }
+                delete u.pointageCode;
+              }
+            }
+            updates.mdb_users = us;
+          }
+        } catch (eU) {}
+      }
 
       const keys = Object.keys(updates);
       if (keys.length === 0) {
@@ -234,6 +329,9 @@ export async function onRequest(context) {
       if (!uid) {
         return new Response(JSON.stringify({ error: 'Missing uid' }), { status: 400, headers: corsHeaders });
       }
+      /* Effacer TOUTES les données : administrateur uniquement, même en transition. */
+      const _auD = await mdbAutorise(request, db, url, uid, null, !cle);
+      if (!_auD.ok || (!cle && !_auD.s)) return mdbRefus(corsHeaders, 403);
       if (cle) {
         await db.prepare('DELETE FROM enterprise_data WHERE enterprise_id = ? AND cle = ?').bind(uid, cle).run();
       } else {

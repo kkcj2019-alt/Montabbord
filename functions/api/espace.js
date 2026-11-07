@@ -217,6 +217,12 @@ export async function onRequest(context) {
       return json(out);
     }
 
+    /* ---------- Nom et logo de l'entreprise (espace employé, pages publiques) ---------- */
+    if (action === 'entreprise') {
+      const e0 = await lireVal(db, uid, 'mdb_entreprise', {}) || {};
+      return json({ ok: true, ent: { nom: e0.nom || '', sigle: e0.sigle || '', logo: e0.logo || '', telephone: e0.telephone || e0.tel || '', email: e0.email || '', adresse: e0.adresse || '', slogan: e0.slogan || '' } });
+    }
+
     /* ---------- Connexion ---------- */
     if (action === 'login') {
       const email = lc(body.email);
