@@ -65,6 +65,29 @@ export async function onRequest(context) {
         if (!sL || sL.role !== 'superadmin') return mdbRefus(corsHeaders, 403);
         const stmt = db.prepare('SELECT id, identifiant, email, nom, updated_at FROM enterprises ORDER BY nom ASC');
         const res = await stmt.all();
+        /* Nom / identifiant manquants dans la fiche : on les reprend du dossier
+           de l'entreprise (Paramètres → Entreprise) et de l'index de connexion,
+           sinon le Super Admin ne voit que « Entreprise #1aWBeqTj ». */
+        for (const row of (res.results || [])) {
+          try {
+            if (!row.identifiant) {
+              const ix = await db.prepare('SELECT identifiant FROM enterprise_index WHERE enterprise_id = ? LIMIT 1').bind(row.id).first();
+              if (ix && ix.identifiant) row.identifiant = ix.identifiant;
+            }
+          } catch (eIx) {}
+          try {
+            if (!row.nom || !row.email) {
+              const r = await db.prepare("SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = 'mdb_entreprise' ORDER BY updated_at DESC LIMIT 1").bind(row.id, '"' + row.id + '"').first();
+              let v = r ? r.valeur : null;
+              for (let k = 0; k < 2 && typeof v === 'string'; k++) { try { v = JSON.parse(v); } catch (eP) { break; } }
+              if (v && typeof v === 'object') {
+                if (!row.nom && v.nom) row.nom = String(v.nom);
+                if (!row.email && v.email) row.email = String(v.email);
+                if (v.telephone) row.telephone = String(v.telephone);
+              }
+            }
+          } catch (eNom) {}
+        }
         return new Response(JSON.stringify({
           data: res.results || [],
           count: (res.results || []).length
