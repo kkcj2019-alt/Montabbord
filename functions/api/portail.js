@@ -355,6 +355,16 @@ export async function onRequest(context) {
     }
 
     /* ---------- Photo ajoutée par l'administration ---------- */
+    /* Copie du bulletin imprimé (sans QR) pour l'espace employé. */
+    if (action === 'adminbulsnap') {
+      const empId = String(body.empId || '');
+      const mois = String(body.mois || '').slice(0, 7);
+      const html = String(body.html || '');
+      if (!empId || !/^\d{4}-\d{2}$/.test(mois) || html.length < 200) return json({ ok: false, code: 'donnees' }, 400);
+      if (html.length > 900000) return json({ ok: false, code: 'trop_gros' }, 413);
+      await ecrireCle(db, uid, 'mdb_bulSnap:' + empId + '|' + mois, { html: html, vue: String(body.vue || ''), at: new Date().toISOString() });
+      return json({ ok: true });
+    }
     if (action === 'adminphoto') {
       const empId = String(body.empId || '');
       const photo = String(body.photo || '');
@@ -850,6 +860,19 @@ export async function onRequest(context) {
     if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
     const paye = await lirePaye(db, uid);
     const allowed = moisAutorises(emp.id, paye);
+
+    /* ---------- Bulletin tel qu'imprimé (seulement s'il est publié) ---------- */
+    if (action === 'bulletinsnap') {
+      const mois = String(body.mois || '').slice(0, 7);
+      if (allowed.indexOf(mois) === -1) return json({ ok: false, code: 'mois' }, 403);
+      const pub = (Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).some(b => b && b.visible === true && String(b.empId) === String(emp.id) && String(b.mois || '') === mois);
+      if (!pub) return json({ ok: false, code: 'non_publie' }, 403);
+      const snap = parseVal(await lireCle(db, uid, 'mdb_bulSnap:' + emp.id + '|' + mois), null);
+      if (!snap || !snap.html) return json({ ok: false, code: 'absent' }, 404);
+      let logo = '';
+      try { const ent = parseVal(await lireCle(db, uid, 'mdb_entreprise'), {}) || {}; logo = String(ent.logo || ''); } catch (eL) {}
+      return json({ ok: true, html: String(snap.html).split('__MDB_LOGO__').join(logo), at: snap.at || '' });
+    }
 
     /* ---------- Demande de permission (espace employé) ---------- */
     if (action === 'permission') {

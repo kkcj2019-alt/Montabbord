@@ -164,6 +164,9 @@ export async function onRequest(context) {
         sql += ' AND cle LIKE ?';
         params.push(prefix + '%');
       }
+      /* Copies de bulletins (espace employé) : jamais dans la synchro générale,
+         sinon chaque appareil téléchargerait tous les bulletins. */
+      if (!cle && !cles && !prefix) sql += " AND cle NOT LIKE 'mdb_bulSnap:%'";
 
       if (since && since !== '0') {
         sql += ' AND updated_at > ?';
