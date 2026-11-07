@@ -263,6 +263,28 @@ function mdbRefus(cors, status) {
   return new Response(JSON.stringify({ ok: false, code: 'auth', error: 'Connexion requise' }), { status: status || 401, headers: cors });
 }
 
+/* ---- Anti-essais au hasard sur le code PIN : 5 erreurs -> 15 min de blocage.
+   Sans base disponible (tests), on laisse passer sans bloquer. ---- */
+let _pinTablePrete = false;
+async function _pinTable(db) {
+  if (_pinTablePrete) return true;
+  try { await db.prepare('CREATE TABLE IF NOT EXISTS auth_echecs (k TEXT PRIMARY KEY, n INTEGER, until INTEGER, last INTEGER)').run(); _pinTablePrete = true; return true; } catch (e) { return false; }
+}
+async function pinBloque(db, k) {
+  try { if (!(await _pinTable(db))) return false; const r = await db.prepare('SELECT until FROM auth_echecs WHERE k = ?').bind(k).first(); return !!(r && r.until && r.until > Date.now()); } catch (e) { return false; }
+}
+async function pinEchec(db, k) {
+  try {
+    if (!(await _pinTable(db))) return;
+    const now = Date.now();
+    const r = await db.prepare('SELECT n FROM auth_echecs WHERE k = ?').bind(k).first();
+    let n = (r && r.n ? r.n : 0) + 1, until = 0;
+    if (n >= 5) { until = now + 15 * 60 * 1000; n = 0; }
+    await db.prepare('INSERT INTO auth_echecs (k, n, until, last) VALUES (?, ?, ?, ?) ON CONFLICT(k) DO UPDATE SET n = excluded.n, until = excluded.until, last = excluded.last').bind(k, n, until, now).run();
+  } catch (e) {}
+}
+async function pinReussite(db, k) { try { if (await _pinTable(db)) await db.prepare('DELETE FROM auth_echecs WHERE k = ?').bind(k).run(); } catch (e) {} }
+
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -362,10 +384,13 @@ export async function onRequest(context) {
       if (estInactif(emp)) return json({ ok: false, code: 'inactive' }, 403);
       const pinRec = compte || trouverPin(comptes, emp);
       if (!pinRec || (!pinRec.passwordHash && !pinRec.hash)) return json({ ok: false, code: 'no_access' }, 403);
+      const _kPin = 'pin|' + uid + '|' + emp.id;
+      if (await pinBloque(db, _kPin)) return json({ ok: false, code: 'bloque' }, 429);
       let ok = false;
       if (pinRec.passwordHash) ok = await verifierPin(pinRec.passwordHash, body.pin);
       if (!ok && pinRec.hash) ok = await verifierPin(pinRec.hash, body.pin);
-      if (!ok) return json({ ok: false, code: 'bad_pin' }, 403);
+      if (!ok) { await pinEchec(db, _kPin); return json({ ok: false, code: 'bad_pin' }, 403); }
+      await pinReussite(db, _kPin);
       await assurerSignaturePin(db, uid, emp, pinRec.hash, pinRec.nom);
 
       let sessions = parseVal(await lireCle(db, uid, 'mdb_portailSessions'), []);
@@ -925,6 +950,21 @@ export async function onRequest(context) {
 
     /* ---------- Validation de la fiche de pointage par l'employé ---------- */
     if (action === 'validatepointage') {
+      /* Valider son pointage = le signer : le code PIN de l'employé est exigé. */
+      {
+        const pinV = String(body.pin || '').trim();
+        if (!pinV) return json({ ok: false, code: 'pin_requis' }, 400);
+        const payeV = await lirePaye(db, uid);
+        const recV = trouverPin(fusionComptes(payeV.employePins, await lireComptesPortail(db, uid)), emp);
+        if (!recV || !(recV.hash || recV.passwordHash)) return json({ ok: false, code: 'no_pin' }, 403);
+        const kV = 'pin|' + uid + '|' + emp.id;
+        if (await pinBloque(db, kV)) return json({ ok: false, code: 'bloque' }, 429);
+        let okV = false;
+        if (recV.passwordHash) okV = await verifierPin(recV.passwordHash, pinV);
+        if (!okV && recV.hash) okV = await verifierPin(recV.hash, pinV);
+        if (!okV) { await pinEchec(db, kV); return json({ ok: false, code: 'bad_pin' }, 403); }
+        await pinReussite(db, kV);
+      }
       let map = parseVal(await lireCle(db, uid, 'mdb_paye.pointageValidations'), {});
       if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
       const at = new Date().toISOString();
@@ -1031,7 +1071,7 @@ export async function onRequest(context) {
         const ech = Array.isArray(a.echeances) ? a.echeances : [];
         let preleve = 0;
         ech.forEach(e => { if (e && e.preleve === true) preleve += parseFloat(e.montant) || 0; });
-        const rembEffectif = Math.max(parseFloat(a.montantRembourse) || 0, preleve);
+        const rembEffectif = Math.max(parseFloat(a.montantRembourse) || 0, parseFloat(a.rembourse) || 0, preleve);
         return {
           nature: natureDe(a),
           sourceNom: (src && (src.nom || src.libelle || src.code)) || (req && req.traitement && req.traitement.sourceName) || '',
@@ -1378,6 +1418,10 @@ export async function onRequest(context) {
 
     /* ---------- Pointage par code PIN (entrée / sortie) ---------- */
     if (action === 'pointer') {
+      /* Pointage par code PIN depuis l'espace employé : SUPPRIMÉ (on pouvait se
+         pointer depuis chez soi). Seuls restent le QR montré par l'administration
+         (pointageqr) et le badge scanné par l'administration. */
+      if (action === 'pointer') return json({ ok: false, code: 'desactive', message: 'Pointage sur place uniquement : QR de l’administration ou badge.' }, 403);
       const pin = String(body.pin || '').trim();
       const sens = String(body.sens || 'entree').toLowerCase();
       const paye = await lirePaye(db, uid);
