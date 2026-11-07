@@ -34,7 +34,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-06-656';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-06-657';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -56918,6 +56918,26 @@ function acCaisses() { try { var o = JSON.parse(localStorage.getItem('mdb_caisse
 function acPUConsommable(code) {
   var key = String(code || '').trim().toUpperCase();
   if (!key) return 0;
+  /* PRIORITÉ au prix d'ACHAT RÉEL : montant payé ÷ nombre de pièces achetées
+     (ex. 3 cartons de pointes P8 = 84 000 F pour 18 000 pointes = 4,67 F).
+     Moyenne pondérée des achats de la période, sinon du dernier achat. */
+  try {
+    var _per = (typeof acPeriode === 'function') ? acPeriode() : { du: '', au: '' };
+    var _tq = 0, _tm = 0, _dq = 0, _dm = 0, _dd = '';
+    (getAchats() || []).forEach(function (a) {
+      if (!a) return;
+      var d0 = String(a.date || '').slice(0, 10);
+      (Array.isArray(a.items) ? a.items : []).forEach(function (it) {
+        if (!it || String(it.code || '').trim().toUpperCase() !== key) return;
+        var q0 = parseFloat(it.quantity) || 0, m0 = parseFloat(it.total_price) || 0;
+        if (!(q0 > 0) || !(m0 > 0)) return;
+        if ((!_per.du || d0 >= _per.du) && (!_per.au || d0 <= _per.au)) { _tq += q0; _tm += m0; }
+        if (d0 >= _dd) { _dd = d0; _dq = q0; _dm = m0; }
+      });
+    });
+    if (_tq > 0) return _tm / _tq;
+    if (_dq > 0) return _dm / _dq;
+  } catch (eAchPU) {}
   var i;
 
   /* Règle utilisateur explicite pour les pointes / consommables :
@@ -60477,7 +60497,8 @@ function acCoutArticleCampagne(artId, qte) {  var arts = (typeof getArticles ===
     /* prix du m3 PROPRE au poste : celui de son essence */
     var pxLigne = comp ? acPrixM3Composant(comp) : (parseFloat(c.pxM3) || 0);
     if (!(pxLigne > 0)) pxLigne = parseFloat(c.pxM3) || 0;
-    var mt = Math.round(volTot * pxLigne);
+    /* bois ACHETÉ = volume net × (1 + taux de perte) : la chute se paie aussi */
+    var mt = Math.round(volTot * (parseFloat(c.chute) || 1) * pxLigne);
     volNet += (parseFloat(b.volTot) || 0);
     lignes.push({
       libelle: b.libelle, type: b.type,
@@ -60815,7 +60836,7 @@ function acEtapesHtml(articleId, cAuto, compact) {
          ligne plus haut, et ces lignes de total ne sont qu'une
          recapitulation. ---- */
   var volNetCampagne = compCouts.reduce(function (s, x) { return s + (x.volNet * x.qte); }, 0);
-  var volAchatCampagne = compCouts.reduce(function (s, x) { return s + x.volAchat; }, 0);
+  var volAchatCampagne = compCouts.reduce(function (s, x) { return s + (x.volAchat * x.qte); }, 0);
   var cvampTotal = Math.round(boisCampagne);
   var margeCvampTotal = Math.round(caAffiche) - cvampTotal;
   var pxM3Affiche = volAchatCampagne > 0 ? Math.round(cvampTotal / volAchatCampagne) : 0;
@@ -69871,7 +69892,9 @@ function rbCalculer(du, au) {
       /* Base du jour = bulletin SAUF rémunération montage et prime de production.
          Un jour où il a monté des palettes, le travailleur compte comme MONTEUR
          (même s'il n'est pas au rendement) : paie montage réelle + accessoires. */
-      var primeM = parseFloat(b.prime) || 0;
+      /* Prime de production à part SEULEMENT pour un monteur (fonction) ;
+         pour les autres (ex. chef d'équipe), elle reste dans le salaire. */
+      var primeM = poste === 'monteur' ? (parseFloat(b.prime) || 0) : 0;
       var base = Math.max(0, brut - montM - primeM) * part, pr = primeM * part;
       var monteurCeJour = poste === 'monteur' || !!montJourEmp[e.id + '|' + d];
       if (montJourEmp[e.id + '|' + d]) rec.joursMontage++;
@@ -69902,7 +69925,7 @@ function rbCalculer(du, au) {
   var lib = function (k, def) { return chGlobal['libelle_' + k] || def; };
   var cvamp = Math.round(bois);
   var fabL = [['Consommables (pointes, clous…)', conso], ['Manutentionnaires', TOT.manutentionnaire], ['Machinistes', TOT.machiniste],
-    ['Monteurs — paie montage', TOT.montage], ['Monteurs — accessoires de salaire', TOT.accessoires], ['Primes de production', TOT.prime],
+    ['Monteurs — paie montage', TOT.montage], ['Monteurs — accessoires de salaire', TOT.accessoires], ['Primes de production (monteurs)', TOT.prime],
     ['Main-d’œuvre indirecte (autres employés)', TOT.indirect], ['Électricité / énergie atelier', chT.electricite]];
   var cvppf = Math.round(fabL.reduce(function (s, l) { return s + (l[1] || 0); }, 0));
   var cvd = Math.round(chT.distribution);
