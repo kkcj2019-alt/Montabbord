@@ -1320,8 +1320,27 @@
       try {
         if (w && w.document && !w.__mdbQrPatch) {
           w.__mdbQrPatch = true;
-          var dw = w.document.write;
-          w.document.write = function () { var a = Array.prototype.slice.call(arguments).map(function (x) { return window.mdbQrHtml(x); }); return dw.apply(w.document, a); };
+          var dw = w.document.write, dc = w.document.close, barreMise = false;
+          /* Barre « Fermer » : sur téléphone (application installée), ces pages
+             s'ouvrent en plein écran sans bouton retour ni croix. Jamais imprimée. */
+          var BARRE = '<div class="mdb-fermer-barre" style="position:fixed;top:10px;right:10px;z-index:2147483647;display:flex;gap:6px;font-family:Arial,sans-serif">'
+            + '<button type="button" onclick="try{window.print()}catch(e){}" style="border:0;border-radius:999px;padding:9px 14px;background:#0b3a6f;color:#fff;font-weight:700;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer">Imprimer</button>'
+            + '<button type="button" onclick="try{window.close()}catch(e){}setTimeout(function(){try{history.length>1?history.back():location.replace(\'about:blank\')}catch(e){}},250)" aria-label="Fermer" style="border:0;border-radius:999px;padding:9px 14px;background:#dc2626;color:#fff;font-weight:700;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer">\u2715 Fermer</button></div>'
+            + '<style>@media print{.mdb-fermer-barre{display:none!important}}</style>';
+          w.document.write = function () {
+            var a = Array.prototype.slice.call(arguments).map(function (x) {
+              var h = window.mdbQrHtml(x);
+              if (!barreMise && /<\/body>/i.test(h)) { h = h.replace(/<\/body>/i, BARRE + '</body>'); barreMise = true; }
+              return h;
+            });
+            return dw.apply(w.document, a);
+          };
+          w.document.close = function () {
+            try { if (!barreMise && w.document.body) { w.document.body.insertAdjacentHTML('beforeend', BARRE); barreMise = true; } } catch (eB) {}
+            return dc.apply(w.document, arguments);
+          };
+          var _op = w.document.open;
+          w.document.open = function () { barreMise = false; return _op.apply(w.document, arguments); };
         }
       } catch (eW) {}
       return w;

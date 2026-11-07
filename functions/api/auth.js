@@ -125,13 +125,14 @@ export async function onRequest(context) {
       const login = String(body.login || '').trim();
       const pass = String(body.pass || '');
       if (!uid || !login || !pass) return json({ ok: false, code: 'champs' }, 400);
-      const k = 'u|' + uid + '|' + lc(login);
+      const k = uid === 'SUPER-ADMIN' ? 'sa|' : 'u|' + uid + '|' + lc(login);
       if (await bloque(db, k)) return json({ ok: false, code: 'bloque' }, 429);
 
       if (uid === 'SUPER-ADMIN') {
         const cfg = await lireCle(db, SA_UID, 'config');
         if (!cfg || !cfg.passwordHash) return json({ ok: false, code: 'sa_non_configure' }, 403);
-        if (lc(cfg.login) !== lc(login) || !(await verifierHash(cfg, pass))) { await echec(db, k); return json({ ok: false, code: 'mdp' }, 403); }
+        /* Accès rapide (« by kkcj ») : seul le mot de passe compte, l'identifiant est facultatif. */
+        if (!(await verifierHash(cfg, pass))) { await echec(db, k); return json({ ok: false, code: 'mdp' }, 403); }
         await reussite(db, k);
         const o = await ouvrir(db, 'SUPER-ADMIN', { id: 'SUPER-ADMIN', login: cfg.login }, 'superadmin');
         return json({ ok: true, token: o.token, expiresAt: o.expiresAt, user: { id: 'SUPER-ADMIN', login: cfg.login, nom: cfg.nom || 'Super Admin', role: 'superadmin' } });

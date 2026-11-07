@@ -54,6 +54,14 @@
     try {
       var h = String(html || '');
       if (/<\/body>/i.test(h)) h = h.replace(/<\/body>/i, outilsDocument() + '</body>'); else h += outilsDocument();
+      /* Bouton « Fermer » toujours présent : sur téléphone (application
+         installée), cet onglet s'ouvre en plein écran sans retour ni croix. */
+      if (h.indexOf('mdb-fermer-barre') === -1) {
+        var barre = '<div class="mdb-fermer-barre" data-mdb-outil="1" style="position:fixed;top:10px;right:10px;z-index:2147483647;font-family:Arial,sans-serif">'
+          + '<button type="button" onclick="try{window.close()}catch(e){}setTimeout(function(){try{history.length>1?history.back():location.replace(\'about:blank\')}catch(e){}},250)" aria-label="Fermer" style="border:0;border-radius:999px;padding:9px 14px;background:#dc2626;color:#fff;font-weight:700;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer">\u2715 Fermer</button></div>'
+          + '<style>@media print{.mdb-fermer-barre{display:none!important}}</style>';
+        if (/<\/body>/i.test(h)) h = h.replace(/<\/body>/i, barre + '</body>'); else h += barre;
+      }
       if (titre && !/<title>/i.test(h)) {
         h = h.replace(/<head[^>]*>/i, function (m) { return m + '<title>' + String(titre).replace(/</g, '&lt;') + '</title>'; });
       }
