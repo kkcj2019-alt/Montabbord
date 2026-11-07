@@ -10,7 +10,7 @@
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
 <script>
-window.__APP_VERSION='2026-11-07-388';
+window.__APP_VERSION='2026-11-07-389';
 (function(){
   try {
     var cur = window.__APP_VERSION;
@@ -4273,6 +4273,9 @@ var nbPresentsTotal = 0;
   var ptMontLignes = (ptMont && Array.isArray(ptMont.lignes)) ? ptMont.lignes : (Array.isArray(ptMont) ? ptMont : []);
   var idsMonteursActifs = {};
   ptMontLignes.forEach(function(x) { if (x && x.employee_id) idsMonteursActifs[String(x.employee_id)] = true; });
+  /* Bruts du bulletin (publiés par la Paie) pour les accessoires de salaire */
+  var brutsMoisAc = {};
+  try { brutsMoisAc = (JSON.parse(localStorage.getItem('mdb_paye') || '{}').brutsMois) || {}; } catch (eBm) {}
 
   for (var i = 0; i < emps.length; i++) {
     var emp = emps[i];
@@ -4299,6 +4302,10 @@ nbPresentsTotal++;
        ou machiniste paye au mois / au forfait) n'a pas de tarif a la piece :
        il est compte en Main-d'oeuvre Indirecte. */
     if (posteGuess !== 'indirect' && emp.rendement !== true) posteGuess = 'indirect';
+    /* A monté des palettes ce jour (pointage montage) → MONTEUR ce jour-là,
+       même s'il n'est pas au rendement ni monteur de fonction (ex. MARIANO). */
+    var aMonteCeJour = !!idsMonteursActifs[String(emp.id)];
+    if (aMonteCeJour) posteGuess = 'monteur';
     var poste = posteGuess;
     var rem = acEmpRemuneration(emp);
 
@@ -4308,12 +4315,26 @@ nbPresentsTotal++;
          qui viennent s'ajouter sur la ligne dédiée "Accessoires salaire main d'œuvre clouage" */
       var txHAcc = rem.horaireAccessoires;
       var mtAccEmp = Math.round(txHAcc * hPt * joursEff);
+      /* Accessoires = bulletin − rémunération montage − prime de production
+         (prime retirée seulement pour un monteur de fonction), ramené au jour. */
+      var bMo = brutsMoisAc[String(targetDate).slice(0, 7)];
+      var bEmp = bMo && bMo.emps ? bMo.emps[emp.id] : null;
+      var accBulletin = false;
+      if (bEmp && (parseFloat(bEmp.brut) || 0) > 0) {
+        var primeRet = acGuessPosteFromFonction(emp.fonction) === 'monteur' ? (parseFloat(bEmp.prime) || 0) : 0;
+        var accMois = Math.max(0, (parseFloat(bEmp.brut) || 0) - (parseFloat(bEmp.montage) || 0) - primeRet);
+        var jB = parseFloat(bEmp.jours) || 0;
+        if (!(jB > 0)) jB = (typeof acJoursOuvresMois === 'function') ? (acJoursOuvresMois(String(targetDate).slice(0, 7) + '-01') || 26) : 26;
+        mtAccEmp = Math.round(accMois / jB * joursEff);
+        txHAcc = hPt > 0 ? accMois / jB / hPt : 0;
+        accBulletin = true;
+      }
 
       postes.monteur.nb++;
       postes.monteur.sumH += hPt;
       postes.monteur.names.push((emp.nom || emp.matricule || 'Monteur') + ' (' + hPt + 'h)');
 
-      if (emp.rendement === true) {
+      if (emp.rendement === true || aMonteCeJour) {
         if (!postes.accessoiresClouage) postes.accessoiresClouage = { nb: 0, tot: 0, sumH: 0, names: [] };
         postes.accessoiresClouage.nb++;
         postes.accessoiresClouage.sumH += hPt;
