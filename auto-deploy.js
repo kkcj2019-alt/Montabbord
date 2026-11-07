@@ -170,6 +170,7 @@ function deployerCloudflare() {
       var m = out.match(/https:\/\/[^\s]+\.pages\.dev/);
       log('Mise en ligne Cloudflare OK' + (m ? ' -> ' + m[0] : '') + (essai > 1 ? ' (essai ' + essai + ')' : ''));
       deployEnAttente = false;
+      deployerWorker();
       return true;
     } catch (e) {
       log('ERREUR deploiement (essai ' + essai + '/3): ' + String(e.message).split('\n').slice(0, 4).join(' | '));
@@ -178,6 +179,40 @@ function deployerCloudflare() {
   }
   deployEnAttente = true;
   log('Mise en ligne en attente : nouvel essai automatique dans quelques minutes.');
+  return false;
+}
+
+/* Le 2e serveur (montabbord-api.workers.dev, utilise par l'application) n'etait
+   JAMAIS republie automatiquement : il gardait l'ancien code du serveur.
+   On le republie quand functions/ ou worker-api/ ont change. */
+function _hashServeur() {
+  try {
+    var crypto = require('crypto'), h = crypto.createHash('sha256');
+    var lister = function (dir) {
+      var out = [];
+      try { fs.readdirSync(dir).forEach(function (f) { var p = path.join(dir, f); var st = fs.statSync(p); if (st.isDirectory()) out = out.concat(lister(p)); else if (/\.(js|toml|json)$/.test(f)) out.push(p); }); } catch (e) {}
+      return out;
+    };
+    lister(path.join(ROOT, 'functions')).concat(lister(path.join(ROOT, 'worker-api'))).sort().forEach(function (p) { h.update(p + '|'); h.update(fs.readFileSync(p)); });
+    return h.digest('hex');
+  } catch (e) { return ''; }
+}
+function deployerWorker() {
+  var fh = path.join(ROOT, '.wrangler', 'worker-hash.txt');
+  var h = _hashServeur();
+  var avant = '';
+  try { avant = fs.readFileSync(fh, 'utf8').trim(); } catch (e) {}
+  if (h && h === avant) return true;
+  for (var essai = 1; essai <= 2; essai++) {
+    try {
+      sh('npx.cmd --yes wrangler@4 deploy --config worker-api/wrangler.toml', { timeout: 600000, maxBuffer: 50 * 1024 * 1024 });
+      try { if (!fs.existsSync(path.join(ROOT, '.wrangler'))) fs.mkdirSync(path.join(ROOT, '.wrangler')); fs.writeFileSync(fh, h); } catch (eW) {}
+      log('Serveur API (workers.dev) mis a jour' + (essai > 1 ? ' (essai ' + essai + ')' : ''));
+      return true;
+    } catch (e) {
+      log('ERREUR mise a jour serveur API workers.dev (essai ' + essai + '/2): ' + String(e.message).split('\n').slice(0, 3).join(' | '));
+    }
+  }
   return false;
 }
 
@@ -197,6 +232,7 @@ fs.watch(ROOT, { recursive: true }, function(ev, filename) {
 });
 
 log('=== Auto-deploy demarre (delai ' + (DEBOUNCE_MS / 1000) + 's apres derniere modification) ===');
+try { setTimeout(function () { if (!deploying) { deploying = true; try { deployerWorker(); } catch (eDW) {} deploying = false; } }, 5000); } catch (eDW0) {}
 schedule();
 /* Miroir periodique des sauvegardes cloud vers Git (toutes les 11 min) */
 setInterval(run, 11 * 60 * 1000);
