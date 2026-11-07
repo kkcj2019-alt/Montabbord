@@ -1023,7 +1023,12 @@ export async function onRequest(context) {
         if (String(pvk).indexOf(String(emp.id) + '|') === 0) myValidations[pvk] = pvAll[pvk];
       }
       let pointageToken = '';
-      try { pointageToken = (await sha256Hex(uid + '|' + emp.id + '|MDB-POINTAGE-V1')).slice(0, 32); } catch (ePT) {}
+      try {
+        /* Version du badge (Paie > Refaire un badge) : l'ancien QR devient invalide. */
+        const bvs = (paye && paye.badgeVersions && typeof paye.badgeVersions === 'object') ? paye.badgeVersions : {};
+        const bv = parseInt(bvs[emp.id], 10) || 0;
+        pointageToken = (await sha256Hex(uid + '|' + emp.id + '|MDB-POINTAGE-V1' + (bv > 0 ? '|' + bv : ''))).slice(0, 32);
+      } catch (ePT) {}
       return json({
         ok: true,
         pointageToken: pointageToken,
@@ -1163,10 +1168,15 @@ export async function onRequest(context) {
       const qr = String(body.qr || '').trim();
       const parts = qr.split('|');
       if (parts.length < 5 || parts[0] !== 'MDBPOINT') return json({ ok: false, code: 'qr_invalide' }, 400);
+      const qrVer = String(parts[1] || '');
       const qrUid = String(parts[2] || '').trim();
       const sid = String(parts[3] || '').trim();
       const stoken = String(parts[4] || '').trim();
       if (qrUid !== uid) return json({ ok: false, code: 'autre_entreprise' }, 403);
+      /* QR v2 (tournant) : MDBPOINT|v2|uid|sid|minute|signature. La signature
+         change chaque minute : une photo du QR envoyée à un absent expire. */
+      const qrW = qrVer === 'v2' ? parseInt(parts[4], 10) : NaN;
+      const qrSig = qrVer === 'v2' ? String(parts[5] || '') : '';
       const payeQr = await lirePaye(db, uid);
       let sessions = payeQr.pointageSessions;
       if (sessions && !Array.isArray(sessions) && typeof sessions === 'object') {
@@ -1176,9 +1186,22 @@ export async function onRequest(context) {
       let sess = null;
       for (let i = 0; i < sessions.length; i++) {
         const s = sessions[i];
-        if (s && String(s.id) === sid && String(s.token) === stoken) { sess = s; break; }
+        if (!s || String(s.id) !== sid) continue;
+        if (qrVer === 'v2') { sess = s; break; }
+        if (String(s.token) === stoken) { sess = s; break; }
       }
       if (!sess) return json({ ok: false, code: 'session_invalide' }, 403);
+      if (qrVer === 'v2') {
+        const wNow = Math.floor(Date.now() / 60000);
+        /* 3 minutes de tolérance (temps de scanner / confirmer, petite avance d'horloge). */
+        if (!isFinite(qrW) || qrW > wNow + 1 || qrW < wNow - 3) return json({ ok: false, code: 'qr_expire' }, 403);
+        const dig = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(sess.token) + '|' + qrW));
+        const hex = Array.from(new Uint8Array(dig)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        if (hex.slice(0, 20) !== qrSig) return json({ ok: false, code: 'session_invalide' }, 403);
+      } else if (sess.rot) {
+        /* Session tournante : l'ancien QR fixe (v1) n'est plus accepté. */
+        return json({ ok: false, code: 'qr_expire' }, 403);
+      }
       if (sess.active === false) return json({ ok: false, code: 'session_fermee' }, 403);
       if (sess.expiresAt && Date.now() > Number(sess.expiresAt)) return json({ ok: false, code: 'session_expiree' }, 403);
       const now = new Date();
@@ -1209,12 +1232,37 @@ export async function onRequest(context) {
         if (d < 0) d += 1440;
         return d;
       };
-      const pts = Array.isArray(payeQr.pointage) ? payeQr.pointage : [];
-      let row = null;
-      for (let i = 0; i < pts.length; i++) {
-        if (pts[i] && String(pts[i].employee_id) === String(emp.id) && String(pts[i].date || '').slice(0, 10) === date) { row = pts[i]; break; }
-      }
-      const baseRep = { nom: nom, matricule: emp.matricule || '', shift: shift, date: date, superviseur: superviseur };
+      /* Lecture AVEC sa date de mise à jour : l'écriture ne réussit que si
+         personne n'a écrit entre-temps (sinon deux employés qui scannent à la
+         même seconde : l'un des deux pointages était perdu). */
+      const lirePts = async function () {
+        const r0 = await db.prepare('SELECT enterprise_id, valeur, updated_at FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1').bind(uid, '"' + uid + '"', 'mdb_paye.pointage').first();
+        if (r0) { const v = parseVal(r0.valeur, []); return { pts: Array.isArray(v) ? v : [], at: r0.enterprise_id === uid ? r0.updated_at : null }; }
+        return { pts: Array.isArray(payeQr.pointage) ? payeQr.pointage : [], at: null };
+      };
+      const trouverLigne = function (pts) {
+        const chercher = function (d) {
+          for (let i = 0; i < pts.length; i++) {
+            if (pts[i] && String(pts[i].employee_id) === String(emp.id) && String(pts[i].date || '').slice(0, 10) === d) return pts[i];
+          }
+          return null;
+        };
+        let r = chercher(date), d = date;
+        /* NUIT après minuit : on continue la ligne de la veille (arrivée sans fin). */
+        if (shift === 'nuit' && nowMin < 720 && !(r && r.n_arrivee)) {
+          const v = new Date(date + 'T12:00:00Z'); v.setUTCDate(v.getUTCDate() - 1);
+          const hier = v.toISOString().slice(0, 10);
+          const rh = chercher(hier);
+          if (rh && rh.n_arrivee && !rh.n_fin) { r = rh; d = hier; }
+        }
+        return { row: r, date: d };
+      };
+      let lu = await lirePts();
+      let pts = lu.pts;
+      let tl = trouverLigne(pts);
+      let row = tl.row;
+      const baseRep = { nom: nom, matricule: emp.matricule || '', shift: shift, date: tl.date, superviseur: superviseur };
+      if (row && row.protege === true) return json(Object.assign({ ok: false, code: 'verrouille' }, baseRep));
       const ecrireLog = async function (step, hh) {
         try {
           const log = Array.isArray(payeQr.pointageQrLog) ? payeQr.pointageQrLog : [];
@@ -1247,27 +1295,46 @@ export async function onRequest(context) {
         }
       }
 
-      if (!row) {
-        row = {
-          id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
-          employee_id: emp.id, date, present: true, h_j_manual: 0, h_n_manual: 0
-        };
-        pts.push(row);
+      const appliquer = function (pts0) {
+        const t = trouverLigne(pts0);
+        let rw = t.row;
+        if (!rw) {
+          rw = {
+            id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
+            employee_id: emp.id, date: t.date, present: true, h_j_manual: 0, h_n_manual: 0
+          };
+          pts0.push(rw);
+        }
+        rw[pre + step] = heure;
+        rw.present = true;
+        rw.source = 'qr';
+        rw.shift = shift;
+        rw.sessionId = sid;
+        rw.superviseur = superviseur;
+        rw.updatedAt = now.toISOString();
+        if (step === 'arrivee') { rw.heure_entree = heure; if (shift === 'nuit') rw.heure_entree_nuit = heure; }
+        if (step === 'fin') { rw.heure_sortie = heure; if (shift === 'nuit') rw.heure_sortie_nuit = heure; }
+        const h1 = (rw[pre + 'arrivee'] && rw[pre + 'pause']) ? dur(rw[pre + 'arrivee'], rw[pre + 'pause']) : 0;
+        const h2 = (rw[pre + 'reprise'] && rw[pre + 'fin']) ? dur(rw[pre + 'reprise'], rw[pre + 'fin']) : 0;
+        rw[hField] = Math.max(0, Math.round(((h1 + h2) / 60) * 100) / 100);
+        return rw;
+      };
+      let ecrit = false;
+      for (let essai = 0; essai < 5 && !ecrit; essai++) {
+        if (essai > 0) { lu = await lirePts(); pts = lu.pts; }
+        row = appliquer(pts);
+        const stamp = (Math.max(Date.now(), (parseInt(lu.at, 10) || 0) + 1)).toString();
+        if (lu.at == null) {
+          await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+          ecrit = true;
+        } else {
+          const res = await db.prepare('UPDATE enterprise_data SET valeur = ?, updated_at = ? WHERE enterprise_id = ? AND cle = ? AND updated_at = ?')
+            .bind(JSON.stringify(pts), stamp, uid, 'mdb_paye.pointage', lu.at).run();
+          ecrit = !!(res && res.meta && res.meta.changes > 0);
+        }
       }
-      row[pre + step] = heure;
-      row.present = true;
-      row.source = 'qr';
-      row.shift = shift;
-      row.sessionId = sid;
-      row.superviseur = superviseur;
-      row.updatedAt = now.toISOString();
-      if (step === 'arrivee') { row.heure_entree = heure; if (shift === 'nuit') row.heure_entree_nuit = heure; }
-      if (step === 'fin') { row.heure_sortie = heure; if (shift === 'nuit') row.heure_sortie_nuit = heure; }
-      const h1 = (row[pre + 'arrivee'] && row[pre + 'pause']) ? dur(row[pre + 'arrivee'], row[pre + 'pause']) : 0;
-      const h2 = (row[pre + 'reprise'] && row[pre + 'fin']) ? dur(row[pre + 'reprise'], row[pre + 'fin']) : 0;
-      row[hField] = Math.max(0, Math.round(((h1 + h2) / 60) * 100) / 100);
+      if (!ecrit) return json(Object.assign({ ok: false, code: 'occupe' }, baseRep), 409);
       payeQr.pointage = pts;
-      await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
       await ecrireLog(step, row[hField]);
       return json(Object.assign({ ok: true, step: step, label: labels[step], heure: heure, heures: row[hField], overwrite: overwrite }, baseRep));
     }

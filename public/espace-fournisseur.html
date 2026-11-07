@@ -115,22 +115,56 @@
   }
   function randSalt() { return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10); }
 
+  /* ===== Accès SÉCURISÉ par le serveur (/api/espace) =====
+     Mot de passe vérifié côté serveur ; le fournisseur ne reçoit QUE ses
+     commandes, ses dettes et ses messages (plus ceux des autres). */
+  var API_E = '/api/espace';
+  var TOKEN = '';
+  var _pub = null, _me = null, _meAt = 0, _envoye = {};
+  async function api(action, data) {
+    var body = Object.assign({ uid: UID, type: 'fournisseur', action: action, token: TOKEN }, data || {});
+    var r = await fetch(API_E, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    var j = null; try { j = await r.json(); } catch (e) {}
+    if (j && j.code === 'session' && action !== 'login' && S.acc) { TOKEN = ''; try { localStorage.removeItem('mdb_fournisseur_tok_' + UID); } catch (e2) {} S.acc = null; S.four = null; renderTop(); renderAuth('Session expirée : reconnectez-vous.'); }
+    return j || { ok: false, code: 'reseau' };
+  }
+  async function _moi(force) {
+    if (!TOKEN) return null;
+    if (!_me || force || Date.now() - _meAt > 3000) {
+      var j = await api('me');
+      if (j && j.ok) { _me = j; _meAt = Date.now(); (j.threads || []).forEach(function (t) { if (t && t.id) _envoye[t.id] = JSON.stringify(t); }); }
+      else return null;
+    }
+    return _me;
+  }
   async function syncGet(key) {
     if (!UID) return null;
     try {
-      var r = await fetch(API + '?uid=' + encodeURIComponent(UID) + '&cle=' + encodeURIComponent(key) + '&t=' + Date.now(), { cache: 'no-store' });
-      if (!r.ok) return null;
-      var j = await r.json();
-      var v = (j && j.data && j.data[key] !== undefined) ? j.data[key] : null;
-      if (typeof v === 'string') { try { return JSON.parse(v); } catch (e) { return v; } }
-      return v;
+      if (key === 'mdb_fournisseurPublic') { if (!_pub) { var jp = await api('public'); _pub = (jp && jp.ok) ? jp : {}; } return _pub.ent || null; }
+      if (key === 'mdb_fournisseurPresence') { var m0 = await _moi(); return (m0 && m0.presence) || (_pub && _pub.presence) || null; }
+      if (key === 'mdb_bonsCommandeFournisseurs') { var m1 = await _moi(true); return m1 ? m1.bcs : null; }
+      if (key === 'mdb_dettesFournisseurs') { var m2 = await _moi(); return m2 ? m2.dettes : null; }
+      if (key === 'mdb_fournisseurThreads') { var m3 = await _moi(); return m3 ? m3.threads : null; }
+      return null; /* comptes, fiches et dossier entreprise : plus jamais envoyés au navigateur */
     } catch (e) { return null; }
   }
+  /* Messages : n'envoie que MES discussions modifiées, une par une. */
   async function syncSet(key, val) {
-    if (!UID) throw new Error('uid');
-    var body = { uid: UID, updates: {} }; body.updates[key] = val;
-    var r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error('sync');
+    if (!UID || !TOKEN) throw new Error('session');
+    if (key === 'mdb_bonsCommandeFournisseurs') return true; /* les commandes passent par api('bc') */
+    if (key !== 'mdb_fournisseurThreads') throw new Error('cle');
+    var list = Array.isArray(val) ? val : [];
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (!t || !t.id) continue;
+      var js = JSON.stringify(t);
+      if (_envoye[t.id] === js) continue;
+      var j = await api('thread', { thread: t });
+      if (!j || !j.ok) throw new Error((j && j.code) || 'envoi');
+      if (j.thread) { Object.keys(t).forEach(function (k) { delete t[k]; }); Object.assign(t, j.thread); }
+      _envoye[t.id] = JSON.stringify(t);
+    }
+    _me = null;
     return true;
   }
 
@@ -192,23 +226,16 @@
     if (!UID) return;
     var pub = await syncGet('mdb_fournisseurPublic');
     if (pub && typeof pub === 'object') S.ent = pub;
-    else {
-      var ent = await syncGet('mdb_entreprise');
-      if (ent && typeof ent === 'object') S.ent = { nom: ent.nom || '', logo: ent.logo || '', telephone: ent.telephone || ent.tel || '', email: ent.email || '', adresse: ent.adresse || '' };
+    /* L'ancienne « session » (un simple e-mail gardé dans le navigateur) ne vaut plus rien. */
+    try { localStorage.removeItem('mdb_fournisseur_session_' + UID); } catch (eOld) {}
+    try { TOKEN = TOKEN || localStorage.getItem('mdb_fournisseur_tok_' + UID) || ''; } catch (eT) {}
+    S.presence = (_pub && _pub.presence) || null;
+    if (TOKEN) {
+      var m = await _moi(true);
+      if (m && m.acc) {
+        S.acc = m.acc; S.four = m.four; S.bcs = m.bcs || []; S.dettes = m.dettes || []; S.threads = m.threads || []; S.presence = m.presence || S.presence;
+      } else { TOKEN = ''; S.acc = null; S.four = null; try { localStorage.removeItem('mdb_fournisseur_tok_' + UID); } catch (e2) {} }
     }
-    var accounts = (await syncGet('mdb_fournisseurAccounts')) || {};
-    S.accounts = (accounts && typeof accounts === 'object') ? accounts : {};
-    S.bcs = (await syncGet('mdb_bonsCommandeFournisseurs')) || [];
-    S.dettes = (await syncGet('mdb_dettesFournisseurs')) || [];
-    S.threads = (await syncGet('mdb_fournisseurThreads')) || [];
-    S.presence = (await syncGet('mdb_fournisseurPresence')) || null;
-    var fournisseurs = (await syncGet('mdb_fournisseurs')) || [];
-    S.fournisseurs = Array.isArray(fournisseurs) ? fournisseurs : [];
-    try {
-      var mail = localStorage.getItem('mdb_fournisseur_session_' + UID);
-      if (mail && S.accounts[mail] && S.accounts[mail].actif !== false) { S.acc = S.accounts[mail]; S.acc.email = S.acc.email || mail; }
-    } catch (e) {}
-    if (S.acc) S.four = S.fournisseurs.filter(function (f) { return f && String(f.id) === String(S.acc.fournisseurId); })[0] || null;
     renderTop();
   }
 
@@ -253,20 +280,23 @@
     var err = el('fxLoginErr');
     if (!email || !pass) { err.textContent = 'Email et mot de passe requis.'; return; }
     err.textContent = 'Connexion…';
-    var c = S.accounts[email];
-    if (!c) { err.textContent = 'Aucun compte fournisseur avec cet email.'; return; }
-    if (c.actif === false) { err.textContent = 'Compte désactivé : contactez le service achats.'; return; }
-    var hash = await sha256((c.salt || '') + '|' + pass);
-    if (!hash || hash !== c.hash) { err.textContent = 'Mot de passe incorrect.'; return; }
-    S.acc = c; S.acc.email = S.acc.email || email;
-    S.four = S.fournisseurs.filter(function (f) { return f && String(f.id) === String(c.fournisseurId); })[0] || null;
-    try { localStorage.setItem('mdb_fournisseur_session_' + UID, email); } catch (e) {}
+    var j = await api('login', { email: email, pass: pass });
+    if (!j || !j.ok) {
+      var c = j && j.code;
+      err.textContent = c === 'bloque' ? 'Trop d’essais : réessayez dans 15 minutes.' : c === 'desactive' ? 'Compte désactivé : contactez le service achats.' : (c === 'inconnu' || c === 'mdp') ? 'Email ou mot de passe incorrect.' : 'Connexion impossible. Réessayez.';
+      return;
+    }
+    TOKEN = j.token; try { localStorage.setItem('mdb_fournisseur_tok_' + UID, TOKEN); } catch (e) {}
+    await bootData();
+    err.textContent = '';
     S.tab = 'commandes';
     renderTop(); renderApp();
   }
   function logout() {
+    try { if (TOKEN) api('logout'); } catch (eLo) {}
+    TOKEN = ''; _me = null;
     S.acc = null; S.four = null;
-    try { localStorage.removeItem('mdb_fournisseur_session_' + UID); } catch (e) {}
+    try { localStorage.removeItem('mdb_fournisseur_session_' + UID); localStorage.removeItem('mdb_fournisseur_tok_' + UID); } catch (e) {}
     renderTop(); renderAuth();
   }
 
@@ -444,8 +474,9 @@
     var bc = (S.bcs || []).filter(function (x) { return x && x.id === id; })[0];
     if (!bc) return;
     if (!confirm('Confirmer la commande ' + (bc.numero || '') + ' ?')) return;
-    bc.statut = 'confirme';
-    bc.confirmedAt = Date.now();
+    var jb = await api('bc', { id: id, op: 'confirm' });
+    if (!jb || !jb.ok) { alert('Enregistrement impossible. Réessayez.'); return; }
+    Object.assign(bc, jb.bc || { statut: 'confirme', confirmedAt: Date.now() });
     var th = ensureThread('Commande ' + (bc.numero || ''), 'commande', bc.id);
     th.messages.push({ auteur: 'fournisseur', nom: S.four.nom, texte: 'Commande ' + (bc.numero || '') + ' confirmée.', at: Date.now() });
     th.updatedAt = Date.now();
@@ -458,8 +489,9 @@
   async function declarerLivraison(id, note) {
     var bc = (S.bcs || []).filter(function (x) { return x && x.id === id; })[0];
     if (!bc) return;
-    bc.livraisonsDeclarees = Array.isArray(bc.livraisonsDeclarees) ? bc.livraisonsDeclarees : [];
-    bc.livraisonsDeclarees.push({ at: Date.now(), note: note || '', par: S.four.nom });
+    var jd = await api('bc', { id: id, op: 'deliver', note: note || '' });
+    if (!jd || !jd.ok) { alert('Enregistrement impossible. Réessayez.'); return; }
+    if (jd.bc) Object.assign(bc, jd.bc);
     var th = ensureThread('Commande ' + (bc.numero || ''), 'commande', bc.id);
     th.messages.push({ auteur: 'fournisseur', nom: S.four.nom, texte: 'Livraison déclarée pour ' + (bc.numero || '') + (note ? ' : ' + note : ''), at: Date.now() });
     th.updatedAt = Date.now();
@@ -544,12 +576,8 @@
     setInterval(async function () {
       if (!S.acc) return;
       try {
-        var b = await syncGet('mdb_bonsCommandeFournisseurs');
-        var t = await syncGet('mdb_fournisseurThreads');
-        var p = await syncGet('mdb_fournisseurPresence');
-        if (Array.isArray(b)) S.bcs = b;
-        if (Array.isArray(t)) S.threads = t;
-        if (p) S.presence = p;
+        var m = await _moi(true);
+        if (m) { S.bcs = m.bcs || []; S.threads = m.threads || []; S.dettes = m.dettes || []; if (m.presence) S.presence = m.presence; }
         renderTop();
         if (S.tab === 'commandes' || S.tab === 'livraisons' || S.tab === 'messages') renderApp();
       } catch (e) {}

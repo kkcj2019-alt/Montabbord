@@ -112,6 +112,8 @@
   window.qrVerifImage = function (url, size) {
     size = size || 110;
     var px = Math.max(240, Math.round(size * 3));
+    /* Image fabriquée sur place (js/qr-local.js) : marche sans internet. */
+    try { if (window.mdbQr) { var loc = window.mdbQr(url, px); if (loc) return loc; } } catch (eL) {}
     return 'https://api.qrserver.com/v1/create-qr-code/?size=' + px + 'x' + px + '&data=' + enc(url);
   };
 
@@ -127,7 +129,7 @@
       ov.onclick = function (e) { if (e.target === ov) ov.remove(); };
       ov.innerHTML = '<div style="background:#fff;border-radius:16px;padding:18px;max-width:380px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.35)">'
         + '<div style="font-weight:900;color:#0b3a6f;margin-bottom:8px;font-size:15px">' + esc(title || 'QR de vérification') + '</div>'
-        + '<img src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=' + enc(url) + '" alt="QR" style="width:290px;height:290px;max-width:100%;display:block;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff">'
+        + '<img src="' + window.qrVerifImage(url, 107) + '" alt="QR" style="width:290px;height:290px;max-width:100%;display:block;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;background:#fff">'
         + '<div style="font-size:10.5px;color:#475569;word-break:break-all;margin-top:8px;line-height:1.4">' + safe + '</div>'
         + '<div style="display:flex;gap:8px;justify-content:center;margin-top:12px;flex-wrap:wrap">'
         + '<a href="' + safe + '" target="_blank" rel="noopener" style="background:#0b3a6f;color:#fff;border-radius:8px;padding:9px 14px;text-decoration:none;font-weight:800;font-size:12px">Ouvrir le lien</a>'

@@ -34,7 +34,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
-<script>window.__APP_VERSION='2026-11-07-659';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION='2026-11-07-662';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -12548,7 +12548,24 @@ function csOpSignatureRequise(o) {
   if (/acompte|pr[eê]t|solde|avance/i.test(code) && (o.beneficiaireNom || o.beneficiaireId)) return true;
   return false;
 }
+/* Transfert entre caisses : c'est la caisse QUI REÇOIT qui signe (son agent),
+   pas la caisse qui envoie. Renvoie { id, nom, caisseNom } ou null. */
+function _sigTransfertDest(op) {
+  try {
+    if (!op) return null;
+    var estTr = String(op.typeOp || '').toLowerCase() === 'transfert' || String(op.beneficiaireType || '').toLowerCase() === 'transfert' || !!op.transferId;
+    if (!estTr) return null;
+    var destId = String(op.caisseDestId || op.beneficiaireId || '');
+    var c = (getCaisses() || []).filter(function (x) { return x && String(x.id) === destId; })[0] || null;
+    var agentId = c ? String(c.agentId || c.employeId || '') : '';
+    var nomAg = c ? String(c.agentNom || '') : '';
+    if (agentId) { try { var e = rhEmpById(agentId); if (e) nomAg = rhEmpLabel(e) || nomAg; } catch (eE) {} }
+    return { id: agentId, nom: nomAg, caisseNom: (c && c.nom) || op.caisseDestNom || op.beneficiaireNom || '' };
+  } catch (e) { return null; }
+}
 function _sigBenefKey(op) {
+  var _trD = _sigTransfertDest(op);
+  if (_trD && _trD.id) return 'employe:' + _trD.id.trim().toLowerCase();
   var t = String(op && op.beneficiaireType || 'libre');
   var id = String(op && (op.beneficiaireId || op.beneficiaireNom || op.remettant || ''));
   return t + ':' + id.trim().toLowerCase();
@@ -12809,6 +12826,11 @@ function openSignatureBeneficiaire(opId) {
     if (!_signataire) {
       try { _signataire = (typeof csPersonFullName === 'function') ? csPersonFullName(op.remettant || op.executant || '') : (op.remettant || op.executant || ''); } catch (eSg) { _signataire = op.remettant || op.executant || ''; }
     }
+    /* Transfert : signe l'agent de la caisse qui REÇOIT l'argent. */
+    var _trDest = _sigTransfertDest(op);
+    if (_trDest) {
+      _signataire = _trDest.nom ? _trDest.nom + ' — ' + _trDest.caisseNom + ' (reçoit l’argent)' : 'Agent de ' + _trDest.caisseNom + ' (aucun agent attribué à cette caisse)';
+    }
     if (!_signataire) _signataire = 'Personne non identifiée';
     var _rem = op.remettant || '';
     var _exe = op.executant || '';
@@ -12952,6 +12974,23 @@ function _sigCommit(opId, op, key, store, rec, data, score, opts) {
   try { renderTresorerie(); } catch (eR) {}
   return { user: _u, premiere: premiere, score: rec.lastScore };
 }
+/* Un employé qui n'a PAS encore de PIN de signature ne peut pas le recevoir
+   depuis l'écran de la caisse : sinon la personne qui tient la caisse
+   choisissait le PIN (et dessinait la « référence ») à la place de
+   l'employé, et pouvait ensuite signer pour lui. Le PIN se crée dans
+   l'espace employé, ou par un administrateur depuis la fiche employé. */
+function _sigPinAbsentBloque(key, rec) {
+  if (rec && rec.pinHash) return false;
+  if (String(key || '').indexOf('employe:') !== 0) return false;
+  /* Un administrateur présent peut encore créer le 1er PIN (l'employé à côté de lui). */
+  if (_sigIsAdmin()) return false;
+  _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #fca5a5;background:#fef2f2;border-radius:9px;color:#b91c1c;font-size:12px;line-height:1.55">'
+    + '<b>⛔ Cette personne n’a pas encore de code PIN de signature.</b><br>'
+    + 'Elle doit le créer elle-même dans son <b>espace employé</b> (création du compte), ou un <b>administrateur</b> le crée (fiche employé → Signature de référence, ou ici en étant connecté en admin).<br>'
+    + '<span style="font-size:11px">Le PIN ne peut plus être choisi depuis l’écran de la caisse : sinon la caisse pourrait signer à sa place.</span></div>');
+  try { toast('Pas de PIN de signature pour cette personne', 'error'); } catch (e) {}
+  return true;
+}
 function _sigValidate(opId) {
   try {
     var cv = document.getElementById('sigCanvas');
@@ -12964,6 +13003,7 @@ function _sigValidate(opId) {
     var key = _sigBenefKey(op);
     var store = _sigGetStore();
     var rec = store[key] || {};
+    if (_sigPinAbsentBloque(key, rec)) return;
     if (rec.pinHash) {
       if (!mdbPassCheck({ passwordHash: rec.pinHash }, pin)) {
         _sigShowResult('<div style="padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;color:#b91c1c;font-size:11.5px;font-weight:700">❌ Code PIN incorrect — la pièce n’est pas validée.</div>');
@@ -13041,6 +13081,7 @@ function _sigValidatePinOnly(opId) {
     var key = _sigBenefKey(op);
     var store = _sigGetStore();
     var rec = store[key] || {};
+    if (_sigPinAbsentBloque(key, rec)) return;
     if (rec.pinHash) {
       if (!mdbPassCheck({ passwordHash: rec.pinHash }, pin)) {
         _sigShowResult('<div style="padding:8px 10px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;color:#b91c1c;font-size:11.5px;font-weight:700">❌ Code PIN incorrect — la pièce n’est pas validée.</div>');
@@ -69070,7 +69111,8 @@ try {
   }
 } catch (eEmbAll) {}
 </script>
-<script src="qr-verif.js?v=4"></script>
+<script src="js/qr-local.js?v=1"></script>
+<script src="qr-verif.js?v=5"></script>
 <script src="print-buttons.js?v=6"></script>
 <div id="mdbByKkcj" role="button" tabindex="0" title="by kkcj" onclick="try{if(typeof showSaQuickLogin==='function'&&document.getElementById('loginOverlay')&&getComputedStyle(document.getElementById('loginOverlay')).display!=='none'){showSaQuickLogin();}}catch(e){}"><i></i><span>by</span><b>kkcj</b></div><style id="mdbSlideStyle">
 #btnInitialLogin,#btnDoLogin{display:none!important}

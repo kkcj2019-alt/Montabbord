@@ -326,20 +326,80 @@
   function fmtDate(s) { if (!s) return '-'; try { return new Date(String(s).slice(0, 10) + 'T00:00:00').toLocaleDateString('fr-FR'); } catch (e) { return s; } }
   function fmtDT(t) { if (!t) return '-'; try { return new Date(t).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) { return '-'; } }
 
+  /* ===== Accès SÉCURISÉ par le serveur (/api/espace) =====
+     Le mot de passe est vérifié côté serveur ; on ne reçoit QUE ses propres
+     devis, commandes et messages ; chaque envoi ne touche qu'UNE pièce. */
+  var API_E = '/api/espace';
+  var TOKEN = '';
+  var _pub = null, _me = null, _meAt = 0, _envoye = {};
+  async function api(action, data) {
+    var body = Object.assign({ uid: S.uid, type: 'client', action: action, token: TOKEN }, data || {});
+    var r = await fetch(API_E, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    var j = null; try { j = await r.json(); } catch (e) {}
+    if (j && j.code === 'session' && action !== 'login') { cxSessionPerdue(); }
+    return j || { ok: false, code: 'reseau' };
+  }
+  function cxSessionPerdue() {
+    TOKEN = ''; try { localStorage.removeItem('mdb_client_tok_' + S.uid); } catch (e) {}
+    if (S.client) { S.client = null; try { el('cxAppWrap').style.display = 'none'; } catch (e) {} renderAuth('Session expirée : reconnectez-vous.'); renderShell(); }
+  }
+  function _snap(col, list) { (list || []).forEach(function (x) { if (x && x.id) _envoye[col + '|' + x.id] = JSON.stringify(x); }); }
+  async function _public(force) {
+    if (!_pub || force) { var j = await api('public'); _pub = (j && j.ok) ? j : {}; }
+    return _pub;
+  }
+  async function _moi(force) {
+    if (!TOKEN) return null;
+    if (!_me || force || Date.now() - _meAt > 3000) {
+      var j = await api('me');
+      if (j && j.ok) { _me = j; _meAt = Date.now(); _snap('mdb_clientQuotes', j.quotes); _snap('mdb_clientOrders', j.orders); _snap('mdb_clientThreads', j.threads); }
+      else if (!j || j.code !== 'session') return _me;
+      else return null;
+    }
+    return _me;
+  }
   async function syncGet(key) {
     if (!S.uid) return null;
     try {
-      var r = await fetch(API + '?uid=' + encodeURIComponent(S.uid) + '&cle=' + encodeURIComponent(key) + '&t=' + Date.now(), { cache: 'no-store' });
-      if (!r.ok) return null;
-      var j = await r.json();
-      return (j && j.data && j.data[key] !== undefined) ? j.data[key] : null;
+      if (key === 'mdb_clientPublic') { var p = await _public(true); return p.ent || null; }
+      if (key === 'mdb_clientGallery') { return (await _public()).gallery || []; }
+      if (key === 'mdb_clientContent') { return (await _public()).content || {}; }
+      if (key === 'mdb_clientPartners') { return (await _public()).partners || []; }
+      if (key === 'mdb_clientReviews') { var pr = await _public(); _snap('mdb_clientReviews', pr.reviews); return pr.reviews || []; }
+      if (key === 'mdb_clientPresence') { var m0 = TOKEN ? await _moi() : null; return (m0 && m0.presence) || (await _public(true)).presence || null; }
+      if (key === 'mdb_clientQuotes') { var m1 = await _moi(); return m1 ? m1.quotes : null; }
+      if (key === 'mdb_clientOrders') { var m2 = await _moi(true); return m2 ? m2.orders : null; }
+      if (key === 'mdb_clientThreads') { var m3 = await _moi(true); return m3 ? m3.threads : null; }
+      return null; /* comptes, dossier entreprise : plus jamais envoyés au navigateur */
     } catch (e) { return null; }
   }
+  /* N'envoie que MES pièces qui ont changé, une par une. */
   async function syncSet(key, val) {
-    if (!S.uid) throw new Error('uid');
-    var body = { uid: S.uid, updates: {} }; body.updates[key] = val;
-    var r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (!r.ok) throw new Error('sync');
+    if (!S.uid || !TOKEN) throw new Error('session');
+    var act = key === 'mdb_clientQuotes' ? 'quote' : key === 'mdb_clientOrders' ? 'order' : key === 'mdb_clientThreads' ? 'thread' : key === 'mdb_clientReviews' ? 'review' : '';
+    if (!act) throw new Error('cle');
+    var list = Array.isArray(val) ? val : [];
+    for (var i = 0; i < list.length; i++) {
+      var x = list[i];
+      if (!x || !x.id) continue;
+      if (act !== 'review' && S.client && x.clientId && String(x.clientId) !== String(S.client.id)) continue;
+      var js = JSON.stringify(x);
+      if (_envoye[key + '|' + x.id] === js) continue;
+      if (act === 'review') {
+        if (_envoye[key + '|' + x.id] !== undefined || (S.client && String(x.clientId) !== String(S.client.id))) continue;
+        var jr = await api('review', { note: x.note, texte: x.texte });
+        if (!jr || !jr.ok) throw new Error((jr && jr.code) || 'envoi');
+        _envoye[key + '|' + x.id] = js;
+        continue;
+      }
+      var data = act === 'thread' ? { thread: x } : { item: x };
+      var j = await api(act, data);
+      if (!j || !j.ok) throw new Error((j && j.code) || 'envoi');
+      var srv = j.thread || j.item;
+      if (srv) { list[i] = srv; Object.keys(x).forEach(function (k) { delete x[k]; }); Object.assign(x, srv); }
+      _envoye[key + '|' + x.id] = JSON.stringify(x);
+    }
+    _me = null;
     return true;
   }
   async function sha256(s) {
@@ -644,17 +704,14 @@
     var err = el('cxRErr');
     if (!soc || !email || !p1) { err.textContent = 'Société, email et mot de passe sont obligatoires.'; return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.textContent = 'Email invalide.'; return; }
-    if (p1.length < 4) { err.textContent = 'Mot de passe : 4 caractères minimum.'; return; }
+    if (p1.length < 6) { err.textContent = 'Mot de passe : 6 caractères minimum.'; return; }
     if (p1 !== p2) { err.textContent = 'Les deux mots de passe ne correspondent pas.'; return; }
+    err.textContent = 'Création…';
+    var j = await api('register', { societe: soc, nom: nom, email: email, tel: tel, pass: p1 });
+    if (!j || !j.ok) { err.textContent = (j && j.code === 'existe') ? 'Un compte existe déjà avec cet email.' : 'Création impossible. Réessayez.'; return; }
     err.textContent = '';
-    var accounts = await syncGet('mdb_clientAccounts') || {};
-    if (accounts[email]) { err.textContent = 'Un compte existe déjà avec cet email.'; return; }
-    var salt = randSalt();
-    var hash = await sha256(salt + '|' + p1);
-    accounts[email] = { id: uid(), nom: nom || soc, societe: soc, contact: nom, email: email, tel: tel, salt: salt, hash: hash, actif: true, createdAt: Date.now() };
-    await syncSet('mdb_clientAccounts', accounts);
-    S.client = accounts[email];
-    try { localStorage.setItem('mdb_client_session_' + S.uid, email); } catch (e) {}
+    TOKEN = j.token; try { localStorage.setItem('mdb_client_tok_' + S.uid, TOKEN); localStorage.removeItem('mdb_client_session_' + S.uid); } catch (e) {}
+    S.client = j.acc;
     await loadClientData();
     renderApp();
   }
@@ -663,43 +720,44 @@
     var email = (el('cxLemail').value || '').trim().toLowerCase(), pass = el('cxLpass').value || '';
     var err = el('cxLErr');
     if (!email || !pass) { err.textContent = 'Email et mot de passe requis.'; return; }
+    err.textContent = 'Connexion…';
+    var j = await api('login', { email: email, pass: pass });
+    if (!j || !j.ok) {
+      var c = j && j.code;
+      err.textContent = c === 'bloque' ? 'Trop d’essais : réessayez dans 15 minutes.' : c === 'desactive' ? 'Compte désactivé : contactez-nous.' : (c === 'inconnu' || c === 'mdp') ? 'Email ou mot de passe incorrect.' : 'Connexion impossible. Réessayez.';
+      return;
+    }
     err.textContent = '';
-    var accounts = await syncGet('mdb_clientAccounts') || {};
-    var c = accounts[email];
-    if (!c || c.actif === false) { err.textContent = 'Compte introuvable ou désactivé.'; return; }
-    var hash = await sha256((c.salt || '') + '|' + pass);
-    if (hash !== c.hash) { err.textContent = 'Mot de passe incorrect.'; return; }
-    S.client = c;
-    try { localStorage.setItem('mdb_client_session_' + S.uid, email); } catch (e) {}
+    TOKEN = j.token; try { localStorage.setItem('mdb_client_tok_' + S.uid, TOKEN); localStorage.removeItem('mdb_client_session_' + S.uid); } catch (e) {}
+    S.client = j.acc;
     await loadClientData();
     renderApp();
   }
 
   async function restoreSession() {
     try {
-      var email = localStorage.getItem('mdb_client_session_' + S.uid);
-      if (!email) return;
-      var accounts = await syncGet('mdb_clientAccounts') || {};
-      var c = accounts[email];
-      if (c && c.actif !== false) { S.client = c; await loadClientData(); renderApp(); }
+      /* L'ancienne « session » (un simple e-mail gardé dans le navigateur) ne vaut plus rien. */
+      try { localStorage.removeItem('mdb_client_session_' + S.uid); } catch (eOld) {}
+      TOKEN = localStorage.getItem('mdb_client_tok_' + S.uid) || '';
+      if (!TOKEN) return;
+      var m = await _moi(true);
+      if (m && m.acc) { S.client = m.acc; await loadClientData(); renderApp(); }
+      else { TOKEN = ''; try { localStorage.removeItem('mdb_client_tok_' + S.uid); } catch (e2) {} }
     } catch (e) {}
   }
 
   async function loadClientData() {
-    try { S.quotes = await syncGet('mdb_clientQuotes') || []; } catch (e) { S.quotes = []; }
-    try { S.orders = await syncGet('mdb_clientOrders') || []; } catch (e) { S.orders = []; }
-    try { S.threads = await syncGet('mdb_clientThreads') || []; } catch (e) { S.threads = []; }
+    var m = await _moi(true);
+    S.quotes = (m && m.quotes) || [];
+    S.orders = (m && m.orders) || [];
+    S.threads = (m && m.threads) || [];
+    if (m && m.acc) S.client = m.acc;
   }
-
   async function bootData() {
     if (!S.uid) return;
     /* On ne lit QUE la fiche publique : jamais le dossier entreprise complet. */
     var pub = await syncGet('mdb_clientPublic');
     if (pub && typeof pub === 'object') S.ent = pub;
-    else {
-      var ent = await syncGet('mdb_entreprise');
-      if (ent && typeof ent === 'object') S.ent = { nom: ent.nom || '', logo: ent.logo || '', telephone: ent.telephone || '', email: ent.email || '', adresse: ent.adresse || '' };
-    }
     var g = await syncGet('mdb_clientGallery');
     S.gallery = Array.isArray(g) ? g.filter(function (x) { return x && x.actif !== false; }) : [];
     var c = await syncGet('mdb_clientContent'); S.content = (c && typeof c === 'object') ? c : {};
@@ -838,7 +896,7 @@
       + (c.logo ? '<a class="cxBtn ghost" href="' + esc(c.logo) + '" download="logo-' + esc(String(c.societe || 'client').replace(/[^a-z0-9]+/gi, '-')) + '.png">⬇️ Télécharger mon logo</a>' : '')
       + '</div><div class="cxErr" id="cxCliLogoErr"></div><div class="cxOk" id="cxCliLogoOk"></div></div>';
 
-    h += '<div class="cxCard"><h2 style="margin:0 0 4px;font-size:17px">Mot de passe</h2><div class="cxNote" style="margin-bottom:12px">Choisissez un mot de passe que vos collaborateurs peuvent utiliser. 4 caractères minimum.</div>'
+    h += '<div class="cxCard"><h2 style="margin:0 0 4px;font-size:17px">Mot de passe</h2><div class="cxNote" style="margin-bottom:12px">Choisissez un mot de passe que vos collaborateurs peuvent utiliser. 6 caractères minimum.</div>'
       + '<div class="cxField"><label>Mot de passe actuel *</label><input id="cxPwdOld" type="password" autocomplete="current-password"></div>'
       + '<div class="cxRow"><div class="cxField"><label>Nouveau mot de passe *</label><input id="cxPwdNew" type="password" autocomplete="new-password"></div>'
       + '<div class="cxField"><label>Confirmer *</label><input id="cxPwdNew2" type="password" autocomplete="new-password"></div></div>'
@@ -858,30 +916,10 @@
     if (!soc || !contact || !email) { if (err) err.textContent = 'Société, contact et email sont obligatoires.'; return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { if (err) err.textContent = 'Adresse email invalide.'; return; }
     try {
-      var accounts = await syncGet('mdb_clientAccounts') || {};
-      var oldKey = String(S.client.email || '').toLowerCase();
-      var cur = accounts[oldKey];
-      if (!cur) { if (err) err.textContent = 'Compte introuvable.'; return; }
-      if (email !== oldKey) {
-        if (accounts[email]) { if (err) err.textContent = 'Cet email est déjà utilisé par un autre compte.'; return; }
-        cur.email = email;
-        accounts[email] = cur;
-        delete accounts[oldKey];
-      }
-      cur.societe = soc; cur.nom = contact; cur.contact = contact; cur.tel = tel; cur.adresse = adresse; cur.updatedAt = Date.now();
-      await syncSet('mdb_clientAccounts', accounts);
-      S.client = cur;
-      try { localStorage.setItem('mdb_client_session_' + S.uid, email); } catch (eS) {}
-      /* Garder les commandes / cotations / messages alignes sur la societe. */
-      var changedO = false;
-      (S.orders || []).forEach(function (x) { if (x && String(x.clientId) === String(cur.id)) { x.clientNom = soc; x.email = email; changedO = true; } });
-      var changedQ = false;
-      (S.quotes || []).forEach(function (x) { if (x && String(x.clientId) === String(cur.id)) { x.clientNom = soc; changedQ = true; } });
-      var changedT = false;
-      (S.threads || []).forEach(function (t) { if (t && String(t.clientId) === String(cur.id)) { t.clientNom = soc; changedT = true; } });
-      if (changedO) { try { await syncSet('mdb_clientOrders', S.orders); } catch (eO) {} }
-      if (changedQ) { try { await syncSet('mdb_clientQuotes', S.quotes); } catch (eQ) {} }
-      if (changedT) { try { await syncSet('mdb_clientThreads', S.threads); } catch (eT) {} }
+      var j = await api('profil', { societe: soc, contact: contact, tel: tel, email: email, adresse: adresse });
+      if (!j || !j.ok) { if (err) err.textContent = (j && j.code === 'email_pris') ? 'Cet email est déjà utilisé par un autre compte.' : 'Enregistrement impossible. Réessayez.'; return; }
+      S.client = j.acc;
+      await loadClientData();
       if (ok) ok.textContent = 'Informations enregistrées.';
       renderShell();
       setTimeout(function () { renderApp(); }, 650);
@@ -895,21 +933,11 @@
     var p1 = String((el('cxPwdNew') || {}).value || '');
     var p2 = String((el('cxPwdNew2') || {}).value || '');
     if (!oldP || !p1) { if (err) err.textContent = 'Renseignez le mot de passe actuel et le nouveau.'; return; }
-    if (p1.length < 4) { if (err) err.textContent = 'Le nouveau mot de passe doit contenir au moins 4 caractères.'; return; }
+    if (p1.length < 6) { if (err) err.textContent = 'Le nouveau mot de passe doit contenir au moins 6 caractères.'; return; }
     if (p1 !== p2) { if (err) err.textContent = 'Les deux nouveaux mots de passe ne correspondent pas.'; return; }
     try {
-      var accounts = await syncGet('mdb_clientAccounts') || {};
-      var key = String(S.client.email || '').toLowerCase();
-      var cur = accounts[key];
-      if (!cur) { if (err) err.textContent = 'Compte introuvable.'; return; }
-      var hOld = await sha256((cur.salt || '') + '|' + oldP);
-      if (hOld !== cur.hash) { if (err) err.textContent = 'Mot de passe actuel incorrect.'; return; }
-      var salt = randSalt();
-      cur.salt = salt;
-      cur.hash = await sha256(salt + '|' + p1);
-      cur.updatedAt = Date.now();
-      await syncSet('mdb_clientAccounts', accounts);
-      S.client = cur;
+      var j = await api('motdepasse', { ancien: oldP, nouveau: p1 });
+      if (!j || !j.ok) { if (err) err.textContent = (j && j.code === 'mdp') ? 'Mot de passe actuel incorrect.' : (j && j.code === 'mdp_court') ? 'Le nouveau mot de passe doit contenir au moins 6 caractères.' : 'Modification impossible. Réessayez.'; return; }
       if (el('cxPwdOld')) el('cxPwdOld').value = '';
       if (el('cxPwdNew')) el('cxPwdNew').value = '';
       if (el('cxPwdNew2')) el('cxPwdNew2').value = '';
@@ -932,11 +960,8 @@
           var cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(img.width * r)); cv.height = Math.max(1, Math.round(img.height * r));
           cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
           var data = cv.toDataURL('image/png');
-          var accounts = await syncGet('mdb_clientAccounts') || {};
-          var key = String(S.client.email || '').toLowerCase();
-          if (!accounts[key]) { if (err) err.textContent = 'Compte introuvable.'; return; }
-          accounts[key].logo = data;
-          await syncSet('mdb_clientAccounts', accounts);
+          var jl = await api('logo', { logo: data });
+          if (!jl || !jl.ok) { if (err) err.textContent = 'Enregistrement impossible.'; return; }
           S.client.logo = data;
           if (ok) ok.textContent = 'Logo enregistré.';
           renderShell();
@@ -1465,8 +1490,10 @@
   };
 
   function logout() {
+    try { if (TOKEN) api('logout'); } catch (eLo) {}
+    TOKEN = ''; _me = null;
     S.client = null; S.thread = null;
-    try { localStorage.removeItem('mdb_client_session_' + S.uid); } catch (e) {}
+    try { localStorage.removeItem('mdb_client_session_' + S.uid); localStorage.removeItem('mdb_client_tok_' + S.uid); } catch (e) {}
     el('cxAppWrap').style.display = 'none';
     renderAuth();
     renderShell();

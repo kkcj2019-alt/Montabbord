@@ -16,7 +16,7 @@
     <meta http-equiv="Expires" content="0" />
     <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js"></script>
     <script>
-      window.__APP_VERSION = '2026-11-06-551';
+      window.__APP_VERSION = '2026-11-07-553';
       try {
         var _v = localStorage.getItem("app_version_paye");
         if (_v && _v !== window.__APP_VERSION) {
@@ -79,6 +79,7 @@
     <script src="vendor/jspdf.plugin.autotable.min.js"></script>
 <script>window.__MDB_API_ROOT=(location.hostname==='localhost'||location.hostname==='127.0.0.1')?'':'https://montabbord-api.kkcj2019.workers.dev';</script>
         <script src="vendor/jsqr.min.js"></script>
+        <script src="js/qr-local.js?v=1"></script>
         <script src="cloud-sdk/mdb-d1.js?v=40261101-d13"></script>
     <script src="vendor/face-api.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -2433,6 +2434,7 @@
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#7c3aed;color:white" onclick="showModalPointageFacial()">📷 Pointage facial</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#0ea5e9;color:white" onclick="showModalPointageQr()">📷 QR Pointage</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#0f766e;color:white" onclick="_qrPtBadges()">🪪 Badges employés</button>
+          <button class="btn btn-sec" style="padding:5px 12px;font-size:.72rem" onclick="_qrPtRefaireBadge()" title="Badge perdu ou copié : l’ancien ne marchera plus">🔁 Refaire un badge</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#22c55e;color:white" onclick="showSaisieRapide()">⏱ Saisie rapide</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#0ea5e9;color:white" onclick="showModalGenererMois()">📅 Générer mois complet</button>
           <button class="btn" style="padding:5px 12px;font-size:.72rem;background:#f97316;color:white" onclick="showModalPointageGroupe()">👥 Pointage groupé</button>
@@ -24154,6 +24156,64 @@ function peTogglePst() {
       var _qrPtPending = null;
       var _qrPtPaused = false;
       var QR_PT_GAP_MIN = 210; /* 3 h 30 entre le 1er et le 2e cr\u00e9neau */
+      var QR_PT_FENETRE_MS = 60000; /* le QR affich\u00e9 change chaque minute (anti-photo) */
+
+      /* Recherche d'un employ\u00e9 par matricule ou nom, SANS ambigu\u00eft\u00e9.
+         Avant : le 1er employ\u00e9 dont le matricule CONTENAIT la saisie \u00e9tait point\u00e9
+         (taper \u00ab 2 \u00bb pouvait pointer le matricule 12 au lieu du 2).
+         Ordre : matricule exact > \u00ab matricule nom \u00bb (autocompl\u00e9tion) > nom exact
+         > une seule correspondance partielle. Plusieurs \u2192 on demande de choisir.
+         Seuls les employ\u00e9s actifs ce jour (en paie, pas sortis) sont pris. */
+      function ptTrouverEmploye(saisie) {
+        var q = String(saisie || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        if (!q) return { emp: null, liste: [] };
+        var pers = [];
+        try { pers = (getPersonnel() || []).filter(function (p) { return p && (typeof empActifLeJour === 'function' ? empActifLeJour(p) : p.en_paie !== false); }); } catch (e) {}
+        var matN = function (m) { return String(m || '').trim().toLowerCase(); };
+        var sansZero = function (m) { return matN(m).replace(/^0+(?=\d)/, ''); };
+        var nomDe = function (p) { return ((p.nom || '') + ' ' + (p.prenoms || '')).toLowerCase().replace(/\s+/g, ' ').trim(); };
+        var ex = pers.filter(function (p) { return matN(p.matricule) && (matN(p.matricule) === q || sansZero(p.matricule) === sansZero(q)); });
+        if (ex.length === 1) return { emp: ex[0], liste: ex };
+        var tok = q.split(' ');
+        if (tok.length > 1) {
+          var ex2 = pers.filter(function (p) { return matN(p.matricule) === tok[0] && nomDe(p).indexOf(tok.slice(1).join(' ')) === 0; });
+          if (ex2.length === 1) return { emp: ex2[0], liste: ex2 };
+        }
+        var nx = pers.filter(function (p) { return nomDe(p) === q; });
+        if (nx.length === 1) return { emp: nx[0], liste: nx };
+        if (ex.length > 1) return { emp: null, liste: ex };
+        var part = pers.filter(function (p) { return matN(p.matricule).indexOf(q) !== -1 || nomDe(p).indexOf(q) !== -1; });
+        if (part.length === 1) return { emp: part[0], liste: part };
+        return { emp: null, liste: part.slice(0, 12) };
+      }
+      /* Ligne de pointage \u00e0 utiliser. NUIT : apr\u00e8s minuit (avant midi), si
+         l'employ\u00e9 a une arriv\u00e9e de nuit la veille sans fin, on continue la
+         ligne de la VEILLE (sinon la pause de 1 h du matin devenait une
+         nouvelle \u00ab arriv\u00e9e \u00bb sur le jour suivant). */
+      function ptLigneDuJour(pts, empId, shift, dateJ, nowMin) {
+        var trouve = function (d) {
+          for (var i = 0; i < pts.length; i++) {
+            if (pts[i] && String(pts[i].employee_id) === String(empId) && String(pts[i].date || '').slice(0, 10) === d) return pts[i];
+          }
+          return null;
+        };
+        var row = trouve(dateJ);
+        if (shift === 'nuit' && nowMin < 720 && !(row && row.n_arrivee)) {
+          var dv = new Date(dateJ + 'T12:00:00'); dv.setDate(dv.getDate() - 1);
+          var hier = dv.getFullYear() + '-' + String(dv.getMonth() + 1).padStart(2, '0') + '-' + String(dv.getDate()).padStart(2, '0');
+          var rh = trouve(hier);
+          if (rh && rh.n_arrivee && !rh.n_fin) return { row: rh, date: hier };
+        }
+        return { row: row, date: dateJ };
+      }
+      /* QR tournant : signature de la session pour la minute w. */
+      function _qrPtFenetre() { return Math.floor(Date.now() / QR_PT_FENETRE_MS); }
+      function _qrPtPayload(ses) {
+        if (!ses) return '';
+        if (!ses.rot) return 'MDBPOINT|v1|' + getEnterpriseUid() + '|' + ses.id + '|' + ses.token;
+        var w = _qrPtFenetre();
+        return 'MDBPOINT|v2|' + getEnterpriseUid() + '|' + ses.id + '|' + w + '|' + _qrPtSha(ses.token + '|' + w).slice(0, 20);
+      }
 
       function _qrPtToken() {
         var a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', s = '';
@@ -24232,7 +24292,11 @@ function peTogglePst() {
       }
       function _qrPtSha(s) { try { return _payeSha256Hex(String(s)); } catch (e) { return ''; } }
       function _qrPtBadgeToken(empId) {
-        try { return _qrPtSha(getEnterpriseUid() + '|' + empId + '|MDB-POINTAGE-V1').slice(0, 32); } catch (e) { return ''; }
+        /* Version du badge : \u00ab Refaire le badge \u00bb l'augmente, l'ancien QR ne marche plus. */
+        try {
+          var vb = 0; try { vb = parseInt((getPayeSection('badgeVersions', {}) || {})[empId], 10) || 0; } catch (eV) {}
+          return _qrPtSha(getEnterpriseUid() + '|' + empId + '|MDB-POINTAGE-V1' + (vb > 0 ? '|' + vb : '')).slice(0, 32);
+        } catch (e) { return ''; }
       }
       function _qrPtEsc(s) { try { return escH(String(s == null ? '' : s)); } catch (e) { return String(s == null ? '' : s); } }
       function _qrPtFindSup(code) {
@@ -24248,7 +24312,9 @@ function peTogglePst() {
         var today = _qrPtToday(), list = _qrPtSessions(), out = null;
         for (var i = list.length - 1; i >= 0; i--) {
           var s = list[i];
-          if (s && s.date === today && s.active !== false && (!s.expiresAt || Date.now() < Number(s.expiresAt))) { out = s; break; }
+          /* Session de NUIT ouverte la veille : reste valable apr\u00e8s minuit jusqu'\u00e0 son expiration. */
+          var _okDate = s && (s.date === today || (s.shift === 'nuit' && s.expiresAt && Date.now() < Number(s.expiresAt)));
+          if (s && _okDate && s.active !== false && (!s.expiresAt || Date.now() < Number(s.expiresAt))) { out = s; break; }
         }
         return out;
       }
@@ -24394,26 +24460,40 @@ function peTogglePst() {
         if (!active) {
           h += '<button onclick="_qrPtOpenSession()" style="width:100%;padding:14px;border:none;border-radius:12px;background:linear-gradient(135deg,#0ea5e9,#0369a1);color:#fff;font-weight:900;font-size:.95rem;box-shadow:0 8px 20px rgba(14,165,233,.35);cursor:pointer">\u25B6\uFE0F Ouvrir la session de pointage</button>';
         } else {
-          var payload = 'MDBPOINT|v1|' + getEnterpriseUid() + '|' + active.id + '|' + active.token;
-          var qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=' + encodeURIComponent(payload);
+          var payload = _qrPtPayload(active);
+          var qrUrl = (window.mdbQr ? window.mdbQr(payload, 320) : '') || ('https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=' + encodeURIComponent(payload));
           h += '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">';
-          h += '<div style="text-align:center;flex:0 0 auto"><div style="background:#fff;padding:8px;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,.08);display:inline-block"><img src="' + qrUrl + '" alt="QR pointage" style="width:250px;height:250px;display:block"></div>';
+          h += '<div style="text-align:center;flex:0 0 auto"><div style="background:#fff;padding:8px;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,.08);display:inline-block"><img src="' + qrUrl + '" id="qrpt-qr-img" data-w="' + _qrPtFenetre() + '" alt="QR pointage" style="width:250px;height:250px;display:block"></div>';
           h += '<div style="font-size:.72rem;color:#64748b;margin-top:8px">L\u2019employ\u00e9 scanne ce QR depuis son espace</div>';
+          if (active.rot) h += '<div style="font-size:.66rem;color:#0f766e;font-weight:700;margin-top:3px">\uD83D\uDD04 Le QR change chaque minute : une photo envoy\u00e9e \u00e0 un absent ne marche pas.</div>';
           h += '<div style="font-family:monospace;font-size:.7rem;color:#94a3b8;margin-top:4px">' + _qrPtEsc(active.id) + '</div></div>';
           h += '<div style="flex:1;min-width:220px">';
           h += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:10px 12px;font-size:.8rem;color:#166534;font-weight:700;margin-bottom:8px">Session ' + (active.shift === 'nuit' ? 'NUIT' : 'JOUR') + ' ouverte' + (active.openedBy ? '<br><span style="font-weight:500">Superviseur : ' + _qrPtEsc(active.openedBy) + '</span>' : '') + '<br><span style="font-weight:500">Expire \u00e0 ' + _qrPtEsc(new Date(active.expiresAt).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })) + '</span></div>';
           h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
           h += '<button class="btn" onclick="_qrPtScanBadge()" style="padding:9px 12px;background:#7c3aed;color:#fff;border:none;border-radius:10px;font-weight:800;font-size:.78rem;cursor:pointer">\uD83D\uDCF7 Scanner un badge</button>';
           h += '<button class="btn" onclick="_qrPtBadges()" style="padding:9px 12px;background:#0f766e;color:#fff;border:none;border-radius:10px;font-weight:800;font-size:.78rem;cursor:pointer">\uD83E\uDEAA Badges</button>';
+          h += '<button class="btn btn-sec" onclick="_qrPtRefaireBadge()" style="padding:9px 12px;font-size:.78rem" title="Badge perdu ou copi\u00e9 : l\u2019ancien ne marchera plus">\uD83D\uDD01 Refaire un badge</button>';
           h += '<button class="btn btn-sec" onclick="_qrPtCloseSession()" style="padding:9px 12px;font-size:.78rem">Fermer la session</button>';
           h += '</div></div></div>';
+          /* SAISIE RAPIDE : le superviseur tape le matricule + Entr\u00e9e \u2192 photo,
+             matricule, nom, annonce vocale avec l'heure ; le champ se vide et
+             reste pr\u00eat pour le suivant. Entr\u00e9e sur champ vide = confirmer
+             l'alerte affich\u00e9e ; \u00c9chap = annuler. */
+          h += '<div style="margin-top:14px;padding:12px;background:#0f172a;border-radius:14px">';
+          h += '<div style="color:#e2e8f0;font-weight:900;font-size:.85rem;margin-bottom:6px">\u2328\uFE0F Tapez le matricule puis <span style="background:#334155;padding:1px 7px;border-radius:5px">Entr\u00e9e</span></div>';
+          h += '<input id="qrpt-manual-mat" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Matricule\u2026" onkeydown="_qrPtFastKey(event)" style="width:100%;box-sizing:border-box;padding:14px;border:3px solid #38bdf8;border-radius:12px;font-size:1.6rem;font-weight:900;text-align:center;letter-spacing:3px">';
+          h += '<div id="qrpt-confirm-box" style="margin-top:8px"></div>';
+          h += '<div id="qrpt-scan-status" style="margin-top:8px;font-size:.82rem;color:#cbd5e1;min-height:20px;text-align:center"></div>';
+          h += '</div>';
           h += '<div id="qrpt-list" style="margin-top:14px"></div>';
         }
-        h += '<div id="qrpt-scan-status" style="margin-top:10px;font-size:.82rem;color:#475569;min-height:20px;text-align:center"></div>';
+        if (!active) h += '<div id="qrpt-scan-status" style="margin-top:10px;font-size:.82rem;color:#475569;min-height:20px;text-align:center"></div>';
         root.innerHTML = h;
         if (active) {
           _qrPtRenderList(active.id);
           _qrPtStartListTimer(active.id);
+          try { _qrPtFetchPhotos(function () {}); } catch (ePh) {}
+          _qrPtFocusMat();
         }
       }
       function _qrPtOpenSession() {
@@ -24427,7 +24507,7 @@ function peTogglePst() {
           id: 'PS' + Date.now().toString(36).toUpperCase(),
           token: _qrPtToken(), uid: uid, shift: _qrPtShift, date: today,
           openedAt: new Date().toISOString(), expiresAt: Date.now() + 12 * 60 * 60 * 1000,
-          active: true, openedBy: who, openedById: whoId
+          active: true, openedBy: who, openedById: whoId, rot: true
         };
         list.push(s);
         _qrPtSaveSessions(list);
@@ -24447,6 +24527,13 @@ function peTogglePst() {
         _qrPtListTimer = setInterval(function () {
           if (!document.getElementById('qrpt-list')) { _qrPtStopListTimer(); return; }
           _qrPtRenderList(sessionId);
+          try {
+            var _im = document.getElementById('qrpt-qr-img'), _w = _qrPtFenetre();
+            if (_im && String(_im.getAttribute('data-w')) !== String(_w)) {
+              var _as = _qrPtActiveSession();
+              if (_as && _as.rot) { _im.setAttribute('data-w', String(_w)); _im.src = (window.mdbQr ? window.mdbQr(_qrPtPayload(_as), 320) : '') || ('https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=' + encodeURIComponent(_qrPtPayload(_as))); }
+            }
+          } catch (eRot) {}
         }, 5000);
       }
       function _qrPtStopListTimer() {
@@ -24499,22 +24586,66 @@ function peTogglePst() {
         root.innerHTML = h;
         _qrPtStartCamera('badge');
       }
-      function _qrPtManualPoint() {
+      function _qrPtManualPoint(saisie) {
         var el = document.getElementById('qrpt-manual-mat');
-        var q = String((el && el.value) || '').trim().toLowerCase();
+        var q = String((saisie != null ? saisie : (el && el.value)) || '').trim().toLowerCase();
+        if (saisie == null && el) el.value = '';
         if (!q) { toast('Saisissez un matricule ou un nom', 'error'); return; }
+        var tr = ptTrouverEmploye(q);
+        var emp = tr.emp;
+        if (!emp) {
+          var box0 = document.getElementById('qrpt-confirm-box');
+          if (tr.liste.length > 1 && box0) {
+            box0.innerHTML = '<div style="max-width:460px;margin:0 auto;padding:10px;background:#eff6ff;border:2px solid #93c5fd;border-radius:12px;text-align:left;font-size:.8rem"><b>Plusieurs employ\u00e9s correspondent \u00e0 \u00ab ' + _qrPtEsc(q) + ' \u00bb</b> : choisissez le bon.'
+              + tr.liste.map(function (p) { return '<button class="btn btn-sec" onclick="_qrPtManualChoisir(\'' + _qrPtEsc(String(p.id)) + '\')" style="display:block;width:100%;margin-top:6px;padding:8px;text-align:left;font-size:.8rem"><b>' + _qrPtEsc(p.matricule || '') + '</b> \u2014 ' + _qrPtEsc(((p.nom || '') + ' ' + (p.prenoms || '')).trim()) + '</button>'; }).join('') + '</div>';
+          } else toast('Aucun employ\u00e9 actif trouv\u00e9 pour \u00ab ' + q + ' \u00bb', 'error');
+          return;
+        }
+        _qrPtManualPointEmp(emp);
+      }
+      function _qrPtFocusMat() {
+        setTimeout(function () { var el = document.getElementById('qrpt-manual-mat'); if (el && !_qrPtStream) { try { el.focus(); } catch (e) {} } }, 60);
+      }
+      function _qrPtFastKey(ev) {
+        var el = ev.target;
+        if (ev.key === 'Escape') {
+          ev.preventDefault();
+          if (_qrPtPending) { _qrPtPending = null; var b = document.getElementById('qrpt-confirm-box'); if (b) b.innerHTML = ''; var st = document.getElementById('qrpt-scan-status'); if (st) st.innerHTML = '<span style="color:#94a3b8">Annul\u00e9.</span>'; }
+          el.value = '';
+          return;
+        }
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        var v = String(el.value || '').trim();
+        if (!v && _qrPtPending) { _qrPtConfirm(); return; }
+        if (!v) return;
+        /* Nouveau matricule tap\u00e9 : l'alerte pr\u00e9c\u00e9dente est abandonn\u00e9e. */
+        if (_qrPtPending) { _qrPtPending = null; }
+        var b2 = document.getElementById('qrpt-confirm-box'); if (b2) b2.innerHTML = '';
+        /* Le champ est vid\u00e9 AVANT le traitement (\u2248 60 ms) : on peut taper le
+           matricule suivant imm\u00e9diatement, le curseur ne quitte jamais le champ. */
+        el.value = '';
+        _qrPtManualPoint(v);
+        if (document.activeElement !== el) { try { el.focus(); } catch (eF) {} }
+      }
+      function _qrPtManualChoisir(empId) {
         var emp = null;
-        try {
-          emp = getPersonnel().find(function (p) {
-            var mat = String(p.matricule || '').toLowerCase();
-            var nom = ((p.nom || '') + ' ' + (p.prenoms || '')).toLowerCase();
-            return mat === q || nom.indexOf(q) !== -1 || mat.indexOf(q) !== -1;
-          });
-        } catch (e) {}
-        if (!emp) { toast('Aucun employé trouvé', 'error'); return; }
-        var res = _qrPtPointEmployee(emp, false);
+        try { emp = getPersonnel().filter(function (p) { return String(p.id) === String(empId); })[0]; } catch (e) {}
+        var b = document.getElementById('qrpt-confirm-box'); if (b) b.innerHTML = '';
+        if (emp) _qrPtManualPointEmp(emp);
+      }
+      function _qrPtManualPointEmp(emp) {
+        var res = _qrPtPointEmployee(emp, false, 'matricule');
         if (res.ok) _qrPtShowSuccess(res);
-        else { _qrPtStopCamera(); _qrPtShowConfirm(emp, res); }
+        else if (res.code === 'court' || res.code === 'deja') { if (_qrPtStream) _qrPtStopCamera(); _qrPtShowConfirm(emp, res); }
+        else _qrPtShowRefus(res);
+        _qrPtFocusMat();
+      }
+      function _qrPtShowRefus(res) {
+        var status = document.getElementById('qrpt-scan-status');
+        var m = res.code === 'clos' ? 'Mois cl\u00f4tur\u00e9 : pointage impossible.' : (res.code === 'verrouille' ? 'Journ\u00e9e verrouill\u00e9e par l\u2019administration : pointage impossible.' : 'Pointage impossible.');
+        if (status) status.innerHTML = '<span style="color:#b91c1c;font-weight:800">\u26D4 ' + _qrPtEsc(res.nom || '') + ' \u2014 ' + m + '</span>';
+        _qrPtSpeak((res.nom || '') + ', pointage refus\u00e9');
       }
       function _qrPtStartCamera(mode) {
         _qrPtStopCamera();
@@ -24594,13 +24725,17 @@ function peTogglePst() {
         var expected = _qrPtBadgeToken(empId);
         var tokens = getPayeSection('badgeTokens', {});
         var legacy = (tokens && tokens[empId]) ? String(tokens[empId]) : '';
+        try { if ((parseInt((getPayeSection('badgeVersions', {}) || {})[empId], 10) || 0) > 0) legacy = ''; } catch (eLv) {}
         if (String(tok) !== expected && String(tok) !== legacy) { if (status) status.textContent = 'Badge non reconnu.'; return; }
         var emp = null;
         try { emp = getPersonnel().filter(function (p) { return String(p.id) === String(empId); })[0]; } catch (e) {}
         if (!emp) { if (status) status.textContent = 'Employ\u00e9 introuvable.'; return; }
-        var res = _qrPtPointEmployee(emp, false);
+        if (typeof empActifLeJour === 'function' && !empActifLeJour(emp)) { if (status) status.textContent = 'Employ\u00e9 sorti ou hors paie : badge refus\u00e9.'; return; }
+        var res = _qrPtPointEmployee(emp, false, 'qr-badge');
         if (res.ok) {
           _qrPtShowSuccess(res);
+        } else if (res.code !== 'court' && res.code !== 'deja') {
+          _qrPtShowRefus(res);
         } else {
           _qrPtStopCamera();
           _qrPtShowConfirm(emp, res);
@@ -24610,10 +24745,16 @@ function peTogglePst() {
         var status = document.getElementById('qrpt-scan-status');
         var label = res.label || 'Pointage';
         var extra = (res.heures != null && res.heures > 0) ? ' \u00b7 ' + res.heures + ' h' : '';
-        var ph = res.photo ? '<img src="' + _qrPtEsc(res.photo) + '" alt="" style="width:56px;height:56px;border-radius:50%;object-fit:cover;border:2px solid #4ade80;margin:0 auto 4px;display:block">' : '';
-        if (status) status.innerHTML = '<div style="padding:12px;background:#052e16;border:2px solid #16a34a;border-radius:12px;color:#fff">' + ph + '<div style="font-size:1.25rem">\u2705 ' + _qrPtEsc(label) + ' ' + (res.shift === 'nuit' ? 'NUIT' : 'JOUR') + '</div><div style="font-weight:900;color:#4ade80;font-size:1rem">' + _qrPtEsc(res.nom) + '</div><div style="color:#bbf7d0;font-size:.82rem">point\u00e9 \u00e0 ' + _qrPtEsc(res.heure) + extra + '</div></div>';
+        /* PHOTO en grand : le superviseur v\u00e9rifie que c'est bien la personne
+           (surtout quand on tape le matricule). */
+        var ph = ptPhotoBloc(res.empId, res.photo, '#4ade80');
+        if (status) status.innerHTML = '<div style="padding:12px;background:#052e16;border:2px solid #16a34a;border-radius:12px;color:#fff">' + ph + '<div style="font-size:1.25rem">\u2705 ' + _qrPtEsc(label) + ' ' + (res.shift === 'nuit' ? 'NUIT' : 'JOUR') + '</div><div style="font-weight:900;color:#4ade80;font-size:1rem">' + (res.matricule ? _qrPtEsc(res.matricule) + ' \u2014 ' : '') + _qrPtEsc(res.nom) + '</div><div style="color:#bbf7d0;font-size:.82rem">point\u00e9 \u00e0 ' + _qrPtEsc(res.heure) + extra + (res.source === 'matricule' ? ' \u00b7 par matricule' : '') + '</div></div>';
+        ptPhotoCharger(res.empId);
         var spoken = res.step === 'fin' ? (res.shift === 'nuit' ? 'fin de nuit enregistr\u00e9e' : 'fin de journ\u00e9e enregistr\u00e9e') : (String(label).toLowerCase() + ' enregistr\u00e9e');
-        _qrPtSpeak(res.nom + ', ' + spoken);
+        var _hh = String(res.heure || '').split(':');
+        var _hDit = _hh.length === 2 ? (parseInt(_hh[0], 10) + ' heure' + (parseInt(_hh[0], 10) > 1 ? 's' : '') + (parseInt(_hh[1], 10) ? ' ' + parseInt(_hh[1], 10) : '')) : '';
+        var _court = String(res.nom || '').split(/\s+/).slice(0, 2).join(' ');
+        _qrPtSpeak(_court + ', ' + spoken + (_hDit ? ', ' + _hDit : ''));
       }
       function _qrPtShowConfirm(emp, res) {
         _qrPtPending = { emp: emp, res: res };
@@ -24629,18 +24770,23 @@ function peTogglePst() {
         } else {
           msg = '<b>' + _qrPtEsc(res.nom) + '</b> a d\u00e9j\u00e0 les 4 cr\u00e9neaux :<br>Arriv\u00e9e ' + _qrPtEsc(res.entree || '--') + ' \u00b7 Pause ' + _qrPtEsc(res.pause || '--') + ' \u00b7 Reprise ' + _qrPtEsc(res.reprise || '--') + ' \u00b7 Fin ' + _qrPtEsc(res.fin || '--') + '.<br>Voulez-vous corriger la fin ?';
         }
-        if (status) status.innerHTML = '<span style="color:#b45309;font-weight:800">\u26A0\uFE0F ' + (res.code === 'court' ? 'Cr\u00e9neau trop rapproch\u00e9' : 'Journ\u00e9e d\u00e9j\u00e0 compl\u00e8te') + '</span>';
-        if (box) box.innerHTML = '<div style="max-width:460px;margin:0 auto;padding:12px;background:#fffbeb;border:2px solid #f59e0b;border-radius:12px;text-align:left;font-size:.8rem;color:#78350f">' + msg + '<button class="btn" onclick="_qrPtConfirm()" style="width:100%;margin-top:10px;padding:10px;background:#b45309;color:#fff;border:none;border-radius:10px;font-weight:900;cursor:pointer">Confirmer ce pointage</button></div>';
+        if (status) status.innerHTML = '<span style="color:#f59e0b;font-weight:800">\u26A0\uFE0F ' + (res.code === 'court' ? 'Cr\u00e9neau trop rapproch\u00e9' : 'Journ\u00e9e d\u00e9j\u00e0 compl\u00e8te') + '</span>' + (document.getElementById('qrpt-manual-mat') && !_qrPtStream ? '<div style="color:#cbd5e1;font-size:.75rem;margin-top:3px">Entr\u00e9e = confirmer \u00b7 \u00c9chap = annuler \u00b7 ou tapez le matricule suivant</div>' : '');
+        if (box) box.innerHTML = '<div style="max-width:460px;margin:0 auto;padding:12px;background:#fffbeb;border:2px solid #f59e0b;border-radius:12px;text-align:left;font-size:.8rem;color:#78350f">' + ptPhotoBloc(emp && emp.id, '', '#f59e0b') + msg + '<button class="btn" onclick="_qrPtConfirm()" style="width:100%;margin-top:10px;padding:10px;background:#b45309;color:#fff;border:none;border-radius:10px;font-weight:900;cursor:pointer">Confirmer ce pointage</button></div>';
         _qrPtSpeak(res.nom + ', ' + (res.code === 'court' ? 'cr\u00e9neau trop rapproch\u00e9' : 'journ\u00e9e d\u00e9j\u00e0 compl\u00e8te'));
       }
       function _qrPtConfirm() {
         if (!_qrPtPending) return;
         var emp = _qrPtPending.emp;
+        var srcP = (_qrPtPending.res && _qrPtPending.res.source) || 'qr-badge';
         _qrPtPending = null;
-        var res = _qrPtPointEmployee(emp, true);
+        var res = _qrPtPointEmployee(emp, true, srcP);
         var box = document.getElementById('qrpt-confirm-box');
         if (box) box.innerHTML = '';
-        if (res.ok) { _qrPtShowSuccess(res); setTimeout(function () { if (!_qrPtStream) _qrPtRenderStation(); }, 1700); }
+        if (res.ok) {
+          _qrPtShowSuccess(res);
+          if (document.getElementById('qrpt-list')) _qrPtFocusMat();
+          else setTimeout(function () { if (!_qrPtStream) _qrPtRenderStation(); }, 1700);
+        }
       }
       function _qrPtDurMin(a, b) {
         var am = _qrPtMin(a), bm = _qrPtMin(b);
@@ -24649,25 +24795,28 @@ function peTogglePst() {
         if (d < 0) d += 1440;
         return d;
       }
-      function _qrPtPointEmployee(emp, force) {
+      function _qrPtPointEmployee(emp, force, source) {
         var today = _qrPtToday(), heure = _qrPtNow();
+        source = source || 'qr-badge';
         var shift = _qrPtShift === 'nuit' ? 'nuit' : 'jour';
         var pre = shift === 'nuit' ? 'n_' : 'j_';
         var hField = shift === 'nuit' ? 'h_n_manual' : 'h_j_manual';
         var steps = ['arrivee', 'pause', 'reprise', 'fin'];
         var labels = { arrivee: 'Arriv\u00e9e', pause: 'Pause', reprise: 'Reprise', fin: 'Fin' };
         var pts = getPointageData();
-        var row = null;
-        for (var i = 0; i < pts.length; i++) {
-          if (pts[i] && String(pts[i].employee_id) === String(emp.id) && String(pts[i].date || '').slice(0, 10) === today) { row = pts[i]; break; }
-        }
         var nom = ((emp.nom || '') + ' ' + (emp.prenoms || '')).trim();
-        if (!row) { row = { id: DB.id(), employee_id: emp.id, date: today, present: true, h_j_manual: 0, h_n_manual: 0 }; pts.push(row); }
+        var _ld = ptLigneDuJour(pts, emp.id, shift, today, _qrPtMin(heure) || 0);
+        var row = _ld.row;
+        var dateL = _ld.date;
+        var base = { nom: nom, shift: shift, photo: ptPhotoSrc(emp.id), source: source, empId: emp.id, matricule: emp.matricule || '' };
+        if (typeof payeMoisClos === 'function' && payeMoisClos(dateL)) return Object.assign({ ok: false, code: 'clos' }, base);
+        if (row && row.protege === true && !(window._ptUnlocked && window._ptUnlocked[row.id])) return Object.assign({ ok: false, code: 'verrouille' }, base);
+        if (!row) { row = { id: DB.id(), employee_id: emp.id, date: dateL, present: true, h_j_manual: 0, h_n_manual: 0 }; pts.push(row); }
         var next = -1;
         for (var s = 0; s < steps.length; s++) { if (!row[pre + steps[s]]) { next = s; break; } }
         var overwrite = false;
         if (next === -1) {
-          if (!force) return { ok: false, code: 'deja', nom: nom, heure: row[pre + 'fin'], entree: row[pre + 'arrivee'], pause: row[pre + 'pause'], reprise: row[pre + 'reprise'], fin: row[pre + 'fin'], shift: shift, step: 'fin', photo: emp.photo || '' };
+          if (!force) return { ok: false, code: 'deja', nom: nom, heure: row[pre + 'fin'], entree: row[pre + 'arrivee'], pause: row[pre + 'pause'], reprise: row[pre + 'reprise'], fin: row[pre + 'fin'], shift: shift, step: 'fin', photo: emp.photo || '', source: source };
           next = 3; overwrite = true;
         }
         var step = steps[next];
@@ -24675,11 +24824,11 @@ function peTogglePst() {
         if (!force && (step === 'pause' || step === 'fin')) {
           var ref = step === 'pause' ? row[pre + 'arrivee'] : row[pre + 'reprise'];
           var gap = _qrPtDurMin(ref, heure);
-          if (gap < QR_PT_GAP_MIN) return { ok: false, code: 'court', nom: nom, heure: ref, gapMin: gap, minGap: QR_PT_GAP_MIN, step: step, shift: shift, photo: emp.photo || '' };
+          if (gap < QR_PT_GAP_MIN) return { ok: false, code: 'court', nom: nom, heure: ref, gapMin: gap, minGap: QR_PT_GAP_MIN, step: step, shift: shift, photo: emp.photo || '', source: source };
         }
         row[pre + step] = heure;
         row.present = true;
-        row.source = 'qr-badge'; row.shift = shift;
+        row.source = source; row.shift = shift;
         row.superviseur = (_qrPtSupervisor ? _qrPtSupervisor.nom : '');
         row.updatedAt = new Date().toISOString();
         if (step === 'arrivee') { row.heure_entree = heure; if (shift === 'nuit') row.heure_entree_nuit = heure; }
@@ -24688,7 +24837,7 @@ function peTogglePst() {
         var h2 = (row[pre + 'reprise'] && row[pre + 'fin']) ? _qrPtDurMin(row[pre + 'reprise'], row[pre + 'fin']) : 0;
         row[hField] = Math.round(((h1 + h2) / 60) * 100) / 100;
         setPointageData(pts);
-        return { ok: true, nom: nom, heure: heure, step: step, label: labels[step], shift: shift, heures: row[hField], overwrite: overwrite };
+        return { ok: true, nom: nom, heure: heure, step: step, label: labels[step], shift: shift, heures: row[hField], overwrite: overwrite, photo: ptPhotoSrc(emp.id), date: dateL, source: source, empId: emp.id, matricule: emp.matricule || '' };
       }
       function _qrPtSpeak(text) {
         try {
@@ -24700,6 +24849,35 @@ function peTogglePst() {
         } catch (e) {}
       }
       var _qrPtPhotoCache = null;
+      /* Photo d'un employ\u00e9 : fiche (emp.photo) sinon photo de l'espace employ\u00e9. */
+      function ptPhotoSrc(empId) {
+        var v = '';
+        try { var e = getPersonnel().filter(function (p) { return String(p.id) === String(empId); })[0]; if (e && e.photo) v = e.photo; } catch (eP) {}
+        if (!v && _qrPtPhotoCache) v = _qrPtPhotoCache[empId] || '';
+        if (v && typeof v === 'object') v = v.data || v.photo || v.url || v.src || '';
+        return typeof v === 'string' ? v : '';
+      }
+      function ptPhotoBloc(empId, photo, couleur) {
+        var src = photo || ptPhotoSrc(empId);
+        var st = 'width:130px;height:130px;border-radius:16px;object-fit:cover;border:3px solid ' + (couleur || '#4ade80') + ';margin:0 auto 8px;display:block;background:#1f2937';
+        if (src) return '<img class="pt-photo-' + _qrPtEsc(empId) + '" src="' + _qrPtEsc(src) + '" alt="" style="' + st + '">';
+        return '<div class="pt-photo-' + _qrPtEsc(empId) + '" style="' + st + ';display:flex;align-items:center;justify-content:center;color:#fca5a5;font-weight:900;font-size:.75rem;text-align:center;padding:8px;box-sizing:border-box">PAS DE PHOTO<br>v\u00e9rifiez l\u2019identit\u00e9</div>';
+      }
+      /* Si la photo n'\u00e9tait pas encore charg\u00e9e : on la r\u00e9cup\u00e8re puis on l'affiche. */
+      function ptPhotoCharger(empId) {
+        if (!empId || ptPhotoSrc(empId)) return;
+        try {
+          _qrPtFetchPhotos(function () {
+            var src = ptPhotoSrc(empId); if (!src) return;
+            var els = document.querySelectorAll('.pt-photo-' + String(empId).replace(/[^A-Za-z0-9_-]/g, ''));
+            for (var i = 0; i < els.length; i++) {
+              var im = document.createElement('img'); im.src = src; im.className = els[i].className;
+              im.setAttribute('style', els[i].getAttribute('style').replace(/display:flex;[^;]*;[^;]*;/, ''));
+              els[i].parentNode.replaceChild(im, els[i]);
+            }
+          });
+        } catch (eF) {}
+      }
       function _qrPtFetchPhotos(cb) {
         if (_qrPtPhotoCache) { cb(_qrPtPhotoCache); return; }
         var uid = getEnterpriseUid();
@@ -24725,13 +24903,29 @@ function peTogglePst() {
           })
           .catch(function () { _qrPtPhotoCache = map; cb(map); });
       }
-      function _qrPtBadges() {
+      /* Badge perdu / copi\u00e9 : on refait le badge d'un employ\u00e9, l'ancien est refus\u00e9. */
+      function _qrPtRefaireBadge() {
+        var q = window.prompt('Refaire le badge de quel employ\u00e9 ? (matricule)');
+        if (!q) return;
+        var tr = ptTrouverEmploye(q);
+        if (!tr.emp) { toast(tr.liste.length > 1 ? 'Plusieurs employ\u00e9s : tapez le matricule exact' : 'Employ\u00e9 introuvable', 'error'); return; }
+        var e = tr.emp, nom = ((e.nom || '') + ' ' + (e.prenoms || '')).trim();
+        if (!window.confirm('Refaire le badge de ' + (e.matricule ? e.matricule + ' \u2014 ' : '') + nom + ' ?\n\nL\u2019ANCIEN badge (et le QR de son espace employ\u00e9 d\u00e9j\u00e0 affich\u00e9) ne marchera plus.')) return;
+        var bv = getPayeSection('badgeVersions', {}) || {};
+        if (typeof bv !== 'object' || Array.isArray(bv)) bv = {};
+        bv[e.id] = (parseInt(bv[e.id], 10) || 0) + 1;
+        setPayeSection('badgeVersions', bv);
+        try { pushPayeCloud(true); } catch (eP) {}
+        toast('Nouveau badge pour ' + nom + ' : l\u2019ancien est annul\u00e9. Imprimez-le.', 'success');
+        _qrPtBadges([e.id]);
+      }
+      function _qrPtBadges(seulement) {
         var w = window.open('', '_blank');
         if (!w) { toast('Autorisez les fen\u00eatres pop-up pour voir et imprimer les badges', 'error'); return; }
         try { w.document.write('<html><body style="font-family:Arial;padding:24px;color:#334155">Chargement des photos\u2026</body></html>'); } catch (eW) {}
         _qrPtFetchPhotos(function (photoMap) {
           var emps = [];
-          try { emps = getPersonnel().filter(function (p) { return p && (p.status || p.statut || 'actif') !== 'inactif'; }); } catch (e) {}
+          try { emps = getPersonnel().filter(function (p) { return p && (p.status || p.statut || 'actif') !== 'inactif' && (!Array.isArray(seulement) || seulement.indexOf(p.id) !== -1); }); } catch (e) {}
           var uid = getEnterpriseUid(), soc = {};
           try { soc = getSocieteP() || {}; } catch (e) {}
           var logo = soc.logo ? String(soc.logo) : '';
@@ -24885,13 +25079,10 @@ function peTogglePst() {
         var timeInput = document.getElementById("face-manual-time");
         var q = (matInput ? matInput.value : "").trim().toLowerCase();
         if (!q) { toast("Saisissez un matricule ou nom","error"); return; }
-        var personnel = getPersonnel().filter(function(p){ return p.en_paie !== false; });
-        var emp = personnel.find(function(p){
-          var mat = (p.matricule||"").toLowerCase();
-          var name = ((p.nom||"") + " " + (p.prenoms||"")).toLowerCase();
-          return mat === q || name.indexOf(q) !== -1 || mat.indexOf(q) !== -1;
-        });
-        if (!emp) { toast("Aucun employé trouvé pour '"+escH(q)+"'","error"); return; }
+        var _tr = ptTrouverEmploye(q);
+        var emp = _tr.emp;
+        if (!emp && _tr.liste.length > 1) { toast("Plusieurs employés correspondent à « "+q+" » : choisissez dans la liste ou tapez le matricule exact ("+_tr.liste.slice(0,4).map(function(p){return p.matricule||p.nom;}).join(", ")+"…)","error"); return; }
+        if (!emp) { toast("Aucun employé actif trouvé pour « "+q+" »","error"); return; }
         var heure = timeInput ? timeInput.value : new Date().toTimeString().slice(0,5);
         var shortM = faceShortName(emp.nom + " " + (emp.prenoms||""));
         facePointer(emp.id, shortM, heure, faceMode, faceMoment);
@@ -25026,9 +25217,13 @@ function peTogglePst() {
           if (d < 0) d += 1440;
           return Math.round(d);
         };
-        var dk = new Date().toISOString().slice(0,10);
+        var dk = (typeof _qrPtToday === "function") ? _qrPtToday() : new Date().toISOString().slice(0,10);
         var pts = getPointageData();
+        /* Nuit après minuit : continuer la ligne de la veille (voir ptLigneDuJour). */
+        try { var _ldF = ptLigneDuJour(pts, empId, mode === "nuit" ? "nuit" : "jour", dk, Math.round(parseHeure(heure) * 60) || 0); if (_ldF && _ldF.date) dk = _ldF.date; } catch (eLd) {}
         var idx = pts.findIndex(function(r){ return r.employee_id===empId && r.date===dk; });
+        if (idx !== -1 && pts[idx].protege === true && !(window._ptUnlocked && window._ptUnlocked[pts[idx].id])) { toast(shortName+" — journée verrouillée par l’administration","error"); return "verrouille"; }
+        if (typeof payeMoisClos === "function" && payeMoisClos(dk)) { toast("Mois clôturé : pointage impossible","error"); return "clos"; }
         function cpSummary(rec) {
           var pre = (mode === "nuit") ? "n_" : "j_";
           return FACE_MOMENTS.map(function(mm){
@@ -25073,11 +25268,13 @@ function peTogglePst() {
         } catch (eSup) {}
         setPointageData(pts);
         if (result) result.innerHTML = '<div style="padding:14px;background:#052e16;border:2px solid #16a34a;border-radius:12px;text-align:center">'
+          + ((typeof ptPhotoBloc === "function") ? ptPhotoBloc(empId, "", "#4ade80") : "")
           + '<div style="font-size:1rem;font-weight:800;color:#4ade80;letter-spacing:.5px">✓ '+escH(momLabel.toUpperCase())+' '+creneau+'</div>'
           + '<div style="font-size:1.05rem;font-weight:700;color:#fff;margin-top:4px">'+escH(shortName)+'</div>'
           + '<div style="font-size:.8rem;color:#bbf7d0;margin-top:4px">pointé à '+heure+'</div>'
           + '<div style="font-size:.72rem;color:#86efac;margin-top:6px">'+cpSummary(rec)+'</div></div>';
         toast(shortName+" — "+momLabel+" "+creneau+" ("+heure+")", "success");
+        try { if (typeof ptPhotoCharger === "function") ptPhotoCharger(empId); } catch (ePc) {}
         faceSpeak(shortName + ", " + momLabel + " " + creneau + " enregistrée");
         renderPtRecap();
         return "ok";
@@ -47208,7 +47405,8 @@ function _dsEmbellir() {
   };
 })();
 </script>
-<script src="qr-verif.js?v=4"></script>
+<script src="js/qr-local.js?v=1"></script>
+<script src="qr-verif.js?v=5"></script>
 <script src="print-buttons.js?v=6"></script>
 
 <script>
