@@ -1,0 +1,62 @@
+# Mise en ligne automatique SANS le PC.
+# A chaque envoi sur la branche « ma-version-deployee » :
+#   1. les tests tournent (rien n'est publié s'ils échouent) ;
+#   2. le site est publié sur Cloudflare Pages (montabbord.pages.dev) ;
+#   3. le serveur API (montabbord-api.workers.dev) est republié si
+#      functions/ ou worker-api/ ont changé.
+# Il faut deux secrets dans GitHub (Settings → Secrets and variables → Actions) :
+#   CLOUDFLARE_API_TOKEN  et  CLOUDFLARE_ACCOUNT_ID
+name: Mise en ligne
+
+on:
+  push:
+    branches: [ma-version-deployee]
+  workflow_dispatch:
+
+concurrency:
+  group: mise-en-ligne
+  cancel-in-progress: false
+
+jobs:
+  deployer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tests (rien n'est publié s'ils échouent)
+        run: node tests/run.js
+
+      - name: Aucun fichier de sauvegarde dans public/
+        run: |
+          if ls public | grep -Ei '\.(bak|old|orig)$|backup' ; then
+            echo "Fichier de sauvegarde dans public/ : retirez-le avant publication"; exit 1
+          fi
+
+      - name: Publier le site (Cloudflare Pages)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 pages deploy public --project-name montabbord --branch main --commit-dirty=true
+
+      - name: Le serveur a-t-il changé ?
+        id: serveur
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || git diff --name-only HEAD~1 HEAD | grep -qE '^(functions|worker-api)/'; then
+            echo "change=oui" >> "$GITHUB_OUTPUT"
+          else
+            echo "change=non" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publier le serveur API (workers.dev)
+        if: steps.serveur.outputs.change == 'oui'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy --config worker-api/wrangler.toml
