@@ -11275,7 +11275,56 @@ function renderPrimeEmpMatrix() {
         }
         return 0;
       }
+      /* Mois ecrit dans un libelle : "Mois de Octobre 2026" ou "2026-10".
+         Indispensable pour les soldes : la piece peut etre datee du 02/11
+         alors que le salaire concerne octobre. */
+      function _payeMoisDepuisLibellePaye(lib) {
+        if (!lib) return '';
+        var s0 = String(lib).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        var mo = s0.match(/mois de (janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)\s+((?:19|20)\d{2})/);
+        if (mo) {
+          var idx = ['janvier','fevrier','mars','avril','mai','juin','juillet','aout','septembre','octobre','novembre','decembre'].indexOf(mo[1]);
+          if (idx >= 0) return mo[2] + '-' + ('0' + (idx + 1)).slice(-2);
+        }
+        var ym = s0.match(/(^|[^0-9])((?:19|20)\d{2})[-\/](0[1-9]|1[0-2])([^0-9]|$)/);
+        if (ym) return ym[2] + '-' + ym[3];
+        var my = s0.match(/(^|[^0-9])(0[1-9]|1[0-2])[-\/]((?:19|20)\d{2})([^0-9]|$)/);
+        if (my) return my[3] + '-' + my[2];
+        return '';
+      }
+      function _payeMoisPiecePaye(op) {
+        if (!op) return '';
+        if (/^\d{4}-\d{2}$/.test(op.periode || '')) return String(op.periode).substring(0, 7);
+        return _payeMoisDepuisLibellePaye(op.libelle || '') || _payeMoisDepuisLibellePaye(op.observations || '') || '';
+      }
       var _payeApReconciled = false;
+      function _payeNormNomOp(x) {
+        return String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+      }
+      function _payeEmployeIdPourOp(op, emps) {
+        try {
+          if (!op || !emps || !emps.length) return '';
+          if (op.beneficiaireId) {
+            for (var i0 = 0; i0 < emps.length; i0++) { if (emps[i0] && emps[i0].id === op.beneficiaireId) return emps[i0].id; }
+          }
+          var nom = String(op.beneficiaireNom || '').trim();
+          if (!nom && op.libelle) {
+            var m = String(op.libelle).match(/^(?:Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)/i);
+            if (m) nom = String(m[1] || '').trim();
+          }
+          var n = _payeNormNomOp(nom);
+          if (!n) return '';
+          for (var i = 0; i < emps.length; i++) {
+            var e = emps[i]; if (!e || !e.id) continue;
+            var full = _payeNormNomOp(((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim());
+            var inv = _payeNormNomOp(((e.prenoms || e.prenom || '') + ' ' + (e.nom || '')).trim());
+            var ab = _payeNormNomOp(e.abreviation || '');
+            var mat = _payeNormNomOp(e.matricule || '');
+            if ((full && n === full) || (inv && n === inv) || (ab && n === ab) || (mat && n === mat)) return e.id;
+          }
+        } catch (eN) {}
+        return '';
+      }
       function _payeReconcileAPFromCaisse() {
         if (_payeApReconciled) return;
         try {
@@ -11316,7 +11365,8 @@ function renderPrimeEmpMatrix() {
             if (t !== "pret" && t !== "acompte") continue;
             /* La pièce maîtresse « à répartir » (pendingDetail) n'est pas un prêt individuel. */
             if (op.pendingDetail) continue;
-            if (!op.beneficiaireId || !empIds[op.beneficiaireId]) continue;
+            var _empOpId = _payeEmployeIdPourOp(op, emps);
+            if (!_empOpId) continue;
             /* Une remise collective partage le même numeroPiece pour tous ses employés :
                la déduplication doit se faire sur l'ID de l'opération (unique), sinon
                une seule ligne est recréée et les autres restent à « 0 op. ». */
@@ -11331,7 +11381,7 @@ function renderPrimeEmpMatrix() {
               if (_tbAp && (_tbAp[_recId] || _tbAp["ap" + op.id])) { linked[op.id] = true; continue; }
             } catch (eTb) {}
             var _npO = String(op.numeroPiece || '').trim().toUpperCase();
-            var _emO = String(op.beneficiaireId || '').trim().toLowerCase();
+            var _emO = String(_empOpId || op.beneficiaireId || '').trim().toLowerCase();
             if (_npO && _npO !== '-' && _emO && linked["PE:" + _npO + ":" + _emO]) {
               var existingAp = linked["PE:" + _npO + ":" + _emO];
               if (!existingAp.caisseOpId || existingAp.caisseOpId !== op.id) {
@@ -11343,12 +11393,12 @@ function renderPrimeEmpMatrix() {
             var rec = {
               id: _recId,
               type: t,
-              employeId: op.beneficiaireId,
+              employeId: _empOpId,
               employeNom: op.beneficiaireNom || "",
               montant: parseInt(op.montant) || 0,
               dureeMois: parseInt(op.apDureeMois) || 0,
               montantMensuel: parseInt(op.apMontantMensuel) || 0,
-              moisDeduction: op.apMoisDeduction || op.periode || (op.date ? String(op.date).substring(0, 7) : ""),
+              moisDeduction: (/^\d{4}-\d{2}$/.test(op.apMoisDeduction || "") ? String(op.apMoisDeduction).substring(0, 7) : "") || _payeMoisPiecePaye(op) || (/^\d{4}-\d{2}$/.test(op.periode || "") ? String(op.periode).substring(0, 7) : "") || (op.date ? String(op.date).substring(0, 7) : ""),
               motif: op.tiers || op.observations || op.libelle || "",
               notes: op.observations || "",
               date: op.date || "",
@@ -11371,12 +11421,31 @@ function renderPrimeEmpMatrix() {
             if (op.acomptePretId) { op.acomptePretId = rec.id; linked["A:" + rec.id] = true; }
             created++;
           }
-          if (created > 0) {
+          /* Lignes deja creees avec le mois de la DATE (02/11) alors que le
+             libelle dit "Mois de Octobre 2026" : on les remet sur le bon mois.
+             Un mois choisi manuellement (moisManuel) n'est jamais touche. */
+          var fixedMois = 0;
+          try {
+            var _opsByIdPM = {};
+            for (var _oiPM = 0; _oiPM < ops.length; _oiPM++) { if (ops[_oiPM] && ops[_oiPM].id) _opsByIdPM[ops[_oiPM].id] = ops[_oiPM]; }
+            for (var _liPM = 0; _liPM < list.length; _liPM++) {
+              var _aPM = list[_liPM];
+              if (!_aPM || !_aPM.caisseOpId || _aPM.moisManuel === true) continue;
+              var _oPM = _opsByIdPM[_aPM.caisseOpId];
+              if (!_oPM || _oPM.reversed) continue;
+              var _ciblePM = _payeMoisPiecePaye(_oPM);
+              if (!_ciblePM) continue;
+              var _dateMoisPM = _oPM.date ? String(_oPM.date).substring(0, 7) : (_aPM.date ? String(_aPM.date).substring(0, 7) : '');
+              var _curPM = String(_aPM.moisDeduction || '').substring(0, 7);
+              if (_curPM !== _ciblePM && (!_curPM || _curPM === _dateMoisPM)) { _aPM.moisDeduction = _ciblePM; fixedMois++; }
+            }
+          } catch (eFixMois) {}
+          if (created > 0 || fixedMois > 0) {
             /* Les pierres tombales restent prioritaires : on n'efface jamais
                la trace d'une suppression volontaire. */
             DB.setMain("mdb_acomptesPrets", _payeStripTombstoned("mdb_acomptesPrets", list));
             try { pushPayeCloud(); } catch (e2) { console.warn("[Paye] pushPayeCloud reconstitution acomptes échoué :", e2); }
-            console.log("Reconstitution de " + created + " pret(s)/acompte(s) depuis la caisse (module Salaire)");
+            console.log("Reconstitution de " + created + " pret(s)/acompte(s) depuis la caisse (module Salaire)" + (fixedMois ? " + " + fixedMois + " mois remis sur la periode du libelle" : ""));
           }
         } catch (e) {}
         /* Une seule fois : les acomptes/prets venant d'une piece de caisse deja reconstitues sont valides (deduits du net). Ensuite l'utilisateur garde la main (devalider). */
@@ -11705,6 +11774,9 @@ function renderPrimeEmpMatrix() {
          Cela évite qu'une ancienne copie (ex. 20 000 restée à côté du
          25 000 corrigé) soit déduite en plus du bon montant. */
       function _apCalcDedupList(empId) {
+        /* Le livre de paie et les bulletins doivent voir les soldes verses
+           en caisse meme si l'onglet Acomptes & Prets n'a pas ete ouvert. */
+        try { if (!_payeApReconciled) _payeReconcileAPFromCaisse(); } catch (eRecAL) {}
         var list = (getAPList() || []).map(normalizeAP).filter(function (a) {
           return a && String(a.employee_id || a.employeId || "") === String(empId);
         });

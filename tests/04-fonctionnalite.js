@@ -13798,6 +13798,29 @@ function run(rapport) {
     rapport.ko('Transferts caisse signature/PIN : lecture impossible (' + eTc.message + ')');
   }
 
+  /* Controle statique : soldes verses en caisse rattaches au MOIS DU LIBELLE.
+     Une piece "Solde salaire : X/Mois de Octobre 2026" datee du 02/11 doit
+     reduire la paie d'octobre, pas celle de novembre. */
+  try {
+    const fsSm = require('fs');
+    const pathSm = require('path');
+    const srcPayeSm = fsSm.readFileSync(pathSm.join(__dirname, '..', 'public', 'paye.html'), 'utf8');
+    const srcIndexSm = fsSm.readFileSync(pathSm.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okHelper = srcPayeSm.indexOf('function _payeMoisPiecePaye(') !== -1;
+    const okCreation = srcPayeSm.indexOf('|| _payeMoisPiecePaye(op) ||') !== -1;
+    const okRepair = srcPayeSm.indexOf('fixedMois') !== -1 && srcPayeSm.indexOf('_aPM.moisDeduction = _ciblePM') !== -1;
+    const okAuto = srcPayeSm.indexOf('if (!_payeApReconciled) _payeReconcileAPFromCaisse();') !== -1;
+    const okIndex = srcIndexSm.indexOf('periode: _isSoldeMois ? _newApMois :') !== -1
+      && srcIndexSm.indexOf('apType: _isSoldeMois ? \'solde\'') !== -1;
+    if (okHelper && okCreation && okRepair && okAuto && okIndex) {
+      rapport.ok('Soldes caisse : mois du libelle (ex. octobre) retenu avant la date de la piece (02/11), lignes existantes reparees');
+    } else {
+      rapport.ko('Soldes caisse mois du libelle — helper=' + okHelper + ' creation=' + okCreation + ' repair=' + okRepair + ' auto=' + okAuto + ' index=' + okIndex);
+    }
+  } catch (eSm) {
+    rapport.ko('Soldes caisse mois du libelle : lecture impossible (' + eSm.message + ')');
+  }
+
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
      pages internes (derriere mot de passe) en noindex et retirees du sitemap,
      sitemap/robots referencant uniquement les pages publiques. */
