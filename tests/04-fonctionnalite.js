@@ -13773,27 +13773,29 @@ function run(rapport) {
     rapport.ko('Synchro Exploitation anti-écrasement : lecture impossible (' + eAf.message + ')');
   }
 
-  /* Controle statique : transferts internes de caisse — l'approbation exige le
-     CODE DE CONNEXION de l'agent (mot de passe de son compte mdb_users), pas
-     le code global de l'entreprise. La caisse destination prouve ainsi qui     elle est avant d'etre creditee. */
+  /* Controle statique : transferts internes de caisse — l'approbation exige
+     la SIGNATURE / le code PIN de l'agent de la caisse DESTINATAIRE.
+     (Ancien test : code de connexion saisi dans un prompt. La regle a change :
+     la piece d'entree est signee par le beneficiaire, le PIN appose la
+     signature de reference et approuve le transfert.) */
   try {
     const fsTc = require('fs');
     const pathTc = require('path');
     const srcTc = fsTc.readFileSync(pathTc.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-    const okDef = srcTc.indexOf('function codeConnexionOK(') !== -1;
-    const okPrompt = srcTc.indexOf("window.prompt('Saisissez votre code de connexion pour approuver ce transfert :'") !== -1;
-    const okAppel = srcTc.indexOf('if (!codeConnexionOK(codeCs) && !codeCaisseDestOK(op, codeCs)) { toast(\'Code de connexion incorrect\', \'error\'); return; }') !== -1;
-    /* V2 : le code de connexion se verifie via mdbPassCheck (empreinte
-       sha256 avec sel, ancien champ en clair encore accepte en lecture). */
-    const okCompte = srcTc.indexOf('if (mdbPassCheck(list[i], c)) return true;') !== -1;
-    const okExclusion = srcTc.indexOf('if (sansCompte) {') !== -1; /* code entreprise seulement sans compte local */
-    if (okDef && okPrompt && okAppel && okCompte && okExclusion) {
-      rapport.ok('Transferts caisse : approbation protégée par le code de connexion de l\u2019agent (compte mdb_users, code entreprise seulement sans compte)');
+    const okDef = srcTc.indexOf('function csOpSignatureRequise(') !== -1;
+    const okTransfert = srcTc.indexOf("if (o.typeOp === 'transfert') return o.sens === 'entree';") !== -1;
+    const okDest = srcTc.indexOf('function _sigTransfertDest(') !== -1;
+    const okPin = srcTc.indexOf('function _sigValidatePinOnly(') !== -1;
+    const okCompte = srcTc.indexOf('mdbPassCheck({ passwordHash: rec.pinHash }, pin)') !== -1;
+    const okRef = srcTc.indexOf("op.signatureData = rec.ref || '';") !== -1;
+    const okAppel = srcTc.indexOf('if (csOpSignatureRequise(o)) {') !== -1;
+    if (okDef && okTransfert && okDest && okPin && okCompte && okRef && okAppel) {
+      rapport.ok('Transferts caisse : approbation par signature / PIN de l’agent de la caisse destinataire');
     } else {
-      rapport.ko('Transferts caisse code connexion — def=' + okDef + ' prompt=' + okPrompt + ' appel=' + okAppel + ' compte=' + okCompte + ' exclusion=' + okExclusion);
+      rapport.ko('Transferts caisse signature/PIN — def=' + okDef + ' transfert=' + okTransfert + ' dest=' + okDest + ' pin=' + okPin + ' compte=' + okCompte + ' ref=' + okRef + ' appel=' + okAppel);
     }
   } catch (eTc) {
-    rapport.ko('Transferts caisse code connexion : lecture impossible (' + eTc.message + ')');
+    rapport.ko('Transferts caisse signature/PIN : lecture impossible (' + eTc.message + ')');
   }
 
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
