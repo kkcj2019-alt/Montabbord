@@ -24978,6 +24978,94 @@ function _apNormNom(s) {
     return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
   } catch (e) { try { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); } catch (e2) { return ''; } }
 }
+/* Normalisation beneficiaire pour la detection de doublons caisse. */
+function _csNormBenefAP(x) {
+  return String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+/* Cle beneficiaire : id si present, sinon nom (ou nom extrait du libelle). */
+function _csBenefKeyAP(o) {
+  if (!o) return '';
+  if (o.beneficiaireId) return 'id:' + String(o.beneficiaireId).trim().toLowerCase();
+  var nom = o.beneficiaireNom || '';
+  if (!nom) {
+    var lib = String(o.libelle || '');
+    var m = lib.match(/ACOMPTE\s*\/\s*INDEMNITE(?:\s*\/\s*Mois de [^-]*)?\s*-\s*(.+)$/i) || lib.match(/^\s*(?:Solde|Acompte)[^:]*:\s*([^\/]+)/i);
+    if (m) nom = m[1];
+  }
+  var n = _csNormBenefAP(nom);
+  return n ? ('nom:' + n) : '';
+}
+/* Nature d'une piece caisse pour la comparaison anti-doublon. */
+function _csNaturePieceAP(x) {
+  if (!x) return '';
+  var c = String(x.code || '').toUpperCase().trim();
+  var t = String(x.apType || '').toLowerCase().trim();
+  if (t === 'solde' || c.indexOf('SOLDE') === 0) return 'solde';
+  if (t === 'pret' || c.indexOf('PRET') === 0) return 'pret';
+  if (t === 'acompte' || c.indexOf('ACOMPTE') === 0) return 'acompte';
+  return '';
+}
+/* Cherche une piece strictement identique deja enregistree (meme date, sens,
+   nature, montant, beneficiaire et mois du libelle). Sert de garde-fou avant
+   de creer une deuxieme piece : sans cela un double clic / une double remise
+   passe inapercue (pieces aux numeros differents mais aux memes donnees). */
+function _csPieceIdentiqueAP(c) {
+  try {
+    var nat = _csNaturePieceAP(c);
+    if (!nat) return null;
+    var m = Math.round(parseFloat(c.montant) || 0);
+    if (m <= 0) return null;
+    var ben = _csBenefKeyAP(c);
+    var codeC = String(c.code || '').toUpperCase().trim();
+    var d = String(c.date || '').slice(0, 10);
+    var mois = (typeof _apMoisDepuisLibelle === 'function') ? (_apMoisDepuisLibelle(c.libelle || '') || '') : '';
+    if (!mois) mois = String(c.date || '').slice(0, 7);
+    var ops = getOperationsCaisse() || [];
+    for (var i = 0; i < ops.length; i++) {
+      var o = ops[i];
+      if (!o || o.reversed || o.brouillon) continue;
+      if (String(o.date || '').slice(0, 10) !== d) continue;
+      if (String(o.sens || 'sortie') !== String(c.sens || 'sortie')) continue;
+      if (_csNaturePieceAP(o) !== nat) continue;
+      var codeO = String(o.code || '').toUpperCase().trim();
+      if (codeC && codeO && codeC !== codeO) continue;
+      if (Math.round(parseFloat(o.montant) || 0) !== m) continue;
+      var ob = _csBenefKeyAP(o);
+      if (ben && ob && ben !== ob) continue;
+      var obsO = _csNormBenefAP(o.observations || '');
+      if (obsC && obsO && obsC !== obsO) continue;
+      var om = (typeof _apMoisDepuisLibelle === 'function') ? (_apMoisDepuisLibelle(o.libelle || '') || '') : '';
+      if (!om) om = String(o.date || '').slice(0, 7);
+      if (mois && om && mois !== om) continue;
+      return o;
+    }
+  } catch (e) {}
+  return null;
+}
+/* Groupes de pieces AP/solde identiques (meme date/montant/beneficiaire/type/mois). */
+function _csDoublonsAPRapides(mois) {
+  try {
+    var ops = getOperationsCaisse() || [];
+    var g = {};
+    for (var i = 0; i < ops.length; i++) {
+      var o = ops[i];
+      if (!o || o.reversed || o.brouillon) continue;
+      if (String(o.sens || 'sortie') !== 'sortie') continue;
+      var nat = _csNaturePieceAP(o);
+      if (!nat) continue;
+      var m = Math.round(parseFloat(o.montant) || 0);
+      if (m <= 0) continue;
+      var ben = _csBenefKeyAP(o);
+      if (!ben) continue;
+      var mois = (typeof _apMoisDepuisLibelle === 'function') ? (_apMoisDepuisLibelle(o.libelle || '') || '') : '';
+      if (!mois) mois = String(o.date || '').slice(0, 7);
+      var codeK = String(o.code || '').toUpperCase().trim();
+      var k = [String(o.date || '').slice(0, 10), nat, codeK, m, ben, mois].join('|');
+      (g[k] = g[k] || []).push(o);
+    }
+    return Object.keys(g).map(function (k) { return g[k]; }).filter(function (l) { return l.length > 1; });
+  } catch (e) { return []; }
+}
 /* Nature acompte/prêt d'une pièce : d'abord apType explicite, sinon CODE
    (saisie rapide sans apType : ACOMPTE*, codes de règlement salaire...).
    'solde' vaut 'acompte' (l'état s'appelle « Acomptes & Prêts salaire »). */
@@ -40882,7 +40970,17 @@ function renderCaisseIn(el) {
      + '.cs-mob-top .btn-outline.btn-sm{color:#334155 !important;border-color:#cbd5e1 !important;background:#fff !important;font-weight:600 !important;height:28px}'
      + '.cs-mob-top .btn-outline.btn-sm:hover{background:#f1f5f9 !important;border-color:#94a3b8 !important}'
      + '#tresorerieContent table button.btn-icon svg{width:12px;height:12px}</style>';
-   html += '<div class="table-wrap"><div class="table-responsive"><table style="font-size:12px"><thead><tr><th style="width:28px;text-align:center"><input type="checkbox" id="csSelectAll" onchange="toggleSelectAllCaisse(this)"></th><th style="cursor:pointer;user-select:none;white-space:nowrap" onclick="sortCaisseTable(\'date\')" title="Cliquer pour trier par date">Date <span id="csSortDateIcon"></span></th><th style="width:64px;cursor:pointer;user-select:none" onclick="sortCaisseTable(\'piece\')" title="Cliquer pour trier par N\u00b0 de pi\u00e8ce">Pi\u00e8ce <span id="csSortPieceIcon"></span></th><th style="width:52px;font-size:10px">Code</th><th style="min-width:175px">Libell\u00e9</th><th style="width:80px;text-align:right;color:#bbf7d0;white-space:nowrap">Entr\u00e9e</th><th style="width:80px;text-align:right;color:#fecaca;white-space:nowrap">Sortie</th><th style="width:70px;text-align:right;color:#ddd6fe;white-space:nowrap">Charge</th><th style="width:62px;text-align:right;color:#fde68a;white-space:nowrap">Frais</th><th class="cs-col-spf" style="width:66px;text-align:right;color:#ddd6fe;white-space:nowrap">S+F</th><th>B\u00e9n\u00e9ficiaire</th><th>Ex\u00e9cutant</th><th style="white-space:nowrap">Moyen / N\u00b0</th><th>Remettant</th><th style="min-width:150px">Observations</th><th style="text-align:right;font-weight:700;color:#bfdbfe;white-space:nowrap">Solde</th><th style="width:74px">Actions</th></tr></thead><tbody id="csOpsBody">';
+   var _dupAPR = (typeof _csDoublonsAPRapides === 'function') ? _csDoublonsAPRapides((window._csSelYear && window._csSelMonth) ? (window._csSelYear + '-' + window._csSelMonth) : '') : [];
+  if (_dupAPR.length) {
+    var _nDupAP = 0;
+    for (var _dri = 0; _dri < _dupAPR.length; _dri++) _nDupAP += Math.max(0, _dupAPR[_dri].length - 1);
+    html += '<div style="display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;background:#fff7ed;border:1px solid #fdba74;border-left:4px solid #ea580c;border-radius:8px;font-size:12px;color:#9a3412;flex-wrap:wrap">' +
+      '<span style="font-size:16px">\u26A0\uFE0F</span>' +
+      '<div style="flex:1;min-width:220px"><b>' + _nDupAP + ' doublon(s) probable(s) d\u00e9tect\u00e9(s)</b><br><span style="font-size:11px">M\u00eame date, m\u00eame montant, m\u00eame b\u00e9n\u00e9ficiaire et m\u00eame type. V\u00e9rifiez avant de supprimer.</span></div>' +
+      '<button class="btn btn-sm" onclick="findDuplicates()" style="background:#ea580c;color:#fff;border:none;font-weight:800;border-radius:8px">Analyser / corriger</button>' +
+      '</div>';
+  }
+  html += '<div class="table-wrap"><div class="table-responsive"><table style="font-size:12px"><thead><tr><th style="width:28px;text-align:center"><input type="checkbox" id="csSelectAll" onchange="toggleSelectAllCaisse(this)"></th><th style="cursor:pointer;user-select:none;white-space:nowrap" onclick="sortCaisseTable(\'date\')" title="Cliquer pour trier par date">Date <span id="csSortDateIcon"></span></th><th style="width:64px;cursor:pointer;user-select:none" onclick="sortCaisseTable(\'piece\')" title="Cliquer pour trier par N\u00b0 de pi\u00e8ce">Pi\u00e8ce <span id="csSortPieceIcon"></span></th><th style="width:52px;font-size:10px">Code</th><th style="min-width:175px">Libell\u00e9</th><th style="width:80px;text-align:right;color:#bbf7d0;white-space:nowrap">Entr\u00e9e</th><th style="width:80px;text-align:right;color:#fecaca;white-space:nowrap">Sortie</th><th style="width:70px;text-align:right;color:#ddd6fe;white-space:nowrap">Charge</th><th style="width:62px;text-align:right;color:#fde68a;white-space:nowrap">Frais</th><th class="cs-col-spf" style="width:66px;text-align:right;color:#ddd6fe;white-space:nowrap">S+F</th><th>B\u00e9n\u00e9ficiaire</th><th>Ex\u00e9cutant</th><th style="white-space:nowrap">Moyen / N\u00b0</th><th>Remettant</th><th style="min-width:150px">Observations</th><th style="text-align:right;font-weight:700;color:#bfdbfe;white-space:nowrap">Solde</th><th style="width:74px">Actions</th></tr></thead><tbody id="csOpsBody">';
   ops.sort(function(a, b) { var da = (a.date || '') + ' ' + (a.heure || '00:00'); var db = (b.date || '') + ' ' + (b.heure || '00:00'); return da.localeCompare(db); });
   /* Pre-compute progressive solde (oldest to newest) */
   var runningSolde = soldeBefore;
@@ -52244,6 +52342,16 @@ ops[i].apType = (typeOp === 'acompte' || typeOp === 'pret') ? typeOp : (ops[i].a
         codeStr = 'PANIER';
         if (!codeId) { /* code tap\u00e9 librement : rattacher au code PANIER du catalogue */ try { var _pcAll = getCodesCaisse(); for (var _pci = 0; _pci < _pcAll.length; _pci++) { if (String(_pcAll[_pci].code || '').toUpperCase() === 'PANIER') { codeId = _pcAll[_pci].id; break; } } } catch (ePC) {} }
         libelle = libelle || 'Prime de panier';
+      }
+      /* Anti-doublon : une piece identique (meme date, montant, beneficiaire,
+         type et mois) est-elle deja enregistree ? On demande confirmation au
+         lieu de laisser passer silencieusement une deuxieme piece. */
+      if (!isDraft) {
+        var _dupAP = _csPieceIdentiqueAP({ date: fullDate, code: codeStr, beneficiaireId: beneficiaireId, beneficiaireNom: beneficiaireNom, montant: montant, sens: sens, typeOp: typeOp, libelle: libelle, caisseId: caisseId });
+        if (_dupAP) {
+          var _okDup = confirm('Une pi\u00e8ce identique existe d\u00e9j\u00e0 :\n\n' + (_dupAP.numeroPiece || '') + '  \u2014  ' + fmtMoney(_dupAP.montant) + '  \u2014  ' + (_dupAP.date || '') + '\n' + (_dupAP.beneficiaireNom || '') + '\n\nVoulez-vous vraiment enregistrer une DEUXI\u00c8ME pi\u00e8ce identique ?');
+          if (!_okDup) { try { toast('Enregistrement annul\u00e9 : une pi\u00e8ce identique existe d\u00e9j\u00e0', 'info'); } catch (eTD) {} return; }
+        }
       }
       numeroPiece = generatePieceNumber(caisseId, fullDate);
       var newId = DB.genId();

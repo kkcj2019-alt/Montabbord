@@ -13821,6 +13821,30 @@ function run(rapport) {
     rapport.ko('Soldes caisse mois du libelle : lecture impossible (' + eSm.message + ')');
   }
 
+  /* Controle statique : garde anti-doublon des pieces de caisse AP/solde.
+     Deux pieces peuvent avoir des numeros differents mais les memes donnees :
+     la deuxieme doit demander confirmation, et un bandeau doit signaler les
+     doublons deja presents. */
+  try {
+    const fsDup = require('fs');
+    const pathDup = require('path');
+    const srcDup = fsDup.readFileSync(pathDup.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okDetect = srcDup.indexOf('function _csPieceIdentiqueAP(') !== -1
+      && srcDup.indexOf('function _csDoublonsAPRapides(') !== -1
+      && srcDup.indexOf('function _csBenefKeyAP(') !== -1;
+    const okGuard = srcDup.indexOf('Anti-doublon : une piece identique') !== -1
+      && srcDup.indexOf('Voulez-vous vraiment enregistrer une DEUXI') !== -1;
+    const okBanner = srcDup.indexOf('doublon(s) probable(s)') !== -1
+      && srcDup.indexOf('Analyser / corriger') !== -1;
+    if (okDetect && okGuard && okBanner) {
+      rapport.ok('Caisse : garde anti-doublon sur les pieces AP/solde + bandeau de detection des doublons existants');
+    } else {
+      rapport.ko('Caisse anti-doublon AP — detect=' + okDetect + ' garde=' + okGuard + ' bandeau=' + okBanner);
+    }
+  } catch (eDup) {
+    rapport.ko('Caisse anti-doublon AP : lecture impossible (' + eDup.message + ')');
+  }
+
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
      pages internes (derriere mot de passe) en noindex et retirees du sitemap,
      sitemap/robots referencant uniquement les pages publiques. */
