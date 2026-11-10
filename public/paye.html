@@ -6452,8 +6452,14 @@ function apNatureCodeStricte(op) {
   var t = (op && op.apType) || "";
   if (t === "solde" || t === "pret" || t === "acompte") return t;
   var c = String((op && op.code) || "").toUpperCase().trim();
+  /* Codes solde : SOLDE_SALAIRE, SOLDE_INDEMNITE, SOLDE, SOLSAL, STC, tout code contenant SOLDE */
+  if (c === "SOLDE_SALAIRE" || c === "SOLDE_INDEMNITE" || c === "SOLDE" || c === "SOLSAL" || c === "STC" ||
+      c.indexOf("SOLDE_") === 0 || c.indexOf("SOLDE-") === 0 ||
+      /_SOLDE(_|$)/.test(c) || /^SOLDE/.test(c)) return "solde";
+  /* Libelle commençant par "Solde" */
+  var lib = String((op && op.libelle) || "").toLowerCase();
+  if (/^solde\s*(salaire|indemnit|tout\s*compte|de\s)/.test(lib)) return "solde";
   if (!c) return "";
-  if (c === "SOLDE_SALAIRE" || c === "SOLDE_INDEMNITE" || c.indexOf("SOLDE_") === 0) return "solde";
   if (c === "ACOMPTE" || c.indexOf("ACOMPTE_") === 0 || c.indexOf("ACOMPTE-") === 0 || /_ACOMPTE(_|$)/.test(c)) return "acompte";
   if (/^PRET(_|-|$)/.test(c) || /_PRET(_|$)/.test(c)) return "pret";
   return "";
@@ -11275,27 +11281,68 @@ function renderPrimeEmpMatrix() {
         }
         return 0;
       }
-      /* Mois ecrit dans un libelle : "Mois de Octobre 2026" ou "2026-10".
+      /* Mois ecrit dans un libelle : "Mois de Octobre 2026", "Mois d'octobre 2026",
+         "Octobre 2026", "oct 26", "10/2026" ou "2026-10".
          Indispensable pour les soldes : la piece peut etre datee du 02/11
          alors que le salaire concerne octobre. */
       function _payeMoisDepuisLibellePaye(lib) {
         if (!lib) return '';
         var s0 = String(lib).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        var mo = s0.match(/mois de (janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)\s+((?:19|20)\d{2})/);
-        if (mo) {
-          var idx = ['janvier','fevrier','mars','avril','mai','juin','juillet','aout','septembre','octobre','novembre','decembre'].indexOf(mo[1]);
-          if (idx >= 0) return mo[2] + '-' + ('0' + (idx + 1)).slice(-2);
+        var MOIS_NMS = ['janvier','fevrier','mars','avril','mai','juin','juillet','aout','septembre','octobre','novembre','decembre'];
+        var MOIS_AB  = ['jan','fev','mar','avr','mai','juin','juil','aou','sep','oct','nov','dec'];
+        /* "mois de/d' <nom> <annee>" ou "<nom> <annee>" ou "<nom>-<annee 2 chiffres>" */
+        var moRe = s0.match(/(?:mois\s+d[e']\s*)?(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)\s+((?:19|20)?\d{2})\b/);
+        if (moRe) {
+          var idx = MOIS_NMS.indexOf(moRe[1]);
+          if (idx >= 0) {
+            var yr = moRe[2]; if (yr.length === 2) yr = '20' + yr;
+            return yr + '-' + ('0' + (idx + 1)).slice(-2);
+          }
         }
+        /* Abreviations : "oct 26", "oct-26", "oct. 2026" */
+        var abRe = s0.match(/\b(jan|fev|mar|avr|mai|juin|juil|aou|sep|oct|nov|dec)\.?\s*[-]?\s*((?:19|20)?\d{2})\b/);
+        if (abRe) {
+          var idx2 = MOIS_AB.indexOf(abRe[1]);
+          if (idx2 >= 0) {
+            var yr2 = abRe[2]; if (yr2.length === 2) yr2 = '20' + yr2;
+            return yr2 + '-' + ('0' + (idx2 + 1)).slice(-2);
+          }
+        }
+        /* "2026-10" ou "2026/10" */
         var ym = s0.match(/(^|[^0-9])((?:19|20)\d{2})[-\/](0[1-9]|1[0-2])([^0-9]|$)/);
         if (ym) return ym[2] + '-' + ym[3];
+        /* "10/2026" ou "10-2026" */
         var my = s0.match(/(^|[^0-9])(0[1-9]|1[0-2])[-\/]((?:19|20)\d{2})([^0-9]|$)/);
         if (my) return my[3] + '-' + my[2];
         return '';
       }
-      function _payeMoisPiecePaye(op) {
+      /* noInference=true : ne pas deduire le mois precedent depuis la date
+         (utilise dans le bloc fixedMois pour ne corriger que les libelles explicites). */
+      function _payeMoisPiecePaye(op, noInference) {
         if (!op) return '';
+        /* 1. Periode explicite sur la piece */
         if (/^\d{4}-\d{2}$/.test(op.periode || '')) return String(op.periode).substring(0, 7);
-        return _payeMoisDepuisLibellePaye(op.libelle || '') || _payeMoisDepuisLibellePaye(op.observations || '') || '';
+        if (/^\d{4}-\d{2}$/.test(op.apMoisDeduction || '')) return String(op.apMoisDeduction).substring(0, 7);
+        /* 2. Mois inscrit dans le libelle ou observations */
+        var fromLib = _payeMoisDepuisLibellePaye(op.libelle || '') || _payeMoisDepuisLibellePaye(op.observations || '');
+        if (fromLib) return fromLib;
+        /* 3. Solde sans mention de mois EXPLICITE dans les 15 premiers jours :
+              la piece est probablement le solde du MOIS PRECEDENT.
+              noInference=true : desactive cette heuristique (bloc fixedMois). */
+        if (!noInference) {
+          var _nc = (typeof apNatureCodeStricte === 'function') ? apNatureCodeStricte(op) : '';
+          if (_nc === 'solde' && op.date) {
+            var _d = String(op.date);
+            var _j = parseInt((_d.slice(8, 10) || '99'), 10);
+            if (_j <= 15) {
+              var _y = parseInt(_d.slice(0, 4), 10);
+              var _m = parseInt(_d.slice(5, 7), 10);
+              _m -= 1; if (_m < 1) { _m = 12; _y -= 1; }
+              return _y + '-' + ('0' + _m).slice(-2);
+            }
+          }
+        }
+        return '';
       }
       var _payeApReconciled = false;
       function _payeNormNomOp(x) {
@@ -11304,23 +11351,49 @@ function renderPrimeEmpMatrix() {
       function _payeEmployeIdPourOp(op, emps) {
         try {
           if (!op || !emps || !emps.length) return '';
+          /* 1. beneficiaireId direct — avec ou sans prefixe "emp_" */
           if (op.beneficiaireId) {
-            for (var i0 = 0; i0 < emps.length; i0++) { if (emps[i0] && emps[i0].id === op.beneficiaireId) return emps[i0].id; }
+            var _bid = String(op.beneficiaireId);
+            var _bidStrip = _bid.indexOf('emp_') === 0 ? _bid.slice(4) : _bid;
+            for (var i0 = 0; i0 < emps.length; i0++) {
+              if (!emps[i0] || !emps[i0].id) continue;
+              var _eid = String(emps[i0].id);
+              var _eidStrip = _eid.indexOf('emp_') === 0 ? _eid.slice(4) : _eid;
+              if (_eid === _bid || _eid === _bidStrip || _eidStrip === _bid || _eidStrip === _bidStrip) return emps[i0].id;
+            }
           }
+          /* 2. Nom beneficiaire, ou extrait du libelle ("Solde salaire : NOM / Mois...") */
           var nom = String(op.beneficiaireNom || '').trim();
           if (!nom && op.libelle) {
-            var m = String(op.libelle).match(/^(?:Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)/i);
-            if (m) nom = String(m[1] || '').trim();
+            var _mLib = String(op.libelle).match(/^(?:Solde\s*(?:de\s+)?(?:salaire|indemnit[e\u00e9]|tout\s*compte)?\s*:\s*)([^\/]+)/i);
+            if (_mLib) nom = String(_mLib[1] || '').trim();
           }
           var n = _payeNormNomOp(nom);
           if (!n) return '';
+          /* 3. Correspondance exacte (nom complet, nom inverse, abreviation, matricule) */
           for (var i = 0; i < emps.length; i++) {
             var e = emps[i]; if (!e || !e.id) continue;
             var full = _payeNormNomOp(((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim());
-            var inv = _payeNormNomOp(((e.prenoms || e.prenom || '') + ' ' + (e.nom || '')).trim());
-            var ab = _payeNormNomOp(e.abreviation || '');
-            var mat = _payeNormNomOp(e.matricule || '');
+            var inv  = _payeNormNomOp(((e.prenoms || e.prenom || '') + ' ' + (e.nom || '')).trim());
+            var ab   = _payeNormNomOp(e.abreviation || '');
+            var mat  = _payeNormNomOp(e.matricule || '');
             if ((full && n === full) || (inv && n === inv) || (ab && n === ab) || (mat && n === mat)) return e.id;
+          }
+          /* 4. Scoring par mots-cles (evite les faux positifs d'une egalite stricte) */
+          var nWords = n.split(' ').filter(function(w){ return w.length >= 2; });
+          if (nWords.length >= 1) {
+            var best = '', bestScore = 0;
+            for (var j = 0; j < emps.length; j++) {
+              var ej = emps[j]; if (!ej || !ej.id) continue;
+              var fullJ = _payeNormNomOp(((ej.nom || '') + ' ' + (ej.prenoms || ej.prenom || '')).trim());
+              var score = 0;
+              for (var w = 0; w < nWords.length; w++) { if (fullJ.indexOf(nWords[w]) !== -1) score++; }
+              if (score > bestScore || (score === bestScore && score > 0 && fullJ === n)) {
+                bestScore = score; best = ej.id;
+              }
+            }
+            /* Seuil : au moins la moitie des mots doivent correspondre */
+            if (best && bestScore >= Math.ceil(nWords.length / 2)) return best;
           }
         } catch (eN) {}
         return '';
@@ -11382,13 +11455,21 @@ function renderPrimeEmpMatrix() {
             } catch (eTb) {}
             var _npO = String(op.numeroPiece || '').trim().toUpperCase();
             var _emO = String(_empOpId || op.beneficiaireId || '').trim().toLowerCase();
+            /* Multi-pieŕes sous même numeroPiece/employé : ne sauter QUE si le montant
+               est identique (même versement). Si le montant diffère, créer une nouvelle
+               ligne (ex. Gabou : 175 000 + 20 000 sous le même numéro de pièce). */
             if (_npO && _npO !== '-' && _emO && linked["PE:" + _npO + ":" + _emO]) {
               var existingAp = linked["PE:" + _npO + ":" + _emO];
-              if (!existingAp.caisseOpId || existingAp.caisseOpId !== op.id) {
-                existingAp.caisseOpId = op.id;
+              var _montDiff = Math.abs((parseInt(existingAp.montant) || 0) - (parseInt(op.montant) || 0));
+              if (_montDiff < 1) {
+                /* Meme montant : vraie deduplication, rattacher l'op si besoin */
+                if (!existingAp.caisseOpId || existingAp.caisseOpId !== op.id) {
+                  existingAp.caisseOpId = op.id;
+                }
+                linked[op.id] = true;
+                continue;
               }
-              linked[op.id] = true;
-              continue;
+              /* Montants differents : c'est un versement complementaire, le creer */
             }
             var rec = {
               id: _recId,
@@ -11433,7 +11514,10 @@ function renderPrimeEmpMatrix() {
               if (!_aPM || !_aPM.caisseOpId || _aPM.moisManuel === true) continue;
               var _oPM = _opsByIdPM[_aPM.caisseOpId];
               if (!_oPM || _oPM.reversed) continue;
-              var _ciblePM = _payeMoisPiecePaye(_oPM);
+              /* noInference=true : ne corriger le mois que depuis un libelle explicite,
+                 pas depuis l'heuristique "mois precedent si date <= 15"
+                 (evite d'ecraser un moisDeduction deja correct). */
+              var _ciblePM = _payeMoisPiecePaye(_oPM, true);
               if (!_ciblePM) continue;
               var _dateMoisPM = _oPM.date ? String(_oPM.date).substring(0, 7) : (_aPM.date ? String(_aPM.date).substring(0, 7) : '');
               var _curPM = String(_aPM.moisDeduction || '').substring(0, 7);
