@@ -13892,6 +13892,30 @@ function run(rapport) {
     rapport.ko('Achat matiere premiere volume x P.U : lecture impossible (' + eMp.message + ')');
   }
 
+  /* Controle statique : inventaire des comptes de tiers (surtout fournisseurs),
+     meme logique que l'inventaire de caisse : solde calcule, solde confirme,
+     ecart et historique. */
+  try {
+    const fsTI = require('fs');
+    const pathTI = require('path');
+    const srcTI = fsTI.readFileSync(pathTI.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okFns = srcTI.indexOf('function openTiersInventaire(') !== -1
+      && srcTI.indexOf('function saveTiersInventaire(') !== -1
+      && srcTI.indexOf('function openTiersInventaireHistory(') !== -1
+      && srcTI.indexOf('function printTiersInventaire(') !== -1;
+    const okKey = srcTI.indexOf("'mdb_tiersInventaires'") !== -1
+      && srcTI.indexOf("'mdb_tiersInventaires','mdb_caisseInventaires'") !== -1;
+    const okButtons = srcTI.indexOf('openTiersInventaire') !== -1
+      && srcTI.indexOf('openTiersInventaireHistory') !== -1;
+    if (okFns && okKey && okButtons) {
+      rapport.ok('Inventaire des comptes de tiers : fournisseurs et clients, solde calcule/confirme, ecart, historique et impression');
+    } else {
+      rapport.ko('Inventaire tiers — fonctions=' + okFns + ' cle=' + okKey + ' boutons=' + okButtons);
+    }
+  } catch (eTI) {
+    rapport.ko('Inventaire tiers : lecture impossible (' + eTI.message + ')');
+  }
+
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
      pages internes (derriere mot de passe) en noindex et retirees du sitemap,
      sitemap/robots referencant uniquement les pages publiques. */
