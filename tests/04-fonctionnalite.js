@@ -13845,6 +13845,29 @@ function run(rapport) {
     rapport.ko('Caisse anti-doublon AP : lecture impossible (' + eDup.message + ')');
   }
 
+  /* Controle statique : le detail d'un compte tiers reste ouvert apres un
+     rafraichissement temps reel (la sonde cloud reconstruit le tableau). */
+  try {
+    const fsDet = require('fs');
+    const pathDet = require('path');
+    const srcDet = fsDet.readFileSync(pathDet.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const okClientMemo = srcDet.indexOf('function ccMemoDetail(') !== -1
+      && srcDet.indexOf('function ccReouvrirDetails(') !== -1
+      && srcDet.indexOf('try { ccReouvrirDetails(); }') !== -1;
+    const okFournMemo = srcDet.indexOf('function cfMemoDetail(') !== -1
+      && srcDet.indexOf('function cfReouvrirDetails(') !== -1
+      && srcDet.indexOf('try { cfReouvrirDetails(); }') !== -1;
+    const okScroll = srcDet.indexOf('var _scrollYBefore') !== -1
+      && srcDet.indexOf('window.scrollTo(0, _scrollYBefore)') !== -1;
+    if (okClientMemo && okFournMemo && okScroll) {
+      rapport.ok('Comptes tiers : le detail deplie survit au rafraichissement temps reel (memo client + fournisseur) et la position de lecture est restauree');
+    } else {
+      rapport.ko('Comptes tiers detail — client=' + okClientMemo + ' fournisseur=' + okFournMemo + ' scroll=' + okScroll);
+    }
+  } catch (eDet) {
+    rapport.ko('Comptes tiers detail : lecture impossible (' + eDet.message + ')');
+  }
+
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
      pages internes (derriere mot de passe) en noindex et retirees du sitemap,
      sitemap/robots referencant uniquement les pages publiques. */

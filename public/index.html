@@ -17912,6 +17912,8 @@ function renderTiersDettes(el) {
 
 var _creancesDettesTab = 'comptesClients';
 function renderCreancesDettes() {
+  var _scrollYBefore = (window.scrollY || document.documentElement.scrollTop || 0);
+  var _contentScrollBefore = (document.getElementById('content') || {}).scrollTop || 0;
   var html = '<div class="tabs-scroll" style="display:flex;gap:0;border-bottom:2px solid var(--gray-200);margin-bottom:24px">';
   var tabs = [{key:'comptesClients',label:'Clients'},{key:'comptesFournisseurs',label:'Fournisseurs'}];
   for (var i = 0; i < tabs.length; i++) {
@@ -17925,6 +17927,19 @@ function renderCreancesDettes() {
   if (_creancesDettesTab === 'comptesClients') renderComptesClientsSection(el);
   else if (_creancesDettesTab === 'comptesFournisseurs') renderComptesFournisseursSection(el);
   saveAppState();
+  try {
+    requestAnimationFrame(function () {
+      window.scrollTo(0, _scrollYBefore);
+      var _cScroll = document.getElementById('content');
+      if (_cScroll) _cScroll.scrollTop = _contentScrollBefore;
+    });
+    setTimeout(function () {
+      var d = document.querySelector('#creancesDettesContent tr[id^="clientDetail_"], #creancesDettesContent tr[id^="fournisseurDetail_"]');
+      if (d && d.getBoundingClientRect && (d.getBoundingClientRect().top < 0 || d.getBoundingClientRect().bottom > (window.innerHeight || 800))) {
+        d.scrollIntoView({ block: 'nearest' });
+      }
+    }, 120);
+  } catch (e) {}
 }
 function cdTab(tab) { if (_creancesDettesTab === tab) return; _memNav(); _creancesDettesTab = tab; renderCreancesDettes(); }
 function renderComptesClientsSection(el) {
@@ -18008,6 +18023,7 @@ function renderComptesClientsSection(el) {
   if (!hasStats) html += '<tr><td colspan="5" class="text-center" style="padding:32px;color:#94a3b8"><div style="font-size:28px;margin-bottom:6px">📊</div>Aucun client dans cette période</td></tr>';
   html += '</tbody></table></div></div></div></div>';
   el.innerHTML = html;
+  try { ccReouvrirDetails(); } catch (e) {}
 }
 function renderComptesFournisseursSection(el) {
   try { if (typeof reparerDettesFournisseursIds === 'function') reparerDettesFournisseursIds(); } catch(e) {}
@@ -37698,12 +37714,45 @@ function showClientSimpleDetail(clientId) {
   document.getElementById('content').innerHTML = html;
 }
 
+/* Memo des comptes clients ouverts : un rafraichissement temps reel
+   (sonde cloud) reconstruit le tableau et supprimait le detail deplie.
+   On memorise l'id et on le reouvre apres chaque rendu. */
+function ccMemoDetail(clientId, ouvert) {
+  try {
+    if (!window._ccOpenDetails) window._ccOpenDetails = [];
+    var l = window._ccOpenDetails;
+    var i = l.indexOf(clientId);
+    if (ouvert && i === -1) l.push(clientId);
+    if (!ouvert && i !== -1) l.splice(i, 1);
+  } catch (e) {}
+}
+function ccReouvrirDetails() {
+  function _pass() {
+    try {
+      var l = (window._ccOpenDetails || []).slice();
+      for (var i = 0; i < l.length; i++) {
+        var cid = l[i];
+        if (document.getElementById('clientDetail_' + cid)) continue;
+        var els = document.querySelectorAll('#creancesDettesContent [onclick*="toggleClientSimpleDetail"]');
+        var td = null;
+        for (var j = 0; j < els.length; j++) {
+          var m = (els[j].getAttribute('onclick') || '').match(/toggleClientSimpleDetail\('([^']+)'/);
+          if (m && m[1] === cid) { td = els[j].closest ? (els[j].closest('td') || els[j]) : els[j]; break; }
+        }
+        if (td) toggleClientSimpleDetail(cid, td, true);
+      }
+    } catch (e) {}
+  }
+  _pass();
+  setTimeout(_pass, 80);
+}
 /* ===== TOGGLE SIMPLE CLIENT DETAIL (inline in table) - Tableau complet demandé ===== */
-function toggleClientSimpleDetail(clientId, tdEl) {
+function toggleClientSimpleDetail(clientId, tdEl, sansMemo) {
   var existing = document.getElementById('clientDetail_' + clientId);
   if (existing) {
     existing.remove();
     tdEl.style.fontWeight = '600';
+    if (!sansMemo) ccMemoDetail(clientId, false);
     return;
   }
   var cl = getClientById(clientId);
@@ -37774,11 +37823,13 @@ function toggleClientSimpleDetail(clientId, tdEl) {
     '</div></td>';
   tr.parentNode.insertBefore(detailRow, tr.nextSibling);
   tdEl.style.fontWeight = '700';
+  if (!sansMemo) ccMemoDetail(clientId, true);
   // Attacher l'événement de fermeture après création
   var closeBtn = detailRow.querySelector('button[data-close-id]');
   if (closeBtn) closeBtn.onclick = function() {
     var row = this.closest('tr');
     row.remove();
+    ccMemoDetail(clientId, false);
     // Réinitialiser le poids de la cellule parent
     var parentTd = this.parentNode.parentNode;
     if (parentTd) {
@@ -37995,17 +38046,27 @@ function cfMemoDetail(fournisseurId, ouvert) {
   } catch (e) {}
 }
 function cfReouvrirDetails() {
-  try {
-    var l = (window._cfOpenDetails || []).slice();
-    for (var i = 0; i < l.length; i++) {
-      var fid = l[i];
-      if (document.getElementById('fournisseurDetail_' + fid)) continue;
-      var el = document.querySelector('[onclick*="toggleFournisseurSimpleDetail(\'' + fid + '\'"]');
-      if (!el) continue;
-      var td = el.closest ? (el.closest('td') || el) : el;
-      if (td) toggleFournisseurSimpleDetail(fid, td);
-    }
-  } catch (e) {}
+  /* Reouverture robuste : on parcourt les lignes au lieu d'un selecteur CSS
+     (un nom avec apostrophe/quote faisait echouer la recherche), et on refait
+     un passage 80 ms plus tard car un second rendu peut suivre. */
+  function _pass() {
+    try {
+      var l = (window._cfOpenDetails || []).slice();
+      for (var i = 0; i < l.length; i++) {
+        var fid = l[i];
+        if (document.getElementById('fournisseurDetail_' + fid)) continue;
+        var els = document.querySelectorAll('#creancesDettesContent [onclick*="toggleFournisseurSimpleDetail"]');
+        var td = null;
+        for (var j = 0; j < els.length; j++) {
+          var m = (els[j].getAttribute('onclick') || '').match(/toggleFournisseurSimpleDetail\('([^']+)'/);
+          if (m && m[1] === fid) { td = els[j].closest ? (els[j].closest('td') || els[j]) : els[j]; break; }
+        }
+        if (td) toggleFournisseurSimpleDetail(fid, td, true);
+      }
+    } catch (e) {}
+  }
+  _pass();
+  setTimeout(_pass, 80);
 }
 function toggleFournisseurSimpleDetail(fournisseurId, tdEl, sansMemo) {
   var existing = document.getElementById('fournisseurDetail_' + fournisseurId);
