@@ -13916,6 +13916,24 @@ function run(rapport) {
     rapport.ko('Inventaire tiers : lecture impossible (' + eTI.message + ')');
   }
 
+  /* Controle statique : les soldes de caisse restent de type "solde" dans la
+     Paie, sinon le Livre les compte en acompte et "Deja paye" reste a 0. */
+  try {
+    const fsSolde = require('fs');
+    const pathSolde = require('path');
+    const srcSolde = fsSolde.readFileSync(pathSolde.join(__dirname, '..', 'public', 'paye.html'), 'utf8');
+    const okType = srcSolde.indexOf('if (t !== "pret" && t !== "acompte" && t !== "solde") continue;') !== -1;
+    const okNoConvert = srcSolde.indexOf('if (t === "solde") t = "acompte";') === -1;
+    const okRepair = srcSolde.indexOf("_aT.type = 'solde'") !== -1;
+    if (okType && okNoConvert && okRepair) {
+      rapport.ok('Paie : les soldes de caisse gardent le type solde (Deja paye et solde restant corrects)');
+    } else {
+      rapport.ko('Paie type solde — condition=' + okType + ' sansConversion=' + okNoConvert + ' reparation=' + okRepair);
+    }
+  } catch (eSolde) {
+    rapport.ko('Paie type solde : lecture impossible (' + eSolde.message + ')');
+  }
+
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
      pages internes (derriere mot de passe) en noindex et retirees du sitemap,
      sitemap/robots referencant uniquement les pages publiques. */
