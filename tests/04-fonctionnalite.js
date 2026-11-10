@@ -13868,6 +13868,30 @@ function run(rapport) {
     rapport.ko('Comptes tiers detail : lecture impossible (' + eDet.message + ')');
   }
 
+  /* Controle statique : achat matiere premiere = volume (m3) x prix/m3,
+     jamais quantite de pieces x prix/m3. Les deux formulaires (application
+     principale et Exploitation) doivent appliquer la meme regle, et le stock
+     doit conserver le prix/m3 pour sa valorisation. */
+  try {
+    const fsMp = require('fs');
+    const pathMp = require('path');
+    const srcIdxMp = fsMp.readFileSync(pathMp.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    const srcPrdMp = fsMp.readFileSync(pathMp.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const formule = 'total_price: (baseM3 ? vol : qte) * puMP';
+    const okIndex = srcIdxMp.indexOf(formule) !== -1
+      && srcIdxMp.indexOf("prix_unitaire: it.unit_price, prix_base: it.prix_base || 'm3'") !== -1
+      && srcIdxMp.indexOf('var _estMatPrem = /mati/i.test') !== -1;
+    const okProd = srcPrdMp.indexOf(formule) !== -1
+      && srcPrdMp.indexOf("prix_unitaire: it.unit_price,\r\n        prix_base: it.prix_base || 'm3'") !== -1;
+    if (okIndex && okProd) {
+      rapport.ok('Achat matiere premiere : total = volume x prix/m3 dans les deux formulaires ; le stock garde le prix/m3');
+    } else {
+      rapport.ko('Achat matiere premiere volume x P.U — index=' + okIndex + ' production=' + okProd);
+    }
+  } catch (eMp) {
+    rapport.ko('Achat matiere premiere volume x P.U : lecture impossible (' + eMp.message + ')');
+  }
+
   /* Controle statique : fondations SEO — images d'apercu (og:image + favicon),
      pages internes (derriere mot de passe) en noindex et retirees du sitemap,
      sitemap/robots referencant uniquement les pages publiques. */
