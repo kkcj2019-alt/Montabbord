@@ -4582,6 +4582,14 @@
         </div>
 
         <!-- ============ ACOMPTES & PRETS ============ -->
+        <section id="transport">
+          <h2>Transport &mdash; camion d'entreprise</h2>
+          <div class="card" style="padding:14px">
+            <div id="tp-camion-bar"></div>
+            <div class="stats-grid" id="tp-camion-kpis" style="margin-top:10px"></div>
+            <div id="tp-camion-host" style="margin-top:12px;overflow:auto"></div>
+          </div>
+        </section>
         <section id="acomptes_prets">
           <h2>Acomptes & Prêts</h2>
           <div class="stats-grid" id="ap-stats"></div>
@@ -6837,6 +6845,13 @@ function payeObj(key) {
         return p[section] !== undefined ? p[section] : def;
       }
       function setPayeSection(section, val) {
+        /* Le pointage (ou ses montages) vient de changer : le tableau transport
+           et les retenues doivent etre recalcules. */
+        try {
+          if (section === 'pointage' || section === 'pointageMontage' || section === 'transportCamion') {
+            if (typeof invaliderTransportCache === 'function') invaliderTransportCache();
+          }
+        } catch (eTrInv) {}
         var p = getPayeData();
         p[section] = val;
         setPayeData(p);
@@ -10845,6 +10860,103 @@ function renderPrimeEmpMatrix() {
       /* Jours ouvrés (lun-ven) d'un mois "YYYY-MM".
          Base de prorata des prestataires externes : un salarié présent
          tous les jours ouvrés touche son forfait intégral (22j/22 = 100%). */
+      /* ================= QUOTE-PART TRANSPORT (CAMION) =================
+         Le camion est un service partage : chaque salarie concerne paie au plus
+         PLAFOND (15 000 F par defaut) par mois, au prorata des JOURS OUVRABLES
+         (lundi -> samedi, jours feries exclus) ET seulement pour les jours ou
+         il est POINTE PRESENT. Exemple : 22 jours ouvrables -> 15 000 ;
+         1 jour -> 682 ; 2 jours -> 1 364. Absent = rien a payer ce jour-la.
+         La somme est deduite du net sur la ligne « Quote-part transport ». */
+      var TRANSPORT_DEFAUT = { actif: true, plafond: 15000, externes: false, journaliers: false };
+      function getTransportConfig() {
+        var c = {};
+        try { c = getPayeSection("transportCamion", {}) || {}; } catch (e) { c = {}; }
+        return {
+          actif: c.actif !== false,
+          plafond: Math.max(0, parseFloat(c.plafond) || TRANSPORT_DEFAUT.plafond),
+          externes: c.externes === true,
+          journaliers: c.journaliers === true
+        };
+      }
+      function setTransportConfig(patch) {
+        var c = getTransportConfig();
+        for (var k in patch) if (Object.prototype.hasOwnProperty.call(patch, k)) c[k] = patch[k];
+        setPayeSection("transportCamion", c);
+        return c;
+      }
+      var _trDaysCache = {};
+      function transportJoursOuvrables(mois) {
+        if (_trDaysCache[mois]) return _trDaysCache[mois];
+        var out = [];
+        var parts = String(mois || "").split("-");
+        var y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+        if (!y || !m) return out;
+        var last = new Date(y, m, 0).getDate();
+        for (var d = 1; d <= last; d++) {
+          var dw = new Date(y, m - 1, d).getDay();
+          if (dw === 0) continue; /* dimanche */
+          var ferie = false;
+          try { ferie = (typeof ptEstFerie === "function") && ptEstFerie(y, m - 1, d); } catch (eF) {}
+          if (ferie) continue;
+          out.push(mois + "-" + (d < 10 ? "0" : "") + d);
+        }
+        _trDaysCache[mois] = out;
+        return out;
+      }
+      function transportEmployeConcerne(emp, cfg) {
+        if (!emp) return false;
+        if (emp.en_paie === false) return false;
+        var cat = "";
+        try { cat = empCategorie(emp); } catch (eC) { cat = ""; }
+        if (cat === "journalier") return !!cfg.journaliers;
+        if (cat === "externe") return !!cfg.externes;
+        var t = String(emp.type_contrat || "").toUpperCase();
+        return t === "CDI" || t === "CDD";
+      }
+      var _trPresCache = {};
+      function transportPresents(empId, mois) {
+        var key = String(empId) + "|" + mois;
+        if (_trPresCache[key]) return _trPresCache[key];
+        var set = {};
+        try {
+          (getPointageData() || []).forEach(function (p) {
+            if (!p || String(p.employee_id) !== String(empId)) return;
+            var d = String(p.date || "").slice(0, 10);
+            if (d.slice(0, 7) !== mois) return;
+            if (p.present === false) return;
+            set[d] = true;
+          });
+        } catch (e) {}
+        try {
+          (getPointageMontage() || []).forEach(function (m2) {
+            if (!m2) return;
+            var id2 = m2.employee_id || m2.employeId;
+            if (String(id2) !== String(empId)) return;
+            var d2 = String(m2.date || "").slice(0, 10);
+            if (d2.slice(0, 7) !== mois) return;
+            if ((m2.quantite || 0) > 0) set[d2] = true;
+          });
+        } catch (eM) {}
+        _trPresCache[key] = set;
+        return set;
+      }
+      function invaliderTransportCache() { _trPresCache = {}; _trDaysCache = {}; }
+      function getQuotePartTransport(empId, mois) {
+        var cfg = getTransportConfig();
+        if (!cfg.actif || cfg.plafond <= 0) return 0;
+        var emps = [];
+        try { emps = getPersonnel() || []; } catch (e) { return 0; }
+        var emp = null;
+        for (var i = 0; i < emps.length; i++) if (emps[i] && String(emps[i].id) === String(empId)) { emp = emps[i]; break; }
+        if (!emp || !transportEmployeConcerne(emp, cfg)) return 0;
+        var jours = transportJoursOuvrables(mois);
+        if (!jours.length) return 0;
+        var pres = transportPresents(empId, mois);
+        var n = 0;
+        for (var j = 0; j < jours.length; j++) if (pres[jours[j]]) n++;
+        if (!n) return 0;
+        return Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length));
+      }
       function ptJoursOuvres(mois) {
         var parts = String(mois || "").split("-");
         var y = parseInt(parts[0], 10), mi = parseInt(parts[1], 10) - 1;
@@ -13817,7 +13929,7 @@ function initPayeNavWithStars() {
          onglets horizontaux, comme le module Stock. */
       var PAYE_TAB_ICONS = {
         personnel: "👤", categories: "🏢", avantages: "🎁",
-        pointage: "🕒", conges: "🌴",
+        pointage: "🕒", transport: "🚚", conges: "🌴",
         paie: "📄", explication: "🧮", livre_paie: "📘", acomptes_prets: "💳",
         paiement_salaires: "💰", virements: "🏦",
         ecritures: "📚", declarations: "📊", stc: "🚪",
@@ -13826,7 +13938,7 @@ function initPayeNavWithStars() {
       var PAYE_GROUPS = [
         { id: "g_personnel", label: "Personnel", icon: "👤", secs: [["personnel", "Personnel"]] },
         { id: "g_config", label: "Configuration", icon: "⚙️", secs: [["categories", "Données de salaire"], ["avantages", "Avantages en nature"], ["convention", "Convention & Conformité"]] },
-        { id: "g_temps", label: "Temps & Pointage", icon: "🕒", secs: [["pointage", "Pointage"], ["conges", "Congés & Gratifications"]] },
+        { id: "g_temps", label: "Temps & Pointage", icon: "🕒", secs: [["pointage", "Pointage"], ["transport", "Transport (camion)"], ["conges", "Congés & Gratifications"]] },
         { id: "g_paie", label: "Paie", icon: "💴", secs: [["livre_paie", "Livre de paie"], ["acomptes_prets", "Acomptes & Prêts"], ["paie", "Bulletins de paie"], ["explication", "Calcul du bulletin"]] },
         { id: "g_paiement", label: "Paiement", icon: "💳", secs: [["paiement_salaires", "Paiement des salaires"], ["virements", "Ordre de virement"]] },
         { id: "g_decl", label: "États & Comptabilité", icon: "📊", secs: [["ecritures", "Écritures comptables"], ["declarations", "États & Déclarations"], ["stc", "STC & Départs"]] },
@@ -13924,6 +14036,7 @@ function showSection(id) {
           else if (ptCurrentTab === "primes") loadPrimesPointageUI();
           else loadPointage();
         }
+        if (id === "transport") renderTransportCamion();
         if (id === "acomptes_prets") loadAP();
         if (id === "livre_paie") loadLivrePaie();
         if (id === "declarations") loadDeclaration();
@@ -19551,6 +19664,139 @@ function parseHeure(val) {
           }
           return false;
         }
+      /* ===== Tableau annexe : quote-part transport du mois ===== */
+      var _trMois = "";
+      function transportDonneesMois(mois) {
+        var cfg = getTransportConfig();
+        var jours = transportJoursOuvrables(mois);
+        var emps = [];
+        try { emps = (getPersonnel() || []).filter(function (e) { return e && transportEmployeConcerne(e, cfg); }); } catch (e) { emps = []; }
+        var parJour = {}, total = 0;
+        var rows = emps.map(function (e) {
+          var pres = transportPresents(e.id, mois);
+          var n = 0;
+          for (var i = 0; i < jours.length; i++) if (pres[jours[i]]) { n++; parJour[jours[i]] = (parJour[jours[i]] || 0) + 1; }
+          var montant = jours.length ? Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length)) : 0;
+          total += montant;
+          return { emp: e, pres: pres, jours: n, montant: montant };
+        });
+        rows.sort(function (a, b) {
+          var ma = String(a.emp.matricule || ""), mb = String(b.emp.matricule || "");
+          if (ma !== mb) return ma.localeCompare(mb, undefined, { numeric: true });
+          return String(a.emp.nom || "").localeCompare(String(b.emp.nom || ""));
+        });
+        return { cfg: cfg, jours: jours, rows: rows, parJour: parJour, total: total };
+      }
+      function _trJourLabel(d) {
+        var t = new Date(d + "T00:00:00");
+        return ["D", "L", "M", "M", "J", "V", "S"][t.getDay()] || "";
+      }
+      function renderTransportCamion(forceMois) {
+        var bar = document.getElementById("tp-camion-bar");
+        var host = document.getElementById("tp-camion-host");
+        var kpis = document.getElementById("tp-camion-kpis");
+        if (!bar || !host) return;
+        if (forceMois) _trMois = forceMois;
+        if (!_trMois) {
+          try { _trMois = getPayeMonth() || ""; } catch (e) {}
+          if (!/^\d{4}-\d{2}$/.test(_trMois)) _trMois = new Date().toISOString().slice(0, 7);
+        }
+        var mois = _trMois;
+        var cfg = getTransportConfig();
+        var d = transportDonneesMois(mois);
+        var parJourVal = (d.jours.length ? cfg.plafond / d.jours.length : 0);
+
+        bar.innerHTML =
+          '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">' +
+            '<div class="form-group" style="margin:0;min-width:150px"><label>Mois</label>' +
+              '<input type="month" id="tp-month" value="' + mois + '" onchange="renderTransportCamion(this.value)" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px"></div>' +
+            '<div class="form-group" style="margin:0;min-width:130px"><label>Plafond / mois</label>' +
+              '<input type="number" id="tp-plafond" value="' + cfg.plafond + '" min="0" step="500" onchange="setTransportConfig({plafond:parseFloat(this.value)||0});invaliderTransportCache();renderTransportCamion()" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px;width:120px"></div>' +
+            '<label style="display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:700;color:#334155"><input type="checkbox" ' + (cfg.actif ? 'checked' : '') + ' onchange="setTransportConfig({actif:this.checked});invaliderTransportCache();renderTransportCamion()"> Module actif</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:700;color:#334155"><input type="checkbox" ' + (cfg.externes ? 'checked' : '') + ' onchange="setTransportConfig({externes:this.checked});invaliderTransportCache();renderTransportCamion()"> Inclure les externes</label>' +
+            '<label style="display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:700;color:#334155"><input type="checkbox" ' + (cfg.journaliers ? 'checked' : '') + ' onchange="setTransportConfig({journaliers:this.checked});invaliderTransportCache();renderTransportCamion()"> Inclure les journaliers</label>' +
+            '<button class="btn btn-sec" style="padding:7px 12px" onclick="invaliderTransportCache();renderTransportCamion()" title="Recalculer depuis le pointage">&#8635; Actualiser</button>' +
+            '<button class="btn btn-sec" style="padding:7px 12px" onclick="showSection(\'pointage\')">&#9201; Fiche de pr&eacute;sence</button>' +
+            '<button class="btn btn-green" style="padding:7px 12px" onclick="imprimerTransportCamion()">&#128424; Imprimer</button>' +
+          '</div>' +
+          '<div style="margin-top:8px;font-size:.74rem;color:#64748b;line-height:1.5">' +
+            'Montant d&ucirc; = plafond &divide; jours ouvrables du mois (lundi &rarr; samedi, f&eacute;ri&eacute;s exclus) &times; jours o&ugrave; le salari&eacute; est <b>point&eacute; pr&eacute;sent</b>. Plafonn&eacute; &agrave; ' + fmt(cfg.plafond) + ' F. D&eacute;duit du net sur la ligne <b>Quote-part transport</b>. Concerne les <b>CDI / CDD</b> (externes et journaliers sur option).' +
+          '</div>';
+
+        if (kpis) {
+          kpis.innerHTML =
+            '<div class="stat-card"><div class="stat-label">Jours ouvrables</div><div class="stat-value">' + d.jours.length + '</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Montant / jour</div><div class="stat-value">' + fmt(Math.round(parJourVal)) + ' F</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Salari&eacute;s concern&eacute;s</div><div class="stat-value">' + d.rows.length + '</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Total &agrave; d&eacute;duire</div><div class="stat-value" style="color:#b91c1c">' + fmt(d.total) + ' F</div></div>';
+        }
+
+        if (!cfg.actif) { host.innerHTML = '<div style="padding:16px;color:#64748b">Module d&eacute;sactiv&eacute; : aucune d&eacute;duction de transport.</div>'; return; }
+        if (!d.rows.length) { host.innerHTML = '<div style="padding:16px;color:#64748b">Aucun salari&eacute; concern&eacute; (CDI/CDD) pour ce mois.</div>'; return; }
+
+        var th = '<tr><th style="position:sticky;left:0;z-index:3;background:#f8fafc;min-width:70px">Matricule</th>' +
+          '<th style="position:sticky;left:70px;z-index:3;background:#f8fafc;min-width:170px;text-align:left">Employ&eacute;</th>' +
+          '<th style="min-width:78px">Contrat</th>';
+        for (var j = 0; j < d.jours.length; j++) {
+          var jj = d.jours[j].slice(8, 10);
+          th += '<th title="' + d.jours[j] + '" style="min-width:30px;padding:4px 2px;line-height:1.1">' + _trJourLabel(d.jours[j]) + '<br><span style="font-size:.66rem;color:#64748b">' + jj + '</span></th>';
+        }
+        th += '<th style="min-width:56px">Jours</th><th style="min-width:92px">Montant</th></tr>';
+
+        var body = '';
+        for (var i = 0; i < d.rows.length; i++) {
+          var r = d.rows[i];
+          var e = r.emp;
+          var cat = '';
+          try { cat = empCategorie(e); } catch (eC) { cat = ''; }
+          var contrat = String(e.type_contrat || (cat === 'externe' ? 'Externe' : cat === 'journalier' ? 'Journalier' : '')).toUpperCase();
+          body += '<tr>' +
+            '<td style="position:sticky;left:0;z-index:2;background:#fff;font-weight:700">' + escH(e.matricule || '') + '</td>' +
+            '<td style="position:sticky;left:70px;z-index:2;background:#fff;text-align:left">' + escH(((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim()) + '</td>' +
+            '<td style="text-align:center;font-size:.72rem;color:#475569">' + escH(contrat) + '</td>';
+          for (var k = 0; k < d.jours.length; k++) {
+            var dj = d.jours[k];
+            var ok = !!r.pres[dj];
+            body += '<td title="' + dj + (ok ? ' : pr&eacute;sent' : ' : absent') + '" style="text-align:center;padding:3px 2px;background:' + (ok ? '#dcfce7' : '#fff') + ';color:' + (ok ? '#15803d' : '#cbd5e1') + ';font-weight:800">' + (ok ? '&#10003;' : '&middot;') + '</td>';
+          }
+          body += '<td style="text-align:center;font-weight:800">' + r.jours + '</td>' +
+            '<td style="text-align:right;font-weight:800;color:' + (r.montant > 0 ? '#b91c1c' : '#94a3b8') + '">' + fmt(r.montant) + ' F</td></tr>';
+        }
+        var foot = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="3" style="text-align:right">Pr&eacute;sents / jour</td>';
+        for (var q = 0; q < d.jours.length; q++) foot += '<td style="text-align:center;font-size:.72rem;color:#0f766e">' + (d.parJour[d.jours[q]] || 0) + '</td>';
+        foot += '<td style="text-align:center">' + d.rows.reduce(function (a, x) { return a + x.jours; }, 0) + '</td>' +
+          '<td style="text-align:right;color:#b91c1c">' + fmt(d.total) + ' F</td></tr>';
+
+        host.innerHTML = '<table class="lp-table" style="border-collapse:separate;border-spacing:0;font-size:.76rem;width:max-content;min-width:100%">' +
+          '<thead>' + th + '</thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tfoot></table>' +
+          '<style>#tp-camion-host th,#tp-camion-host td{border-bottom:1px solid #eef2f7;padding:5px 6px}#tp-camion-host thead th{position:sticky;top:0;z-index:4;background:#f8fafc;font-size:.68rem;text-transform:uppercase;letter-spacing:.03em;color:#475569}</style>';
+      }
+      function imprimerTransportCamion() {
+        var host = document.getElementById("tp-camion-host");
+        if (!host) return;
+        var cfg = getTransportConfig();
+        var d = transportDonneesMois(_trMois);
+        var head = '<tr><th>Matricule</th><th>Employ&eacute;</th><th>Contrat</th>';
+        for (var j = 0; j < d.jours.length; j++) head += '<th>' + d.jours[j].slice(8, 10) + '<br><span style="font-weight:400;font-size:7px">' + _trJourLabel(d.jours[j]) + '</span></th>';
+        head += '<th>Jours</th><th>Montant</th></tr>';
+        var rows = '';
+        d.rows.forEach(function (r) {
+          rows += '<tr><td>' + escH(r.emp.matricule || '') + '</td><td style="text-align:left">' + escH(((r.emp.nom || '') + ' ' + (r.emp.prenoms || '')).trim()) + '</td><td>' + escH(String(r.emp.type_contrat || '').toUpperCase()) + '</td>';
+          d.jours.forEach(function (dj) { rows += '<td style="text-align:center">' + (r.pres[dj] ? 'X' : '') + '</td>'; });
+          rows += '<td style="text-align:center">' + r.jours + '</td><td style="text-align:right">' + fmt(r.montant) + '</td></tr>';
+        });
+        var w = window.open('', '_blank', 'width=1100,height=800');
+        if (!w) { toast('Popup bloquée : autorisez les popups', 'error'); return; }
+        w.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Quote-part transport ' + _trMois + '</title>' +
+          '<style>@page{size:A4 landscape;margin:10mm}body{font-family:Arial,sans-serif;color:#0f172a;font-size:9px;margin:0;padding:12px}' +
+          'h2{margin:0 0 4px;font-size:14px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #94a3b8;padding:3px 4px;text-align:center}' +
+          'th{background:#0f172a;color:#fff;font-size:8px;text-transform:uppercase}.sub{color:#475569;font-size:9px;margin-bottom:8px}</style></head><body>' +
+          '<h2>QUOTE-PART TRANSPORT &mdash; ' + _trMois + '</h2>' +
+          '<div class="sub">Plafond ' + fmt(cfg.plafond) + ' F / mois &middot; ' + d.jours.length + ' jours ouvrables (lundi-samedi, f&eacute;ri&eacute;s exclus) &middot; montant/jour ' + fmt(Math.round(d.jours.length ? cfg.plafond / d.jours.length : 0)) + ' F &middot; total ' + fmt(d.total) + ' F</div>' +
+          '<table><thead>' + head + '</thead><tbody>' + rows + '</tbody></table>' +
+          '<script>window.onload=function(){setTimeout(function(){window.print()},250)}<\/script></body></html>');
+        w.document.close();
+      }
       function loadPointage() {
         try {
           fillEmpSelects();
@@ -34627,7 +34873,14 @@ if (normalHours > 173.33) {
               gain: 0,
               ret: apJ.prets,
             });
-          var totalRetJ = apJ.acomptes + apJ.prets + _panVerseJ;
+          /* Quote-part transport (camion) : retenue separee, plafonnee au mois,
+             au prorata des jours pointes presents. */
+          var _tpCamionJ = 0;
+          try { _tpCamionJ = getQuotePartTransport(emp.id, mois); } catch (eTPJ) {}
+          if (_tpCamionJ > 0) {
+            items.push({ n: "86", label: "Quote-part transport", base: _tpCamionJ, taux: "", gain: 0, ret: _tpCamionJ });
+          }
+          var totalRetJ = apJ.acomptes + apJ.prets + _panVerseJ + _tpCamionJ;
           var rawNetJ = totalBrutJ - totalRetJ;
           var arrondiJ = rawNetJ % 100;
           if (arrondiJ !== 0)
@@ -35296,6 +35549,12 @@ if (normalHours > 173.33) {
             gain: 0,
             ret: assur,
           });
+        /* Quote-part transport (camion) : deduite du net, ligne a part. */
+        var _tpCamion = 0;
+        try { _tpCamion = getQuotePartTransport(emp.id, mois); } catch (eTP) {}
+        if (_tpCamion > 0) {
+          items.push({ n: "86", label: "Quote-part transport", base: _tpCamion, taux: "", gain: 0, ret: _tpCamion });
+        }
         var totalRet = items.reduce(function (s, i) {
           return s + i.ret;
         }, 0);
