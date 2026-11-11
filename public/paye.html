@@ -12030,17 +12030,17 @@ function renderPrimeEmpMatrix() {
         /* Soldes de salaire / d'indemnite verses en caisse : retenus comme les
            acomptes (le net reste le meme) mais isoles pour le livre de paie
            (vue avant / apres paie) et le bulletin. */
-        var _opsSol = null;
+        var _opsSol = null, _opsSolByPiece = null;
         function _estSolde(a) {
           if (!a) return false;
           if (a.type === "solde" || a.nature === "solde" || a.apType === "solde") return true;
           if (a.motif && /solde\s*(de\s*tout\s*compte|\s*salaire|\s*indemnit[eé])?/i.test(a.motif)) return true;
-          if (!a.caisseOpId) return false;
+          if (!a.caisseOpId && !a.numeroPiece) return false;
           if (!_opsSol) {
-            _opsSol = {};
-            try { (payeArr("mdb_operationsCaisse") || []).forEach(function (o) { if (o && o.id) _opsSol[o.id] = o; }); } catch (eO) {}
+            _opsSol = {}; _opsSolByPiece = {};
+            try { (payeArr("mdb_operationsCaisse") || []).forEach(function (o) { if (!o) return; if (o.id) _opsSol[o.id] = o; if (o.numeroPiece) _opsSolByPiece[String(o.numeroPiece).toUpperCase()] = o; }); } catch (eO) {}
           }
-          var o = _opsSol[a.caisseOpId];
+          var o = (a.caisseOpId && _opsSol[a.caisseOpId]) || (a.numeroPiece && _opsSolByPiece[String(a.numeroPiece).toUpperCase()]) || null;
           return !!o && (apNatureCodeStricte(o) === "solde" || o.apType === "solde" || (o.code && /solde/i.test(o.code)) || (o.libelle && /solde/i.test(o.libelle)));
         }
         _rowsAp.forEach(function (a) {
@@ -12079,6 +12079,41 @@ function renderPrimeEmpMatrix() {
             }
           }
         });
+        /* Filet de securite : un solde encore present en caisse mais sans ligne
+           AP (ancienne suppression, ligne non encore recreee) doit compter dans
+           Deja paye. Sans ce filet, le Livre affiche 0 et le solde parait du. */
+        if (!_vueAvant) {
+          try {
+            var _opsDir = payeArr("mdb_operationsCaisse") || [];
+            var _lieOp = {}, _liePiece = {};
+            _rowsAp.forEach(function (a) { if (!a || a.type === "pret") return; if (apMoisPrisEnCompte(a) !== mois) return; if (a.caisseOpId) _lieOp[a.caisseOpId] = true; if (a.numeroPiece) _liePiece[String(a.numeroPiece).toUpperCase()] = true; });
+            var _nomEmp = "";
+            try {
+              var _ems = payeArr("mdb_employes") || [];
+              for (var _ei = 0; _ei < _ems.length; _ei++) {
+                if (_ems[_ei] && String(_ems[_ei].id) === String(empId)) { _nomEmp = ((_ems[_ei].nom || "") + " " + (_ems[_ei].prenoms || _ems[_ei].prenom || "")).trim(); break; }
+              }
+            } catch (eNE) {}
+            var _nEmp = _nomEmp ? _payeNormNomOp(_nomEmp) : "";
+            _opsDir.forEach(function (op) {
+              if (!op || op.reversed || op.brouillon || op.pendingDetail) return;
+              if (apNatureCodeStricte(op) !== "solde") return;
+              var _mOp = _payeMoisPiecePaye(op) || String(op.date || "").slice(0, 7);
+              if (_mOp !== mois) return;
+              var _okEmp = false;
+              if (op.beneficiaireId && String(op.beneficiaireId) === String(empId)) _okEmp = true;
+              else if (_nEmp) {
+                var _nOp = _payeNormNomOp(op.beneficiaireNom || op.beneficiaire || "");
+                if (_nOp && (_nOp === _nEmp || _nOp.indexOf(_nEmp) !== -1 || _nEmp.indexOf(_nOp) !== -1)) _okEmp = true;
+              }
+              if (!_okEmp) return;
+              var _np = String(op.numeroPiece || "").toUpperCase();
+              if (_lieOp[op.id] || (_np && _liePiece[_np])) return;
+              var _mt = parseFloat(op.montant) || 0;
+              if (_mt > 0) { mAcc += _mt; mSolde += _mt; }
+            });
+          } catch (eDir) {}
+        }
         return { acomptes: mAcc, prets: mPret, soldes: mSolde };
       }
 
