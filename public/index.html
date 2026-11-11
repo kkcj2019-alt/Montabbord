@@ -12629,12 +12629,72 @@ function csIsAdmin() {
   } catch (e) {}
   return false;
 }
+function csTitulaireCaisse(caisseId) {
+  try {
+    if (!caisseId) return '';
+    var caisses = (typeof getCaisses === 'function') ? getCaisses() : [];
+    for (var i = 0; i < caisses.length; i++) {
+      if (caisses[i] && String(caisses[i].id) === String(caisseId)) {
+        if (caisses[i].agentNom) return caisses[i].agentNom;
+        if (caisses[i].agentId && typeof rhEmpById === 'function') {
+          var e = rhEmpById(caisses[i].agentId);
+          if (e) return (typeof rhEmpLabel === 'function') ? rhEmpLabel(e) : (e.nom || '');
+        }
+        return caisses[i].nom || '';
+      }
+    }
+  } catch (e) {}
+  return '';
+}
+function csNomEtTitulaireCaisse(caisseId) {
+  try {
+    if (!caisseId) return '-';
+    var caisses = (typeof getCaisses === 'function') ? getCaisses() : [];
+    for (var i = 0; i < caisses.length; i++) {
+      if (caisses[i] && String(caisses[i].id) === String(caisseId)) {
+        var nom = caisses[i].nom || 'Caisse';
+        var ag = caisses[i].agentNom || '';
+        return ag ? (nom + ' (Titulaire : ' + ag + ')') : nom;
+      }
+    }
+  } catch (e) {}
+  return (typeof _csNomCaisseId === 'function') ? _csNomCaisseId(caisseId) : 'Caisse';
+}
+
+function verifierCodeAdmin(code) {
+  var c = String(code == null ? '' : code).trim();
+  if (!c) return false;
+  try { if (currentUser && mdbPassCheck(currentUser, c)) return true; } catch (e1) {}
+  try {
+    var ent = (typeof getEntreprise === 'function') ? getEntreprise() : DB.get('mdb_entreprise');
+    var vc = String((ent && ent.validationCode) || '').trim();
+    if (vc && vc === c) return true;
+  } catch (e2) {}
+  try {
+    var list = (typeof getUsers === 'function') ? getUsers() : DB.get('mdb_users') || [];
+    var uid = (currentUser && (currentUser.subUserId || currentUser.id)) || '';
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && (list[i].id === uid || list[i].login === (currentUser && currentUser.login))) {
+        if (mdbPassCheck(list[i], c)) return true;
+      }
+      if (list[i] && (list[i].isAdmin || list[i].isSuperAdmin || list[i].role === 'admin') && mdbPassCheck(list[i], c)) {
+        return true;
+      }
+    }
+  } catch (e3) {}
+  try { if (typeof codeConnexionOK === 'function' && codeConnexionOK(c)) return true; } catch (e4) {}
+  try { var sa = DB.get('mdb_saPass') || ''; if (sa && String(sa).trim() === c) return true; } catch (e5) {}
+  return false;
+}
+
 function canValidateTransfert(o) {
   if (!isTransfertOp(o)) return false;
   if (!currentUser) return false;
-  /* ADMINISTRATEUR : peut valider n'importe quel transfert sans restriction de caisse. */
-  if (csIsAdmin()) return true;
+  /* RÈGLE ABSOLUE : Un transfert ne se valide JAMAIS sur la caisse qui envoie (sens sortie).
+     Le bouton de validation n'est visible que dans la caisse réceptionnaire (sens entree). */
   if (o.sens !== 'entree') return false;
+  /* Un ADMINISTRATEUR peut valider n'importe quelle réception dans la caisse réceptionnaire. */
+  if (csIsAdmin()) return true;
   var maCaisse = csCaisseDuUtilisateur();
   var dest = String(o.caisseDestId || o.caisseId || '');
   var src = String(o.caisseSourceId || '');
@@ -13096,7 +13156,7 @@ function openSignatureBeneficiaire(opId) {
     h += '<div id="sigQr" style="margin-top:8px"></div>';
     h += '</div></div>';
     var footer = '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>' +
-      (_adm && isTransfertOp(op) ? '<button type="button" class="btn" style="background:#16a34a;color:#fff;font-weight:800;border:none" onclick="confirmerValidationTransfertAdmin(\'' + escJ(opId) + '\')">🛡️ Valider en tant qu\'Admin</button>' : '') +
+      (_adm && isTransfertOp(op) ? '<button type="button" class="btn" style="background:#16a34a;color:#fff;font-weight:800;border:none" onclick="openValidationTransfertAdminModal(\'' + escJ(opId) + '\')">🛡️ Valider en tant qu\'Admin</button>' : '') +
       '<button type="button" class="btn" style="background:#fff;color:#0b3a6f;border:1.5px solid #93c5fd;font-weight:800" onclick="_sigValidate(\'' + escJ(opId) + '\')">✍️ Signer à nouveau</button>' +
       '<button type="button" class="btn btn-primary" onclick="_sigValidatePinOnly(\'' + escJ(opId) + '\')">✅ Valider avec le PIN</button>';
     openFormModal('Signature du bénéficiaire', h, footer, 'wide');
@@ -13460,57 +13520,112 @@ function openValidationTransfertAdminModal(opId) {
   var op = null;
   for (var i = 0; i < ops.length; i++) { if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; } }
   if (!op) { toast('Transfert introuvable', 'error'); return; }
+
+  /* S'assurer qu'on opère sur la pièce de réception (sens entree) */
   var opEntree = op;
   if (op.sens !== 'entree' && op.transferId) {
     for (var k = 0; k < ops.length; k++) {
       if (ops[k] && ops[k].transferId === op.transferId && ops[k].sens === 'entree') { opEntree = ops[k]; break; }
     }
   }
+
   var srcNom = opEntree.caisseSourceNom || (typeof _csNomCaisseId === 'function' ? _csNomCaisseId(opEntree.caisseSourceId) : '') || 'Caisse source';
+  var srcTit = (typeof csTitulaireCaisse === 'function') ? csTitulaireCaisse(opEntree.caisseSourceId) : '';
   var dstNom = (typeof _csNomCaisseId === 'function' ? _csNomCaisseId(opEntree.caisseId || opEntree.caisseDestId) : '') || opEntree.caisseDestNom || 'Caisse destinataire';
+  var dstTit = (typeof csTitulaireCaisse === 'function') ? csTitulaireCaisse(opEntree.caisseId || opEntree.caisseDestId) : '';
+
+  var adminNom = '';
+  try {
+    if (currentUser) {
+      if (currentUser.prenom && currentUser.nom) adminNom = currentUser.prenom + ' ' + currentUser.nom;
+      else adminNom = currentUser.nom || currentUser.login || currentUser.username || 'Administrateur';
+    }
+  } catch(e) {}
+  if (!adminNom) adminNom = 'Administrateur';
+
   var h = '<div style="padding:6px">'
     + '<div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:12px;padding:14px;margin-bottom:14px">'
     + '  <div style="display:flex;align-items:center;gap:12px">'
-    + '    <div style="font-size:30px">🛡️</div>'
+    + '    <div style="font-size:32px;line-height:1">🛡️</div>'
     + '    <div>'
     + '      <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#166534;letter-spacing:.05em">Validation Administrateur</div>'
     + '      <div style="font-size:16px;font-weight:900;color:#0f172a">Réception de transfert de fonds</div>'
     + '    </div>'
     + '  </div>'
     + '  <div style="margin-top:12px;background:#fff;border:1px solid #bbf7d0;border-radius:8px;padding:10px 12px;font-size:12.5px;line-height:1.6">'
-    + '    <div>Montant : <b style="font-size:15px;color:#15803d">' + fmtMoney(opEntree.montant || op.montant || 0) + ' F</b></div>'
-    + '    <div>Trajet : <b>' + escH(srcNom) + '</b> <span style="color:#94a3b8">➔</span> <b style="color:#15803d">' + escH(dstNom) + '</b></div>'
+    + '    <div>Montant : <b style="font-size:16px;color:#15803d">' + fmtMoney(opEntree.montant || op.montant || 0) + ' F</b></div>'
+    + '    <div>Caisse émettrice : <b>' + escH(srcNom) + '</b>' + (srcTit ? ' <span style="font-size:11px;color:#64748b">(Titulaire : <b>' + escH(srcTit) + '</b>)</span>' : '') + '</div>'
+    + '    <div>Caisse réceptionnaire : <b style="color:#15803d">' + escH(dstNom) + '</b>' + (dstTit ? ' <span style="font-size:11px;color:#15803d">(Titulaire : <b>' + escH(dstTit) + '</b>)</span>' : '') + '</div>'
     + '    <div>Pièce : <span style="font-family:ui-monospace,monospace;font-weight:700">' + escH(opEntree.numeroPiece || op.numeroPiece || '-') + '</span> · Date : <b>' + fmtDate(opEntree.date || op.date) + '</b></div>'
     + (opEntree.libelle ? '<div style="color:#475569">Libellé : ' + escH(opEntree.libelle) + '</div>' : '')
     + '  </div>'
     + '</div>'
-    + '<p style="font-size:12px;color:#475569;margin-bottom:14px;line-height:1.5">'
-    + '  En tant qu\'administrateur, vous pouvez valider directement cette réception <b>sans exiger le code PIN ni la signature</b> de l\'agent.<br>'
-    + '  Les fonds seront immédiatement intégrés dans le solde de la caisse destinataire.'
-    + '</p>'
+    + '<div style="background:#fff;border:1.5px solid #cbd5e1;border-radius:10px;padding:12px 14px;margin-bottom:14px">'
+    + '  <label style="display:block;font-size:12px;font-weight:800;color:#0f172a;margin-bottom:4px">'
+    + '    🔐 Saisissez votre code pour valider la réception :'
+    + '  </label>'
+    + '  <div style="font-size:11px;color:#64748b;margin-bottom:8px">'
+    + '    Mot de passe de votre compte (' + escH(adminNom) + ') ou code de validation administrateur.'
+    + '  </div>'
+    + '  <input type="password" id="adminTransfertCode" placeholder="Code ou mot de passe..." style="width:100%;padding:10px 12px;border:1.5px solid #94a3b8;border-radius:8px;font-size:14px;font-weight:700;box-sizing:border-box" onkeydown="if(event.key===\'Enter\')validerTransfertAdminAvecCode(\'' + escJ(opEntree.id) + '\')">'
+    + '  <div id="adminTransfertCodeErr" style="display:none;color:#dc2626;font-size:11.5px;font-weight:800;margin-top:6px"></div>'
+    + '</div>'
     + '<div style="display:flex;flex-direction:column;gap:10px">'
-    + '  <button type="button" class="btn" style="background:#16a34a;color:#fff;font-size:13px;font-weight:800;padding:12px;border:none;border-radius:9px;cursor:pointer;box-shadow:0 2px 4px rgba(22,163,74,.25)" onclick="confirmerValidationTransfertAdmin(\'' + escJ(opEntree.id) + '\')" >✔ Valider la réception maintenant (Admin)</button>'
-    + '  <button type="button" class="btn btn-outline" style="font-size:12px;padding:10px" onclick="openSignatureBeneficiaire(\'' + escJ(opEntree.id) + '\')">✍️ Passer par le mode Signature / Code PIN agent</button>'
+    + '  <button type="button" class="btn" style="background:#16a34a;color:#fff;font-size:13px;font-weight:800;padding:12px;border:none;border-radius:9px;cursor:pointer;box-shadow:0 2px 4px rgba(22,163,74,.25)" onclick="validerTransfertAdminAvecCode(\'' + escJ(opEntree.id) + '\')">'
+    + '    ✔ Valider la réception avec mon code (Admin)'
+    + '  </button>'
+    + '  <button type="button" class="btn btn-outline" style="font-size:12px;padding:10px" onclick="openSignatureBeneficiaire(\'' + escJ(opEntree.id) + '\')">'
+    + '    ✍️ Passer par le mode Signature / Code PIN agent'
+    + '  </button>'
     + '</div></div>';
+
   var footer = '<button type="button" class="btn btn-outline" onclick="closeModal()">Fermer</button>';
   openFormModal('Validation de transfert (Admin)', h, footer, 'medium');
+  setTimeout(function() {
+    var inp = document.getElementById('adminTransfertCode');
+    if (inp) inp.focus();
+  }, 120);
 }
+
+function validerTransfertAdminAvecCode(opId) {
+  var inp = document.getElementById('adminTransfertCode');
+  var codeIn = inp ? inp.value : '';
+  var errEl = document.getElementById('adminTransfertCodeErr');
+  if (!codeIn || !codeIn.trim()) {
+    if (errEl) { errEl.textContent = '⚠️ Veuillez entrer votre code pour valider.'; errEl.style.display = 'block'; }
+    toast('Code administrateur requis', 'error');
+    if (inp) inp.focus();
+    return;
+  }
+  if (!verifierCodeAdmin(codeIn)) {
+    if (errEl) { errEl.textContent = '❌ Code ou mot de passe incorrect.'; errEl.style.display = 'block'; }
+    toast('Code administrateur incorrect', 'error');
+    if (inp) { inp.focus(); inp.select(); }
+    return;
+  }
+  confirmerValidationTransfertAdmin(opId);
+}
+
 function confirmerValidationTransfertAdmin(opId) {
   if (!csIsAdmin()) { toast('Action réservée à un administrateur', 'error'); return; }
   var ops = getOperationsCaisse() || [];
   var op = null;
   for (var i = 0; i < ops.length; i++) { if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; } }
   if (!op) { toast('Transfert introuvable', 'error'); return; }
+
   var now = new Date().toISOString();
   var adminNom = '';
-  try { if (currentUser) adminNom = (currentUser.prenom && currentUser.nom) ? currentUser.prenom + ' ' + currentUser.nom : (currentUser.nom || currentUser.login || currentUser.username || 'Administrateur'); } catch(e) {}
+  try {
+    if (currentUser) {
+      if (currentUser.prenom && currentUser.nom) adminNom = currentUser.prenom + ' ' + currentUser.nom;
+      else adminNom = currentUser.nom || currentUser.login || currentUser.username || 'Administrateur';
+    }
+  } catch(e) {}
   if (!adminNom) adminNom = 'Administrateur';
-  var adminRole = '';
-  try { adminRole = (currentUser && (currentUser.role || currentUser.adminType)) || 'Administrateur'; } catch(e) {}
-  var adminLogin = '';
-  try { adminLogin = (currentUser && (currentUser.login || currentUser.username)) || ''; } catch(e) {}
-  var adminId = '';
-  try { adminId = (currentUser && (currentUser.id || currentUser.subUserId)) || ''; } catch(e) {}
+  var adminRole = (currentUser && (currentUser.role || currentUser.adminType)) || 'Administrateur';
+  var adminLogin = (currentUser && (currentUser.login || currentUser.username)) || '';
+  var adminId = (currentUser && (currentUser.id || currentUser.subUserId)) || '';
+
   var trId = op.transferId;
   for (var j = 0; j < ops.length; j++) {
     var o = ops[j];
@@ -13533,17 +13648,18 @@ function confirmerValidationTransfertAdmin(opId) {
         o.valideLe = now;
         o.signatureAt = now;
         o.signatureNom = adminNom;
-        o.validationTexte = 'Validé par l\'administrateur (' + adminNom + ')';
+        o.validationTexte = 'Validé par l\'administrateur ' + adminNom + ' le ' + new Date(now).toLocaleString('fr-FR');
       }
     }
   }
   DB.set('mdb_operationsCaisse', ops);
   try { markDirty('mdb_operationsCaisse'); persistPendingSync(); schedulePush(); } catch (eP) {}
   closeModal();
-  toast('Réception du transfert validée par l\'administrateur !', 'success');
+  toast('Réception du transfert validée avec succès par ' + adminNom + ' !', 'success');
   try { renderTresorerie(); } catch (eR) {}
   try { var el = document.getElementById('tresorerieContent'); if (el && typeof renderCaisseIn === 'function') renderCaisseIn(el); } catch (eC) {}
 }
+
 function validerTransfert(opId) {
   var ops = getOperationsCaisse() || [];
   var op = null;
@@ -41689,8 +41805,10 @@ function renderCaisseIn(el) {
     if (csOpSignatureRequise(o)) {
       if (o.beneficiaireValide) {
         html += '<button class="btn-icon" title="' + (o.validationParPin ? 'Validé par code PIN (sans signature)' : 'Signé par le bénéficiaire') + ' le ' + escH(o.signatureAt ? new Date(o.signatureAt).toLocaleString('fr-FR') : '') + (o.validePar ? ' — compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') : '') + '" style="color:#15803d;width:auto;min-width:0;height:24px;padding:0 7px;font-size:9.5px;font-weight:800;border:1px solid #86efac;background:#f0fdf4;border-radius:999px" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">✅ ' + (o.validationParPin ? 'PIN' : 'Signé') + '</button> ';
-      } else {
-        var _sigOnclickA = (typeof csIsAdmin === 'function' && csIsAdmin() && isTransfertOp(o)) ? "validerTransfert('" + o.id + "')" : "openSignatureBeneficiaire('" + o.id + "')";
+        var _lblVal = o.validationParAdmin ? ('Admin: ' + (o.validePar || 'OK')) : (o.validationParPin ? 'PIN' : 'Signé');
+        var _titleVal = o.validationParAdmin ? ('Validé par l\'administrateur ' + (o.validePar || '') + (o.valideLe ? ' le ' + new Date(o.valideLe).toLocaleString('fr-FR') : '')) : ((o.validationParPin ? 'Validé par code PIN' : 'Signé par le bénéficiaire') + (o.signatureAt ? ' le ' + new Date(o.signatureAt).toLocaleString('fr-FR') : '') + (o.validePar ? ' (par ' + o.validePar + ')' : ''));
+        html += '<button class="btn-icon" title="' + escH(_titleVal) + '" style="color:#15803d;width:auto;min-width:0;height:24px;padding:0 7px;font-size:9.5px;font-weight:800;border:1px solid #86efac;background:#f0fdf4;border-radius:999px" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">✅ ' + escH(_lblVal) + '</button> ';
+        var _sigOnclickA = (typeof csIsAdmin === 'function' && csIsAdmin() && isTransfertOp(o) && o.sens === 'entree') ? "validerTransfert('" + o.id + "')" : "openSignatureBeneficiaire('" + o.id + "')";
         html += '<button class="btn-icon" title="Signature / PIN du bénéficiaire requis" style="color:#b45309;width:auto;min-width:0;height:24px;padding:0 7px;font-size:9.5px;font-weight:800;border:1px solid #fcd34d;background:#fffbeb;border-radius:999px" onclick="' + _sigOnclickA + '">✍️ À signer</button> ';
       }
     }
@@ -55187,36 +55305,54 @@ function buildCaisseReceiptHTML(o) {
   for (var ci = 0; ci < codes.length; ci++) { if (codes[ci].id === o.codeId) { codeLabel = codes[ci].code + ' - ' + codes[ci].libelle; break; } }
   var header = getCompanyHeaderCompact();
   var sensColor = o.sens === 'entree' ? '#16a34a' : '#dc2626';
-  var sensLabel = o.sens === 'entree' ? 'ENTR\u00c9E' : 'SORTIE';
+  var sensLabel = o.sens === 'entree' ? 'ENTRÉE' : 'SORTIE';
   var caisses = getCaisses();
   var caissierNom = '';
-  for (var ci2 = 0; ci2 < caisses.length; ci2++) { if (caisses[ci2].id === o.caisseId) { caissierNom = caisses[ci2].agentNom || ''; break; } }
+  var caisseNom = '';
+  for (var ci2 = 0; ci2 < caisses.length; ci2++) {
+    if (caisses[ci2].id === o.caisseId) {
+      caissierNom = caisses[ci2].agentNom || '';
+      caisseNom = caisses[ci2].nom || '';
+      break;
+    }
+  }
   var receiptNum = o.numeroPiece || '';
-  var transfertInfo = (o && o.typeOp === 'versementBanque') ? '\u2192 Versement en banque : ' + (o.beneficiaireNom || '') + (o.bordereau ? ' (bordereau n\u00b0' + o.bordereau + ')' : '') : '';
+  var transfertInfo = (o && o.typeOp === 'versementBanque') ? '➔ Versement en banque : ' + (o.beneficiaireNom || '') + (o.bordereau ? ' (bordereau n°' + o.bordereau + ')' : '') : '';
   if (o.typeOp === 'transfert') {
-    if (o.sens === 'sortie' && o.caisseDestNom) transfertInfo = '\u2192 Transfert vers : ' + o.caisseDestNom;
-    else if (o.sens === 'entree' && o.caisseSourceNom) transfertInfo = '\u2190 Transfert de : ' + o.caisseSourceNom;
+    var srcT = (typeof csTitulaireCaisse === 'function') ? csTitulaireCaisse(o.caisseSourceId) : '';
+    var dstT = (typeof csTitulaireCaisse === 'function') ? csTitulaireCaisse(o.caisseDestId || o.caisseId) : '';
+    if (o.sens === 'sortie') {
+      transfertInfo = '➔ Transfert vers : ' + (o.caisseDestNom || _csNomCaisseId(o.caisseDestId)) + (dstT ? ' (Titulaire : ' + dstT + ')' : '');
+    } else {
+      transfertInfo = '⬅ Transfert reçu de : ' + (o.caisseSourceNom || _csNomCaisseId(o.caisseSourceId)) + (srcT ? ' (Titulaire : ' + srcT + ')' : '');
+    }
   }
   var h = '';
   h += header;
-  h += '<div class="rc-top"><div class="rc-titre"><h2>PI\u00c8CE DE CAISSE N\u00b0 ' + receiptNum + '</h2><span class="sens-header">' + sensLabel + '</span></div>';
+  h += '<div class="rc-top"><div class="rc-titre"><h2>PIÈCE DE CAISSE N° ' + receiptNum + '</h2><span class="sens-header">' + sensLabel + '</span></div>';
   h += '<div class="rc-datebox"><div class="rc-datelabel">DATE</div><div class="rc-dateval">' + fmtDate(o.date) + '</div><div class="rc-heure">' + escH(o.heure || '') + '</div></div></div>';
   var libObs = o.observations ? '<br><span style="font-weight:600;font-size:11px;color:#78350f">' + escH(o.observations) + '</span>' : '';
   h += '<div class="rc-libelle">' + escH(o.libelle || '-') + libObs + '</div>';
   h += '<table class="rc-table">';
+  h += '<tr><td class="rc-lab">Caisse</td><td><b style="color:#0f172a">' + escH(caisseNom || 'Caisse') + '</b></td><td class="rc-lab">Titulaire caisse</td><td><b style="color:#0f172a">' + escH(caissierNom || 'Non attribué') + '</b></td></tr>';
   h += '<tr><td class="rc-lab">Code</td><td>' + escH(codeLabel) + '</td><td class="rc-lab">Moyen</td><td>' + escH(o.moyenPaiement || '-') + '</td></tr>';
-  h += '<tr><td class="rc-lab">B\u00e9n\u00e9ficiaire</td><td><strong>' + escH(csBeneficiaireFullName(o)) + '</strong></td><td class="rc-lab">N\u00b0 transaction</td><td>' + escH(o.numeroTransaction || '-') + '</td></tr>';
+  h += '<tr><td class="rc-lab">Bénéficiaire</td><td><strong>' + escH(csBeneficiaireFullName(o)) + '</strong></td><td class="rc-lab">N° transaction</td><td>' + escH(o.numeroTransaction || '-') + '</td></tr>';
   var _pig = csPretInfoForOp(o);
-  if (_pig) h += '<tr><td class="rc-lab">D\u00e9but d\u00e9duction</td><td>' + escH(fmtMois(_pig.mois)) + '</td><td class="rc-lab">Dur\u00e9e / Mensualit\u00e9</td><td>' + (_pig.duree ? _pig.duree + ' mois' : '-') + ' / ' + (_pig.mens ? fmtMoney(_pig.mens) : '-') + '</td></tr>';
+  if (_pig) h += '<tr><td class="rc-lab">Début déduction</td><td>' + escH(fmtMois(_pig.mois)) + '</td><td class="rc-lab">Durée / Mensualité</td><td>' + (_pig.duree ? _pig.duree + ' mois' : '-') + ' / ' + (_pig.mens ? fmtMoney(_pig.mens) : '-') + '</td></tr>';
   h += '<tr><td class="rc-lab">Remettant</td><td>' + escH(csFirstNom(o.remettant)) + '</td>';
-  h += '<td class="rc-lab">Ex\u00e9cutant</td><td>' + escH(csFirstNom(o.executant)) + '</td></tr>';
+  h += '<td class="rc-lab">Exécutant</td><td>' + escH(csFirstNom(o.executant)) + '</td></tr>';
   if (transfertInfo) h += '<tr><td colspan="4" class="rc-transfert">' + escH(transfertInfo) + '</td></tr>';
   h += '</table>';
   h += '<div class="rc-montant">' + sensLabel + ' : <span>' + fmtMoney(o.montant) + '</span></div>';
   h += '<div class="sign-area">';
-  h += '<div class="sign-box">Le Remettant<br><strong>' + escH(csPersonFullName(caissierNom || o.remettant || '')) + '</strong></div>';
-  h += '<div class="sign-box">L\u2019Ex\u00e9cutant<br><strong>' + escH(csPersonFullName(o.executant || '')) + '</strong></div>';
-  h += '<div class="sign-box">Le B\u00e9n\u00e9ficiaire<br>' + (o.signatureData ? '<img src="' + o.signatureData + '" alt="signature" style="max-height:56px;max-width:92%;display:block;margin:2px auto">' : (o.validationParPin ? '<div style="margin:4px auto;display:inline-block;padding:2px 8px;border:1px solid #16a34a;border-radius:999px;color:#166534;font-size:8.5px;font-weight:800;background:#f0fdf4">\u2714 VALID\u00c9 PAR PIN</div>' : '')) + '<strong>' + escH(csBeneficiaireFullName(o)) + '</strong>' + (o.signatureAt ? '<div style="font-size:8px;color:#64748b;font-weight:400">' + (o.validationParPin ? 'Valid\u00e9 par PIN le ' : 'Sign\u00e9 le ') + escH(new Date(o.signatureAt).toLocaleDateString('fr-FR')) + '</div>' : '') + (o.validePar ? '<div style="font-size:7.5px;color:#475569;font-weight:400">Compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') + '</div>' : '') + '</div>';
+  h += '<div class="sign-box">Titulaire de la caisse<br><strong style="font-size:12px;color:#0f172a">' + escH(csPersonFullName(caissierNom || '')) + '</strong>' + (caisseNom ? '<div style="font-size:9px;color:#64748b">' + escH(caisseNom) + '</div>' : '') + '</div>';
+  h += '<div class="sign-box">L’Exécutant / Remettant<br><strong>' + escH(csPersonFullName(o.executant || o.remettant || '')) + '</strong></div>';
+  h += '<div class="sign-box">Le Bénéficiaire<br>'
+    + (o.validationParAdmin ? '<div style="margin:3px auto;display:inline-block;padding:2px 8px;border:1.5px solid #16a34a;border-radius:999px;color:#166534;font-size:8.5px;font-weight:900;background:#f0fdf4">✔ VALIDÉ PAR L’ADMINISTRATEUR</div><div style="font-size:10.5px;font-weight:800;color:#0f172a">' + escH(o.validePar || 'Administrateur') + '</div>' : (o.signatureData ? '<img src="' + o.signatureData + '" alt="signature" style="max-height:56px;max-width:92%;display:block;margin:2px auto">' : (o.validationParPin ? '<div style="margin:4px auto;display:inline-block;padding:2px 8px;border:1px solid #16a34a;border-radius:999px;color:#166534;font-size:8.5px;font-weight:800;background:#f0fdf4">✔ VALIDÉ PAR PIN</div>' : '')))
+    + '<strong>' + escH(csBeneficiaireFullName(o)) + '</strong>'
+    + (o.valideLe || o.signatureAt ? '<div style="font-size:8px;color:#64748b;font-weight:400">' + (o.validationParAdmin ? 'Validé le ' : (o.validationParPin ? 'Validé par PIN le ' : 'Signé le ')) + escH(new Date(o.valideLe || o.signatureAt).toLocaleDateString('fr-FR')) + ' à ' + escH(new Date(o.valideLe || o.signatureAt).toLocaleTimeString('fr-FR', {hour:'2-digit',minute:'2-digit'})) + '</div>' : '')
+    + (o.validePar && !o.validationParAdmin ? '<div style="font-size:7.5px;color:#475569;font-weight:400">Compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') + '</div>' : '')
+    + '</div>';
   h += '</div>';
   try {
     var _qrRefC = receiptNum || ('PC-' + String(o.id || '').slice(-8) + '-' + String(o.date || '').replace(/-/g, ''));
@@ -55224,7 +55360,7 @@ function buildCaisseReceiptHTML(o) {
       h += qrVerifBloc('caisse', _qrRefC, {
         date: o.date || '', tiers: csBeneficiaireFullName(o),
         montant: o.montant || 0, libelle: o.libelle || ''
-      }, { size: 72, gap: 6, marginTop: 5, label: 'V\u00e9rification', texte: 'Contr\u00f4le de la pi\u00e8ce', align: 'right', bg: '#ffffff' });
+      }, { size: 72, gap: 6, marginTop: 5, label: 'Vérification', texte: 'Contrôle de la pièce', align: 'right', bg: '#ffffff' });
     }
   } catch (eQR) {}
   return h;
