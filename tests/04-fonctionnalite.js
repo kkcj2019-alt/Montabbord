@@ -2939,7 +2939,7 @@ attenduPrefixe: 'OK'
       previewConvertirSolde();
       var pv = document.getElementById('cvsPreview');
       var ph = pv ? (pv.innerHTML || '') : '';
-      (defautOk && ph.indexOf('Solde indemnité : KOFFI/Mois de Septembre 2026') !== -1)
+      (defautOk && ph.indexOf('Solde indemnité : DIALLO A/Mois de Septembre 2026') !== -1)
         ? 'OK : mois propose septembre + apercu avant/apres'
         : 'ECHEC defaut=' + defautOk + ' apercu=' + ph.substr(0, 120)
     `,
