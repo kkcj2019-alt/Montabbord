@@ -321,6 +321,41 @@ export async function onRequest(context) {
       });
       if (refus) return json({ ok: false, code: 'interdit' }, 403);
       if (!r.ok) return json({ ok: false, code: r.code || 'occupe' }, 409);
+
+      if (res && type === 'client') {
+        try {
+          const lastMsg = (Array.isArray(res.messages) && res.messages.length) ? res.messages[res.messages.length - 1] : null;
+          if (lastMsg && (lastMsg.auteur === 'client' || lastMsg.from === 'client')) {
+            const now = Date.now();
+            const msgId = 'MSG_' + now + '_' + Math.random().toString(36).slice(2, 7);
+            const clientNomAff = res.clientNom || nomAff || 'Client';
+            const textEch = '💬 [Message Espace Client — ' + (res.sujet || 'Discussion') + ']\n'
+              + '👤 Client : ' + clientNomAff + '\n'
+              + (email ? '📧 ' + email + '\n' : '')
+              + '\n« ' + (lastMsg.texte || lastMsg.text || '') + ' »';
+
+            await modifier(db, uid, 'mdb_echanges', function () { return []; }, function (echList) {
+              echList = Array.isArray(echList) ? echList : [];
+              const cutoff = now - 7 * 24 * 60 * 60 * 1000;
+              echList = echList.filter(function (m) { return m && m.createdAt && (new Date(m.createdAt).getTime() > cutoff); });
+              echList.push({
+                id: msgId,
+                fromId: 'CLIENT_' + (acc ? acc.id : 'portal'),
+                fromName: '🌐 Client: ' + clientNomAff,
+                toId: 'GROUP_ALL',
+                toName: 'Tous',
+                text: textEch,
+                createdAt: new Date(now).toISOString(),
+                read: false,
+                source: 'espace-client-thread',
+                meta: { threadId: res.id, clientId: acc ? acc.id : null }
+              });
+              return { val: echList };
+            });
+          }
+        } catch (eEchSync) {}
+      }
+
       return json({ ok: true, thread: res });
     }
 
