@@ -11517,6 +11517,10 @@ function renderPrimeEmpMatrix() {
       }
       function _payeReconcileAPFromCaisse() {
         if (_payeApReconciled) return;
+        /* Verrou pose AVANT le travail : si une exception ou un retour anticipe
+           survient, on ne relance pas tout le balayage a chaque employe (c'est
+           ce qui figeait le module sur les gros volumes). */
+        _payeApReconciled = true;
         try {
           _dedupliquerAcomptesPretsPaye();
           var ops = payeArr("mdb_operationsCaisse");
@@ -47922,8 +47926,8 @@ function _dsEmbellir() {
    démarrage et après chaque modification (pointage, primes…). ===== */
 (function () {
   function moisDecale(m, n) { var y = +m.slice(0, 4), mo = +m.slice(5, 7) - 1 + n; var d = new Date(y, mo, 1); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); }
-  function calculerMois(mois) {
-    var pers = []; try { pers = getPersonnel() || []; } catch (e) { return null; }
+  function _contexteMois(mois) {
+    var pers = []; try { pers = getPersonnel() || []; } catch (e) { pers = []; }
     var pts = []; try { pts = getPointageData() || []; } catch (e2) {}
     var jours = {};
     pts.forEach(function (p) {
@@ -47931,19 +47935,28 @@ function _dsEmbellir() {
       var d = String(p.date).slice(0, 10); if (d.slice(0, 7) !== mois) return;
       (jours[p.employee_id] = jours[p.employee_id] || {})[d] = 1;
     });
-    var out = {};
-    pers.forEach(function (emp) {
-      if (!emp || !emp.id || emp.en_paie === false) return;
-      var c = null; try { c = calculatePayroll(emp, mois); } catch (e3) { return; }
-      if (!c || !c.totals) return;
-      var mont = 0, prime = 0;
-      (c.items || []).forEach(function (it) {
-        if (!it) return;
-        if (String(it.n) === '27') mont += parseFloat(it.gain) || 0;
-        else if (String(it.n) === '28' || /^Prime de Production/i.test(String(it.label || ''))) prime += parseFloat(it.gain) || 0;
-      });
-      out[emp.id] = { brut: Math.round(c.totals.brut || 0), montage: Math.round(mont), prime: Math.round(prime), jours: Object.keys(jours[emp.id] || {}).length };
+    return { pers: pers, jours: jours };
+  }
+  /* Brut d'un employe pour le mois (publication par tranches). */
+  function _brutEmploye(ctx, emp, mois) {
+    if (!emp || !emp.id || emp.en_paie === false) return null;
+    var c = null; try { c = calculatePayroll(emp, mois); } catch (e3) { return null; }
+    if (!c || !c.totals) return null;
+    var mont = 0, prime = 0;
+    (c.items || []).forEach(function (it) {
+      if (!it) return;
+      if (String(it.n) === '27') mont += parseFloat(it.gain) || 0;
+      else if (String(it.n) === '28' || /^Prime de Production/i.test(String(it.label || ''))) prime += parseFloat(it.gain) || 0;
     });
+    return { brut: Math.round(c.totals.brut || 0), montage: Math.round(mont), prime: Math.round(prime), jours: Object.keys(ctx.jours[emp.id] || {}).length };
+  }
+  function calculerMois(mois) {
+    var ctx = _contexteMois(mois);
+    var out = {};
+    for (var i = 0; i < ctx.pers.length; i++) {
+      var v = _brutEmploye(ctx, ctx.pers[i], mois);
+      if (v) out[ctx.pers[i].id] = v;
+    }
     return out;
   }
   var _timer = null, _enCours = false, _dernier = 0, _retry = false;
@@ -47957,19 +47970,40 @@ function _dsEmbellir() {
     try { if (payeBootstrapping) return; } catch (eB) {}
     _dernier = Date.now(); _enCours = true;
     try {
+      if (document.hidden) { _enCours = false; return; }
       var m0 = (typeof getPayeMonth === 'function' && getPayeMonth()) || new Date().toISOString().slice(0, 7);
       var now = new Date().toISOString().slice(0, 7);
       var liste = {}; [now, m0].forEach(function (m) { if (/^\d{4}-\d{2}$/.test(m)) liste[m] = 1; });
+      var moisList = Object.keys(liste).sort();
       var all = {}; try { all = JSON.parse(JSON.stringify(getPayeSection('brutsMois', {}) || {})); } catch (e) { all = {}; }
       var change = false;
-      Object.keys(liste).forEach(function (m) {
-        var r = calculerMois(m); if (!r) return;
-        var avant = all[m] && all[m].emps ? JSON.stringify(all[m].emps) : '';
-        if (avant !== JSON.stringify(r)) { all[m] = { maj: Date.now(), emps: r }; change = true; }
-      });
-      /* on garde 14 mois au plus */
-      var ks = Object.keys(all).sort(); while (ks.length > 14) { delete all[ks.shift()]; change = true; }
-      if (change) setPayeSection('brutsMois', all);
+      var mi = 0, idx = 0, ctx = null, acc = null;
+      /* Calcul par petits paquets (20 ms max) : la page reste utilisable,
+         meme avec beaucoup de salaries ou de pointages. */
+      function tranche() {
+        try {
+          if (document.hidden) { _enCours = false; return; }
+          var fin = Date.now() + 20;
+          while (mi < moisList.length) {
+            var m = moisList[mi];
+            if (!ctx) { ctx = _contexteMois(m); acc = {}; idx = 0; }
+            while (idx < ctx.pers.length) {
+              var emp = ctx.pers[idx];
+              var v = _brutEmploye(ctx, emp, m);
+              if (v) acc[emp.id] = v;
+              idx++;
+              if (Date.now() > fin) { setTimeout(tranche, 15); return; }
+            }
+            var avant = all[m] && all[m].emps ? JSON.stringify(all[m].emps) : '';
+            if (avant !== JSON.stringify(acc)) { all[m] = { maj: Date.now(), emps: acc }; change = true; }
+            mi++; ctx = null; acc = null;
+          }
+          var ks = Object.keys(all).sort(); while (ks.length > 14) { delete all[ks.shift()]; change = true; }
+          if (change) setPayeSection('brutsMois', all);
+          _enCours = false;
+        } catch (eP) { _enCours = false; }
+      }
+      setTimeout(tranche, 0);
     } catch (eP) {} finally { _enCours = false; }
   };
   /* Toujours DIFFÉRÉ (jamais pendant l'écriture en cours) : regroupe les rafales. */
