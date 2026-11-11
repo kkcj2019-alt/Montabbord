@@ -13811,7 +13811,7 @@ function run(rapport) {
     const okHelper = srcPayeSm.indexOf('function _payeMoisPiecePaye(') !== -1;
     const okCreation = srcPayeSm.indexOf('|| _payeMoisPiecePaye(op) ||') !== -1;
     const okRepair = srcPayeSm.indexOf('fixedMois') !== -1 && srcPayeSm.indexOf('_aPM.moisDeduction = _ciblePM') !== -1;
-    const okAuto = srcPayeSm.indexOf('if (!_payeApReconciled) _payeReconcileAPFromCaisse();') !== -1;
+    const okAuto = srcPayeSm.indexOf('_payeReconcileAPFromCaisse();') !== -1 && srcPayeSm.indexOf('_payeSkipReconcileNow') !== -1;
     const okIndex = srcIndexSm.indexOf('periode: _isSoldeMois ? _newApMois :') !== -1
       && srcIndexSm.indexOf('apType: _isSoldeMois ? \'solde\'') !== -1;
     if (okHelper && okCreation && okRepair && okAuto && okIndex) {
