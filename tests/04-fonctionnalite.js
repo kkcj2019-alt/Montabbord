@@ -350,8 +350,10 @@ CURRENT_PAGE = 'cout-revient';
       (typeof render_reparation_palettes === 'function'
         && h.indexOf('Enregistrer reparation') !== -1
         && h.indexOf('Nouveau type') !== -1
-        && f.indexOf('rep_date') !== -1 && f.indexOf('rep_client') !== -1
-        && f.indexOf('sorties du stock') !== -1)
+        && f.indexOf('rep_date') !== -1 && f.indexOf('rep_prest') !== -1
+        && f.indexOf('rep_type_pal') !== -1 && f.indexOf('rep_palqte') !== -1
+        && f.indexOf('rep_pointes_pal') !== -1 && f.indexOf('rep_paquets') !== -1
+        && f.indexOf('rep_type_pointe') !== -1)
         ? 'OK : onglets + fiche journaliere disponibles'
         : 'ECHEC fiche absente'
     `,
