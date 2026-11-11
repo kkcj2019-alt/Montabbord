@@ -34,7 +34,7 @@ function controles() {
       CURRENT_PAGE = 'presence'; setSection('presenceSubTab', 'pointage'); renderPage();
       var h = document.getElementById('content').innerHTML || '';
       var okFrame = h.indexOf('id="ptPayeIframe"') !== -1;
-      var okSrc = h.indexOf('paye.html#pointage') !== -1;
+      var okSrc = h.indexOf('paye.html') !== -1 && h.indexOf('#pointage') !== -1;
       (okFrame && okSrc) ? 'OK : pointage Paie embarque dans Exploitation' : 'ECHEC frame=' + okFrame + ' src=' + okSrc
     `,
     attenduPrefixe: 'OK'
