@@ -6219,6 +6219,9 @@ function _payePurgeUrgence() {
             } else { throw eQ; }
           }
           try { _dbMainCache[k] = { raw: s, val: v }; } catch (eCacheSet) {}
+          if (k === 'mdb_acomptesPrets' || k === 'mdb_operationsCaisse' || k === 'mdb_employes' || k === 'mdb_tombstones') {
+            try { _apListCache = null; } catch (eAP1) {}
+          }
           if (!_payeApplyingCloud) {
             try {
               var _pd = payeObj('mdb_pendingSync');
@@ -6785,6 +6788,7 @@ function payeObj(key) {
       var _memPayeDataRaw = null;
       function invalidatePayeDataCache() {
         _memPayeData = null;
+        try { _apListCache = null; } catch (eAP0) {}
         _memPayeDataRaw = null;
         try { if (window._payrollCache) window._payrollCache = {}; } catch (eC) {}
       }
@@ -10998,12 +11002,14 @@ function renderPrimeEmpMatrix() {
       }
       /* Acomptes/Prêts : source unique = mdb_acomptesPrets (partagé) */
       var _apValRegKey = "mdb_ap_valides";
+      var _apValRegCache = null;
       /* Registre paye-local des acomptes/prets valides. L'application Principale
          pousse mdb_acomptesPrets SANS le champ « valide » et le pull cloud ecrase la
          copie locale (le cloud fait foi) : une validation disparait donc au refresh.
          Ce registre n'est jamais pousse ; il est reapplique a la lecture (getAPList)
          pour que la validation reste visible et ait un impact sur le bulletin/le livre. */
       function _apValReg() {
+        if (_apValRegCache) return _apValRegCache;
         try {
           if (!localStorage.getItem("mdb_ap_valreg_v2")) {
             /* Une seule fois : l'ancien registre validait d'office TOUS les
@@ -11017,16 +11023,27 @@ function renderPrimeEmpMatrix() {
         } catch (eV2) {}
         try {
           var o = JSON.parse(localStorage.getItem(_apValRegKey) || "{}");
-          return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+          _apValRegCache = (o && typeof o === "object" && !Array.isArray(o)) ? o : {};
+          return _apValRegCache;
         } catch (e) {
-          return {};
+          _apValRegCache = {};
+          return _apValRegCache;
         }
       }
-      function _apValRegSave(o) {
-        try {
-          localStorage.setItem(_apValRegKey, JSON.stringify(o || {}));
-        } catch (e) {}
+      var _apValRegTimer = null, _apValRegDirty = false;
+      function _apValRegFlush() {
+        if (_apValRegTimer) { clearTimeout(_apValRegTimer); _apValRegTimer = null; }
+        if (!_apValRegDirty) return;
+        _apValRegDirty = false;
+        try { localStorage.setItem(_apValRegKey, JSON.stringify(_apValRegCache || {})); } catch (e) {}
       }
+      function _apValRegSave(o) {
+        _apValRegCache = (o && typeof o === "object" && !Array.isArray(o)) ? o : {};
+        _apValRegDirty = true;
+        if (_apValRegTimer) return;
+        _apValRegTimer = setTimeout(_apValRegFlush, 250);
+      }
+      try { window.addEventListener("beforeunload", _apValRegFlush); } catch (eARU) {}
       function _apValRegSet(id, val) {
         var o = _apValReg();
         if (val) o[id] = true;
@@ -11136,7 +11153,10 @@ function renderPrimeEmpMatrix() {
           }
         } catch (e) {}
       }
+      var _apListCache = null;
+      function invalidateAPListCache() { _apListCache = null; }
       function getAPList() {
+        if (_apListCache) return _apListCache;
         try { if (!window._apSyncAt || Date.now() - window._apSyncAt > 10000) { window._apSyncAt = Date.now(); _syncAPAvecCaisse(); } } catch (eS) {}
         try { _payeRestaurerValidations(); } catch (eRV) {}
         var clean = _payeStripTombstoned(
@@ -11188,6 +11208,7 @@ function renderPrimeEmpMatrix() {
           });
           window._payeSoldesDoublons = _nbDbl;
         } catch (eDS) {}
+        _apListCache = clean;
         return clean;
       }
       /* Reconstitution : une pièce de caisse de type pret/acompte dont la ligne
@@ -11375,6 +11396,46 @@ function renderPrimeEmpMatrix() {
         _payeNormNomCache.set(_k, _r);
         return _r;
       }
+      /* Index rapide id/identifiant -> employe (memoire du dernier tableau). */
+      var _payeEmpIdxRef = null, _payeEmpIdx = null;
+      /* Index des operations de caisse par id : sans lui, chaque ligne
+         d'acompte rescannait toutes les pieces (acomptes x operations). */
+      var _payeOpsIdxRef = null, _payeOpsIdx = null;
+      function _payeOpsParId(ops) {
+        if (_payeOpsIdxRef === ops && _payeOpsIdx) return _payeOpsIdx;
+        var by = {};
+        try {
+          for (var i = 0; i < ops.length; i++) {
+            var o = ops[i];
+            if (o && o.id) by[String(o.id)] = o;
+          }
+        } catch (eOI) {}
+        _payeOpsIdxRef = ops;
+        _payeOpsIdx = by;
+        return by;
+      }
+      function _payeOpParId(id) {
+        if (!id) return null;
+        var ops = [];
+        try { ops = payeArr('mdb_operationsCaisse') || []; } catch (eOL) { return null; }
+        return _payeOpsParId(ops)[String(id)] || null;
+      }
+      function _payeIndexEmployes(emps) {
+        if (_payeEmpIdxRef === emps && _payeEmpIdx) return _payeEmpIdx;
+        var by = {};
+        try {
+          for (var i = 0; i < emps.length; i++) {
+            var e = emps[i];
+            if (!e || !e.id) continue;
+            var id = String(e.id);
+            by[id] = e;
+            if (id.indexOf('emp_') === 0) by[id.slice(4)] = e;
+          }
+        } catch (eIdx) {}
+        _payeEmpIdxRef = emps;
+        _payeEmpIdx = by;
+        return by;
+      }
       function _payeEmployeIdPourOp(op, emps) {
         try {
           if (!op || !emps || !emps.length) return '';
@@ -11382,6 +11443,10 @@ function renderPrimeEmpMatrix() {
           if (op.beneficiaireId) {
             var _bid = String(op.beneficiaireId);
             var _bidStrip = _bid.indexOf('emp_') === 0 ? _bid.slice(4) : _bid;
+            /* Cas courant : l'identifiant existe directement dans l'index. */
+            var _fast = _payeIndexEmployes(emps);
+            if (_fast[_bid]) return _fast[_bid].id;
+            if (_fast[_bidStrip]) return _fast[_bidStrip].id;
             var _bNorm = _payeNormNomOp(_bid);
             for (var i0 = 0; i0 < emps.length; i0++) {
               if (!emps[i0] || !emps[i0].id) continue;
@@ -11948,13 +12013,10 @@ function renderPrimeEmpMatrix() {
               if (_tNomFam && _tNomFam.length >= 3 && (aNom === _tNomFam || aNom.indexOf(_tNomFam) !== -1 || _tNomFam.indexOf(aNom) !== -1)) return true;
             }
             if (a.caisseOpId && typeof _payeEmployeIdPourOp === 'function') {
-              var _allOpsD = payeArr('mdb_operationsCaisse') || [];
-              for (var _oiD = 0; _oiD < _allOpsD.length; _oiD++) {
-                if (_allOpsD[_oiD] && _allOpsD[_oiD].id === a.caisseOpId) {
-                  var _ownerEmpId = _payeEmployeIdPourOp(_allOpsD[_oiD], _allEmpsD);
-                  if (_ownerEmpId && (_ownerEmpId === empId || _stripE(_ownerEmpId) === _stripE(empId))) return true;
-                  break;
-                }
+              var _opLie = _payeOpParId(a.caisseOpId);
+              if (_opLie) {
+                var _ownerEmpId = _payeEmployeIdPourOp(_opLie, _allEmpsD);
+                if (_ownerEmpId && (_ownerEmpId === empId || _stripE(_ownerEmpId) === _stripE(empId))) return true;
               }
             }
           }
