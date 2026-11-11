@@ -10905,7 +10905,8 @@ function renderPrimeEmpMatrix() {
           actif: c.actif !== false,
           plafond: Math.max(0, parseFloat(c.plafond) || TRANSPORT_DEFAUT.plafond),
           externes: c.externes === true,
-          journaliers: c.journaliers === true
+          journaliers: c.journaliers === true,
+          sel: (c.sel && typeof c.sel === "object" && !Array.isArray(c.sel)) ? c.sel : {}
         };
       }
       function setTransportConfig(patch) {
@@ -10933,7 +10934,9 @@ function renderPrimeEmpMatrix() {
         _trDaysCache[mois] = out;
         return out;
       }
-      function transportEmployeConcerne(emp, cfg) {
+      /* Eligible = le contrat/la categorie autorise le transport (CDI/CDD,
+         ou externes/journaliers si l'option est cochee). */
+      function transportEligible(emp, cfg) {
         if (!emp) return false;
         if (emp.en_paie === false) return false;
         var cat = "";
@@ -10942,6 +10945,30 @@ function renderPrimeEmpMatrix() {
         if (cat === "externe") return !!cfg.externes;
         var t = String(emp.type_contrat || "").toUpperCase();
         return t === "CDI" || t === "CDD";
+      }
+      /* Concerne = eligible ET coche par l'utilisateur (case « Inclus »). */
+      function transportEmployeConcerne(emp, cfg) {
+        if (!transportEligible(emp, cfg)) return false;
+        var id = String((emp && emp.id) || "");
+        if (cfg.sel && cfg.sel[id] === false) return false;
+        return true;
+      }
+      function transportToggleEmploye(id, val) {
+        var cfg = getTransportConfig();
+        var sel = {};
+        for (var k in cfg.sel) if (Object.prototype.hasOwnProperty.call(cfg.sel, k)) sel[k] = cfg.sel[k];
+        sel[String(id)] = !!val;
+        setTransportConfig({ sel: sel });
+        invaliderTransportCache();
+        renderTransportCamion();
+      }
+      function transportToutSelectionner(val) {
+        var cfg = getTransportConfig();
+        var sel = {};
+        (getPersonnel() || []).forEach(function (e) { if (e && e.id) sel[String(e.id)] = !!val; });
+        setTransportConfig({ sel: sel });
+        invaliderTransportCache();
+        renderTransportCamion();
       }
       var _trPresCache = {};
       function transportPresents(empId, mois) {
@@ -19700,15 +19727,20 @@ function parseHeure(val) {
         var cfg = getTransportConfig();
         var jours = transportJoursOuvrables(mois);
         var emps = [];
-        try { emps = (getPersonnel() || []).filter(function (e) { return e && transportEmployeConcerne(e, cfg); }); } catch (e) { emps = []; }
+        try { emps = (getPersonnel() || []).filter(function (e) { return e && transportEligible(e, cfg); }); } catch (e) { emps = []; }
         var parJour = {}, total = 0;
         var rows = emps.map(function (e) {
+          var inclus = transportEmployeConcerne(e, cfg);
           var pres = transportPresents(e.id, mois);
           var n = 0;
-          for (var i = 0; i < jours.length; i++) if (pres[jours[i]]) { n++; parJour[jours[i]] = (parJour[jours[i]] || 0) + 1; }
-          var montant = jours.length ? Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length)) : 0;
-          total += montant;
-          return { emp: e, pres: pres, jours: n, montant: montant };
+          for (var i = 0; i < jours.length; i++) {
+            if (!pres[jours[i]]) continue;
+            n++;
+            if (inclus) parJour[jours[i]] = (parJour[jours[i]] || 0) + 1;
+          }
+          var montant = (inclus && jours.length) ? Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length)) : 0;
+          if (inclus) total += montant;
+          return { emp: e, pres: pres, jours: n, montant: montant, inclus: inclus };
         });
         rows.sort(function (a, b) {
           var ma = String(a.emp.matricule || ""), mb = String(b.emp.matricule || "");
@@ -19745,6 +19777,8 @@ function parseHeure(val) {
             '<label style="display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:700;color:#334155"><input type="checkbox" ' + (cfg.actif ? 'checked' : '') + ' onchange="setTransportConfig({actif:this.checked});invaliderTransportCache();renderTransportCamion()"> Module actif</label>' +
             '<label style="display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:700;color:#334155"><input type="checkbox" ' + (cfg.externes ? 'checked' : '') + ' onchange="setTransportConfig({externes:this.checked});invaliderTransportCache();renderTransportCamion()"> Inclure les externes</label>' +
             '<label style="display:flex;align-items:center;gap:6px;font-size:.78rem;font-weight:700;color:#334155"><input type="checkbox" ' + (cfg.journaliers ? 'checked' : '') + ' onchange="setTransportConfig({journaliers:this.checked});invaliderTransportCache();renderTransportCamion()"> Inclure les journaliers</label>' +
+            '<button class="btn btn-sec" style="padding:7px 10px" onclick="transportToutSelectionner(true)" title="Tous les salaries eligibles">&#10003; Tout cocher</button>' +
+            '<button class="btn btn-sec" style="padding:7px 10px" onclick="transportToutSelectionner(false)" title="Aucun salarie">&#10007; Tout d&eacute;cocher</button>' +
             '<button class="btn btn-sec" style="padding:7px 12px" onclick="invaliderTransportCache();renderTransportCamion()" title="Recalculer depuis le pointage">&#8635; Actualiser</button>' +
             '<button class="btn btn-sec" style="padding:7px 12px" onclick="showSection(\'pointage\')">&#9201; Fiche de pr&eacute;sence</button>' +
             '<button class="btn btn-green" style="padding:7px 12px" onclick="imprimerTransportCamion()">&#128424; Imprimer</button>' +
@@ -19757,7 +19791,7 @@ function parseHeure(val) {
           kpis.innerHTML =
             '<div class="stat-card"><div class="stat-label">Jours ouvrables</div><div class="stat-value">' + d.jours.length + '</div></div>' +
             '<div class="stat-card"><div class="stat-label">Montant / jour</div><div class="stat-value">' + fmt(Math.round(parJourVal)) + ' F</div></div>' +
-            '<div class="stat-card"><div class="stat-label">Salari&eacute;s concern&eacute;s</div><div class="stat-value">' + d.rows.length + '</div></div>' +
+            '<div class="stat-card"><div class="stat-label">Salari&eacute;s inclus</div><div class="stat-value">' + d.rows.filter(function (x) { return x.inclus; }).length + ' / ' + d.rows.length + '</div></div>' +
             '<div class="stat-card"><div class="stat-label">Total &agrave; d&eacute;duire</div><div class="stat-value" style="color:#b91c1c">' + fmt(d.total) + ' F</div></div>';
         }
 
@@ -19766,7 +19800,7 @@ function parseHeure(val) {
 
         var th = '<tr><th style="position:sticky;left:0;z-index:3;background:#f8fafc;min-width:70px">Matricule</th>' +
           '<th style="position:sticky;left:70px;z-index:3;background:#f8fafc;min-width:170px;text-align:left">Employ&eacute;</th>' +
-          '<th style="min-width:78px">Contrat</th>';
+          '<th style="min-width:78px">Contrat</th><th style="min-width:52px">Inclus</th>';
         for (var j = 0; j < d.jours.length; j++) {
           var jj = d.jours[j].slice(8, 10);
           th += '<th title="' + d.jours[j] + '" style="min-width:30px;padding:4px 2px;line-height:1.1">' + _trJourLabel(d.jours[j]) + '<br><span style="font-size:.66rem;color:#64748b">' + jj + '</span></th>';
@@ -19780,21 +19814,22 @@ function parseHeure(val) {
           var cat = '';
           try { cat = empCategorie(e); } catch (eC) { cat = ''; }
           var contrat = String(e.type_contrat || (cat === 'externe' ? 'Externe' : cat === 'journalier' ? 'Journalier' : '')).toUpperCase();
-          body += '<tr>' +
+          body += '<tr' + (r.inclus ? '' : ' style="opacity:.55"') + '>' +
             '<td style="position:sticky;left:0;z-index:2;background:#fff;font-weight:700">' + escH(e.matricule || '') + '</td>' +
             '<td style="position:sticky;left:70px;z-index:2;background:#fff;text-align:left">' + escH(((e.nom || '') + ' ' + (e.prenoms || e.prenom || '')).trim()) + '</td>' +
-            '<td style="text-align:center;font-size:.72rem;color:#475569">' + escH(contrat) + '</td>';
+            '<td style="text-align:center;font-size:.72rem;color:#475569">' + escH(contrat) + '</td>' +
+            '<td style="text-align:center"><input type="checkbox" ' + (r.inclus ? 'checked' : '') + ' title="Cocher si ce salarie participe au transport" onchange="transportToggleEmploye(&quot;' + escH(e.id) + '&quot;, this.checked)" style="width:16px;height:16px;cursor:pointer"></td>';
           for (var k = 0; k < d.jours.length; k++) {
             var dj = d.jours[k];
             var ok = !!r.pres[dj];
             body += '<td title="' + dj + (ok ? ' : pr&eacute;sent' : ' : absent') + '" style="text-align:center;padding:3px 2px;background:' + (ok ? '#dcfce7' : '#fff') + ';color:' + (ok ? '#15803d' : '#cbd5e1') + ';font-weight:800">' + (ok ? '&#10003;' : '&middot;') + '</td>';
           }
-          body += '<td style="text-align:center;font-weight:800">' + r.jours + '</td>' +
-            '<td style="text-align:right;font-weight:800;color:' + (r.montant > 0 ? '#b91c1c' : '#94a3b8') + '">' + fmt(r.montant) + ' F</td></tr>';
+          body += '<td style="text-align:center;font-weight:800">' + (r.inclus ? r.jours : '&ndash;') + '</td>' +
+            '<td style="text-align:right;font-weight:800;color:' + (r.inclus && r.montant > 0 ? '#b91c1c' : '#94a3b8') + '">' + (r.inclus ? fmt(r.montant) + ' F' : '&mdash;') + '</td></tr>';
         }
-        var foot = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="3" style="text-align:right">Pr&eacute;sents / jour</td>';
+        var foot = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="4" style="text-align:right">Pr&eacute;sents / jour</td>';
         for (var q = 0; q < d.jours.length; q++) foot += '<td style="text-align:center;font-size:.72rem;color:#0f766e">' + (d.parJour[d.jours[q]] || 0) + '</td>';
-        foot += '<td style="text-align:center">' + d.rows.reduce(function (a, x) { return a + x.jours; }, 0) + '</td>' +
+        foot += '<td style="text-align:center">' + d.rows.reduce(function (a, x) { return a + (x.inclus ? x.jours : 0); }, 0) + '</td>' +
           '<td style="text-align:right;color:#b91c1c">' + fmt(d.total) + ' F</td></tr>';
 
         host.innerHTML = '<table class="lp-table" style="border-collapse:separate;border-spacing:0;font-size:.76rem;width:max-content;min-width:100%">' +
@@ -19810,7 +19845,7 @@ function parseHeure(val) {
         for (var j = 0; j < d.jours.length; j++) head += '<th>' + d.jours[j].slice(8, 10) + '<br><span style="font-weight:400;font-size:7px">' + _trJourLabel(d.jours[j]) + '</span></th>';
         head += '<th>Jours</th><th>Montant</th></tr>';
         var rows = '';
-        d.rows.forEach(function (r) {
+        d.rows.filter(function (r) { return r.inclus; }).forEach(function (r) {
           rows += '<tr><td>' + escH(r.emp.matricule || '') + '</td><td style="text-align:left">' + escH(((r.emp.nom || '') + ' ' + (r.emp.prenoms || '')).trim()) + '</td><td>' + escH(String(r.emp.type_contrat || '').toUpperCase()) + '</td>';
           d.jours.forEach(function (dj) { rows += '<td style="text-align:center">' + (r.pres[dj] ? 'X' : '') + '</td>'; });
           rows += '<td style="text-align:center">' + r.jours + '</td><td style="text-align:right">' + fmt(r.montant) + '</td></tr>';
