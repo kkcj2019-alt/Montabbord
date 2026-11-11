@@ -10992,20 +10992,34 @@ function renderPrimeEmpMatrix() {
         var key = String(empId) + "|" + String(date);
         var ov = cfg && cfg.camion ? cfg.camion[key] : "";
         if (ov === "non") return "sans";
-        if (ov === "oui") return "manuel";
-        return (pres && pres[date]) ? "camion" : "absent";
+        if (ov === "aller") return "aller";
+        if (ov === "retour") return "retour";
+        if (ov === "oui") return "ar";
+        return (pres && pres[date]) ? "ar" : "absent";
+      }
+      /* Nombre de trajets payes pour un statut (2 = aller+retour). */
+      function transportTrajets(st) {
+        return st === "ar" ? 2 : (st === "aller" || st === "retour" ? 1 : 0);
+      }
+      function transportStatutLabel(st) {
+        if (st === "ar") return "Aller + Retour";
+        if (st === "aller") return "Aller seulement";
+        if (st === "retour") return "Retour seulement";
+        if (st === "sans") return "Sans camion";
+        return "Absent";
       }
       /* Clic : present -> sans camion -> camion manuel -> automatique. */
       function transportToggleJour(empId, date) {
         var cfg = getTransportConfig();
         var pres = transportPresents(empId, String(date).slice(0, 7));
         var key = String(empId) + "|" + String(date);
-        var ov = cfg.camion ? cfg.camion[key] : "";
+        var st = transportStatutJour(empId, date, cfg, pres);
         var camion = {};
         for (var k in cfg.camion) if (Object.prototype.hasOwnProperty.call(cfg.camion, k)) camion[k] = cfg.camion[k];
-        if (!ov) camion[key] = (pres && pres[date]) ? "non" : "oui";
-        else if (ov === "non") camion[key] = "oui";
-        else delete camion[key];
+        if (st === "ar") camion[key] = "aller";
+        else if (st === "aller") camion[key] = "retour";
+        else if (st === "retour") camion[key] = "non";
+        else camion[key] = "oui"; /* sans / absent -> aller+retour */
         setTransportConfig({ camion: camion });
         invaliderTransportCache();
         renderTransportCamion();
@@ -11048,13 +11062,14 @@ function renderPrimeEmpMatrix() {
         var jours = transportJoursOuvrables(mois);
         if (!jours.length) return 0;
         var pres = transportPresents(empId, mois);
-        var n = 0;
+        var trajets = 0;
         for (var j = 0; j < jours.length; j++) {
-          var _stM = transportStatutJour(empId, jours[j], cfg, pres);
-          if (_stM === "camion" || _stM === "manuel") n++;
+          trajets += transportTrajets(transportStatutJour(empId, jours[j], cfg, pres));
         }
-        if (!n) return 0;
-        return Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length));
+        if (!trajets) return 0;
+        /* 2 trajets = une journee pleine ; 1 trajet (aller OU retour) = demi-journee. */
+        var demi = cfg.plafond / (jours.length * 2);
+        return Math.min(cfg.plafond, Math.round(demi * trajets));
       }
       function ptJoursOuvres(mois) {
         var parts = String(mois || "").split("-");
@@ -19852,6 +19867,9 @@ function parseHeure(val) {
             '<button class="btn btn-sec" style="padding:7px 10px" onclick="transportToutSelectionner(false)" title="Aucun salarie">&#10007; Tout d&eacute;cocher</button>' +
             '<button class="btn btn-sec" style="padding:7px 12px" onclick="invaliderTransportCache();renderTransportCamion()" title="Recalculer depuis le pointage">&#8635; Actualiser</button>' +
             '<button class="btn btn-sec" style="padding:7px 12px" onclick="showSection(\'pointage\')">&#9201; Fiche de pr&eacute;sence</button>' +
+            '<div class="form-group" style="margin:0;min-width:150px"><label>Semaine (lundi)</label>' +
+              '<input type="date" id="tp-week" value="' + transportLundiSemaine() + '" style="padding:7px 10px;border:1px solid #cbd5e1;border-radius:8px"></div>' +
+            '<button class="btn btn-sec" style="padding:7px 12px" onclick="transportFeuilleSemaine()" title="Fiche hebdomadaire a remettre au chauffeur">&#128203; Feuille chauffeur</button>' +
             '<button class="btn btn-green" style="padding:7px 12px" onclick="imprimerTransportCamion()">&#128424; Imprimer</button>' +
           '</div>' +
           '<div style="margin-top:8px;font-size:.74rem;color:#64748b;line-height:1.5">' +
@@ -19876,7 +19894,7 @@ function parseHeure(val) {
           var jj = d.jours[j].slice(8, 10);
           th += '<th title="' + d.jours[j] + '" style="min-width:30px;padding:4px 2px;line-height:1.1">' + _trJourLabel(d.jours[j]) + '<br><span style="font-size:.66rem;color:#64748b">' + jj + '</span></th>';
         }
-        th += '<th style="min-width:56px">Jours</th><th style="min-width:92px">Montant</th></tr>';
+        th += '<th style="min-width:56px">Jours</th><th style="min-width:92px">Montant</th><th style="min-width:44px">Fiche</th></tr>';
 
         var body = '';
         for (var i = 0; i < d.rows.length; i++) {
@@ -19895,13 +19913,15 @@ function parseHeure(val) {
             var st = (r.statuts && r.statuts[dj]) || 'absent';
             var _br = (r.brut && r.brut[dj]) || 'aucune ligne';
             var bg = '#fff', fg = '#cbd5e1', mark = '&middot;', tip = dj + ' : non compte (pointage : ' + _br + ')';
-            if (st === 'camion') { bg = '#dcfce7'; fg = '#15803d'; mark = '&#10003;'; tip = dj + ' : pr&eacute;sent, prend le camion'; }
-            else if (st === 'sans') { bg = '#ffedd5'; fg = '#c2410c'; mark = '&#10007;'; tip = dj + ' : pr&eacute;sent mais SANS camion'; }
-            else if (st === 'manuel') { bg = '#dbeafe'; fg = '#1d4ed8'; mark = '&#10003;'; tip = dj + ' : camion ajout&eacute; manuellement'; }
-            body += '<td title="' + tip + ' (cliquer pour changer)" onclick="transportToggleJour(&quot;' + escH(e.id) + '&quot;,&quot;' + dj + '&quot;)" style="text-align:center;padding:3px 2px;cursor:pointer;background:' + bg + ';color:' + fg + ';font-weight:800;user-select:none">' + mark + '</td>';
+            if (st === 'ar') { bg = '#dcfce7'; fg = '#15803d'; mark = 'AR'; tip = dj + ' : pr&eacute;sent, aller + retour'; }
+            else if (st === 'aller') { bg = '#ffedd5'; fg = '#c2410c'; mark = 'A'; tip = dj + ' : aller seulement (demi-journ&eacute;e)'; }
+            else if (st === 'retour') { bg = '#dbeafe'; fg = '#1d4ed8'; mark = 'R'; tip = dj + ' : retour seulement (demi-journ&eacute;e)'; }
+            else if (st === 'sans') { bg = '#fee2e2'; fg = '#b91c1c'; mark = '&#10007;'; tip = dj + ' : pr&eacute;sent mais sans camion'; }
+            body += '<td title="' + tip + ' (cliquer pour changer)" onclick="transportToggleJour(&quot;' + escH(e.id) + '&quot;,&quot;' + dj + '&quot;)" style="text-align:center;padding:3px 2px;cursor:pointer;background:' + bg + ';color:' + fg + ';font-weight:800;font-size:.62rem;user-select:none">' + mark + '</td>';
           }
           body += '<td style="text-align:center;font-weight:800">' + (r.inclus ? r.jours : '&ndash;') + '</td>' +
-            '<td style="text-align:right;font-weight:800;color:' + (r.inclus && r.montant > 0 ? '#b91c1c' : '#94a3b8') + '">' + (r.inclus ? fmt(r.montant) + ' F' : '&mdash;') + '</td></tr>';
+            '<td style="text-align:right;font-weight:800;color:' + (r.inclus && r.montant > 0 ? '#b91c1c' : '#94a3b8') + '">' + (r.inclus ? fmt(r.montant) + ' F' : '&mdash;') + '</td>' +
+            '<td style="text-align:center"><button type="button" title="D&eacute;tail des d&eacute;ductions" onclick="transportExtraitEmploye(&quot;' + escH(e.id) + '&quot;)" style="border:1px solid #cbd5e1;background:#fff;border-radius:6px;cursor:pointer;padding:2px 6px;font-size:.72rem">&#128424;</button></td></tr>';
         }
         var foot = '<tr style="background:#f1f5f9;font-weight:800"><td colspan="4" style="text-align:right">Pr&eacute;sents / jour</td>';
         for (var q = 0; q < d.jours.length; q++) foot += '<td style="text-align:center;font-size:.72rem;color:#0f766e">' + (d.parJour[d.jours[q]] || 0) + '</td>';
@@ -19912,12 +19932,115 @@ function parseHeure(val) {
           '<thead>' + th + '</thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tfoot></table>' +
           '<style>#tp-camion-host th,#tp-camion-host td{border-bottom:1px solid #eef2f7;padding:5px 6px}#tp-camion-host thead th{position:sticky;top:0;z-index:4;background:#f8fafc;font-size:.68rem;text-transform:uppercase;letter-spacing:.03em;color:#475569}</style>' +
           '<div style="margin-top:8px;font-size:.72rem;color:#475569;display:flex;gap:14px;flex-wrap:wrap">' +
-            '<span><b style="color:#15803d">&#10003;</b> pr&eacute;sent, prend le camion</span>' +
-            '<span><b style="color:#c2410c">&#10007;</b> pr&eacute;sent mais sans camion (non d&eacute;duit)</span>' +
-            '<span><b style="color:#1d4ed8">&#10003;</b> camion ajout&eacute; manuellement</span>' +
+            '<span><b style="color:#15803d">AR</b> aller + retour (journ&eacute;e pleine)</span>' +
+            '<span><b style="color:#c2410c">A</b> aller seulement (demi-journ&eacute;e)</span>' +
+            '<span><b style="color:#1d4ed8">R</b> retour seulement (demi-journ&eacute;e)</span>' +
+            '<span><b style="color:#b91c1c">&#10007;</b> sans camion (non d&eacute;duit)</span>' +
             '<span><b style="color:#94a3b8">&middot;</b> absent</span>' +
             '<span>Cliquez sur un jour pour changer son statut.</span>' +
           '</div>';
+      }
+      function _trIso(d) {
+        return d.getFullYear() + "-" + ((d.getMonth() + 1) < 10 ? "0" : "") + (d.getMonth() + 1) + "-" + (d.getDate() < 10 ? "0" : "") + d.getDate();
+      }
+      function transportLundiSemaine(dateStr) {
+        var t = dateStr ? new Date(String(dateStr).slice(0, 10) + "T00:00:00") : new Date();
+        if (isNaN(t.getTime())) t = new Date();
+        var dw = t.getDay();
+        var diff = (dw === 0) ? -6 : (1 - dw);
+        t.setDate(t.getDate() + diff);
+        return _trIso(t);
+      }
+      function _trEmpNom(e) { return ((e && e.nom ? e.nom : "") + " " + (e && (e.prenoms || e.prenom) ? (e.prenoms || e.prenom) : "")).trim(); }
+
+      /* Detail des deductions transport d'un employe (a lui montrer / joindre). */
+      function transportExtraitEmploye(empId) {
+        try {
+          var mois = _trMois || new Date().toISOString().slice(0, 7);
+          var cfg = getTransportConfig();
+          var d = transportDonneesMois(mois);
+          var row = null;
+          for (var i = 0; i < d.rows.length; i++) if (String(d.rows[i].emp.id) === String(empId)) { row = d.rows[i]; break; }
+          if (!row) { toast("Employe introuvable", "error"); return; }
+          var e = row.emp;
+          var demi = d.jours.length ? (cfg.plafond / (d.jours.length * 2)) : 0;
+          var total = getQuotePartTransport(empId, mois);
+          var soc = {}; try { soc = payeObj("mdb_entreprise") || {}; } catch (eS) {}
+          var per = mois;
+          try { per = new Date(mois + "-01T00:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }); } catch (eP) {}
+          var rows = "";
+          for (var j = 0; j < d.jours.length; j++) {
+            var dj = d.jours[j];
+            var st = row.statuts[dj] || "absent";
+            var tr = transportTrajets(st);
+            var mt = Math.round(demi * tr);
+            rows += '<tr><td>' + escH(dj.slice(8, 10) + "/" + dj.slice(5, 7) + "/" + dj.slice(0, 4)) + '</td><td>' + _trJourLabel(dj) + '</td><td>' +
+              (tr ? escH(transportStatutLabel(st)) : "&mdash;") + '</td><td style="text-align:center">' + (tr || "") + '</td><td style="text-align:right">' +
+              (tr ? fmt(mt) + " F" : "0 F") + '</td></tr>';
+          }
+          var w = window.open("", "_blank", "width=860,height=900");
+          if (!w) { toast("Popup bloquee : autorisez les popups", "error"); return; }
+          w.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Transport - ' + escH(_trEmpNom(e)) + ' - ' + escH(per) + '</title>' +
+            '<style>@page{size:A4;margin:14mm}body{font-family:Arial,sans-serif;color:#0f172a;font-size:11px;margin:0;padding:8px}' +
+            'h2{margin:0 0 2px;font-size:15px}.sub{color:#475569;font-size:10px;margin-bottom:10px}' +
+            'table{width:100%;border-collapse:collapse;margin-top:8px}th,td{border:1px solid #94a3b8;padding:4px 6px}' +
+            'th{background:#0f172a;color:#fff;font-size:9px;text-transform:uppercase}.tot{background:#f1f5f9;font-weight:800}' +
+            '.note{margin-top:10px;font-size:9.5px;color:#475569;line-height:1.5}</style></head><body>' +
+            '<h2>QUOTE-PART TRANSPORT &mdash; ' + escH(_trEmpNom(e)) + '</h2>' +
+            '<div class="sub">' + escH(soc.nom || "Montabbord") + ' &middot; ' + escH(per) + ' &middot; Matricule ' + escH(e.matricule || "-") + ' &middot; ' + escH(e.type_contrat || "") + '</div>' +
+            '<div class="sub">Plafond ' + fmt(cfg.plafond) + ' F / mois &middot; ' + d.jours.length + ' jours ouvrables &middot; 1 trajet = ' + fmt(Math.round(demi)) + ' F &middot; aller+retour = ' + fmt(Math.round(demi * 2)) + ' F</div>' +
+            '<table><thead><tr><th>Date</th><th>Jour</th><th>Camion</th><th>Trajets</th><th>Montant</th></tr></thead><tbody>' + rows +
+            '<tr class="tot"><td colspan="4">TOTAL A DEDUIRE SUR LE BULLETIN</td><td style="text-align:right">' + fmt(total) + ' F</td></tr>' +
+            '</tbody></table>' +
+            '<div class="note">Cette somme est retenue sur le net a payer, ligne <b>Quote-part transport</b>.<br>Le salarie peut arriver par ses propres moyens : le jour est alors marque &laquo; sans camion &raquo; et n\'est pas deduit.<br>Aller seul ou retour seul = demi-journee.</div>' +
+            '<script>window.onload=function(){setTimeout(function(){window.print()},250)}<\/script></body></html>');
+          w.document.close();
+        } catch (eX) { try { toast("Extrait impossible : " + (eX.message || eX), "error"); } catch (e2) {} }
+      }
+
+      /* Fiche hebdomadaire a remettre au chauffeur : deux cases (A/R) par jour. */
+      function transportFeuilleSemaine() {
+        try {
+          var start = (document.getElementById("tp-week") || {}).value || transportLundiSemaine();
+          var lundi = new Date(String(start).slice(0, 10) + "T00:00:00");
+          if (isNaN(lundi.getTime())) lundi = new Date(transportLundiSemaine() + "T00:00:00");
+          var jours = [], labels = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"];
+          for (var i = 0; i < 6; i++) {
+            var dd = new Date(lundi.getTime()); dd.setDate(dd.getDate() + i);
+            jours.push({ iso: _trIso(dd), lbl: labels[i], jj: (dd.getDate() < 10 ? "0" : "") + dd.getDate(), mm: ((dd.getMonth() + 1) < 10 ? "0" : "") + (dd.getMonth() + 1) });
+          }
+          var cfg = getTransportConfig();
+          var emps = (getPersonnel() || []).filter(function (e) { return e && transportEmployeConcerne(e, cfg); });
+          emps.sort(function (a, b) { return String(a.matricule || "").localeCompare(String(b.matricule || ""), undefined, { numeric: true }); });
+          var soc = {}; try { soc = payeObj("mdb_entreprise") || {}; } catch (eS) {}
+          var head = '<tr><th rowspan="2" style="width:26px">N&deg;</th><th rowspan="2" style="min-width:70px">Matricule</th><th rowspan="2" style="text-align:left;min-width:170px">Nom &amp; pr&eacute;noms</th>';
+          for (var j = 0; j < jours.length; j++) head += '<th colspan="2">' + jours[j].lbl + ' ' + jours[j].jj + '/' + jours[j].mm + '</th>';
+          head += '</tr><tr>';
+          for (var j2 = 0; j2 < jours.length; j2++) head += '<th style="width:22px">A</th><th style="width:22px">R</th>';
+          head += '</tr>';
+          var body = '';
+          emps.forEach(function (e, idx) {
+            body += '<tr><td style="text-align:center">' + (idx + 1) + '</td><td>' + escH(e.matricule || "") + '</td><td style="text-align:left">' + escH(_trEmpNom(e)) + '</td>';
+            for (var k = 0; k < jours.length; k++) body += '<td></td><td></td>';
+            body += '</tr>';
+          });
+          var w = window.open("", "_blank", "width=1100,height=800");
+          if (!w) { toast("Popup bloquee : autorisez les popups", "error"); return; }
+          w.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Feuille camion semaine ' + jours[0].jj + '/' + jours[0].mm + '</title>' +
+            '<style>@page{size:A4 landscape;margin:8mm}body{font-family:Arial,sans-serif;color:#0f172a;font-size:10px;margin:0;padding:8px}' +
+            'h2{margin:0 0 2px;font-size:14px}.sub{color:#475569;font-size:9px;margin-bottom:8px}' +
+            'table{width:100%;border-collapse:collapse}th,td{border:1px solid #475569;padding:4px 4px;height:20px}' +
+            'th{background:#0f172a;color:#fff;font-size:8px;text-transform:uppercase;text-align:center}' +
+            'td:nth-child(n+4){text-align:center}.ligne{margin-top:12px;display:flex;justify-content:space-between;font-size:9.5px}' +
+            '@media print{.no-print{display:none}}</style></head><body>' +
+            '<div class="no-print" style="text-align:right;margin-bottom:6px"><button onclick="window.print()" style="padding:6px 16px;background:#0f766e;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer">Imprimer la feuille</button></div>' +
+            '<h2>FICHE DE PRISE DU CAMION &mdash; SEMAINE DU ' + jours[0].jj + '/' + jours[0].mm + ' AU ' + jours[5].jj + '/' + jours[5].mm + '</h2>' +
+            '<div class="sub">' + escH(soc.nom || "Montabbord") + ' &middot; Cocher <b>A</b> (aller) et <b>R</b> (retour) pour chaque jour o&ugrave; le salari&eacute; a pris le camion. Un seul trajet = une seule case.</div>' +
+            '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>' +
+            '<div class="ligne"><div>Chauffeur : ______________________________</div><div>Visa Responsable : ______________________________</div><div>Date : ____ / ____ / ______</div></div>' +
+            '<script>window.onload=function(){setTimeout(function(){window.print()},250)}<\/script></body></html>');
+          w.document.close();
+        } catch (eF) { try { toast("Feuille impossible : " + (eF.message || eF), "error"); } catch (e2) {} }
       }
       function imprimerTransportCamion() {
         var host = document.getElementById("tp-camion-host");
