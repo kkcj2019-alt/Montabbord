@@ -12615,16 +12615,26 @@ function csCaisseDuUtilisateur() {
   } catch (e) {}
   return '';
 }
+function csIsAdmin() {
+  try {
+    if (typeof currentUser === 'undefined' || !currentUser) return false;
+    if (currentUser.isAdmin || currentUser.isSuperAdmin) return true;
+    if (currentUser.adminType === 'admin' || currentUser.adminType === 'principal') return true;
+    var _r = String(currentUser.role || '').toLowerCase();
+    if (_r === 'admin' || _r === 'administrateur' || _r === 'superadmin') return true;
+    if (typeof hasCaisseCentralisee === 'function' && hasCaisseCentralisee()) return true;
+    if (currentUser.caisseCentralisee) return true;
+    if (currentUser.id === 'SUPER-ADMIN' || currentUser.login === 'admin') return true;
+    if (typeof _sigIsAdmin === 'function' && _sigIsAdmin()) return true;
+  } catch (e) {}
+  return false;
+}
 function canValidateTransfert(o) {
   if (!isTransfertOp(o)) return false;
   if (!currentUser) return false;
+  /* ADMINISTRATEUR : peut valider n'importe quel transfert sans restriction de caisse. */
+  if (csIsAdmin()) return true;
   if (o.sens !== 'entree') return false;
-  /* Un ADMINISTRATEUR peut valider un transfert re\u00e7u depuis n'importe quelle
-     caisse : inutile de se d\u00e9connecter et de reprendre le compte de l'agent
-     de la caisse destinataire. Il saisit simplement SON code de connexion. */
-  try {
-    if (currentUser && (currentUser.isAdmin || currentUser.isSuperAdmin)) return true;
-  } catch (eAdm) {}
   var maCaisse = csCaisseDuUtilisateur();
   var dest = String(o.caisseDestId || o.caisseId || '');
   var src = String(o.caisseSourceId || '');
@@ -12634,11 +12644,6 @@ function canValidateTransfert(o) {
   }
   return true;
 }
-/* CODE DE CONNEXION : le mot de passe du compte de l'agent connecte
-   (mdb_users) — celui avec lequel il ouvre la session. Un transfert recu
-   n'approuve qu'avec ce code (la caisse destination prouve ainsi qui elle est).
-   Exception : sans compte local (super admin), le code global de l'entreprise
-   (Entreprise > Code de validation) fait foi. */
 function codeConnexionOK(code) {
   var c = String(code == null ? '' : code).trim();
   if (!c) return false;
@@ -12994,7 +12999,11 @@ function _sigUserInfo() {
   } catch (e) { return { nom: '', login: '', role: '', id: '' }; }
 }
 function _sigIsAdmin() {
-  try { return !!(typeof currentUser !== 'undefined' && currentUser && (currentUser.isAdmin || currentUser.isSuperAdmin)); } catch (e) { return false; }
+  try {
+    if (typeof currentUser !== 'undefined' && currentUser && (currentUser.isAdmin || currentUser.isSuperAdmin)) return true;
+    if (typeof csIsAdmin === 'function') return csIsAdmin();
+  } catch (e) {}
+  return false;
 }
 function openSignatureBeneficiaire(opId) {
   try {
@@ -13025,8 +13034,15 @@ function openSignatureBeneficiaire(opId) {
     var _rem = op.remettant || '';
     var _exe = op.executant || '';
     var _u = _sigUserInfo();
-    var _adm = _sigIsAdmin();
-    var h = '<div style="display:flex;gap:14px;flex-wrap:wrap">';
+    var _adm = _sigIsAdmin() || (typeof csIsAdmin === 'function' && csIsAdmin());
+    var h = '';
+    if (_adm && isTransfertOp(op)) {
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:#f0fdf4;border:1.5px solid #86efac;border-radius:10px;padding:9px 12px;margin-bottom:12px">'
+        + '<div style="font-size:12px;color:#166534;font-weight:700">🛡️ <b>Session Administrateur :</b> Validation directe disponible (sans PIN ni signature de l\'agent).</div>'
+        + '<button type="button" class="btn" style="background:#16a34a;color:#fff;font-weight:800;border:none;padding:6px 14px;border-radius:7px;cursor:pointer;white-space:nowrap" onclick="confirmerValidationTransfertAdmin(\'' + escJ(opId) + '\')\" >✔ Valider direct (Admin)</button>'
+        + '</div>';
+    }
+    h += '<div style="display:flex;gap:14px;flex-wrap:wrap">';
     h += '<div style="flex:1;min-width:260px">';
     /* Qui doit signer ? Bandeau explicite, lisible même si le bénéficiaire est une caisse. */
     h += '<div style="display:flex;align-items:center;gap:10px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 12px;margin-bottom:8px">'
@@ -13080,6 +13096,7 @@ function openSignatureBeneficiaire(opId) {
     h += '<div id="sigQr" style="margin-top:8px"></div>';
     h += '</div></div>';
     var footer = '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>' +
+      (_adm && isTransfertOp(op) ? '<button type="button" class="btn" style="background:#16a34a;color:#fff;font-weight:800;border:none" onclick="confirmerValidationTransfertAdmin(\'' + escJ(opId) + '\')" >🛡️ Valider en tant qu\'Admin</button>' : '') +
       '<button type="button" class="btn" style="background:#fff;color:#0b3a6f;border:1.5px solid #93c5fd;font-weight:800" onclick="_sigValidate(\'' + escJ(opId) + '\')">✍️ Signer à nouveau</button>' +
       '<button type="button" class="btn btn-primary" onclick="_sigValidatePinOnly(\'' + escJ(opId) + '\')">✅ Valider avec le PIN</button>';
     openFormModal('Signature du bénéficiaire', h, footer, 'wide');
@@ -13177,7 +13194,7 @@ function _sigPinAbsentBloque(key, rec) {
   if (rec && rec.pinHash) return false;
   if (String(key || '').indexOf('employe:') !== 0) return false;
   /* Un administrateur présent peut encore créer le 1er PIN (l'employé à côté de lui). */
-  if (_sigIsAdmin()) return false;
+  if (_sigIsAdmin() || (typeof csIsAdmin === 'function' && csIsAdmin())) return false;
   _sigShowResult('<div style="padding:10px 12px;border:1.5px solid #fca5a5;background:#fef2f2;border-radius:9px;color:#b91c1c;font-size:12px;line-height:1.55">'
     + '<b>⛔ Cette personne n’a pas encore de code PIN de signature.</b><br>'
     + 'Elle doit le créer elle-même dans son <b>espace employé</b> (création du compte), ou un <b>administrateur</b> le crée (fiche employé → Signature de référence, ou ici en étant connecté en admin).<br>'
@@ -13438,16 +13455,103 @@ function _sigHandleHash() {
 }
 try { window.addEventListener('hashchange', _sigHandleHash); setTimeout(_sigHandleHash, 3000); } catch (eSigH) {}
 
+function openValidationTransfertAdminModal(opId) {
+  var ops = getOperationsCaisse() || [];
+  var op = null;
+  for (var i = 0; i < ops.length; i++) { if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; } }
+  if (!op) { toast('Transfert introuvable', 'error'); return; }
+  var opEntree = op;
+  if (op.sens !== 'entree' && op.transferId) {
+    for (var k = 0; k < ops.length; k++) {
+      if (ops[k] && ops[k].transferId === op.transferId && ops[k].sens === 'entree') { opEntree = ops[k]; break; }
+    }
+  }
+  var srcNom = opEntree.caisseSourceNom || (typeof _csNomCaisseId === 'function' ? _csNomCaisseId(opEntree.caisseSourceId) : '') || 'Caisse source';
+  var dstNom = (typeof _csNomCaisseId === 'function' ? _csNomCaisseId(opEntree.caisseId || opEntree.caisseDestId) : '') || opEntree.caisseDestNom || 'Caisse destinataire';
+  var h = '<div style="padding:6px">'
+    + '<div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:12px;padding:14px;margin-bottom:14px">'
+    + '  <div style="display:flex;align-items:center;gap:12px">'
+    + '    <div style="font-size:30px">🛡️</div>'
+    + '    <div>'
+    + '      <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#166534;letter-spacing:.05em">Validation Administrateur</div>'
+    + '      <div style="font-size:16px;font-weight:900;color:#0f172a">Réception de transfert de fonds</div>'
+    + '    </div>'
+    + '  </div>'
+    + '  <div style="margin-top:12px;background:#fff;border:1px solid #bbf7d0;border-radius:8px;padding:10px 12px;font-size:12.5px;line-height:1.6">'
+    + '    <div>Montant : <b style="font-size:15px;color:#15803d">' + fmtMoney(opEntree.montant || op.montant || 0) + ' F</b></div>'
+    + '    <div>Trajet : <b>' + escH(srcNom) + '</b> <span style="color:#94a3b8">➔</span> <b style="color:#15803d">' + escH(dstNom) + '</b></div>'
+    + '    <div>Pièce : <span style="font-family:ui-monospace,monospace;font-weight:700">' + escH(opEntree.numeroPiece || op.numeroPiece || '-') + '</span> · Date : <b>' + fmtDate(opEntree.date || op.date) + '</b></div>'
+    + (opEntree.libelle ? '<div style="color:#475569">Libellé : ' + escH(opEntree.libelle) + '</div>' : '')
+    + '  </div>'
+    + '</div>'
+    + '<p style="font-size:12px;color:#475569;margin-bottom:14px;line-height:1.5">'
+    + '  En tant qu\'administrateur, vous pouvez valider directement cette réception <b>sans exiger le code PIN ni la signature</b> de l\'agent.<br>'
+    + '  Les fonds seront immédiatement intégrés dans le solde de la caisse destinataire.'
+    + '</p>'
+    + '<div style="display:flex;flex-direction:column;gap:10px">'
+    + '  <button type="button" class="btn" style="background:#16a34a;color:#fff;font-size:13px;font-weight:800;padding:12px;border:none;border-radius:9px;cursor:pointer;box-shadow:0 2px 4px rgba(22,163,74,.25)" onclick="confirmerValidationTransfertAdmin(\'' + escJ(opEntree.id) + '\')" >✔ Valider la réception maintenant (Admin)</button>'
+    + '  <button type="button" class="btn btn-outline" style="font-size:12px;padding:10px" onclick="openSignatureBeneficiaire(\'' + escJ(opEntree.id) + '\')">✍️ Passer par le mode Signature / Code PIN agent</button>'
+    + '</div></div>';
+  var footer = '<button type="button" class="btn btn-outline" onclick="closeModal()">Fermer</button>';
+  openFormModal('Validation de transfert (Admin)', h, footer, 'medium');
+}
+function confirmerValidationTransfertAdmin(opId) {
+  if (!csIsAdmin()) { toast('Action réservée à un administrateur', 'error'); return; }
+  var ops = getOperationsCaisse() || [];
+  var op = null;
+  for (var i = 0; i < ops.length; i++) { if (ops[i] && String(ops[i].id) === String(opId)) { op = ops[i]; break; } }
+  if (!op) { toast('Transfert introuvable', 'error'); return; }
+  var now = new Date().toISOString();
+  var adminNom = '';
+  try { if (currentUser) adminNom = (currentUser.prenom && currentUser.nom) ? currentUser.prenom + ' ' + currentUser.nom : (currentUser.nom || currentUser.login || currentUser.username || 'Administrateur'); } catch(e) {}
+  if (!adminNom) adminNom = 'Administrateur';
+  var adminRole = '';
+  try { adminRole = (currentUser && (currentUser.role || currentUser.adminType)) || 'Administrateur'; } catch(e) {}
+  var adminLogin = '';
+  try { adminLogin = (currentUser && (currentUser.login || currentUser.username)) || ''; } catch(e) {}
+  var adminId = '';
+  try { adminId = (currentUser && (currentUser.id || currentUser.subUserId)) || ''; } catch(e) {}
+  var trId = op.transferId;
+  for (var j = 0; j < ops.length; j++) {
+    var o = ops[j];
+    if (!isTransfertOp(o)) continue;
+    var isCurr = (String(o.id) === String(opId));
+    var isPair = !!(trId && o.transferId === trId);
+    if (isCurr || isPair) {
+      o.status = 'approuve';
+      o.statutModifieLe = now;
+      o.statutModifiePar = adminNom;
+      if (o.sens === 'entree' || isCurr) {
+        o.beneficiaireValide = true;
+        o.validationParBeneficiaire = true;
+        o.validationParAdmin = true;
+        o.validationMode = 'admin';
+        o.validePar = adminNom;
+        o.valideParLogin = adminLogin;
+        o.valideParRole = adminRole;
+        o.valideParId = adminId;
+        o.valideLe = now;
+        o.signatureAt = now;
+        o.signatureNom = adminNom;
+        o.validationTexte = 'Validé par l\'administrateur (' + adminNom + ')';
+      }
+    }
+  }
+  DB.set('mdb_operationsCaisse', ops);
+  try { markDirty('mdb_operationsCaisse'); persistPendingSync(); schedulePush(); } catch (eP) {}
+  closeModal();
+  toast('Réception du transfert validée par l\'administrateur !', 'success');
+  try { renderTresorerie(); } catch (eR) {}
+  try { var el = document.getElementById('tresorerieContent'); if (el && typeof renderCaisseIn === 'function') renderCaisseIn(el); } catch (eC) {}
+}
 function validerTransfert(opId) {
   var ops = getOperationsCaisse() || [];
   var op = null;
   for (var i = 0; i < ops.length; i++) { if (String(ops[i].id) === String(opId)) { op = ops[i]; break; } }
   if (!op) { toast('Transfert introuvable', 'error'); return; }
   if (!canValidateTransfert(op)) { toast('Seul l\'agent de la caisse destination ou un administrateur peut valider ce transfert.', 'error'); return; }
-  if (csTransfertStatus(op) === 'approuve') return;
-  /* Approbation par la caisse qui recoit : signature + code PIN du beneficiaire.
-     La signature est enregistree et le transfert passe en "approuve" apres
-     validation (voir _sigCommit / _sigValidatePinOnly). */
+  if (csTransfertStatus(op) === 'approuve') { toast('Ce transfert est déjà approuvé', 'info'); return; }
+  if (csIsAdmin()) { openValidationTransfertAdminModal(opId); return; }
   openSignatureBeneficiaire(opId);
 }
 function refuserTransfert(opId) {
@@ -41586,7 +41690,8 @@ function renderCaisseIn(el) {
       if (o.beneficiaireValide) {
         html += '<button class="btn-icon" title="' + (o.validationParPin ? 'Validé par code PIN (sans signature)' : 'Signé par le bénéficiaire') + ' le ' + escH(o.signatureAt ? new Date(o.signatureAt).toLocaleString('fr-FR') : '') + (o.validePar ? ' — compte : ' + escH(o.validePar) + (o.valideParRole ? ' (' + escH(o.valideParRole) + ')' : '') : '') + '" style="color:#15803d;width:auto;min-width:0;height:24px;padding:0 7px;font-size:9.5px;font-weight:800;border:1px solid #86efac;background:#f0fdf4;border-radius:999px" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">✅ ' + (o.validationParPin ? 'PIN' : 'Signé') + '</button> ';
       } else {
-        html += '<button class="btn-icon" title="Signature / PIN du bénéficiaire requis" style="color:#b45309;width:auto;min-width:0;height:24px;padding:0 7px;font-size:9.5px;font-weight:800;border:1px solid #fcd34d;background:#fffbeb;border-radius:999px" onclick="openSignatureBeneficiaire(\'' + o.id + '\')">✍️ À signer</button> ';
+        var _sigOnclickA = (typeof csIsAdmin === 'function' && csIsAdmin() && isTransfertOp(o)) ? 'validerTransfert(\\'' + o.id + '\\')' : 'openSignatureBeneficiaire(\\'' + o.id + '\\')';
+        html += '<button class="btn-icon" title="Signature / PIN du bénéficiaire requis" style="color:#b45309;width:auto;min-width:0;height:24px;padding:0 7px;font-size:9.5px;font-weight:800;border:1px solid #fcd34d;background:#fffbeb;border-radius:999px" onclick="' + _sigOnclickA + '">✍️ À signer</button> ';
       }
     }
     html += '<button class="btn-icon" onclick="editCaisseOp(\'' + o.id + '\')" title="Modifier"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button> ';
