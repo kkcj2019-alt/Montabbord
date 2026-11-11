@@ -9283,6 +9283,9 @@ _payeSceauLignes(arr);
         }
         var obj = getPayeData();
         obj.pointage = arr;
+        /* Toute saisie de pointage (fiche de presence, recap, groupe) doit
+           rafraichir le tableau transport et les retenues. */
+        try { if (typeof invaliderTransportCache === "function") invaliderTransportCache(); } catch (eTrPt) {}
         if (added || tomb.length) obj.pointage_tombstones = tomb;
         /* Horodatage protection (comme setPayeSection) : sans lui, l'auto-save
            case par case (sansPush) n'est jamais protégé et le cloud périmé
@@ -10906,7 +10909,8 @@ function renderPrimeEmpMatrix() {
           plafond: Math.max(0, parseFloat(c.plafond) || TRANSPORT_DEFAUT.plafond),
           externes: c.externes === true,
           journaliers: c.journaliers === true,
-          sel: (c.sel && typeof c.sel === "object" && !Array.isArray(c.sel)) ? c.sel : {}
+          sel: (c.sel && typeof c.sel === "object" && !Array.isArray(c.sel)) ? c.sel : {},
+          camion: (c.camion && typeof c.camion === "object" && !Array.isArray(c.camion)) ? c.camion : {}
         };
       }
       function setTransportConfig(patch) {
@@ -10971,6 +10975,31 @@ function renderPrimeEmpMatrix() {
         renderTransportCamion();
       }
       var _trPresCache = {};
+      /* Statut transport d'un jour :
+         "camion" (present + camion, deduit) / "sans" (present, autre moyen) /
+         "manuel" (camion ajoute a la main) / "absent" (rien). */
+      function transportStatutJour(empId, date, cfg, pres) {
+        var key = String(empId) + "|" + String(date);
+        var ov = cfg && cfg.camion ? cfg.camion[key] : "";
+        if (ov === "non") return "sans";
+        if (ov === "oui") return "manuel";
+        return (pres && pres[date]) ? "camion" : "absent";
+      }
+      /* Clic : present -> sans camion -> camion manuel -> automatique. */
+      function transportToggleJour(empId, date) {
+        var cfg = getTransportConfig();
+        var pres = transportPresents(empId, String(date).slice(0, 7));
+        var key = String(empId) + "|" + String(date);
+        var ov = cfg.camion ? cfg.camion[key] : "";
+        var camion = {};
+        for (var k in cfg.camion) if (Object.prototype.hasOwnProperty.call(cfg.camion, k)) camion[k] = cfg.camion[k];
+        if (!ov) camion[key] = (pres && pres[date]) ? "non" : "oui";
+        else if (ov === "non") camion[key] = "oui";
+        else delete camion[key];
+        setTransportConfig({ camion: camion });
+        invaliderTransportCache();
+        renderTransportCamion();
+      }
       function transportPresents(empId, mois) {
         var key = String(empId) + "|" + mois;
         if (_trPresCache[key]) return _trPresCache[key];
@@ -11010,7 +11039,9 @@ function renderPrimeEmpMatrix() {
         if (!jours.length) return 0;
         var pres = transportPresents(empId, mois);
         var n = 0;
-        for (var j = 0; j < jours.length; j++) if (pres[jours[j]]) n++;
+        for (var j = 0; j < jours.length; j++) {
+          if (transportStatutJour(empId, jours[j], cfg, pres) !== "absent") n++;
+        }
         if (!n) return 0;
         return Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length));
       }
@@ -19732,15 +19763,26 @@ function parseHeure(val) {
         var rows = emps.map(function (e) {
           var inclus = transportEmployeConcerne(e, cfg);
           var pres = transportPresents(e.id, mois);
+          var brut = {};
+          try {
+            (getPointageData() || []).forEach(function (p0) {
+              if (!p0 || String(p0.employee_id) !== String(e.id)) return;
+              var d0 = String(p0.date || '').slice(0, 10);
+              if (d0.slice(0, 7) === mois) brut[d0] = (p0.present === false ? 'absent' : 'present');
+            });
+          } catch (eB) {}
           var n = 0;
+          var statuts = {};
           for (var i = 0; i < jours.length; i++) {
-            if (!pres[jours[i]]) continue;
+            var stJ = transportStatutJour(e.id, jours[i], cfg, pres);
+            statuts[jours[i]] = stJ;
+            if (stJ === "absent") continue;
             n++;
             if (inclus) parJour[jours[i]] = (parJour[jours[i]] || 0) + 1;
           }
           var montant = (inclus && jours.length) ? Math.min(cfg.plafond, Math.round((cfg.plafond * n) / jours.length)) : 0;
           if (inclus) total += montant;
-          return { emp: e, pres: pres, jours: n, montant: montant, inclus: inclus };
+          return { emp: e, pres: pres, brut: brut, statuts: statuts, jours: n, montant: montant, inclus: inclus };
         });
         rows.sort(function (a, b) {
           var ma = String(a.emp.matricule || ""), mb = String(b.emp.matricule || "");
@@ -19821,8 +19863,13 @@ function parseHeure(val) {
             '<td style="text-align:center"><input type="checkbox" ' + (r.inclus ? 'checked' : '') + ' title="Cocher si ce salarie participe au transport" onchange="transportToggleEmploye(&quot;' + escH(e.id) + '&quot;, this.checked)" style="width:16px;height:16px;cursor:pointer"></td>';
           for (var k = 0; k < d.jours.length; k++) {
             var dj = d.jours[k];
-            var ok = !!r.pres[dj];
-            body += '<td title="' + dj + (ok ? ' : pr&eacute;sent' : ' : absent') + '" style="text-align:center;padding:3px 2px;background:' + (ok ? '#dcfce7' : '#fff') + ';color:' + (ok ? '#15803d' : '#cbd5e1') + ';font-weight:800">' + (ok ? '&#10003;' : '&middot;') + '</td>';
+            var st = (r.statuts && r.statuts[dj]) || 'absent';
+            var _br = (r.brut && r.brut[dj]) || 'aucune ligne';
+            var bg = '#fff', fg = '#cbd5e1', mark = '&middot;', tip = dj + ' : non compte (pointage : ' + _br + ')';
+            if (st === 'camion') { bg = '#dcfce7'; fg = '#15803d'; mark = '&#10003;'; tip = dj + ' : pr&eacute;sent, prend le camion'; }
+            else if (st === 'sans') { bg = '#ffedd5'; fg = '#c2410c'; mark = '&#10007;'; tip = dj + ' : pr&eacute;sent mais SANS camion'; }
+            else if (st === 'manuel') { bg = '#dbeafe'; fg = '#1d4ed8'; mark = '&#10003;'; tip = dj + ' : camion ajout&eacute; manuellement'; }
+            body += '<td title="' + tip + ' (cliquer pour changer)" onclick="transportToggleJour(&quot;' + escH(e.id) + '&quot;,&quot;' + dj + '&quot;)" style="text-align:center;padding:3px 2px;cursor:pointer;background:' + bg + ';color:' + fg + ';font-weight:800;user-select:none">' + mark + '</td>';
           }
           body += '<td style="text-align:center;font-weight:800">' + (r.inclus ? r.jours : '&ndash;') + '</td>' +
             '<td style="text-align:right;font-weight:800;color:' + (r.inclus && r.montant > 0 ? '#b91c1c' : '#94a3b8') + '">' + (r.inclus ? fmt(r.montant) + ' F' : '&mdash;') + '</td></tr>';
@@ -19834,7 +19881,14 @@ function parseHeure(val) {
 
         host.innerHTML = '<table class="lp-table" style="border-collapse:separate;border-spacing:0;font-size:.76rem;width:max-content;min-width:100%">' +
           '<thead>' + th + '</thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tfoot></table>' +
-          '<style>#tp-camion-host th,#tp-camion-host td{border-bottom:1px solid #eef2f7;padding:5px 6px}#tp-camion-host thead th{position:sticky;top:0;z-index:4;background:#f8fafc;font-size:.68rem;text-transform:uppercase;letter-spacing:.03em;color:#475569}</style>';
+          '<style>#tp-camion-host th,#tp-camion-host td{border-bottom:1px solid #eef2f7;padding:5px 6px}#tp-camion-host thead th{position:sticky;top:0;z-index:4;background:#f8fafc;font-size:.68rem;text-transform:uppercase;letter-spacing:.03em;color:#475569}</style>' +
+          '<div style="margin-top:8px;font-size:.72rem;color:#475569;display:flex;gap:14px;flex-wrap:wrap">' +
+            '<span><b style="color:#15803d">&#10003;</b> pr&eacute;sent, prend le camion</span>' +
+            '<span><b style="color:#c2410c">&#10007;</b> pr&eacute;sent mais sans camion (non d&eacute;duit)</span>' +
+            '<span><b style="color:#1d4ed8">&#10003;</b> camion ajout&eacute; manuellement</span>' +
+            '<span><b style="color:#94a3b8">&middot;</b> absent</span>' +
+            '<span>Cliquez sur un jour pour changer son statut.</span>' +
+          '</div>';
       }
       function imprimerTransportCamion() {
         var host = document.getElementById("tp-camion-host");
@@ -19847,7 +19901,7 @@ function parseHeure(val) {
         var rows = '';
         d.rows.filter(function (r) { return r.inclus; }).forEach(function (r) {
           rows += '<tr><td>' + escH(r.emp.matricule || '') + '</td><td style="text-align:left">' + escH(((r.emp.nom || '') + ' ' + (r.emp.prenoms || '')).trim()) + '</td><td>' + escH(String(r.emp.type_contrat || '').toUpperCase()) + '</td>';
-          d.jours.forEach(function (dj) { rows += '<td style="text-align:center">' + (r.pres[dj] ? 'X' : '') + '</td>'; });
+          d.jours.forEach(function (dj) { var stI = (r.statuts && r.statuts[dj]) || 'absent'; rows += '<td style="text-align:center">' + (stI === 'absent' ? '' : (stI === 'sans' ? '-' : 'X')) + '</td>'; });
           rows += '<td style="text-align:center">' + r.jours + '</td><td style="text-align:right">' + fmt(r.montant) + '</td></tr>';
         });
         var w = window.open('', '_blank', 'width=1100,height=800');
