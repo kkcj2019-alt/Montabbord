@@ -397,6 +397,47 @@ export async function onRequest(context) {
       await ecrireCle(db, uid, 'mdb_portailPhoto:' + empId, photo);
       return json({ ok: true, photo });
     }
+    /* ---------- Permission supprimee : nettoyer le pointage ---------- */
+    if (action === 'deletepermission') {
+      const ids = (Array.isArray(body.permIds) ? body.permIds : (body.permId ? [body.permId] : [])).map(String);
+      if (!ids.length) return json({ ok: false, code: 'ids' }, 400);
+      try {
+        const perms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+        const arrP = Array.isArray(perms) ? perms : [];
+        const rest = arrP.filter(pp => !pp || ids.indexOf(String(pp.id)) === -1);
+        if (rest.length !== arrP.length) await ecrireCle(db, uid, 'mdb_rh_permissions', rest);
+      } catch (ePermDel) {}
+      try {
+        const paye = await lirePaye(db, uid);
+        const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
+        const out = [];
+        let changed = false;
+        pts.forEach(p => {
+          if (!p) return;
+          const pid = String(p.permissionId || p.requeteId || '');
+          if (!pid || ids.indexOf(pid) === -1) { out.push(p); return; }
+          changed = true;
+          /* Ligne creee uniquement par la permission : on la retire. */
+          if (p.permissionAuto === true) return;
+          delete p.permissionId;
+          delete p.permissionAuto;
+          if (String(p.requeteId || '') === pid) delete p.requeteId;
+          p.absent_paye = false;
+          delete p.paye_sans_travail;
+          if (String(p.motif || '').toLowerCase().indexOf('permission') === 0) delete p.motif;
+          if (String(p.obs || '').toLowerCase().indexOf('permission') === 0) delete p.obs;
+          if (parseFloat(p.h_j_manual) === 8 && !p.j_arrivee && !p.n_arrivee) delete p.h_j_manual;
+          if (parseFloat(p.h_n_manual) === 0) delete p.h_n_manual;
+          const hasReal = !!(p.j_arrivee || p.n_arrivee || p.j_fin || p.n_fin || p.h_j_manual || p.h_n_manual);
+          if (!hasReal) return;
+          if (p.present === false) p.present = true;
+          out.push(p);
+        });
+        if (changed) await ecrireCle(db, uid, 'mdb_paye.pointage', out);
+        return json({ ok: true, pointage: changed });
+      } catch (ePtDel) { return json({ ok: true, pointage: false }); }
+    }
+
     /* ---------- Connexion ---------- */
     if (action === 'login') {
       const employes = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
