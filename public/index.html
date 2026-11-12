@@ -35,7 +35,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js?v=2"></script>
-<script>window.__APP_VERSION = '2026-11-12-333';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION = '2026-11-12-334';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -26062,6 +26062,57 @@ function _corrigerMoisPieces() {
   }
   return fixed;
 }
+/* Correction des mois anachroniques : acompte cree en oct/nov/dec d'une annee N
+   avec moisDeduction = N-01..N-03 => en realite prevu pour (N+1)-01..N-03.
+   Typique: admin choisit "Janvier" en novembre sans que l'UI incremente l'annee.
+   IDEMPOTENT - ne touche que les pieces non marquees moisManuel. */
+function _apCorrigerMoisAnachroniques() {
+  var now = new Date();
+  var curMois = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  var ops = []; try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
+  var aps = []; try { aps = dbArr('mdb_acomptesPrets') || []; } catch (e2) {}
+  var fixedOps = 0, fixedAps = 0;
+  for (var i = 0; i < ops.length; i++) {
+    var o = ops[i];
+    if (!o || o.moisManuel === true || o.reversed) continue;
+    var nat = (typeof _apNatureOp === 'function') ? _apNatureOp(o) : (o.apType || '');
+    if (nat !== 'acompte' && nat !== 'pret') continue;
+    var moisDed = String(o.apMoisDeduction || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(moisDed) || moisDed >= curMois) continue;
+    var opDate = String(o.date || '').slice(0, 7);
+    if (!opDate || opDate < '2026-09') continue;
+    var opY = parseInt(opDate.slice(0, 4), 10), opM = parseInt(opDate.slice(5, 7), 10);
+    var dedY = parseInt(moisDed.slice(0, 4), 10), dedM = parseInt(moisDed.slice(5, 7), 10);
+    if (opM >= 10 && dedY === opY && dedM <= 3) {
+      var newMois = (opY + 1) + '-' + String(dedM).padStart(2, '0');
+      o.libelle = o.libelle ? o.libelle.replace(moisDed, newMois) : o.libelle;
+      o.apMoisDeduction = newMois;
+      fixedOps++;
+    }
+  }
+  for (var j = 0; j < aps.length; j++) {
+    var a = aps[j];
+    if (!a) continue;
+    var moisA = String(a.moisDeduction || '').slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(moisA) || moisA >= curMois) continue;
+    var aDate = String(a.date || '').slice(0, 7);
+    if (!aDate || aDate < '2026-09') continue;
+    var aY = parseInt(aDate.slice(0, 4), 10), aM = parseInt(aDate.slice(5, 7), 10);
+    var aDedY = parseInt(moisA.slice(0, 4), 10), aDedM = parseInt(moisA.slice(5, 7), 10);
+    if (aM >= 10 && aDedY === aY && aDedM <= 3) {
+      var newMoisA = (aY + 1) + '-' + String(aDedM).padStart(2, '0');
+      a.moisDeduction = newMoisA;
+      if (Array.isArray(a.echeances)) {
+        a.echeances.forEach(function(ech) { if (ech && ech.mois && ech.mois.slice(0,7) === moisA) ech.mois = newMoisA; });
+      }
+      fixedAps++;
+    }
+  }
+  if (fixedOps > 0) { DB.set('mdb_operationsCaisse', ops); try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (eO) {} }
+  if (fixedAps > 0) { DB.set('mdb_acomptesPrets', aps); try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (eA) {} }
+  if (fixedOps + fixedAps > 0) console.log('[AnaChrono] ' + fixedOps + ' op(s) + ' + fixedAps + ' acompte(s) corriges');
+  return fixedOps + fixedAps;
+}
 /* Correction des libelles de soldes collectifs ou le nom d'un employe
    a ete duplique sur toute la piece pour tous les beneficiaires (ex: KANGA).
    Retablit le nom propre de chaque beneficiaire dans op.libelle et acompte.motif. */
@@ -26346,6 +26397,7 @@ function _reconcileAcomptesPretsFromCaisse() {
   try { _csDedupliquerCollectif(); } catch (eDed) {}
   /* D'abord les pièces elles-mêmes (même sans ligne liée), puis les lignes. */
   try { _corrigerMoisPieces(); } catch (eCMP) {}
+  try { _apCorrigerMoisAnachroniques(); } catch (eANA) {}
   try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS) {}
   var ops = getOperationsCaisse() || [];
   if (!ops.length) return;
@@ -39896,6 +39948,7 @@ function renderTresorerie() {
   try { _syncApproBanque(); } catch (eSAB) {}
   /* Mois des pièces remis sur période avant affichage (silencieux). */
   try { _corrigerMoisPieces(); } catch (eCM) {}
+  try { _apCorrigerMoisAnachroniques(); } catch (eANA2) {}
   try { _corrigerLibellesSoldesCollectifs(); } catch (eCLS) {}
   if (_tresorerieContext === 'banque' && !canAccessSection('tresorerie', 'banque')) {
     _tresorerieContext = 'caisse'; _tresorerieTab = 'caisse';
@@ -42347,8 +42400,12 @@ function renderCaisseIn(el) {
     html += '<td class="fw-600" style="font-size:10px"><span style="display:inline-block;background:#f1f5f9;border:1px solid #e2e8f0;color:#334155;padding:1px 7px;border-radius:6px;font-size:9.5px;font-weight:800;letter-spacing:.03em;white-space:nowrap">' + escH(codeLabel) + '</span></td>';
     var _csBadge = (window._seeAllCaisses && _cNom) ? ('<span class="badge" style="font-size:9px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;margin-right:5px;display:inline-block;vertical-align:middle" title="Caisse : ' + escH(_cNom) + '">&#x1F3E2; ' + escH(_cNom) + '</span> ') : '';
     var _isPoolPending = !!(o.pendingDetail || o.apType === 'pool' || (o.collective && !o.beneficiaireId));
+    var _apDedBadge = '';
+    if ((o.apType === 'acompte' || o.apType === 'pret') && /^\d{4}-\d{2}$/.test(o.apMoisDeduction || '')) {
+      try { var _dD = new Date(o.apMoisDeduction + '-01T00:00:00'); _apDedBadge = '<span style="display:inline-block;margin-left:4px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:999px;font-size:9px;font-weight:800;padding:1px 6px;vertical-align:middle">📅 ' + escH(_dD.toLocaleDateString('fr-FR', {month:'long',year:'numeric'})) + '</span>'; } catch(eDed) {}
+    }
     var _poolBadge = _isPoolPending ? '<span class="badge" style="background:#fef3c7;color:#b45309;border:1px solid #fcd34d;font-weight:700;margin-left:4px;font-size:10px;padding:2px 7px;border-radius:999px">\u23F3 \u00c0 r\u00e9partir</span>' : '';
-    html += '<td style="min-width:160px">' + _csBadge + escH(o.libelle || '-') + _poolBadge + (o.typeOp === 'transfert' ? '<div style="margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span class="cs-pill" style="' + (o.sens === 'entree' ? 'color:#15803d;background:#ecfdf3;border-color:#a7f3d0' : 'color:#c2410c;background:#fff7ed;border-color:#fed7aa') + '">' + (o.sens === 'entree' ? '\u2193 REÇU' : '\u2191 ENVOYÉ') + '</span><span style="font-size:10px;font-weight:700;color:' + (o.sens === 'entree' ? '#15803d' : '#c2410c') + '">' + transfertLabel + '</span></div>' : (_rowCls === 'cs-appro-recu' ? '<div style="margin-top:3px"><span class="cs-pill" style="color:#1d4ed8;background:#eff6ff;border-color:#bfdbfe">\u2193 APPRO REÇU</span></div>' : '')) + transfertBadge + '</td>';
+    html += '<td style="min-width:160px">' + _csBadge + escH(o.libelle || '-') + _apDedBadge + _poolBadge + (o.typeOp === 'transfert' ? '<div style="margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap"><span class="cs-pill" style="' + (o.sens === 'entree' ? 'color:#15803d;background:#ecfdf3;border-color:#a7f3d0' : 'color:#c2410c;background:#fff7ed;border-color:#fed7aa') + '">' + (o.sens === 'entree' ? '\u2193 REÇU' : '\u2191 ENVOYÉ') + '</span><span style="font-size:10px;font-weight:700;color:' + (o.sens === 'entree' ? '#15803d' : '#c2410c') + '">' + transfertLabel + '</span></div>' : (_rowCls === 'cs-appro-recu' ? '<div style="margin-top:3px"><span class="cs-pill" style="color:#1d4ed8;background:#eff6ff;border-color:#bfdbfe">\u2193 APPRO REÇU</span></div>' : '')) + transfertBadge + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--success);white-space:nowrap;cursor:pointer" onclick="editCaisseOp(\'' + o.id + '\')" title="Cliquer pour modifier la pi\u00e8ce">' + (entreeVal > 0 ? '+ ' + fmtMoneyNoDevise(entreeVal) : '<span style="color:#e5e7eb">\u00b7</span>') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--danger);white-space:nowrap;cursor:pointer" onclick="editCaisseOp(\'' + o.id + '\')" title="Cliquer pour modifier la pi\u00e8ce">' + (sortieVal > 0 ? '- ' + fmtMoneyNoDevise(sortieVal) : '<span style="color:#e5e7eb">\u00b7</span>') + '</td>';
     html += '<td class="text-right fw-600" style="color:#7c3aed;white-space:nowrap;cursor:pointer" onclick="editCaisseOp(\'' + o.id + '\')" title="Cliquer pour modifier la pi\u00e8ce">' + ((o.montantCharge && o.montantCharge > 0) ? fmtMoneyNoDevise(o.montantCharge) : '<span style="color:#e5e7eb">\u00b7</span>') + '</td>';
