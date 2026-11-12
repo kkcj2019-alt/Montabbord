@@ -9240,6 +9240,56 @@ window._payeVuTs = ts;
         var t = getPayeSection("pointage_tombstones", []);
         return Array.isArray(t) ? t : [];
       }
+      /* Repare le pointage local : une ligne liee a une permission qui n'existe
+         plus (permission supprimee) est nettoyee, puis renvoyee au cloud.
+         Cela evite que les jours restent marques « P » indefiniment. */
+      function _nettoyerPermissionsPointagePaye() {
+        try {
+          var uid = ''; try { uid = getEnterpriseUid() || ''; } catch (eU) {}
+          if (!uid) return;
+          var root = /\.pages\.dev$/i.test(location.hostname) ? location.origin : (typeof window.__MDB_API_ROOT === 'string' ? window.__MDB_API_ROOT : '');
+          var url = root + '/api/sync?uid=' + encodeURIComponent(uid) + '&cles=' + encodeURIComponent('mdb_rh_permissions,mdb_requetesDeleted,mdb_requetesDeletedSig') + '&t=' + Date.now();
+          fetch(url, { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+            var pr = function (v) { if (typeof v === 'string') { try { return JSON.parse(v); } catch (e) { return null; } } return v; };
+            var perms = pr(j && j.data && j.data.mdb_rh_permissions);
+            if (!Array.isArray(perms)) return;
+            var active = {};
+            perms.forEach(function (pp) { if (pp && pp.id) active[String(pp.id)] = 1; });
+            var pts = getPayeSection('pointage', []);
+            if (!Array.isArray(pts)) return;
+            var out = [], changed = false;
+            pts.forEach(function (p) {
+              if (!p) return;
+              var pid = String(p.permissionId || '');
+              var rid = String(p.requeteId || '');
+              var key = pid || rid;
+              var looksPerm = !!pid || (p.source === 'requete' && /permission|cong/i.test(String(p.motif || '')));
+              if (!looksPerm || !key) { out.push(p); return; }
+              if (active[key]) { out.push(p); return; }
+              changed = true;
+              if (p.permissionAuto === true) return;
+              delete p.permissionId; delete p.permissionAuto;
+              if (String(p.requeteId || '') === key) delete p.requeteId;
+              p.absent_paye = false; delete p.paye_sans_travail;
+              if (String(p.motif || '').toLowerCase().indexOf('permission') === 0) delete p.motif;
+              if (String(p.obs || '').toLowerCase().indexOf('permission') === 0) delete p.obs;
+              if (parseFloat(p.h_j_manual) === 8 && !p.j_arrivee && !p.n_arrivee) delete p.h_j_manual;
+              if (parseFloat(p.h_n_manual) === 0) delete p.h_n_manual;
+              var hasReal = !!(p.j_arrivee || p.n_arrivee || p.j_fin || p.n_fin || p.h_j_manual || p.h_n_manual);
+              if (!hasReal) return;
+              if (p.present === false) p.present = true;
+              out.push(p);
+            });
+            if (changed) {
+              setPayeSection('pointage', out);
+              try { pushPayeCloud(true); } catch (eP) {}
+              try { if (localStorage.getItem('paye_currentSection') === 'pointage' && typeof showSection === 'function') showSection('pointage'); } catch (eS) {}
+            }
+          }).catch(function () {});
+        } catch (e) {}
+      }
+      setTimeout(_nettoyerPermissionsPointagePaye, 1800);
+
       function getPointageData() {
         var v = getPayeSection("pointage", []);
         if (!Array.isArray(v)) return [];
