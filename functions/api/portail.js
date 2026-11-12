@@ -61,6 +61,31 @@ function parseVal(v, def) {
   if (typeof v === 'string') { try { return JSON.parse(v); } catch (e) { return def; } }
   return v;
 }
+/* Un seul bulletin par employe et par mois dans l'espace employe.
+   D'anciennes publications ou synchronisations peuvent laisser plusieurs
+   copies du meme mois : on garde la plus recente (date la plus grande, et a
+   defaut la derniere de la liste). */
+function dedupeBulletinsParMois(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const res = [];
+  const pos = {};
+  for (let i = 0; i < arr.length; i++) {
+    const b = arr[i];
+    if (!b) continue;
+    const empId = String(b.empId || '');
+    const mois = String(b.mois || '').slice(0, 7);
+    if (!empId || !mois) { res.push({ b: b, i: i, t: 0 }); continue; }
+    const k = empId + '|' + mois;
+    const t = Date.parse(b.date || '') || 0;
+    if (pos[k] === undefined) {
+      pos[k] = res.length;
+      res.push({ b: b, i: i, t: t });
+    } else if (t >= res[pos[k]].t) {
+      res[pos[k]] = { b: b, i: i, t: t };
+    }
+  }
+  return res.sort((x, y) => x.i - y.i).map(x => x.b);
+}
 async function lireCle(db, uid, cle) {
   const row = await db.prepare(
     'SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1'
@@ -1020,7 +1045,7 @@ export async function onRequest(context) {
     if (action === 'data') {
       const pointage = (Array.isArray(paye.pointage) ? paye.pointage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
       const montage = (Array.isArray(paye.pointageMontage) ? paye.pointageMontage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
-      const bulletins = (Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).filter(b => b && b.visible === true && String(b.empId) === String(emp.id) && allowed.indexOf(String(b.mois || '')) !== -1);
+      const bulletins = dedupeBulletinsParMois((Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).filter(b => b && b.visible === true && String(b.empId) === String(emp.id) && allowed.indexOf(String(b.mois || '').slice(0, 7)) !== -1));
       const acomptes = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
       const vusAp = {};
       const mesAcomptes = (Array.isArray(acomptes) ? acomptes : []).filter(a => {
