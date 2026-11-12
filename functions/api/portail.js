@@ -871,6 +871,25 @@ export async function onRequest(context) {
       });
       req.updatedAt = now;
       await ecrireCle(db, uid, 'mdb_requetesEmploye', list);
+      /* Permission / conge : la fiche mdb_rh_permissions doit suivre la
+         decision, sinon l'espace employe reste bloque sur « en attente ». */
+      if ((req.type === 'permission' || req.type === 'conge') && (statut === 'acceptee' || statut === 'refusee')) {
+        try {
+          const perms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+          const arrP = Array.isArray(perms) ? perms : [];
+          let change = false;
+          arrP.forEach(pp => {
+            if (!pp) return;
+            if (String(pp.id) !== id && String(pp.id) !== String(req.id)) return;
+            pp.statut = statut === 'acceptee' ? 'valide' : 'refuse';
+            pp.valide_par = String(body.nom || 'Administration');
+            pp.date_validation = now;
+            if (body.commentaire) pp.commentaire_admin = String(body.commentaire);
+            change = true;
+          });
+          if (change) await ecrireCle(db, uid, 'mdb_rh_permissions', arrP);
+        } catch (ePermMaj) {}
+      }
       return json({ ok: true, requete: req });
     }
 
@@ -1133,7 +1152,24 @@ export async function onRequest(context) {
       };
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
       const permsAll = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
-      const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && !_delSet.has(String(p.id)) && !_delSig.has(_sigReq(p)) && String(p.employee_id) === String(emp.id));
+      const _reqById = {};
+      (Array.isArray(reqs) ? reqs : []).forEach(r => { if (r && r.id) _reqById[String(r.id)] = r; });
+      const _permStatut = (pp) => {
+        const r = pp && _reqById[String(pp.id || '')];
+        if (r && r.statut === 'acceptee') return 'valide';
+        if (r && r.statut === 'refusee') return 'refuse';
+        return pp ? pp.statut : '';
+      };
+      const mesPermissions = (Array.isArray(permsAll) ? permsAll : []).filter(p => p && !_delSet.has(String(p.id)) && !_delSig.has(_sigReq(p)) && String(p.employee_id) === String(emp.id)).map(p => {
+        const st = _permStatut(p);
+        if (!st || st === p.statut) return p;
+        const r = _reqById[String(p.id)] || {};
+        return Object.assign({}, p, {
+          statut: st,
+          valide_par: (r.decision && r.decision.par) || p.valide_par || '',
+          date_validation: (r.decision && r.decision.at) || p.date_validation || ''
+        });
+      });
       let rhEvals = [], rhSanctions = [], rhDemandes = [], rhConges = [], rhPerms = [];
       try { rhEvals = parseVal(await lireCle(db, uid, 'mdb_rh_evaluations'), []) || []; } catch (eRh1) {}
       try { rhSanctions = parseVal(await lireCle(db, uid, 'mdb_rh_sanctions'), []) || []; } catch (eRh2) {}
@@ -1162,7 +1198,7 @@ export async function onRequest(context) {
         sanctions: mineRh(rhSanctions),
         demandes: mineRh(rhDemandes),
         conges: mineRh(rhConges),
-        permissionsValidees: mineRh(rhPerms).filter(p => p && p.statut === 'valide' && !_delSet.has(String(p.id)) && !_delSig.has(_sigReq(p))),
+        permissionsValidees: mineRh(rhPerms).filter(p => p && _permStatut(p) === 'valide' && !_delSet.has(String(p.id)) && !_delSig.has(_sigReq(p))),
         employe: employePublic(emp),
         moiAutorises: allowed,
         portail: { actif: cfg.actif !== false, moisSupplementaires: cfg.mois || [] },
