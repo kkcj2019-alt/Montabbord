@@ -1103,6 +1103,43 @@ export async function onRequest(context) {
 
     /* ---------- Données personnelles ---------- */
     if (action === 'data') {
+      /* Nettoyage cote serveur : une ligne de pointage liee a une permission
+         qui n'existe plus est retiree avant d'etre renvoyee a l'employe. */
+      const _permsData = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), null);
+      if (Array.isArray(_permsData) && Array.isArray(paye.pointage)) {
+        try {
+          const _activePerm = new Set(_permsData.map(pp => pp && pp.id ? String(pp.id) : ''));
+          const _outP = [];
+          let _changedP = false;
+          paye.pointage.forEach(p => {
+            if (!p) return;
+            const pid = String(p.permissionId || '');
+            const rid = String(p.requeteId || '');
+            const key = pid || rid;
+            const looksPerm = !!pid || (p.source === 'requete' && /permission|cong/i.test(String(p.motif || '')));
+            if (!looksPerm || !key || _activePerm.has(key)) { _outP.push(p); return; }
+            _changedP = true;
+            if (p.permissionAuto === true) return;
+            delete p.permissionId;
+            delete p.permissionAuto;
+            if (String(p.requeteId || '') === key) delete p.requeteId;
+            p.absent_paye = false;
+            delete p.paye_sans_travail;
+            if (String(p.motif || '').toLowerCase().indexOf('permission') === 0) delete p.motif;
+            if (String(p.obs || '').toLowerCase().indexOf('permission') === 0) delete p.obs;
+            if (parseFloat(p.h_j_manual) === 8 && !p.j_arrivee && !p.n_arrivee) delete p.h_j_manual;
+            if (parseFloat(p.h_n_manual) === 0) delete p.h_n_manual;
+            const hasReal = !!(p.j_arrivee || p.n_arrivee || p.j_fin || p.n_fin || p.h_j_manual || p.h_n_manual);
+            if (!hasReal) return;
+            if (p.present === false) p.present = true;
+            _outP.push(p);
+          });
+          if (_changedP) {
+            paye.pointage = _outP;
+            try { await ecrireCle(db, uid, 'mdb_paye.pointage', _outP); } catch (ePClean) {}
+          }
+        } catch (ePClean2) {}
+      }
       const pointage = (Array.isArray(paye.pointage) ? paye.pointage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
       const montage = (Array.isArray(paye.pointageMontage) ? paye.pointageMontage : []).filter(p => p && String(p.employee_id) === String(emp.id) && allowed.indexOf(String(p.date || '').slice(0, 7)) !== -1);
       const bulletins = dedupeBulletinsParMois((Array.isArray(paye.bulletinVerifs) ? paye.bulletinVerifs : []).filter(b => b && b.visible === true && String(b.empId) === String(emp.id) && allowed.indexOf(String(b.mois || '').slice(0, 7)) !== -1));
@@ -1192,7 +1229,7 @@ export async function onRequest(context) {
         };
       };
       const cfg = (paye.portailEmployes && paye.portailEmployes[emp.id]) || {};
-      const permsAll = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+      const permsAll = Array.isArray(_permsData) ? _permsData : [];
       const _reqById = {};
       (Array.isArray(reqs) ? reqs : []).forEach(r => { if (r && r.id) _reqById[String(r.id)] = r; });
       const _permStatut = (pp) => {
