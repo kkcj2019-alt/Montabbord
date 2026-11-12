@@ -35,7 +35,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js?v=2"></script>
-<script>window.__APP_VERSION = '2026-11-12-327';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION = '2026-11-12-328';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -22481,142 +22481,429 @@ function filterProformas() {
     rows[i].style.display = show ? '' : 'none';
   }
 }
+
+/* ==========================================================================
+   PRO-FORMA : MÊME ERGONOMIE & LOGIQUE QUE LE BON DE COMMANDE FOURNISSEUR (BCF)
+   Adaptée au cycle de Vente Client (Devis / Proposition commerciale)
+   ========================================================================== */
+
+var _pfLignes = [];
+var _pfEditId = '';
+
+function pfDefaultPU() {
+  for (var i = 0; i < _pfLignes.length; i++) {
+    var l = _pfLignes[i];
+    if (!l.isTitle && parseFloat(l.prixUnitaire) > 0) return parseFloat(l.prixUnitaire);
+    if (l.sousLignes) {
+      for (var sub = 0; sub < l.sousLignes.length; sub++) {
+        if (parseFloat(l.sousLignes[sub].prixUnitaire) > 0) return parseFloat(l.sousLignes[sub].prixUnitaire);
+      }
+    }
+  }
+  return 0;
+}
+
+function addPfLigne() {
+  _pfLignes.push({
+    isTitle: false,
+    titre: '',
+    designation: '',
+    articleId: '',
+    unite: '',
+    qte: 1,
+    prixUnitaire: pfDefaultPU(),
+    montant: 0,
+    sousLignes: []
+  });
+  renderPfLignes();
+  calcPfTotals();
+}
+
+function addPfTitreLigne() {
+  _pfLignes.push({
+    isTitle: true,
+    titre: '',
+    titreSimple: false,
+    designation: '',
+    articleId: '',
+    unite: '',
+    qte: '',
+    prixUnitaire: '',
+    montant: 0,
+    sousLignes: []
+  });
+  renderPfLignes();
+  calcPfTotals();
+}
+
+function addPfSousLigne(idx) {
+  if (!_pfLignes[idx].sousLignes) _pfLignes[idx].sousLignes = [];
+  _pfLignes[idx].sousLignes.push({
+    designation: '',
+    unite: '',
+    qte: '',
+    prixUnitaire: pfDefaultPU(),
+    montant: 0
+  });
+  renderPfLignes();
+  calcPfTotals();
+}
+
+function removePfLigne(idx) {
+  _pfLignes.splice(idx, 1);
+  renderPfLignes();
+  calcPfTotals();
+}
+
+function removePfSousLigne(parentIdx, subIdx) {
+  if (_pfLignes[parentIdx] && _pfLignes[parentIdx].sousLignes) {
+    _pfLignes[parentIdx].sousLignes.splice(subIdx, 1);
+  }
+  renderPfLignes();
+  calcPfTotals();
+}
+
+function onPfSelectArticle(idx, artId) {
+  if (!_pfLignes[idx]) return;
+  _pfLignes[idx].articleId = artId || '';
+  if (artId) {
+    var art = (typeof getArticleById === 'function' ? getArticleById(artId) : null);
+    if (art) {
+      if (!_pfLignes[idx].designation) _pfLignes[idx].designation = art.designation || art.nom || '';
+      if (!_pfLignes[idx].unite) _pfLignes[idx].unite = art.unite || art.uniteMesure || 'palette';
+      var pu = parseFloat(art.prixVente || art.prixVenteHT || art.prix || 0) || 0;
+      if (pu > 0) _pfLignes[idx].prixUnitaire = pu;
+    }
+  }
+  var q = parseFloat(_pfLignes[idx].qte) || 0;
+  var p = parseFloat(_pfLignes[idx].prixUnitaire) || 0;
+  _pfLignes[idx].montant = q * p;
+  renderPfLignes();
+  calcPfTotals();
+}
+
+function renderPfLignes() {
+  var c = document.getElementById('pfLignesContainer');
+  if (!c) return;
+  var articles = (typeof getArticles === 'function' ? getArticles() : []) || [];
+  var html = '<table class="lignes-table" style="width:100%;border-collapse:collapse"><thead><tr style="background:var(--gray-50)">' +
+    '<th style="width:40px"></th>' +
+    '<th>Désignation / Article</th>' +
+    '<th style="width:90px">Unité</th>' +
+    '<th style="width:90px;text-align:right">Quantité</th>' +
+    '<th style="width:115px;text-align:right">Prix unitaire</th>' +
+    '<th style="width:125px;text-align:right">Montant</th>' +
+    '<th style="width:40px"></th>' +
+    '</tr></thead><tbody>';
+
+  for (var i = 0; i < _pfLignes.length; i++) {
+    var l = _pfLignes[i];
+    if (l.isTitle) {
+      var _replie = !!l.titreSimple;
+      html += '<tr style="background:#f1f5f9;font-weight:700">';
+      html += '<td style="white-space:nowrap">' +
+        '<button type="button" class="btn-icon" onclick="removePfLigne(' + i + ')" title="Supprimer ce titre" style="color:#dc2626"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
+        '<button type="button" class="btn-icon" onclick="_pfLignes[' + i + '].titreSimple=' + (_replie ? 'false' : 'true') + ';renderPfLignes();calcPfTotals()" title="' + (_replie ? 'Afficher les montants du titre' : 'Replier en titre seul sans montants') + '" style="font-size:13px">' + (_replie ? '👁' : '👁‍🗨') + '</button></td>';
+
+      if (_replie) {
+        html += '<td colspan="4"><textarea rows="1" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" placeholder="Titre / Section (ex : Lot 1 - Palettes d\'expédition)" title="Titre seul : les montants sont portés par les sous-lignes" style="font-weight:700;border:none;background:transparent;font-size:13.5px;color:#0f172a;width:100%;resize:vertical" onchange="_pfLignes[' + i + '].titre=this.value">' + escH(l.titre || '') + '</textarea></td>';
+        html += '<td style="text-align:right;color:#64748b;font-size:11px;font-style:italic">sous-lignes comptées</td>';
+      } else {
+        html += '<td><textarea rows="1" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" placeholder="Titre / Section" style="font-weight:700;border:none;background:transparent;font-size:13.5px;color:#0f172a;width:100%;resize:vertical" onchange="_pfLignes[' + i + '].titre=this.value">' + escH(l.titre || '') + '</textarea></td>';
+        html += '<td><input type="text" value="' + escH(l.unite || '') + '" placeholder="lot, u..." style="width:100%;font-size:12px" onchange="_pfLignes[' + i + '].unite=this.value"></td>';
+        html += '<td><input type="number" value="' + (l.qte || '') + '" min="0" step="any" placeholder="0" style="width:100%;text-align:right;font-size:12.5px;font-weight:700" onchange="_pfLignes[' + i + '].qte=parseFloat(this.value)||0;_pfLignes[' + i + '].montant=(_pfLignes[' + i + '].qte||0)*(_pfLignes[' + i + '].prixUnitaire||0);calcPfTotals()"></td>';
+        html += '<td><input type="number" value="' + (l.prixUnitaire || '') + '" min="0" step="any" placeholder="0" style="width:100%;text-align:right;font-size:12.5px;font-weight:700" onchange="_pfLignes[' + i + '].prixUnitaire=parseFloat(this.value)||0;_pfLignes[' + i + '].montant=(_pfLignes[' + i + '].qte||0)*(_pfLignes[' + i + '].prixUnitaire||0);calcPfTotals()"></td>';
+        html += '<td style="text-align:right;font-weight:800;color:#0f172a;font-size:13px">' + fmtMoney(l.montant || 0) + '<div style="font-size:10px;font-weight:400;color:' + (((l.montant || 0) > 0) ? '#b45309' : '#64748b') + '">' + (((l.montant || 0) > 0) ? 'titre porteur' : 'sous-lignes comptées') + '</div></td>';
+      }
+      html += '<td style="text-align:center"><button type="button" class="btn btn-outline btn-sm" onclick="addPfSousLigne(' + i + ')" title="Ajouter une sous-ligne descriptive sous ce titre" style="padding:2px 6px;font-weight:700">+</button></td>';
+      html += '</tr>';
+
+      // Affichage des sous-lignes associées au titre
+      if (l.sousLignes && l.sousLignes.length > 0) {
+        for (var s = 0; s < l.sousLignes.length; s++) {
+          var sl = l.sousLignes[s];
+          html += '<tr style="background:#f8fafc">';
+          html += '<td style="text-align:right"><button type="button" class="btn-icon" onclick="removePfSousLigne(' + i + ',' + s + ')" title="Supprimer la sous-ligne" style="color:#94a3b8"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></td>';
+          html += '<td style="padding-left:26px"><textarea rows="1" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" placeholder="Détail / observation technique" style="width:100%;resize:vertical;font-size:12px;color:#334155" onchange="_pfLignes[' + i + '].sousLignes[' + s + '].designation=this.value">' + escH(sl.designation || '') + '</textarea></td>';
+          html += '<td><input type="text" value="' + escH(sl.unite || '') + '" placeholder="palette, u..." style="width:100%;font-size:12px" onchange="_pfLignes[' + i + '].sousLignes[' + s + '].unite=this.value"></td>';
+          html += '<td><input type="number" value="' + (sl.qte || '') + '" min="0" step="any" placeholder="0" style="width:100%;text-align:right;font-size:12px" onchange="_pfLignes[' + i + '].sousLignes[' + s + '].qte=parseFloat(this.value)||0;_pfLignes[' + i + '].sousLignes[' + s + '].montant=(_pfLignes[' + i + '].sousLignes[' + s + '].qte||0)*(_pfLignes[' + i + '].sousLignes[' + s + '].prixUnitaire||0);calcPfTotals()"></td>';
+          html += '<td><input type="number" value="' + (sl.prixUnitaire || '') + '" min="0" step="any" placeholder="0" style="width:100%;text-align:right;font-size:12px" onchange="_pfLignes[' + i + '].sousLignes[' + s + '].prixUnitaire=parseFloat(this.value)||0;_pfLignes[' + i + '].sousLignes[' + s + '].montant=(_pfLignes[' + i + '].sousLignes[' + s + '].qte||0)*(_pfLignes[' + i + '].sousLignes[' + s + '].prixUnitaire||0);calcPfTotals()"></td>';
+          html += '<td style="text-align:right;font-weight:700;color:#334155;font-size:12px">' + fmtMoney(sl.montant || 0) + '</td>';
+          html += '<td></td>';
+          html += '</tr>';
+        }
+      }
+    } else {
+      // Ligne normale d'article / produit fini
+      html += '<tr>';
+      html += '<td><button type="button" class="btn-icon" onclick="removePfLigne(' + i + ')" title="Supprimer cette ligne" style="color:#dc2626"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></td>';
+      html += '<td>';
+      html += '<select style="width:100%;margin-bottom:4px;font-size:12.5px;font-weight:600;padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px" onchange="onPfSelectArticle(' + i + ', this.value)">';
+      html += '<option value="">-- Choisir un article / produit fini (ou saisir ci-dessous) --</option>';
+      for (var a = 0; a < articles.length; a++) {
+        var art = articles[a];
+        if (!art || !art.id) continue;
+        var artTxt = (art.code ? (art.code + ' · ') : '') + (art.designation || art.nom || '');
+        html += '<option value="' + escH(art.id) + '"' + (l.articleId === art.id ? ' selected' : '') + '>' + escH(artTxt) + '</option>';
+      }
+      html += '</select>';
+      html += '<textarea rows="1" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" placeholder="Désignation libre ou complément" style="width:100%;resize:vertical;font-size:12px" onchange="_pfLignes[' + i + '].designation=this.value">' + escH(l.designation || '') + '</textarea>';
+      html += '</td>';
+      html += '<td><input type="text" value="' + escH(l.unite || '') + '" placeholder="palette, u..." style="width:100%;font-size:12px" onchange="_pfLignes[' + i + '].unite=this.value"></td>';
+      html += '<td><input type="number" value="' + (l.qte || '') + '" min="0" step="any" placeholder="0" style="width:100%;text-align:right;font-size:12.5px;font-weight:700" onchange="_pfLignes[' + i + '].qte=parseFloat(this.value)||0;_pfLignes[' + i + '].montant=(_pfLignes[' + i + '].qte||0)*(_pfLignes[' + i + '].prixUnitaire||0);calcPfTotals()"></td>';
+      html += '<td><input type="number" value="' + (l.prixUnitaire || '') + '" min="0" step="any" placeholder="0" style="width:100%;text-align:right;font-size:12.5px;font-weight:700" onchange="_pfLignes[' + i + '].prixUnitaire=parseFloat(this.value)||0;_pfLignes[' + i + '].montant=(_pfLignes[' + i + '].qte||0)*(_pfLignes[' + i + '].prixUnitaire||0);calcPfTotals()"></td>';
+      html += '<td style="text-align:right;font-weight:800;color:#0f172a;font-size:13px">' + fmtMoney(l.montant || 0) + '</td>';
+      html += '<td></td>';
+      html += '</tr>';
+    }
+  }
+
+  html += '</tbody></table>';
+  c.innerHTML = html;
+}
+
+function calcPfTotals() {
+  var totalHT = 0;
+  for (var i = 0; i < _pfLignes.length; i++) {
+    var l = _pfLignes[i];
+    l.montant = (parseFloat(l.qte) || 0) * (parseFloat(l.prixUnitaire) || 0);
+    totalHT += l.montant;
+    var _titrePorteur = !!(l.isTitle && (l.montant || 0) > 0);
+    if (l.sousLignes) {
+      for (var s = 0; s < l.sousLignes.length; s++) {
+        l.sousLignes[s].montant = (parseFloat(l.sousLignes[s].qte) || 0) * (parseFloat(l.sousLignes[s].prixUnitaire) || 0);
+        if (!_titrePorteur) totalHT += l.sousLignes[s].montant;
+      }
+    }
+  }
+
+  var tvaActive = document.getElementById('pfTvaActive') ? document.getElementById('pfTvaActive').checked : true;
+  var tauxTva = parseFloat(document.getElementById('pfTauxTva') ? document.getElementById('pfTauxTva').value : 18) || 0;
+  var tva = tvaActive ? (totalHT * tauxTva / 100) : 0;
+  var totalTTC = totalHT + tva;
+
+  var gt = document.getElementById('pfGrandTotal');
+  if (gt) {
+    gt.innerHTML = 'Total HT: ' + fmtMoney(Math.round(totalHT)) + (tvaActive ? (' | TVA (' + tauxTva + '%): ' + fmtMoney(Math.round(tva))) : '') + ' | Total TTC: ' + fmtMoney(Math.round(totalTTC)) + ' FCFA';
+  }
+}
+
 function openProformaModal(id) {
   var pf = null;
-  if (id) { var list = getProformas(); for (var i = 0; i < list.length; i++) { if (list[i].id === id) { pf = list[i]; break; } } }
+  if (id) {
+    var list = getProformas();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) { pf = list[i]; break; }
+    }
+  }
   if (id && !pf) { toast('Pro-forma introuvable', 'error'); return; }
-  if (pf && pf.statut === 'convertie') { toast('Pro-forma convertie en facture \u2014 modification verrouill\u00e9e.', 'error'); return; }
-  var pre = (!pf && _prefillProformaData) ? _prefillProformaData : null;
-  _prefillProformaData = null;
-  formLignes = [];
-  var srcLignes = (pf && pf.lignes) ? pf.lignes : (pre && pre.lignes ? pre.lignes : []);
-  var srcTva = (pf && pf.tauxTvaDefaut !== undefined) ? pf.tauxTvaDefaut : (pre && pre.tauxTvaDefaut !== undefined ? pre.tauxTvaDefaut : 18);
+  if (pf && pf.statut === 'convertie') {
+    toast('Pro-forma convertie en facture — modification verrouillée.', 'error');
+    return;
+  }
+
+  _pfEditId = id || '';
+  _pfLignes = [];
+
+  var srcLignes = (pf && pf.lignes) ? pf.lignes : [];
   for (var j = 0; j < srcLignes.length; j++) {
     var line = srcLignes[j];
-    formLignes.push({articleId:line.articleId||'', designation:line.designation||'', quantite:line.quantite||1, prixUnitaire:line.prixUnitaire||0, bcId:line.bcId||'', blId:line.blId||'', tvaRate:(line.tvaRate !== undefined ? line.tvaRate : srcTva)});
+    if (line.isTitle) {
+      _pfLignes.push({
+        isTitle: true,
+        titre: line.titre || line.designation || '',
+        titreSimple: !!line.titreSimple,
+        unite: line.unite || '',
+        qte: line.qte !== undefined ? line.qte : (line.quantite || ''),
+        prixUnitaire: line.prixUnitaire !== undefined ? line.prixUnitaire : '',
+        montant: line.montant || 0,
+        sousLignes: (line.sousLignes || []).map(function(sl) {
+          return {
+            designation: sl.designation || '',
+            unite: sl.unite || '',
+            qte: sl.qte !== undefined ? sl.qte : (sl.quantite || ''),
+            prixUnitaire: sl.prixUnitaire || 0,
+            montant: sl.montant || 0
+          };
+        })
+      });
+    } else {
+      var q = line.quantite !== undefined ? line.quantite : (line.qte !== undefined ? line.qte : 1);
+      var p = line.prixUnitaire || 0;
+      _pfLignes.push({
+        isTitle: false,
+        articleId: line.articleId || '',
+        designation: line.designation || '',
+        unite: line.unite || '',
+        qte: q,
+        prixUnitaire: p,
+        montant: line.montant || (q * p),
+        sousLignes: []
+      });
+    }
   }
+
+  if (_pfLignes.length === 0) {
+    addPfLigne();
+  }
+
+  var title = pf ? 'Modifier la pro-forma' : 'Nouvelle facture pro-forma';
+  var isTvaActive = pf ? (pf.tvaActive !== undefined ? !!pf.tvaActive : ((pf.tvaAmount || 0) > 0 || pf.tva === 'oui')) : true;
+  var tauxTva = (pf && (pf.tauxTva !== undefined ? pf.tauxTva : pf.tauxTvaDefaut)) || 18;
+
   var html = '';
   html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Num\u00e9ro *</label><input type="text" id="pfNumero" value="' + escH(pf ? pf.numero : getNumero('PF', getProformas())) + '"></div>';
+  html += '<div class="form-group"><label>Numéro *</label><input type="text" id="pfNumero" value="' + escH(pf ? pf.numero : getNumero('PF', getProformas())) + '"></div>';
   html += '<div class="form-group"><label>Client *</label><div id="pfClient"></div></div>';
   html += '</div>';
-  html += '<div class="form-group"><label>Objet / Titre (manuel, facultatif)</label><input type="text" id="pfObjet" value="' + escH(pf ? (pf.objet || '') : (pre ? (pre.objet || '') : '')) + '" placeholder="Ex : Fourniture de mat\u00e9riel de bureau"></div>';
-  html += '<div class="form-group"><label>Signataire (personnel + saisie libre)</label><input type="text" id="pfSignataire" list="pfSignataireList" value="' + escH(pf ? (pf.signataire || '') : (pre ? (pre.signataire || '') : getDefaultSignataire())) + '" placeholder="Choisir dans le personnel ou saisir librement"><datalist id="pfSignataireList"></datalist></div>';
+
   html += '<div class="form-row">';
   html += '<div class="form-group"><label>Date *</label><input type="date" id="pfDate" value="' + (pf ? pf.dateEmission : getToday()) + '" onchange="calcPfValidite()"></div>';
+  html += '<div class="form-group"><label>Statut</label><select id="pfStatut">';
+  html += '<option value="brouillon"' + (pf && pf.statut === 'brouillon' ? ' selected' : '') + '>Brouillon</option>';
+  html += '<option value="envoyee"' + (pf && pf.statut === 'envoyee' ? ' selected' : '') + '>Envoyée</option>';
+  html += '<option value="validee"' + ((!pf || pf.statut === 'validee') ? ' selected' : '') + '>Validée / Acceptée</option>';
+  html += '<option value="terminee"' + (pf && pf.statut === 'terminee' ? ' selected' : '') + '>Terminée (transformée)</option>';
+  html += '<option value="annulee"' + (pf && pf.statut === 'annulee' ? ' selected' : '') + '>Annulée / Rejetée</option>';
+  html += '</select></div>';
+  html += '</div>';
+
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label title="Quand les sous-lignes décrivent techniquement le lot, on peut cacher leurs colonnes de montants à l\'impression : seul le titre porte la valeur globale"><input type="checkbox" id="pfMasquerSous"' + ((pf && pf.masquerSousMontants) ? ' checked' : '') + ' style="margin-right:4px"> Masquer les montants des sous-lignes à l\'impression</label></div>';
+  html += '</div>';
+
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label><input type="checkbox" id="pfTvaActive"' + (isTvaActive ? ' checked' : '') + ' onchange="calcPfTotals()"> TVA applicable</label></div>';
+  html += '<div class="form-group"><label>Taux TVA (%)</label><input type="number" id="pfTauxTva" value="' + tauxTva + '" min="0" max="100" step="0.1" onchange="calcPfTotals()"></div>';
+  html += '</div>';
+
+  html += '<div class="form-row">';
+  html += '<div class="form-group" style="flex:2"><label>Conditions de règlement</label><textarea id="pfCond" rows="2" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" style="width:100%;resize:vertical" placeholder="Ex : Acompte 30% à la commande, solde à la livraison">' + escH(pf ? (pf.conditionsPaiement || '') : '30 jours, date de réception') + '</textarea></div>';
+  html += '<div class="form-group" style="flex:1"><label>Délai de livraison</label><textarea id="pfDelai" rows="2" oninput="this.style.height=\'auto\';this.style.height=this.scrollHeight+\'px\'" style="width:100%;resize:vertical" placeholder="Ex : 15 jours ouvrés">' + escH(pf ? (pf.delaiLivraison || '') : '') + '</textarea></div>';
+  html += '</div>';
+
+  html += '<div class="form-row">';
+  html += '<div class="form-group"><label>Référence dossier / Demande client (facultatif)</label><input type="text" id="pfRef" value="' + escH(pf ? (pf.reference || pf.bcClientRecu || '') : '') + '" placeholder="Ex : Appel d\'offres n°, Consultation réf..."></div>';
   html += '<div class="form-group"><label>Valable jusqu\'au</label><input type="date" id="pfValidite" value="' + (pf ? (pf.validite || '') : '') + '"></div>';
   html += '</div>';
-  html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Statut</label><select id="pfStatut">';
-  html += '<option value="validee"' + ((!pf || pf.statut === 'validee') ? ' selected' : '') + '>Valid\u00e9e</option>';
-  html += '<option value="brouillon"' + ((pf && pf.statut === 'brouillon') ? ' selected' : '') + '>Brouillon</option>';
-  html += '</select></div>';
-  html += '<div class="form-group"><label>Taux TVA par d\u00e9faut (%)</label><input type="number" id="pfTVA" value="' + srcTva + '" min="0" max="100" step="0.1" onchange="renderFormLignes()"></div>';
+
+  html += '<div class="form-group"><label>Signataire (personnel + saisie libre)</label><input type="text" id="pfSignataire" list="pfSignataireList" value="' + escH(pf ? (pf.signataire || '') : getDefaultSignataire()) + '" placeholder="Choisir dans le personnel ou saisir librement"><datalist id="pfSignataireList"></datalist></div>';
+  html += '<div class="form-group"><label>Observations / Conditions particulières</label><textarea id="pfObs" rows="2" placeholder="Informations complémentaires, validité des prix...">' + escH(pf ? (pf.notes || pf.observations || '') : '') + '</textarea></div>';
+  html += '<div class="form-group"><label>Objet / Titre (manuel, facultatif)</label><input type="text" id="pfObjet" value="' + escH(pf ? (pf.objet || '') : '') + '" placeholder="Ex : Fourniture de palettes en bois et caisses"></div>';
+
+  html += '<div class="form-group"><label style="font-weight:700">Lignes de la pro-forma</label>';
+  html += '<div style="margin-bottom:8px">';
+  html += '<button type="button" class="btn btn-outline btn-sm" onclick="addPfLigne()" style="margin-right:6px">+ Ajouter une ligne</button>';
+  html += '<button type="button" class="btn btn-outline btn-sm" onclick="addPfTitreLigne()" title="Ajouter une ligne de titre / section (texte libre)">+ Titre</button>';
   html += '</div>';
-  /* N\u00b0 BC client : saisie uniquement dans le tableau (colonne BC client) */
-  html += '<div class="form-row">';
-  html += '<div class="form-group"><label>D\u00e9lais de livraison (texte libre, autant que vous voulez)</label><textarea id="pfDelai" rows="2" placeholder="\u00e0 convenir">' + escH(pf ? (pf.delaiLivraison || '') : (pre ? (pre.delaiLivraison || '') : '')) + '</textarea></div>';
-  html += '<div class="form-group"><label>Conditions de paiement</label><input type="text" id="pfCond" value="' + escH(pf ? (pf.conditionsPaiement || '') : (pre ? (pre.conditionsPaiement || '') : '')) + '" placeholder="\u00e0 convenir"></div>';
-  html += '</div>';
-  html += '<div class="form-group"><label>Lignes de la pro-forma</label><div id="lignesContainer"></div></div>';
-  html += '<div class="form-group"><label>Notes / conditions</label><input type="text" id="pfNotes" value="' + escH(pf ? (pf.notes || '') : (pre ? (pre.notes || '') : '')) + '" placeholder="Ex : Paiement \u00e0 la commande"></div>';
+  html += '<div id="pfLignesContainer"></div></div>';
+
+  html += '<div class="grand-total" id="pfGrandTotal">Total HT: 0 FCFA | TVA: 0 FCFA | Total TTC: 0 FCFA</div>';
+
   var footer = '<button class="btn btn-outline" onclick="closeModal()">Annuler</button>';
   footer += '<button class="btn btn-primary" onclick="saveProforma(\'' + (id || '') + '\')">Enregistrer</button>';
-  openFormModal(pf ? 'Modifier la pro-forma' : 'Nouvelle pro-forma', html, footer, true);
-  populateClientSelect('pfClient', pf ? pf.clientId : (pre ? pre.clientId : ''));
+
+  openFormModal(title, html, footer, '85%');
+  populateClientSelect('pfClient', pf ? pf.clientId : '');
   fillSignataireDatalist('pfSignataireList');
-  renderFormLignes();
+  renderPfLignes();
+  calcPfTotals();
   calcPfValidite();
 }
-/* (saisie BC client : voir editPfBcClientInline dans le tableau) */
-/* BC client saisissable directement dans le tableau (avec suggestions du client) */
-function editPfBcClientInline(id, el) {
-  var list = getProformas(), cur = '', cid = '';
-  for (var i = 0; i < list.length; i++) { if (list[i].id === id) { cur = list[i].bcClientRecu || ''; cid = list[i].clientId || ''; break; } }
-  var seen = {}, dh = '';
-  /* D'abord les BC actifs du client (bons de commande li\u00e9s), puis les r\u00e9f\u00e9rences d\u00e9j\u00e0 utilis\u00e9es */
-  try {
-    var _ab = (typeof getBCsForClient === 'function' && cid) ? getBCsForClient(cid) : [];
-    for (var _bi = 0; _bi < _ab.length; _bi++) {
-      var _st = _ab[_bi].statut || '';
-      if (_st === 'annule' || _st === 'livre' || _st === 'termine') continue;
-      var _bn = _ab[_bi].numero || '';
-      if (_bn && !seen[_bn]) { seen[_bn] = 1; dh += '<option value="' + escH(_bn) + '">'; }
-    }
-  } catch (eB) {}
-  for (var j = 0; j < list.length; j++) {
-    var r = list[j].bcClientRecu || '';
-    if (!r || seen[r]) continue;
-    if (cid && list[j].clientId !== cid) continue;
-    seen[r] = 1; dh += '<option value="' + escH(r) + '">';
-  }
-  var td = el.parentNode;
-  td.innerHTML = '<input type="text" class="inline-edit-input" style="width:130px;text-align:left" list="pfBcDlCur" value="' + escH(cur) + '" placeholder="N\u00b0 BC..." onkeydown="if(event.key===\'Enter\'){savePfBcClientInline(\'' + id + '\',this.value)}else if(event.key===\'Escape\'){renderProformas()}"><datalist id="pfBcDlCur">' + dh + '</datalist>';
-  var inp = td.querySelector('input');
-  if (inp) { inp.focus(); inp.select(); }
-}
-function savePfBcClientInline(id, val) {
-  var list = getProformas();
-  for (var i = 0; i < list.length; i++) { if (list[i].id === id) { list[i].bcClientRecu = String(val || '').trim(); break; } }
-  DB.set('mdb_proformas', list);
-  try { if (typeof markDirty === 'function') markDirty('mdb_proformas'); } catch(eM) {}
-  renderProformas();
-}
+
 function calcPfValidite() {
   var di = document.getElementById('pfDate'), vi = document.getElementById('pfValidite');
   if (!di || !vi) return;
-  if (!vi.value && di.value) { try { vi.value = addDays(di.value, 30); } catch(e) {} }
+  if (!vi.value && di.value) {
+    try { vi.value = addDays(di.value, 30); } catch (e) {}
+  }
 }
+
 function saveProforma(id) {
   var clientEl = document.getElementById('pfClient');
   var clientId = clientEl ? clientEl.value : '';
-  if (!clientId) { toast('Veuillez s\u00e9lectionner un client', 'error'); return; }
-  var totalHT = 0, totalTVA = 0;
-  var defaultTva = parseFloat(document.getElementById('pfTVA').value) || 0;
-  for (var k = 0; k < formLignes.length; k++) {
-    var mt = (formLignes[k].quantite || 0) * (formLignes[k].prixUnitaire || 0);
-    var tvaRate = formLignes[k].tvaRate !== undefined ? formLignes[k].tvaRate : defaultTva;
+  if (!clientId) { toast('Veuillez sélectionner un client', 'error'); return; }
+
+  calcPfTotals();
+
+  var totalHT = 0;
+  for (var i = 0; i < _pfLignes.length; i++) {
+    var l = _pfLignes[i];
+    var mt = (parseFloat(l.qte) || 0) * (parseFloat(l.prixUnitaire) || 0);
+    l.montant = mt;
     totalHT += mt;
-    totalTVA += mt * tvaRate / 100;
-  }
-  var totalTTC = totalHT + totalTVA;
-  var bcIds = [], blIds = [];
-  for (var k2 = 0; k2 < formLignes.length; k2++) {
-    if (formLignes[k2].bcId && bcIds.indexOf(formLignes[k2].bcId) === -1) bcIds.push(formLignes[k2].bcId);
-    if (formLignes[k2].blId && blIds.indexOf(formLignes[k2].blId) === -1) blIds.push(formLignes[k2].blId);
-  }
-  var data = {
-    numero: document.getElementById('pfNumero').value.trim(),
-    clientId: clientId,
-    objet: document.getElementById('pfObjet').value.trim(),
-    signataire: document.getElementById('pfSignataire').value.trim(),
-    bcClientRecu: (function(){ var _b = document.getElementById('pfBcClient'); if (_b) return _b.value.trim(); if (id) { var _pl = getProformas(); for (var _pi = 0; _pi < _pl.length; _pi++) { if (_pl[_pi].id === id) return _pl[_pi].bcClientRecu || ''; } } return ''; })(),
-    dateEmission: document.getElementById('pfDate').value,
-    validite: document.getElementById('pfValidite').value,
-    statut: document.getElementById('pfStatut').value,
-    lignes: formLignes.slice(),
-    total: totalHT, tva: totalTVA > 0 ? 'oui' : 'non', tvaAmount: totalTVA, totalTTC: totalTTC, tauxTvaDefaut: defaultTva,
-    notes: document.getElementById('pfNotes').value.trim(),
-    delaiLivraison: document.getElementById('pfDelai').value.trim(),
-    conditionsPaiement: document.getElementById('pfCond').value.trim(),
-    bcIds: bcIds, blIds: blIds
-  };
-  var list = getProformas();
-  if (id) {
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].id === id) {
-        if (list[i].statut === 'convertie') { toast('Pro-forma convertie \u2014 modification verrouill\u00e9e.', 'error'); return; }
-        data.id = id; data.factureId = list[i].factureId || '';
-        list[i] = data; break;
+    var _titrePorteur = !!(l.isTitle && mt > 0);
+    if (l.sousLignes) {
+      for (var s = 0; s < l.sousLignes.length; s++) {
+        var smt = (parseFloat(l.sousLignes[s].qte) || 0) * (parseFloat(l.sousLignes[s].prixUnitaire) || 0);
+        l.sousLignes[s].montant = smt;
+        if (!_titrePorteur) totalHT += smt;
       }
     }
-  } else { data.id = DB.genId(); list.push(data); }
+  }
+
+  var tvaActive = document.getElementById('pfTvaActive') ? document.getElementById('pfTvaActive').checked : true;
+  var tauxTva = parseFloat(document.getElementById('pfTauxTva') ? document.getElementById('pfTauxTva').value : 18) || 0;
+  var totalTVA = tvaActive ? (totalHT * tauxTva / 100) : 0;
+  var totalTTC = totalHT + totalTVA;
+
+  var refVal = (document.getElementById('pfRef') ? document.getElementById('pfRef').value.trim() : '');
+  var obsVal = (document.getElementById('pfObs') ? document.getElementById('pfObs').value.trim() : '');
+  var masquerSous = document.getElementById('pfMasquerSous') ? document.getElementById('pfMasquerSous').checked : false;
+
+  var data = {
+    numero: (document.getElementById('pfNumero') ? document.getElementById('pfNumero').value.trim() : ''),
+    clientId: clientId,
+    objet: (document.getElementById('pfObjet') ? document.getElementById('pfObjet').value.trim() : ''),
+    signataire: (document.getElementById('pfSignataire') ? document.getElementById('pfSignataire').value.trim() : ''),
+    reference: refVal,
+    bcClientRecu: refVal,
+    dateEmission: (document.getElementById('pfDate') ? document.getElementById('pfDate').value : getToday()),
+    validite: (document.getElementById('pfValidite') ? document.getElementById('pfValidite').value : ''),
+    statut: (document.getElementById('pfStatut') ? document.getElementById('pfStatut').value : 'validee'),
+    lignes: JSON.parse(JSON.stringify(_pfLignes)),
+    total: totalHT,
+    totalHT: totalHT,
+    tva: totalTVA > 0 ? 'oui' : 'non',
+    tvaActive: tvaActive,
+    tauxTva: tauxTva,
+    tauxTvaDefaut: tauxTva,
+    tvaAmount: totalTVA,
+    totalTVA: totalTVA,
+    totalTTC: totalTTC,
+    masquerSousMontants: masquerSous,
+    notes: obsVal,
+    observations: obsVal,
+    delaiLivraison: (document.getElementById('pfDelai') ? document.getElementById('pfDelai').value.trim() : ''),
+    conditionsPaiement: (document.getElementById('pfCond') ? document.getElementById('pfCond').value.trim() : '')
+  };
+
+  var list = getProformas();
+  if (id) {
+    for (var k = 0; k < list.length; k++) {
+      if (list[k].id === id) {
+        if (list[k].statut === 'convertie') {
+          toast('Pro-forma convertie — modification verrouillée.', 'error');
+          return;
+        }
+        data.id = id;
+        data.factureId = list[k].factureId || '';
+        list[k] = data;
+        break;
+      }
+    }
+  } else {
+    data.id = DB.genId();
+    list.push(data);
+  }
+
   DB.set('mdb_proformas', list);
   closeModal();
-  toast('Pro-forma enregistr\u00e9e');
+  toast('Facture pro-forma enregistrée');
   renderProformas();
   buildSidebar();
 }
+
 function deleteProforma(id) {
   if (!window.confirm('Supprimer ce devis ?')) return;
   openConfirm('Supprimer cette pro-forma ?', function() {
@@ -22847,13 +23134,13 @@ function buildProformaDoc(id) {
   if (!pf) return null;
   var ent = getEntreprise() || {};
   var cl = getClientById(pf.clientId) || {};
-  var hasTva = (pf.tvaAmount || 0) > 0;
+  var hasTva = (pf.tvaActive !== undefined) ? !!pf.tvaActive : ((pf.tvaAmount || pf.totalTVA || 0) > 0);
   var ttc = pf.totalTTC || pf.total || 0;
-  var tvaPct = pf.tauxTvaDefaut || 18;
+  var tvaPct = pf.tauxTva || pf.tauxTvaDefaut || 18;
   var devise = 'FCFA'; try { devise = getDevise() || 'FCFA'; } catch (eDv) {}
   var metaItems = [['Date', fmtDate(pf.dateEmission || '')]];
-  if (pf.validite) metaItems.push(['Date de fin de validit\u00e9', fmtDate(pf.validite)]);
-  if (pf.bcClientRecu) metaItems.push(['R\u00e9f', pf.bcClientRecu]);
+  if (pf.validite) metaItems.push(['Valable jusqu\'au', fmtDate(pf.validite)]);
+  if (pf.reference || pf.bcClientRecu) metaItems.push(['Réf', pf.reference || pf.bcClientRecu]);
   var body = docBand(ent, 'Facture Proforma ' + (pf.numero || ''), metaItems, '#ea580c');
   body += '<div class="dp-body">';
   var clLines = [];
@@ -22862,41 +23149,66 @@ function buildProformaDoc(id) {
   if (cl.email) clLines.push(cl.email);
   var entLines = [];
   if (ent.adresse) entLines.push(ent.adresse);
-  if (ent.telephone) entLines.push('T\u00e9l : ' + ent.telephone);
+  if (ent.telephone) entLines.push('Tél : ' + ent.telephone);
   if (ent.email) entLines.push(ent.email);
   if (ent.rc) entLines.push('RC : ' + ent.rc);
-  body += docParties('\u00c9metteur', ent.nom || 'Mon Entreprise', entLines, 'Adress\u00e9 \u00e0', cl.nom || '-', clLines);
-  body += '<div class="dp-devnote">Montants exprim\u00e9s en ' + escH(devise) + '</div>';
+  body += docParties('Émetteur', ent.nom || 'Mon Entreprise', entLines, 'Adressé à', cl.nom || '-', clLines);
+  body += '<div class="dp-devnote">Montants exprimés en ' + escH(devise) + '</div>';
   if (pf.objet) body += '<div class="dp-objet">Objet : ' + escH(pf.objet) + '</div>';
-  /* Unite : seulement ce qui a ete saisi (plus de « U » par defaut) ; si aucune ligne n'a d'unite, la colonne disparait. */
-  var _unites = (pf.lignes || []).map(function (l0) { var a0 = l0.articleId ? getArticleById(l0.articleId) : null; return String(l0.unite || (a0 ? (a0.unite || a0.uniteMesure || '') : '') || '').trim(); });
-  var _avecUnite = _unites.some(function (u) { return !!u; });
-  body += '<table class="dp-table"><thead><tr><th>D\u00e9signation</th><th class="ctr">Qt\u00e9</th>' + (_avecUnite ? '<th class="ctr">Unit\u00e9</th>' : '') + '<th class="num">P.U. HT</th><th class="num">Total HT</th></tr></thead><tbody>';
+
+  var _avecUnite = false;
+  (pf.lignes || []).forEach(function(l0) {
+    if (l0.unite) _avecUnite = true;
+    if (l0.sousLignes) {
+      l0.sousLignes.forEach(function(sl0) { if (sl0.unite) _avecUnite = true; });
+    }
+  });
+
+  body += '<table class="dp-table"><thead><tr><th>Désignation</th><th class="ctr">Qté</th>' + (_avecUnite ? '<th class="ctr">Unité</th>' : '') + '<th class="num">P.U. HT</th><th class="num">Total HT</th></tr></thead><tbody>';
   if (pf.lignes) {
+    var _masq = !!pf.masquerSousMontants;
     for (var j = 0; j < pf.lignes.length; j++) {
       var l = pf.lignes[j];
-      var mt = (l.quantite || 0) * (l.prixUnitaire || 0);
-      var ltr = (l.tvaRate !== undefined ? l.tvaRate : tvaPct);
-      var _pa = l.articleId ? getArticleById(l.articleId) : null;
-      var _pc = _pa ? (_pa.code || '') : '';
-      var _pd = l.designation || (_pa ? (_pa.designation || '') : '') || '-';
-      var _un = _unites[j] || '';
-      body += '<tr><td>' + escH((_pc ? _pc + ' - ' : '') + _pd) + '</td><td class="ctr">' + (l.quantite || 0) + '</td>' + (_avecUnite ? '<td class="ctr">' + escH(_un) + '</td>' : '') + '<td class="num">' + fmtPrint(l.prixUnitaire || 0) + '</td><td class="num">' + fmtPrint(mt) + '</td></tr>';
+      if (l.isTitle) {
+        var mtTitre = (parseFloat(l.montant) || ((parseFloat(l.qte) || 0) * (parseFloat(l.prixUnitaire) || 0)));
+        if (mtTitre > 0 || (l.qte && parseFloat(l.qte) > 0) || (l.prixUnitaire && parseFloat(l.prixUnitaire) > 0)) {
+          body += '<tr class="titre-row"><td><strong>' + nl2brH(l.titre || l.designation || 'Sans titre') + '</strong></td><td class="ctr">' + (l.qte || l.quantite || '-') + '</td>' + (_avecUnite ? '<td class="ctr">' + escH(l.unite || '-') + '</td>' : '') + '<td class="num">' + (l.prixUnitaire ? fmtPrint(l.prixUnitaire) : '-') + '</td><td class="num"><strong>' + fmtPrint(mtTitre) + '</strong></td></tr>';
+        } else {
+          body += '<tr class="titre-row"><td colspan="' + (_avecUnite ? '5' : '4') + '" style="background:#f8fafc;font-weight:800;font-size:13px;padding:6px 8px"><strong>' + nl2brH(l.titre || l.designation || 'Sans titre') + '</strong></td></tr>';
+        }
+        if (l.sousLignes && l.sousLignes.length > 0) {
+          for (var s = 0; s < l.sousLignes.length; s++) {
+            var sl = l.sousLignes[s];
+            if (_masq) {
+              body += '<tr class="sous-ligne"><td style="padding-left:22px;color:#475569">' + nl2brH(sl.designation || '-') + '</td><td class="ctr"></td>' + (_avecUnite ? '<td class="ctr"></td>' : '') + '<td class="num"></td><td class="num"></td></tr>';
+            } else {
+              body += '<tr class="sous-ligne"><td style="padding-left:22px;color:#475569">' + nl2brH(sl.designation || '-') + '</td><td class="ctr">' + (sl.qte || '-') + '</td>' + (_avecUnite ? '<td class="ctr">' + escH(sl.unite || '-') + '</td>' : '') + '<td class="num">' + (sl.prixUnitaire ? fmtPrint(sl.prixUnitaire) : '-') + '</td><td class="num">' + fmtPrint(sl.montant || 0) + '</td></tr>';
+            }
+          }
+        }
+      } else {
+        var _pa = l.articleId ? getArticleById(l.articleId) : null;
+        var _pc = _pa ? (_pa.code || '') : '';
+        var _pd = l.designation || (_pa ? (_pa.designation || '') : '') || '-';
+        var _un = l.unite || (_pa ? (_pa.unite || _pa.uniteMesure || '') : '') || '';
+        var mt = l.montant !== undefined ? l.montant : ((l.quantite || l.qte || 0) * (l.prixUnitaire || 0));
+        body += '<tr><td>' + escH((_pc ? _pc + ' - ' : '') + _pd) + '</td><td class="ctr">' + (l.quantite || l.qte || 0) + '</td>' + (_avecUnite ? '<td class="ctr">' + escH(_un || '-') + '</td>' : '') + '<td class="num">' + fmtPrint(l.prixUnitaire || 0) + '</td><td class="num">' + fmtPrint(mt) + '</td></tr>';
+      }
     }
   }
   body += '<tr class="dp-fill"><td>&nbsp;</td><td></td>' + (_avecUnite ? '<td></td>' : '') + '<td></td><td></td></tr>';
   body += '</tbody></table>';
   body += '<div class="dp-bottom"><div class="dp-bleft">';
-  body += '<div><span class="lbl">Conditions de r\u00e8glement :</span> ' + escH(pf.conditionsPaiement || '\u00e0 convenir') + '</div>';
-  body += '<div><span class="lbl">D\u00e9lais de livraison :</span> ' + escH(pf.delaiLivraison || '\u00e0 convenir') + '</div>';
-  if (ent.banque || ent.rib) body += '<div class="dp-bank"><span class="lbl">R\u00e8glement par virement sur le compte suivant :</span><br>Banque : ' + escH(ent.banque || '-') + '<br>N\u00b0 compte : ' + escH(ent.rib || '-') + '</div>';
-  if (pf.notes) body += '<div><span class="lbl">Observation :</span> ' + escH(pf.notes) + '</div>';
-  body += docSommeEnLettres('Arr\u00eat\u00e9e la pr\u00e9sente pro forma \u00e0 la somme de :', ttc);
-  body += '<div class="dp-mention">Document sans valeur comptable \u2014 ne tient pas lieu de facture.</div>';
+  body += '<div><span class="lbl">Conditions de règlement :</span> ' + escH(pf.conditionsPaiement || 'à convenir') + '</div>';
+  body += '<div><span class="lbl">Délais de livraison :</span> ' + escH(pf.delaiLivraison || 'à convenir') + '</div>';
+  if (ent.banque || ent.rib) body += '<div class="dp-bank"><span class="lbl">Règlement par virement sur le compte suivant :</span><br>Banque : ' + escH(ent.banque || '-') + '<br>N° compte : ' + escH(ent.rib || '-') + '</div>';
+  if (pf.notes || pf.observations) body += '<div><span class="lbl">Observation :</span> ' + escH(pf.notes || pf.observations) + '</div>';
+  body += docSommeEnLettres('Arrêtée la présente pro forma à la somme de :', ttc);
+  body += '<div class="dp-mention">Document sans valeur comptable — ne tient pas lieu de facture.</div>';
   body += '</div><div class="dp-bright">';
   body += '<table class="dp-totals">';
-  body += '<tr><td>Total HT</td><td class="num">' + fmtPrint(pf.total || 0) + '</td></tr>';
-  if (hasTva) body += '<tr><td>TVA ' + tvaPct + ' %</td><td class="num">' + fmtPrint(pf.tvaAmount || 0) + '</td></tr>';
+  body += '<tr><td>Total HT</td><td class="num">' + fmtPrint(pf.totalHT || pf.total || 0) + '</td></tr>';
+  if (hasTva) body += '<tr><td>TVA ' + tvaPct + ' %</td><td class="num">' + fmtPrint(pf.tvaAmount || pf.totalTVA || 0) + '</td></tr>';
   body += '<tr><td>Total TTC</td><td class="num">' + fmtPrint(ttc) + '</td></tr>';
   body += '</table><div class="dp-net"><span>NET A PAYER</span><span class="dp-netval">' + fmtPrint(ttc) + ' ' + escH(devise) + '</span></div>';
   body += '<div class="dp-signcap">Cachet, Signature</div><div class="dp-signbox"></div>';
@@ -22909,13 +23221,6 @@ function buildProformaDoc(id) {
   } catch (eQR) {}
   body += docFooter(ent);
   return { title: 'Pro-forma ' + (pf.numero || ''), body: body, numero: pf.numero || '', clientNom: (cl.nom || ''), dateStr: (pf.dateEmission || '') };
-}
-/* Nom auto du PDF : KIND_numero_client_date */
-function docPdfFilename(kind, numero, clientNom, dateStr) {
-  var d = (dateStr || '').split('-');
-  var ds = d.length === 3 ? (d[2] + '-' + d[1] + '-' + d[0]) : (dateStr || '');
-  var s = kind + '_' + (numero || '') + '_' + (clientNom || '') + '_' + ds;
-  return s.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') + '.pdf';
 }
 function printProforma(id) {
   var d = buildProformaDoc(id);
@@ -23022,11 +23327,28 @@ function convertProformaToFacture(id) {
     var defaultTva = pf.tauxTvaDefaut || 18;
     var totalHT = 0, totalTVA = 0;
     for (var k = 0; k < lignes.length; k++) {
-      var mt = (lignes[k].quantite || 0) * (lignes[k].prixUnitaire || 0);
-      var tr = (lignes[k].tvaRate !== undefined ? lignes[k].tvaRate : defaultTva);
-      lignes[k].tvaRate = tr;
-      lignes[k].blId = '';
-      totalHT += mt; totalTVA += mt * tr / 100;
+      var lk = lignes[k];
+      var q = parseFloat(lk.qte !== undefined ? lk.qte : lk.quantite) || 0;
+      var p = parseFloat(lk.prixUnitaire) || 0;
+      var mt = q * p;
+      var tr = (lk.tvaRate !== undefined ? lk.tvaRate : defaultTva);
+      lk.tvaRate = tr;
+      lk.blId = '';
+      lk.quantite = q;
+      lk.prixUnitaire = p;
+      lk.montant = mt;
+      totalHT += mt;
+      totalTVA += mt * tr / 100;
+      if (lk.isTitle && lk.sousLignes && mt === 0) {
+        for (var sk = 0; sk < lk.sousLignes.length; sk++) {
+          var slk = lk.sousLignes[sk];
+          var sq = parseFloat(slk.qte !== undefined ? slk.qte : slk.quantite) || 0;
+          var sp = parseFloat(slk.prixUnitaire) || 0;
+          var smt = sq * sp;
+          totalHT += smt;
+          totalTVA += smt * tr / 100;
+        }
+      }
     }
     var cli = getClientById(pf.clientId);
     var facDate = getToday();
@@ -58235,7 +58557,7 @@ function renderCoutRevient() {
 
   var h = '';
   h += '<style>' +
-    '.cr-container { display:grid; grid-template-columns: 1fr 1.08fr; gap:16px; margin-bottom:20px; }' +
+    '.cr-container { display:grid; grid-template-columns: 1fr 1.18fr; gap:18px; margin-bottom:20px; }' +
 '@media(max-width:1150px){ .cr-container { grid-template-columns: 1fr; } }' +
 '.cr-input-num::-webkit-outer-spin-button, .cr-input-num::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }' +
 '.cr-input-num { -moz-appearance:textfield; text-align:right; font-variant-numeric:tabular-nums; font-weight:700; }' +
@@ -58368,12 +58690,12 @@ function renderCoutRevient() {
   h += '  <table class="cr-table" style="width:100%;table-layout:fixed">';
   h += '    <thead>';
   h += '      <tr>';
-  h += '        <th style="width:auto;min-width:110px">Pièce de bois</th>';
-  h += '        <th style="width:72px;min-width:72px;text-align:right" title="Longueur en centimètres">Long (cm)</th>';
-  h += '        <th style="width:72px;min-width:72px;text-align:right" title="Largeur en centimètres">Larg (cm)</th>';
-  h += '        <th style="width:68px;min-width:68px;text-align:right" title="Épaisseur en centimètres">Ép (cm)</th>';
-  h += '        <th style="width:54px;min-width:54px;text-align:right" title="Quantité de pièces">Qté</th>';
-  h += '        <th style="width:88px;min-width:88px;text-align:right" title="Volume net en m³">Vol (m³)</th>';
+  h += '        <th style="width:auto;min-width:100px">Pièce de bois</th>';
+  h += '        <th style="width:88px;min-width:88px;text-align:right" title="Longueur en centimètres">Long (cm)</th>';
+  h += '        <th style="width:88px;min-width:88px;text-align:right" title="Largeur en centimètres">Larg (cm)</th>';
+  h += '        <th style="width:82px;min-width:82px;text-align:right" title="Épaisseur en centimètres">Ép (cm)</th>';
+  h += '        <th style="width:64px;min-width:64px;text-align:right" title="Quantité de pièces">Qté</th>';
+  h += '        <th style="width:98px;min-width:98px;text-align:right" title="Volume net en m³">Vol (m³)</th>';
   h += '        <th style="width:28px;text-align:center"></th>';
   h += '      </tr>';
   h += '    </thead>';
@@ -58381,12 +58703,12 @@ function renderCoutRevient() {
 
   (sim.boisPieces || []).forEach(function(p, pIdx) {
     h += '<tr>';
-    h += '  <td><input type="text" class="cr-input" style="font-size:12px;padding:6px 8px;font-weight:700" value="' + escH(p.nom || '') + '" data-idx="' + pIdx + '" data-field="nom" onchange="crOnInputPiece(this)"></td>';
-    h += '  <td><input type="number" step="any" class="cr-input cr-input-num" style="padding:6px 4px;font-size:13px;font-weight:800;color:#1e293b" value="' + (p.l || 0) + '" data-idx="' + pIdx + '" data-field="l" onchange="crOnInputPiece(this)"></td>';
-    h += '  <td><input type="number" step="any" class="cr-input cr-input-num" style="padding:6px 4px;font-size:13px;font-weight:800;color:#1e293b" value="' + (p.w || 0) + '" data-idx="' + pIdx + '" data-field="w" onchange="crOnInputPiece(this)"></td>';
-    h += '  <td><input type="number" step="any" class="cr-input cr-input-num" style="padding:6px 4px;font-size:13px;font-weight:800;color:#1e293b" value="' + (p.e || 0) + '" data-idx="' + pIdx + '" data-field="e" onchange="crOnInputPiece(this)"></td>';
-    h += '  <td><input type="number" step="1" class="cr-input cr-input-num" style="padding:6px 4px;font-size:13px;font-weight:800;color:#1e293b" value="' + (p.qte || 0) + '" data-idx="' + pIdx + '" data-field="qte" onchange="crOnInputPiece(this)"></td>';
-    h += '  <td style="text-align:right;font-weight:900;color:#78350f;font-size:13px;padding-right:6px;font-variant-numeric:tabular-nums">' + (p.vol || 0).toFixed(5) + '</td>';
+    h += '  <td><input type="text" class="cr-input" style="height:38px;font-size:12.5px;padding:6px 8px;font-weight:700;border:1.5px solid #cbd5e1;border-radius:8px" value="' + escH(p.nom || '') + '" data-idx="' + pIdx + '" data-field="nom" onchange="crOnInputPiece(this)"></td>';
+    h += '  <td><input type="number" step="any" class="cr-input cr-input-num" style="height:38px;padding:6px 8px;font-size:14px;font-weight:800;color:#0f172a;border:1.5px solid #94a3b8;border-radius:8px;background:#fff" value="' + (p.l || 0) + '" data-idx="' + pIdx + '" data-field="l" onchange="crOnInputPiece(this)"></td>';
+    h += '  <td><input type="number" step="any" class="cr-input cr-input-num" style="height:38px;padding:6px 8px;font-size:14px;font-weight:800;color:#0f172a;border:1.5px solid #94a3b8;border-radius:8px;background:#fff" value="' + (p.w || 0) + '" data-idx="' + pIdx + '" data-field="w" onchange="crOnInputPiece(this)"></td>';
+    h += '  <td><input type="number" step="any" class="cr-input cr-input-num" style="height:38px;padding:6px 8px;font-size:14px;font-weight:800;color:#0f172a;border:1.5px solid #94a3b8;border-radius:8px;background:#fff" value="' + (p.e || 0) + '" data-idx="' + pIdx + '" data-field="e" onchange="crOnInputPiece(this)"></td>';
+    h += '  <td><input type="number" step="1" class="cr-input cr-input-num" style="height:38px;padding:6px 8px;font-size:14px;font-weight:800;color:#0f172a;border:1.5px solid #94a3b8;border-radius:8px;background:#fff" value="' + (p.qte || 0) + '" data-idx="' + pIdx + '" data-field="qte" onchange="crOnInputPiece(this)"></td>';
+    h += '  <td style="text-align:right;font-weight:900;color:#78350f;font-size:14px;padding-right:6px;font-variant-numeric:tabular-nums">' + (p.vol || 0).toFixed(5) + '</td>';
     h += '  <td style="text-align:center"><button class="cr-btn-del" onclick="crSupprimerPieceBois(' + pIdx + ')">✕</button></td>';
     h += '</tr>';
   });
