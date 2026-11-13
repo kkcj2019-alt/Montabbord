@@ -501,8 +501,10 @@
         h+='<div class="card" style="margin-top:8px;background:#f8fafc"><div class="meta" style="margin:0 0 6px"><b>Validation et paiement</b> — choisissez la source et le mois de prélèvement.</div>'
           +'<div class="row"><div><label style="font-size:11px;font-weight:800">Source</label><select id="pay-type" onchange="window.__loadSources()"><option value="caisse">Caisse</option><option value="banque">Banque</option></select></div>'
           +'<div><label style="font-size:11px;font-weight:800">Caisse / banque</label><select id="pay-source"></select></div>'
-          +'<div><label style="font-size:11px;font-weight:800">Montant accordé</label><input type="number" id="pay-montant" min="0" step="1000" value="'+(Math.round(parseFloat(r.montant)||0))+'"></div>'
+          +'<div><label style="font-size:11px;font-weight:800">Montant accordé</label><input type="number" id="pay-montant" min="0" step="1000" oninput="window.__payCalcMensualite()" value="'+(Math.round(parseFloat(r.montant)||0))+'"></div>'
           +'<div><label style="font-size:11px;font-weight:800">Mois de déduction</label><input type="month" id="pay-mois" value="'+(r.moisDeduction||"")+'"></div>'
+          +(r.type==="pret"?'<div><label style="font-size:11px;font-weight:800">Durée du prêt (mois)</label><input type="number" id="pay-duree" min="1" step="1" value="'+(Math.max(1, parseInt(r.dureeMois)||1))+'" oninput="window.__payCalcMensualite()"></div>'
+          +'<div><label style="font-size:11px;font-weight:800">Mensualité (FCFA)</label><input type="number" id="pay-mensualite" min="0" step="100" value="'+Math.round((parseFloat(r.montant)||0)/Math.max(1,parseInt(r.dureeMois)||1))+'"></div>':'')
           +'<div style="max-width:180px"><button class="btn green sm" style="width:100%" onclick="window.__acceptPay(\''+esc(r.id)+'\')">✅ Accepter et payer</button></div></div></div>';
       } else if(r.traitement&&r.traitement.paiement){
         h+='<div class="meta" style="margin-top:8px;color:#166534"><b>✅ Paiement enregistré</b> — '+esc(r.traitement.sourceType==="banque"?"Banque":"Caisse")+' '+esc(r.traitement.sourceName||"")+' · '+money(r.traitement.montant)+' · déduction '+esc(mois(r.traitement.moisDeduction||""))+'</div>';
@@ -512,7 +514,7 @@
     (r.messages||[]).forEach(function(m){var emp=m.auteur==="employe";h+='<div class="msg '+(emp?"emp":"rh")+'"><div class="who">'+esc(emp?(r.nom||"Employé"):(m.nom||"Administration"))+'</div>'+esc(m.texte)+'<div class="at">'+esc(fdt(m.at))+'</div></div>';});
     h+='</div>';
     h+='<div class="row"><textarea id="rep" rows="3" placeholder="Répondre à l’employé…"></textarea><button class="btn sm" style="max-width:120px" onclick="window.__reply(\''+esc(r.id)+'\')">Envoyer</button></div><div class="err" id="err"></div>';
-    if(_isPay&&r.statut!=="acceptee")setTimeout(function(){try{window.__loadSources();}catch(e){}},30);
+    if(_isPay&&r.statut!=="acceptee")setTimeout(function(){try{window.__loadSources();window.__payCalcMensualite();}catch(e){}},30);
     return h;
   }
   window.__filter=function(f){state.filter=f;state.kpiFilter='';state.open=null;state.focus={id:"reqSearch",pos:state.reqSearch.length};renderAll();};
@@ -681,16 +683,31 @@
       }).catch(function(){ alert('Connexion impossible. Réessayez.'); });    });
   };
   window.__loadSources=function(){var type=(document.getElementById("pay-type")||{}).value||"caisse";var cle=type==="banque"?"mdb_banques":"mdb_caisses";var sel=document.getElementById("pay-source");if(sel)sel.innerHTML='<option value="">Chargement…</option>';fetch(SYNC+"?uid="+encodeURIComponent(uid)+"&cle="+cle+"&t="+Date.now(),{cache:"no-store"}).then(function(r){return r.ok?r.json():null;}).then(function(j){var v=j&&j.data&&j.data[cle];if(typeof v==="string"){try{v=JSON.parse(v)}catch(e){v=null}}var arr=Array.isArray(v)?v:[];if(!sel)return;sel.innerHTML=arr.length?arr.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.nom||s.libelle||s.code||"Sans nom")+'</option>';}).join(""):'<option value="">Aucune source</option>';}).catch(function(){if(sel)sel.innerHTML='<option value="">Erreur</option>';});};
+  window.__payCalcMensualite=function(){
+    var mt = parseFloat((document.getElementById('pay-montant') || {}).value || 0) || 0;
+    var dEl = document.getElementById('pay-duree');
+    var mel = document.getElementById('pay-mensualite');
+    if (!dEl || !mel) return;
+    if (window.__payMensualiteManuelle) return;
+    var d = parseInt(dEl.value, 10) || 1;
+    mel.value = Math.round(mt / Math.max(1, d));
+  };
   window.__acceptPay=function(id){
     var type = (document.getElementById('pay-type') || {}).value || 'caisse';
     var sourceId = (document.getElementById('pay-source') || {}).value || '';
     var m = (document.getElementById('pay-mois') || {}).value || '';
     var mt = parseFloat((document.getElementById('pay-montant') || {}).value || 0);
+    var dEl = document.getElementById('pay-duree');
+    var duree = dEl ? (parseInt(dEl.value, 10) || 0) : 0;
+    var menEl = document.getElementById('pay-mensualite');
+    var mens = menEl ? (parseFloat(menEl.value) || 0) : 0;
     if (!sourceId) { alert('Choisissez la caisse ou la banque.'); return; }
     if (!/^\d{4}-\d{2}$/.test(m)) { alert('Choisissez le mois de déduction.'); return; }
     if (!(mt > 0)) { alert('Saisissez le montant accordé.'); return; }
+    if (dEl && !(duree > 0)) { alert('Indiquez la durée du prêt en mois.'); return; }
+    if (dEl && !(mens > 0)) { alert('Indiquez la mensualité du prêt.'); return; }
     window.__mdbAsk({ title: 'Accepter la demande', label: 'Commentaire d’acceptation (facultatif)', value: '', okText: 'Accepter', onOk: function (com) {
-      api('admindecision', { requestId: id, statut: 'acceptee', commentaire: com, sourceType: type, sourceId: sourceId, moisDeduction: m, montant: mt, nom: me.nom, role: me.role }).then(function (j) {
+      api('admindecision', { requestId: id, statut: 'acceptee', commentaire: com, sourceType: type, sourceId: sourceId, moisDeduction: m, montant: mt, dureeMois: duree, montantMensuel: mens, nom: me.nom, role: me.role }).then(function (j) {
         if (j && j.ok) { loadAll(); state.open = id; } else alert('Validation impossible : ' + ((j && j.code) || 'erreur'));
       });
     } });

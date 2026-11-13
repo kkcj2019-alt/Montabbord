@@ -895,7 +895,8 @@ export async function onRequest(context) {
         } catch (eNomEmp) {}
         const libelle = (apType === 'pret' ? 'Prêt employé : ' : 'ACOMPTE SALAIRE : ') + nomEmp + (moisTexte ? '/Mois de ' + moisTexte : '');
         const duree = apType === 'pret' ? Math.max(0, Math.round(parseFloat(body.dureeMois) || parseFloat(req.dureeMois) || 0)) : 0;
-        const montantMensuel = (apType === 'pret' && duree > 0) ? Math.round(montant / duree) : montant;
+        const _mensBody = parseFloat(body.montantMensuel) || 0;
+        const montantMensuel = (apType === 'pret' && duree > 0) ? Math.round(_mensBody > 0 ? _mensBody : (montant / duree)) : montant;
         if (sourceType === 'banque') {
           const bops = parseVal(await lireCle(db, uid, 'mdb_banqueOperations'), []);
           const arr = Array.isArray(bops) ? bops : [];
