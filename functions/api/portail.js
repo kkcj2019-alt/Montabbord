@@ -860,14 +860,54 @@ export async function onRequest(context) {
         const opId = 'OP' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
         const apId = 'AP' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase();
         const num = 'REQ-' + req.id;
-        const libelle = (req.type === 'pret' ? 'Prêt' : 'Acompte') + ' ' + req.nom + ' — ' + moisDed;
+        /* Meme presentation qu'un acompte / pret saisi depuis la Caisse :
+           code ACOMPTE-SAL ou PRET, libelle uniforme avec le mois, et tous
+           les champs ap* necessaires a la Paie et a la repartition. */
+        const MOIS_FR = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+        const _mp = /^\d{4}-\d{2}$/.test(moisDed) ? moisDed.split('-') : null;
+        const moisTexte = _mp ? (MOIS_FR[parseInt(_mp[1], 10) - 1] + ' ' + _mp[0]) : moisDed;
+        const apType = req.type === 'pret' ? 'pret' : 'acompte';
+        const wantCode = req.type === 'pret' ? 'PRET' : 'ACOMPTE-SAL';
+        const codeCandidates = req.type === 'pret' ? ['PRET','PRET-SAL','PRET_SAL'] : ['ACOMPTE-SAL','ACOMPTE_SAL','ACOMPTE'];
+        let codeObj = null;
+        try {
+          const codes = parseVal(await lireCle(db, uid, 'mdb_codesCaisse'), []);
+          const arrC = Array.isArray(codes) ? codes : [];
+          codeObj = arrC.find(c => c && codeCandidates.indexOf(String(c.code || '').toUpperCase().trim()) >= 0) || null;
+          if (!codeObj) {
+            codeObj = {
+              id: 'CD' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase(),
+              code: wantCode,
+              libelle: req.type === 'pret' ? 'Prêt sur salaire' : 'ACOMPTE SALAIRE',
+              sens: 'sortie', montantDefaut: 0, pinned: false
+            };
+            arrC.push(codeObj);
+            await ecrireCle(db, uid, 'mdb_codesCaisse', arrC);
+          }
+        } catch (eCode) {}
+        const codeLabel = codeObj ? String(codeObj.code || wantCode) : wantCode;
+        const codeId = codeObj ? codeObj.id : '';
+        let nomEmp = String(req.nom || '').trim();
+        try {
+          const empsReq = parseVal(await lireCle(db, uid, 'mdb_employes'), []);
+          const er = (Array.isArray(empsReq) ? empsReq : []).find(x => x && String(x.id) === String(req.empId));
+          if (er) nomEmp = (((er.nom || '') + ' ' + (er.prenoms || '')).trim()) || nomEmp;
+        } catch (eNomEmp) {}
+        const libelle = (apType === 'pret' ? 'Prêt employé : ' : 'ACOMPTE SALAIRE : ') + nomEmp + (moisTexte ? '/Mois de ' + moisTexte : '');
+        const duree = apType === 'pret' ? Math.max(0, Math.round(parseFloat(body.dureeMois) || parseFloat(req.dureeMois) || 0)) : 0;
+        const montantMensuel = (apType === 'pret' && duree > 0) ? Math.round(montant / duree) : montant;
         if (sourceType === 'banque') {
           const bops = parseVal(await lireCle(db, uid, 'mdb_banqueOperations'), []);
           const arr = Array.isArray(bops) ? bops : [];
           arr.push({
             id: opId, banqueId: sourceId, date, heure, sens: 'sortie', montant,
-            libelle, reference: num, beneficiaireType: 'employe', beneficiaireId: req.empId,
-            beneficiaireNom: req.nom, moyenPaiement: 'virement', requeteId: req.id
+            libelle, reference: num, typeOp: apType, apType: apType,
+            beneficiaireType: 'employe', beneficiaireId: req.empId,
+            beneficiaireNom: nomEmp, moyenPaiement: 'virement',
+            numeroTransaction: '', observations: 'Demande employé ' + req.id,
+            requeteId: req.id, acomptePretId: apId,
+            apMoisDeduction: moisDed, apDureeMois: duree, apMontantMensuel: montantMensuel,
+            source: 'banque', updatedAt: Date.now()
           });
           await ecrireCle(db, uid, 'mdb_banqueOperations', arr);
         } else {
@@ -875,24 +915,33 @@ export async function onRequest(context) {
           const arr = Array.isArray(cops) ? cops : [];
           arr.push({
             id: opId, caisseId: sourceId, date, heure, sens: 'sortie', montant,
-            libelle, beneficiaireType: 'employe', beneficiaireId: req.empId,
-            beneficiaireNom: req.nom, moyenPaiement: 'espece', numeroPiece: num,
-            typeOp: req.type === 'pret' ? 'pret' : 'acompte',
-            apMoisDeduction: moisDed, apDureeMois: 0, apMontantMensuel: montant,
-            observations: 'Demande employé ' + req.id, requeteId: req.id
+            codeId: codeId, code: codeLabel, libelle: libelle,
+            beneficiaireType: 'employe', beneficiaireId: req.empId,
+            beneficiaireNom: nomEmp, moyenPaiement: 'espece', numeroTransaction: '',
+            numeroPiece: num, typeOp: apType, apType: apType,
+            apMoisDeduction: moisDed, apDureeMois: duree, apMontantMensuel: montantMensuel,
+            montantCharge: 0, frais: 0, remettant: nomEmp, executant: '', imprime: false,
+            caisseId: sourceId, reversed: false, brouillon: false,
+            collective: false, pendingDetail: false,
+            observations: 'Demande employe ' + req.id, requeteId: req.id,
+            acomptePretId: apId, updatedAt: Date.now(), _maj: Date.now()
           });
           await ecrireCle(db, uid, 'mdb_operationsCaisse', arr);
         }
         const aps = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
         const arrAp = Array.isArray(aps) ? aps : [];
         arrAp.push({
-          id: apId, type: req.type === 'pret' ? 'pret' : 'acompte',
-          employeId: req.empId, employeNom: req.nom, montant,
-          dureeMois: 0, montantMensuel: montant, moisDeduction: moisDed,
-          date, statut: 'en_cours', montantRembourse: 0,
-          caisseOpId: opId, numeroPiece: num,
-          provenance: sourceType, moyen: sourceType === 'banque' ? 'virement' : 'espece',
+          id: apId, type: apType,
+          employeId: req.empId, employeNom: nomEmp, montant,
+          dureeMois: duree, montantMensuel: montantMensuel, moisDeduction: moisDed,
+          date, statut: 'en_cours', montantRembourse: 0, motif: libelle,
+          caisseOpId: sourceType === 'caisse' ? opId : '',
+          banqueOpId: sourceType === 'banque' ? opId : '',
+          numeroPiece: num,
+          provenance: sourceType, sourceType: sourceType, sourceNom: (src.nom || src.libelle || ''),
+          moyen: sourceType === 'banque' ? 'virement' : 'espece',
           caisseId: sourceType === 'caisse' ? sourceId : '',
+          banqueId: sourceType === 'banque' ? sourceId : '',
           valide: true, requeteId: req.id, updatedAt: Date.now()
         });
         await ecrireCle(db, uid, 'mdb_acomptesPrets', arrAp);

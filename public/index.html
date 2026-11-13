@@ -35,7 +35,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js?v=2"></script>
-<script>window.__APP_VERSION = '2026-11-12-335';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION = '2026-11-13-336';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -26210,8 +26210,80 @@ function _migrerCodeAcompteSal() {
   if (nAp) { DB.set('mdb_acomptesPrets', aps); try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e6) {} }
   return nOps;
 }
+/* Aligne les pieces creees par l'acceptation d'une demande employe (acompte
+   ou pret) sur une piece de caisse NORMALE : code ACOMPTE-SAL / PRET, libelle
+   uniforme avec le mois, apType/apMoisDeduction/apDureeMois/apMontantMensuel
+   et lien acomptePretId. Corrige aussi les anciennes pieces deja creees. */
+function _migrerRequetesAP() {
+  var ops = [];
+  try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
+  var aps = [];
+  try { aps = dbArr('mdb_acomptesPrets') || []; } catch (e2) {}
+  var codes = [];
+  try { codes = getCodesCaisse() || []; } catch (e3) {}
+  var emps = {};
+  try { (getEmployes() || []).forEach(function (e) { if (e && e.id) emps[e.id] = e; }); } catch (e4) {}
+  var apParOp = {}, apParReq = {};
+  aps.forEach(function (a) { if (!a) return; if (a.caisseOpId) apParOp[a.caisseOpId] = a; if (a.requeteId) apParReq[a.requeteId] = a; });
+  var cSal = null, cPret = null;
+  codes.forEach(function (c) {
+    if (!c) return;
+    var u = String(c.code || '').toUpperCase().trim();
+    if (u === 'ACOMPTE-SAL' || u === 'ACOMPTE') cSal = cSal || c;
+    if (u === 'PRET' || u === 'PRET-SAL') cPret = cPret || c;
+  });
+  var codeChanged = false;
+  function ensureCode(type) {
+    if (type === 'pret') {
+      if (!cPret) {
+        cPret = { id: DB.genId(), code: 'PRET', libelle: 'Pret sur salaire', sens: 'sortie', montantDefaut: 0, pinned: false };
+        codes.push(cPret); codeChanged = true;
+      }
+      return cPret;
+    }
+    if (!cSal) {
+      cSal = { id: DB.genId(), code: 'ACOMPTE-SAL', libelle: 'ACOMPTE SALAIRE', sens: 'sortie', montantDefaut: 0, pinned: false };
+      codes.push(cSal); codeChanged = true;
+    }
+    return cSal;
+  }
+  var n = 0, apChanged = false;
+  ops.forEach(function (op) {
+    if (!op || !op.requeteId) return;
+    var t = (op.apType === 'pret' || op.typeOp === 'pret' || /^pret/i.test(String(op.libelle || ''))) ? 'pret' : 'acompte';
+    var ap = apParOp[op.id] || apParReq[op.requeteId] || null;
+    var eid = op.beneficiaireId || (ap && ap.employeId) || '';
+    var e = emps[eid];
+    var nom = e ? (((e.nom || '') + ' ' + (e.prenoms || '')).trim()) : (op.beneficiaireNom || (ap && ap.employeNom) || '');
+    var mois = (op.apMoisDeduction && /^\d{4}-\d{2}$/.test(op.apMoisDeduction)) ? op.apMoisDeduction
+      : ((ap && /^\d{4}-\d{2}/.test(ap.moisDeduction || '')) ? String(ap.moisDeduction).slice(0, 7) : String(op.date || '').slice(0, 7));
+    var codeObj = ensureCode(t);
+    var base = (t === 'pret' ? 'Pr\u00eat employ\u00e9 : ' : 'ACOMPTE SALAIRE : ') + nom;
+    var lib = (/^\d{4}-\d{2}$/.test(mois || '')) ? csPeriodeBuildLibelle(base, mois) : base;
+    var duree = t === 'pret' ? (parseFloat(op.apDureeMois) || (ap && parseFloat(ap.dureeMois)) || 0) : 0;
+    var mm = (t === 'pret' && duree > 0) ? Math.round((parseFloat(op.montant) || 0) / duree) : (parseFloat(op.montant) || 0);
+    var avant = JSON.stringify([op.code, op.codeId, op.libelle, op.apType, op.apMoisDeduction, op.apDureeMois, op.apMontantMensuel, op.montantCharge, op.frais, op.collective]);
+    op.code = codeObj.code; op.codeId = codeObj.id; op.libelle = lib;
+    op.apType = t; op.apMoisDeduction = mois; op.apDureeMois = duree; op.apMontantMensuel = mm;
+    op.montantCharge = 0; op.frais = 0; op.collective = false; op.pendingDetail = false;
+    op.acomptePretId = ap ? ap.id : (op.acomptePretId || '');
+    if (JSON.stringify([op.code, op.codeId, op.libelle, op.apType, op.apMoisDeduction, op.apDureeMois, op.apMontantMensuel, op.montantCharge, op.frais, op.collective]) !== avant) { op.updatedAt = Date.now(); n++; }
+    if (ap) {
+      var apAvant = JSON.stringify([ap.type, ap.moisDeduction, ap.montantMensuel, ap.dureeMois, ap.valide]);
+      ap.type = t; ap.moisDeduction = mois; ap.montantMensuel = mm; ap.dureeMois = duree; ap.valide = true;
+      if (!ap.motif) ap.motif = lib;
+      if (!ap.statut) ap.statut = 'en_cours';
+      if (JSON.stringify([ap.type, ap.moisDeduction, ap.montantMensuel, ap.dureeMois, ap.valide]) !== apAvant) { ap.updatedAt = Date.now(); apChanged = true; }
+    }
+  });
+  if (n) { DB.set('mdb_operationsCaisse', ops); try { _dirtyKeys['mdb_operationsCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e5) {} }
+  if (apChanged) { DB.set('mdb_acomptesPrets', aps); try { _dirtyKeys['mdb_acomptesPrets'] = true; persistPendingSync(); schedulePush(); } catch (e6) {} }
+  if (codeChanged) { DB.set('mdb_codesCaisse', codes); try { _dirtyKeys['mdb_codesCaisse'] = true; persistPendingSync(); schedulePush(); } catch (e7) {} }
+  return n;
+}
 function _corrigerLibellesSoldesCollectifs() {
   try { _migrerCodeAcompteSal(); } catch (eMAS) { try { console.warn('[ACOMPTE-SAL]', eMAS); } catch (e0) {} }
+  try { _migrerRequetesAP(); } catch (eREQAP) { try { console.warn('[REQ-AP]', eREQAP); } catch (e0b) {} }
   var ops = [];
   try { ops = getOperationsCaisse() || []; } catch (e) { return 0; }
   var employes = [];
