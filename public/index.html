@@ -35,7 +35,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js?v=2"></script>
-<script>window.__APP_VERSION = '2026-11-13-364';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION = '2026-11-13-366';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -16681,9 +16681,143 @@ function factureNumFormHTML() {
   h += '<div style="font-size:11px;color:#64748b;line-height:1.6">Jetons disponibles : <code>{YY}</code> année sur 2 chiffres, <code>{YYYY}</code> année complète, <code>{MM}</code> mois sur 2 chiffres.<br>Exemple : <code>FNE{YY}.{MM}.</code> avec 2 chiffres donne FNE26.11.01, FNE26.11.02, etc. La suite avance automatiquement à chaque nouvelle facture ; un numéro saisi manuellement reste possible et met la suite à jour.</div>';
   return h;
 }
+function factureRenumberHTML() {
+  return '<div style="margin-top:20px;border-top:1px dashed #cbd5e1;padding-top:16px">' +
+      '<div style="font-size:14px;font-weight:800;color:#0f172a">Appliquer aux factures existantes</div>' +
+      '<div style="font-size:11.5px;color:#64748b;margin:4px 0 10px;line-height:1.5">Réattribue un numéro à toutes les factures déjà enregistrées avec le modèle ci-dessus. Les avoirs liés et les libellés des règlements sont mis à jour. Une sauvegarde est créée avant l\'opération.</div>' +
+      '<div class="form-row">' +
+        '<div class="form-group"><label>Premier numéro de la série</label><input type="number" id="facRenumberStart" min="1" value="1"></div>' +
+        '<div class="form-group"><label>Ordre d\'attribution</label><select id="facRenumberOrder"><option value="date">Date d\'émission (recommandé)</option><option value="numero">Numéro actuel</option></select></div>' +
+        '<div class="form-group" style="display:flex;align-items:flex-end"><button type="button" class="btn btn-outline" onclick="openFactureRenumberPreview()" style="border-color:#f59e0b;color:#92400e;background:#fffbeb;font-weight:700">Aperçu et appliquer</button></div>' +
+      '</div>' +
+    '</div>';
+}
 function factureNumParamHTML() {
   return '<div class="section"><div class="section-body">' + factureNumFormHTML() +
-    '<div style="margin-top:12px"><button class="btn btn-primary" onclick="saveFactureNumerotation(false)">Enregistrer la numérotation</button></div></div></div>';
+    '<div style="margin-top:12px"><button class="btn btn-primary" onclick="saveFactureNumerotation(false)">Enregistrer la numérotation</button></div>' +
+    factureRenumberHTML() +
+    '</div></div>';
+}
+function buildFactureRenumberPlan(start, order) {
+  var cfg = getFactureNumConfig();
+  var list = (getFactures() || []).filter(function (f) { return f && !ccEstAvoir(f); });
+  if (order === 'numero') {
+    list.sort(function (a, b) { return String(a.numero || '').localeCompare(String(b.numero || ''), 'fr', { numeric: true }); });
+  } else {
+    list.sort(function (a, b) {
+      var d = String(a.dateEmission || a.date || '').localeCompare(String(b.dateEmission || b.date || ''));
+      if (d) return d;
+      return String(a.numero || '').localeCompare(String(b.numero || ''), 'fr', { numeric: true });
+    });
+  }
+  var plan = [];
+  var seq = start;
+  for (var i = 0; i < list.length; i++) {
+    var f = list[i];
+    var dt = f.dateEmission || f.date || getToday();
+    var prefix = factureNumPrefixAt(cfg.prefix, dt);
+    plan.push({ id: f.id, oldNum: f.numero || '', newNum: prefix + String(seq).padStart(cfg.padding, '0'), date: dt });
+    seq++;
+  }
+  return plan;
+}
+function openFactureRenumberPreview() {
+  var start = parseInt((document.getElementById('facRenumberStart') || {}).value, 10);
+  if (!(start >= 1)) start = 1;
+  var order = (document.getElementById('facRenumberOrder') || {}).value || 'date';
+  var plan = buildFactureRenumberPlan(start, order);
+  if (!plan.length) { toast('Aucune facture à renuméroter', 'error'); return; }
+  window._facRenumberPlan = plan;
+  window._facRenumberStart = start;
+  var shown = [];
+  if (plan.length <= 18) shown = plan.slice();
+  else shown = plan.slice(0, 10).concat(plan.slice(-6));
+  var rows = '';
+  shown.forEach(function (p, idx) {
+    if (plan.length > 18 && idx === 10) rows += '<tr><td colspan="3" style="padding:4px;border:1px solid #e2e8f0;text-align:center;color:#94a3b8">… ' + (plan.length - 16) + ' autre(s) facture(s) …</td></tr>';
+    rows += '<tr><td style="padding:5px 8px;border:1px solid #e2e8f0;font-family:ui-monospace,monospace;font-size:11px">' + escH(p.oldNum || '-') + '</td>' +
+      '<td style="padding:5px 8px;border:1px solid #e2e8f0;font-family:ui-monospace,monospace;font-size:11px;color:#0369a1;font-weight:700">' + escH(p.newNum) + '</td>' +
+      '<td style="padding:5px 8px;border:1px solid #e2e8f0;white-space:nowrap">' + (p.date ? fmtDate(p.date) : '-') + '</td></tr>';
+  });
+  var body = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px 12px;font-size:12px;color:#92400e;margin-bottom:12px">' +
+    '<b>' + plan.length + ' facture(s)</b> seront renumérotées. Les numéros d\'avoir ne changent pas, mais leur référence à la facture d\'origine sera mise à jour. Vérifie l\'aperçu avant de valider.' +
+    '</div>' +
+    '<div style="max-height:320px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px"><table style="width:100%;border-collapse:collapse;font-size:12px">' +
+    '<thead><tr style="background:#f1f5f9;position:sticky;top:0"><th style="padding:6px 8px;border:1px solid #e2e8f0;text-align:left">Ancien numéro</th><th style="padding:6px 8px;border:1px solid #e2e8f0;text-align:left">Nouveau numéro</th><th style="padding:6px 8px;border:1px solid #e2e8f0;text-align:left">Date</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table></div>';
+  var footer = '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>' +
+    '<button type="button" class="btn btn-primary" onclick="applyFactureRenumbering()" style="background:#d97706;border-color:#d97706">Appliquer la renumérotation</button>';
+  openFormModal('Renumérotation des factures existantes', body, footer, '720px');
+}
+function applyFactureRenumbering() {
+  var plan = window._facRenumberPlan || [];
+  if (!plan.length) { toast('Aperçu expiré : recommencez', 'error'); return; }
+  if (!confirm('Renuméroter définitivement ' + plan.length + ' facture(s) ?\n\nCette action modifie les numéros déjà émis. Une sauvegarde est créée avant.')) return;
+  try { if (typeof createFullBackup === 'function') createFullBackup(); } catch (eB) {}
+  var fs = (getFactures() || []).slice();
+  var byId = {}, byOld = {}, normMap = {};
+  function norm(x) { return String(x == null ? '' : x).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  plan.forEach(function (p) {
+    byId[String(p.id)] = p.newNum;
+    if (p.oldNum) { byOld[String(p.oldNum)] = p.newNum; normMap[norm(p.oldNum)] = p.newNum; }
+  });
+  for (var i = 0; i < fs.length; i++) {
+    var f = fs[i];
+    if (!f) continue;
+    if (byId[String(f.id)]) f.numero = byId[String(f.id)];
+    if (ccEstAvoir(f) && f.factureRef) {
+      var exact = byOld[String(f.factureRef)];
+      if (exact) f.factureRef = exact;
+      else { var n = normMap[norm(f.factureRef)]; if (n) f.factureRef = n; }
+    }
+  }
+  DB.set('mdb_factures', fs);
+  try {
+    var oldKeys = Object.keys(byOld).sort(function (a, b) { return b.length - a.length; });
+    function replToken(str, oldN, newN) {
+      var out = '', rest = String(str);
+      while (true) {
+        var pos = rest.indexOf(oldN);
+        if (pos === -1) { out += rest; break; }
+        var before = pos > 0 ? rest.charAt(pos - 1) : '';
+        var after = rest.charAt(pos + oldN.length);
+        var ok = (!before || !/[A-Za-z0-9]/.test(before)) && (!after || !/[A-Za-z0-9]/.test(after));
+        if (ok) { out += rest.slice(0, pos) + newN; rest = rest.slice(pos + oldN.length); }
+        else { out += rest.slice(0, pos + oldN.length); rest = rest.slice(pos + oldN.length); }
+      }
+      return out;
+    }
+    function repl(s) {
+      if (!s) return s;
+      var out = String(s);
+      for (var k = 0; k < oldKeys.length; k++) {
+        var oldN = oldKeys[k];
+        if (!oldN) continue;
+        out = replToken(out, oldN, byOld[oldN]);
+      }
+      return out;
+    }
+    var cops = getOperationsCaisse() || [];
+    var ch1 = false;
+    cops.forEach(function (o) { if (o && o.libelle) { var nv = repl(o.libelle); if (nv !== o.libelle) { o.libelle = nv; ch1 = true; } } });
+    if (ch1) DB.set('mdb_operationsCaisse', cops);
+    var bops = (typeof dbArr === 'function' ? dbArr('mdb_banqueOperations') : []) || [];
+    var ch2 = false;
+    bops.forEach(function (o) { if (o && o.libelle) { var nv2 = repl(o.libelle); if (nv2 !== o.libelle) { o.libelle = nv2; ch2 = true; } } });
+    if (ch2) DB.set('mdb_banqueOperations', bops);
+  } catch (eL) {}
+  try {
+    var cfg = getFactureNumConfig();
+    cfg.next = (parseInt(window._facRenumberStart, 10) || 1) + plan.length;
+    DB.set('mdb_factureNum', cfg);
+  } catch (eC) {}
+  var n = plan.length;
+  window._facRenumberPlan = null;
+  closeModal();
+  toast(n + ' facture(s) renumérotée(s) selon le modèle configuré');
+  try { if (typeof currentPage !== 'undefined' && currentPage === 'parametres') renderParametres(); } catch (e1) {}
+  try { if (typeof renderFactures === 'function') renderFactures(); } catch (e2) {}
+  buildSidebar();
 }
 function updateFactureNumApercu() {
   try {
@@ -16707,7 +16841,7 @@ function saveFactureNumerotation(fromModal) {
   else if (typeof currentPage !== 'undefined' && currentPage === 'parametres') renderParametres();
 }
 function openFactureNumConfig() {
-  openFormModal('Numérotation des factures', factureNumFormHTML(),
+  openFormModal('Numérotation des factures', factureNumFormHTML() + factureRenumberHTML(),
     '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>' +
     '<button type="button" class="btn btn-primary" onclick="saveFactureNumerotation(true)">Enregistrer</button>');
 }
