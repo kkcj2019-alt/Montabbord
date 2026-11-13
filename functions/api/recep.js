@@ -64,6 +64,22 @@ async function lireSection(db, uid, cle) {
   if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { v = null; } }
   return v;
 }
+/* Anti-essais au hasard du PIN (5 erreurs -> 15 min de blocage), même table
+   que la connexion. Sans table disponible, on ne bloque pas. */
+async function _tbl(db) { try { await db.prepare('CREATE TABLE IF NOT EXISTS auth_echecs (k TEXT PRIMARY KEY, n INTEGER, until INTEGER, last INTEGER)').run(); return true; } catch (e) { return false; } }
+async function estBloque(db, k) { try { if (!(await _tbl(db))) return false; const r = await db.prepare('SELECT until FROM auth_echecs WHERE k = ?').bind(k).first(); return !!(r && r.until && r.until > Date.now()); } catch (e) { return false; } }
+async function noterEchec(db, k) {
+  try {
+    if (!(await _tbl(db))) return;
+    const now = Date.now();
+    const r = await db.prepare('SELECT n FROM auth_echecs WHERE k = ?').bind(k).first();
+    let n = (r && r.n ? r.n : 0) + 1, until = 0;
+    if (n >= 5) { until = now + 15 * 60 * 1000; n = 0; }
+    await db.prepare('INSERT INTO auth_echecs (k, n, until, last) VALUES (?, ?, ?, ?) ON CONFLICT(k) DO UPDATE SET n = excluded.n, until = excluded.until, last = excluded.last').bind(k, n, until, now).run();
+  } catch (e) {}
+}
+async function effacerEchecs(db, k) { try { if (await _tbl(db)) await db.prepare('DELETE FROM auth_echecs WHERE k = ?').bind(k).run(); } catch (e) {} }
+
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -106,7 +122,10 @@ export async function onRequest(context) {
     const pinRec = trouverPin(pins, rec);
     if (!pinRec || !pinRec.hash) return json({ ok: false, code: 'no_pin' }, 403);
 
-    if (!(await verifierPin(pinRec.hash, pin))) return json({ ok: false, code: 'bad_pin' }, 403);
+    const kRec = 'pin|' + uid + '|' + String(rec.empId || rec.matricule || token);
+    if (await estBloque(db, kRec)) return json({ ok: false, code: 'bloque' }, 429);
+    if (!(await verifierPin(pinRec.hash, pin))) { await noterEchec(db, kRec); return json({ ok: false, code: 'bad_pin' }, 403); }
+    await effacerEchecs(db, kRec);
 
     /* Déjà reçu ? On renvoie la réception existante (idempotent). */
     const now = Date.now().toString();

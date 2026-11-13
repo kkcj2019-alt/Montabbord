@@ -322,7 +322,10 @@ export async function onRequest(context) {
     if (!uid) return json({ ok: false, code: 'uid' }, 400);
     const action = String(body.action || '').toLowerCase();
     /* Actions de l'administration (Paie / RH) : badge de connexion de cette entreprise. */
-    if (action.indexOf('admin') === 0) {
+    /* deletepermission modifie les permissions et le pointage : réservé à
+       l'administration connectée (avant : n'importe qui connaissant l'identifiant
+       de l'entreprise pouvait effacer les permissions). */
+    if (action.indexOf('admin') === 0 || action === 'deletepermission') {
       const auA = await mdbAutorise(request, db, null, uid, body, false);
       if (!auA.ok) return json({ ok: false, code: 'auth' }, 401);
     }

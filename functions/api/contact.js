@@ -34,7 +34,7 @@ export async function onRequest(context) {
     const tel = String(body.tel || '').trim().slice(0, 40);
     const message = String(body.message || body.texte || '').trim().slice(0, 4000);
     const sujet = String(body.sujet || 'Message direct depuis le site web').trim().slice(0, 150);
-    const clientId = body.clientId ? String(body.clientId).slice(0, 80) : null;
+    let clientId = body.clientId ? String(body.clientId).slice(0, 80) : null;
 
     if (!uid) {
       return new Response(JSON.stringify({ ok: false, error: 'Identifiant entreprise manquant' }), { status: 400, headers: corsHeaders });
@@ -42,6 +42,39 @@ export async function onRequest(context) {
     if (!message) {
       return new Response(JSON.stringify({ ok: false, error: 'Le contenu du message est obligatoire' }), { status: 400, headers: corsHeaders });
     }
+
+    /* Sécurité : l'entreprise doit exister (sinon n'importe qui créait des
+       lignes pour des identifiants inventés). */
+    const entOk = await db.prepare("SELECT 1 AS x FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = 'mdb_entreprise' LIMIT 1").bind(uid, '"' + uid + '"').first();
+    if (!entOk) return new Response(JSON.stringify({ ok: false, error: 'Entreprise inconnue' }), { status: 404, headers: corsHeaders });
+
+    /* Un message « au nom d'un client » n'est accepté qu'avec la session de ce
+       client (espace client). Sans session : message de visiteur. */
+    if (clientId) {
+      let valide = false;
+      try {
+        const tok = String(body.token || '');
+        if (tok) {
+          const lire = async (cle) => { const r = await db.prepare('SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1').bind(uid, '"' + uid + '"', cle).first(); let v = r ? r.valeur : null; if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) { v = null; } } return v; };
+          const sessions = await lire('mdb_espaceSessions');
+          const s0 = (Array.isArray(sessions) ? sessions : []).filter(x => x && x.token === tok && x.type === 'client' && x.exp > Date.now())[0];
+          if (s0) { const accs = await lire('mdb_clientAccounts') || {}; const acc = accs[s0.email]; valide = !!(acc && String(acc.id) === String(clientId)); }
+        }
+      } catch (eS) { valide = false; }
+      if (!valide) clientId = null;
+    }
+
+    /* Anti-inondation : 8 messages / 10 min par adresse et par entreprise. */
+    try {
+      await db.prepare('CREATE TABLE IF NOT EXISTS auth_echecs (k TEXT PRIMARY KEY, n INTEGER, until INTEGER, last INTEGER)').run();
+      const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('x-forwarded-for') || 'ip?';
+      const kRl = 'contact|' + uid + '|' + ip;
+      const t = Date.now();
+      const r = await db.prepare('SELECT n, last FROM auth_echecs WHERE k = ?').bind(kRl).first();
+      let n = (r && r.last && t - r.last < 10 * 60 * 1000) ? (r.n || 0) + 1 : 1;
+      if (n > 8) return new Response(JSON.stringify({ ok: false, error: 'Trop de messages, réessayez dans quelques minutes' }), { status: 429, headers: corsHeaders });
+      await db.prepare('INSERT INTO auth_echecs (k, n, until, last) VALUES (?, ?, 0, ?) ON CONFLICT(k) DO UPDATE SET n = excluded.n, last = excluded.last').bind(kRl, n, (r && r.last && t - r.last < 10 * 60 * 1000) ? r.last : t).run();
+    } catch (eRl) {}
 
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
