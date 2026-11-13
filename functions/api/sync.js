@@ -52,6 +52,37 @@ const CLES_SERVEUR = ['mdb_espaceSessions', 'mdb_espaceEchecs'];
 const CLES_SERVEUR_ECRITURE = ['mdb_espaceSessions', 'mdb_espaceEchecs', 'mdb_portailSessions'];
 function parseV(v) { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch (e) { return null; } }
 
+/* ===== DROITS À L'INTÉRIEUR D'UNE ENTREPRISE (comptes « utilisateur ») =====
+   Un utilisateur non administrateur :
+   - ne reçoit PAS les empreintes de mot de passe des AUTRES comptes
+     (sinon on pouvait les casser hors ligne) ;
+   - ne peut PAS modifier les comptes : ni se donner les droits administrateur,
+     ni changer ses pages autorisées, ni toucher aux autres comptes, ni en créer.
+     Il peut seulement mettre à jour SA fiche (mot de passe, photo, préférences). */
+function estUtilisateurSimple(s) { return !!(s && s.role && s.role !== 'admin' && s.role !== 'superadmin'); }
+const SECRETS_COMPTE = ['passwordHash', 'password', 'pointageCode'];
+function comptesPourUtilisateur(arr, moiId) {
+  if (!Array.isArray(arr)) return arr;
+  return arr.map(u => {
+    if (!u || typeof u !== 'object' || String(u.id) === String(moiId)) return u;
+    const c = Object.assign({}, u);
+    SECRETS_COMPTE.forEach(k => { delete c[k]; });
+    return c;
+  });
+}
+const CHAMPS_PROTEGES = ['id', 'login', 'email', 'isAdmin', 'adminType', 'isSuperAdmin', 'role', 'sections', 'deniedPages', 'caisseId', 'caisseCentralisee', 'caissesAutorisees', 'actif', 'status', 'desactive', 'employeeId', 'dashSpecial', 'permissions', 'modules'];
+function fusionComptesUtilisateur(serveur, client, moiId) {
+  const srv = Array.isArray(serveur) ? serveur : [];
+  const cli = Array.isArray(client) ? client : [];
+  const moiCli = cli.filter(u => u && String(u.id) === String(moiId))[0];
+  return srv.map(u => {
+    if (!u || String(u.id) !== String(moiId) || !moiCli) return u;
+    const out = Object.assign({}, u);
+    Object.keys(moiCli).forEach(k => { if (CHAMPS_PROTEGES.indexOf(k) === -1) out[k] = moiCli[k]; });
+    return out;
+  });
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   const db = env.DB;
@@ -204,11 +235,15 @@ export async function onRequest(context) {
       const tsParts = [];
       let maxUpdatedAt = since;
       let uniq = 0;
+      const _simple = estUtilisateurSimple(_au.s);
       for (const r of rows) {
         if (seen.has(r.cle)) continue;
         seen.add(r.cle);
         uniq++;
-        const raw = typeof r.valeur === 'string' ? r.valeur : JSON.stringify(r.valeur);
+        let raw = typeof r.valeur === 'string' ? r.valeur : JSON.stringify(r.valeur);
+        if (_simple && r.cle === 'mdb_users') {
+          try { raw = JSON.stringify(comptesPourUtilisateur(parseV(raw), _au.s.user_id)); } catch (eCU) {}
+        }
         const s = raw.trim();
         const c0 = s.charAt(0);
         const cl = s.charAt(s.length - 1);
@@ -266,6 +301,14 @@ export async function onRequest(context) {
       }
       if (uid === '__SUPER_ADMIN__' && !(_auP.s && _auP.s.role === 'superadmin')) return mdbRefus(corsHeaders, 403);
       CLES_SERVEUR_ECRITURE.forEach(k => { delete updates[k]; });
+      if (estUtilisateurSimple(_auP.s) && updates.mdb_users !== undefined) {
+        try {
+          const rU = await db.prepare("SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = 'mdb_users' ORDER BY updated_at DESC LIMIT 1").bind(uid, '"' + uid + '"').first();
+          const srvU = rU ? parseV(rU.valeur) : null;
+          if (Array.isArray(srvU) && srvU.length) updates.mdb_users = fusionComptesUtilisateur(srvU, parseV(updates.mdb_users), _auP.s.user_id);
+          else delete updates.mdb_users;
+        } catch (eFU) { delete updates.mdb_users; }
+      }
       /* Comptes utilisateurs : plus aucun mot de passe ni code de pointage en clair au cloud. */
       if (updates.mdb_users !== undefined) {
         try {
@@ -287,6 +330,7 @@ export async function onRequest(context) {
         } catch (eU) {}
       }
 
+      if (estUtilisateurSimple(_auP.s)) ['mdb_users', 'mdb_entreprise', 'mdb_portailComptes'].forEach(k => { const v = updates[k]; if (v === null || (v && v.__mdbFieldValueDelete)) delete updates[k]; });
       const keys = Object.keys(updates);
       if (keys.length === 0) {
         return new Response(JSON.stringify({ ok: true, updated: 0, ts: Date.now().toString() }), { headers: corsHeaders });
@@ -337,6 +381,8 @@ export async function onRequest(context) {
       /* Effacer TOUTES les données : administrateur uniquement, même en transition. */
       const _auD = await mdbAutorise(request, db, url, uid, null, !cle);
       if (!_auD.ok || (!cle && !_auD.s)) return mdbRefus(corsHeaders, 403);
+      /* Un simple utilisateur ne peut pas effacer les comptes ni la fiche entreprise. */
+      if (cle && estUtilisateurSimple(_auD.s) && ['mdb_users', 'mdb_entreprise', 'mdb_portailComptes'].indexOf(cle) !== -1) return mdbRefus(corsHeaders, 403);
       if (cle) {
         await db.prepare('DELETE FROM enterprise_data WHERE enterprise_id = ? AND cle = ?').bind(uid, cle).run();
       } else {
