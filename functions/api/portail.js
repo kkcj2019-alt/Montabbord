@@ -922,7 +922,7 @@ export async function onRequest(context) {
             numeroPiece: num, typeOp: apType, apType: apType,
             apMoisDeduction: moisDed, apDureeMois: duree, apMontantMensuel: montantMensuel,
             montantCharge: 0, frais: 0, remettant: nomEmp, executant: '', imprime: false,
-            caisseId: sourceId, reversed: false, brouillon: false,
+            reversed: false, brouillon: false,
             collective: false, pendingDetail: false,
             observations: 'Demande employe ' + req.id, requeteId: req.id,
             acomptePretId: apId, updatedAt: Date.now(), _maj: Date.now()
