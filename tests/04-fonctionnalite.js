@@ -13878,13 +13878,13 @@ function run(rapport) {
     const fsMp = require('fs');
     const pathMp = require('path');
     const srcIdxMp = fsMp.readFileSync(pathMp.join(__dirname, '..', 'public', 'index.html'), 'utf8');
-    const srcPrdMp = fsMp.readFileSync(pathMp.join(__dirname, '..', 'public', 'production.html'), 'utf8');
+    const srcPrdMp = fsMp.readFileSync(pathMp.join(__dirname, '..', 'public', 'production.html'), 'utf8').replace(/\r\n/g, '\n');
     const formule = 'total_price: (baseM3 ? vol : qte) * puMP';
     const okIndex = srcIdxMp.indexOf(formule) !== -1
       && srcIdxMp.indexOf("prix_unitaire: it.unit_price, prix_base: it.prix_base || 'm3'") !== -1
       && srcIdxMp.indexOf('var _estMatPrem = /mati/i.test') !== -1;
     const okProd = srcPrdMp.indexOf(formule) !== -1
-      && srcPrdMp.indexOf("prix_unitaire: it.unit_price,\r\n        prix_base: it.prix_base || 'm3'") !== -1;
+      && srcPrdMp.indexOf("prix_unitaire: it.unit_price,\n        prix_base: it.prix_base || 'm3'") !== -1;
     if (okIndex && okProd) {
       rapport.ok('Achat matiere premiere : total = volume x prix/m3 dans les deux formulaires ; le stock garde le prix/m3');
     } else {
