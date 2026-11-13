@@ -35,7 +35,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js?v=2"></script>
-<script>window.__APP_VERSION = '2026-11-13-358';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION = '2026-11-13-359';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -15179,7 +15179,7 @@ function duplicateFacture(id) {
   var title = 'Dupliquer la Facture ' + (src.numero || '');
   var html = '';
   html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Num\u00e9ro</label><input type="text" id="facNumero" value="' + escH(getNumero('FAC')) + '"></div>';
+  html += '<div class="form-group"><label>Num\u00e9ro</label><input type="text" id="facNumero" value="' + escH(getNumeroFacture(getToday())) + '"></div>';
   html += '<div class="form-group"><label>Client *</label><div id="facClient"></div></div>';
   html += '</div>';
   html += '<div class="form-row">';
@@ -16581,6 +16581,137 @@ function getNumero(prefix, items) {
   }
   return prefix + '-' + String(maxNum + 1).padStart(3, '0');
 }
+
+/* ===== Numérotation paramétrable des factures =====
+   Modèle avec jetons {YY}, {YYYY}, {MM} + compteur persistant.
+   Exemple : FNE{YY}.{MM}. + 2 chiffres -> FNE26.11.01, FNE26.11.02 ... */
+function factureNum2(n) { return (n < 10 ? '0' : '') + n; }
+function factureNumPrefixAt(prefix, dateStr) {
+  var d = new Date();
+  var mm = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (mm) d = new Date(parseInt(mm[1], 10), parseInt(mm[2], 10) - 1, parseInt(mm[3], 10));
+  var yyyy = String(d.getFullYear());
+  return String(prefix == null ? '' : prefix)
+    .replace(/\{YYYY\}/g, yyyy)
+    .replace(/\{YY\}/g, yyyy.slice(-2))
+    .replace(/\{MM\}/g, factureNum2(d.getMonth() + 1));
+}
+function getFactureNumConfig() {
+  var c = null;
+  try { c = (typeof DB !== 'undefined' && DB.get) ? DB.get('mdb_factureNum') : null; } catch (eCfg) {}
+  if (!c || typeof c !== 'object') c = {};
+  var hasSaved = (c.prefix != null && String(c.prefix).trim() !== '') || c.padding != null || c.next != null;
+  var prefix = (c.prefix == null ? '' : String(c.prefix));
+  var padding = parseInt(c.padding, 10);
+  var next = parseInt(c.next, 10);
+  if (!hasSaved) {
+    var list = [];
+    try { list = getFactures() || []; } catch (eF) { list = []; }
+    var best = '', bestDate = '', bestN = 0, bestLen = 0;
+    for (var i = 0; i < list.length; i++) {
+      var f = list[i]; if (!f) continue;
+      var mt = String(f.numero || '').match(/^(.*?)(\d+)$/);
+      if (!mt) continue;
+      var n = parseInt(mt[2], 10);
+      if (!isFinite(n)) continue;
+      var dt = String(f.dateEmission || f.date || '');
+      if (!best || dt > bestDate || (dt === bestDate && n >= bestN)) { best = String(f.numero || ''); bestDate = dt; bestN = n; bestLen = mt[2].length; }
+    }
+    if (best) {
+      prefix = best.replace(/\d+$/, '');
+      var g = prefix.match(/^([A-Za-z]+)(\d{2})\.(\d{2})\.$/);
+      if (g) prefix = g[1] + '{YY}.{MM}.';
+      padding = Math.min(8, Math.max(1, bestLen || 3));
+      next = bestN + 1;
+    } else {
+      prefix = 'FNE{YY}.{MM}.';
+      padding = 2;
+      next = 1;
+    }
+  }
+  if (prefix === '') prefix = 'FNE{YY}.{MM}.';
+  if (!(padding >= 1 && padding <= 8)) padding = 3;
+  if (!(next >= 1)) next = 1;
+  return { prefix: prefix, padding: padding, next: next };
+}
+function getNumeroFacture(dateStr) {
+  var cfg = getFactureNumConfig();
+  var prefix = factureNumPrefixAt(cfg.prefix, dateStr || (typeof getToday === 'function' ? getToday() : ''));
+  var max = 0;
+  var list = [];
+  try { list = getFactures() || []; } catch (eL) { list = []; }
+  for (var i = 0; i < list.length; i++) {
+    var num = String((list[i] && list[i].numero) || '');
+    if (num.indexOf(prefix) !== 0) continue;
+    var tail = num.substring(prefix.length);
+    if (!/^\d+$/.test(tail)) continue;
+    var n = parseInt(tail, 10);
+    if (isFinite(n) && n > max) max = n;
+  }
+  var next = Math.max(parseInt(cfg.next, 10) || 1, max + 1);
+  return prefix + String(next).padStart(cfg.padding, '0');
+}
+function syncFactureNumeroApresSauvegarde(numero, dateStr) {
+  try {
+    var cfg = getFactureNumConfig();
+    var prefix = factureNumPrefixAt(cfg.prefix, dateStr || '');
+    var num = String(numero || '');
+    if (!prefix || num.indexOf(prefix) !== 0) return;
+    var tail = num.substring(prefix.length);
+    if (!/^\d+$/.test(tail)) return;
+    var n = parseInt(tail, 10);
+    if (!isFinite(n)) return;
+    if (n >= (parseInt(cfg.next, 10) || 1)) {
+      cfg.next = n + 1;
+      DB.set('mdb_factureNum', cfg);
+    }
+  } catch (eSync) {}
+}
+function factureNumFormHTML() {
+  var cfg = getFactureNumConfig();
+  var today = (typeof getToday === 'function' ? getToday() : '');
+  var preview = factureNumPrefixAt(cfg.prefix, today) + String(cfg.next).padStart(cfg.padding, '0');
+  var h = '';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px">';
+  h += '<div class="form-group"><label>Modèle du numéro</label><input type="text" id="facNumPrefix" value="' + escH(cfg.prefix) + '" placeholder="FNE{YY}.{MM}." oninput="updateFactureNumApercu()" style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace"></div>';
+  h += '<div class="form-group"><label>Nombre de chiffres</label><input type="number" id="facNumPadding" min="1" max="8" value="' + cfg.padding + '" oninput="updateFactureNumApercu()"></div>';
+  h += '<div class="form-group"><label>Prochain numéro</label><input type="number" id="facNumNext" min="1" value="' + cfg.next + '" oninput="updateFactureNumApercu()"></div>';
+  h += '</div>';
+  h += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:12px;margin-bottom:10px">Aperçu du prochain numéro : <b id="facNumApercu" style="font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#0369a1;font-size:13px">' + escH(preview) + '</b></div>';
+  h += '<div style="font-size:11px;color:#64748b;line-height:1.6">Jetons disponibles : <code>{YY}</code> année sur 2 chiffres, <code>{YYYY}</code> année complète, <code>{MM}</code> mois sur 2 chiffres.<br>Exemple : <code>FNE{YY}.{MM}.</code> avec 2 chiffres donne FNE26.11.01, FNE26.11.02, etc. La suite avance automatiquement à chaque nouvelle facture ; un numéro saisi manuellement reste possible et met la suite à jour.</div>';
+  return h;
+}
+function factureNumParamHTML() {
+  return '<div class="section"><div class="section-body">' + factureNumFormHTML() +
+    '<div style="margin-top:12px"><button class="btn btn-primary" onclick="saveFactureNumerotation(false)">Enregistrer la numérotation</button></div></div></div>';
+}
+function updateFactureNumApercu() {
+  try {
+    var prefix = String((document.getElementById('facNumPrefix') || {}).value || '');
+    var pad = parseInt((document.getElementById('facNumPadding') || {}).value, 10) || 3;
+    var next = parseInt((document.getElementById('facNumNext') || {}).value, 10) || 1;
+    var el = document.getElementById('facNumApercu');
+    if (el) el.textContent = factureNumPrefixAt(prefix, getToday()) + String(next).padStart(pad, '0');
+  } catch (eA) {}
+}
+function saveFactureNumerotation(fromModal) {
+  var prefix = String((document.getElementById('facNumPrefix') || {}).value || '').trim();
+  if (!prefix) prefix = 'FNE{YY}.{MM}.';
+  var pad = parseInt((document.getElementById('facNumPadding') || {}).value, 10);
+  if (!(pad >= 1 && pad <= 8)) pad = 3;
+  var next = parseInt((document.getElementById('facNumNext') || {}).value, 10);
+  if (!(next >= 1)) next = 1;
+  DB.set('mdb_factureNum', { prefix: prefix, padding: pad, next: next });
+  toast('Numérotation enregistrée : prochaine facture ' + factureNumPrefixAt(prefix, getToday()) + String(next).padStart(pad, '0'));
+  if (fromModal) closeModal();
+  else if (typeof currentPage !== 'undefined' && currentPage === 'parametres') renderParametres();
+}
+function openFactureNumConfig() {
+  openFormModal('Numérotation des factures', factureNumFormHTML(),
+    '<button type="button" class="btn btn-outline" onclick="closeModal()">Annuler</button>' +
+    '<button type="button" class="btn btn-primary" onclick="saveFactureNumerotation(true)">Enregistrer</button>');
+}
+
 
 function addFormLigne() {
   var prevBC = '';
@@ -21724,6 +21855,7 @@ function renderFactures() {
   html += '</select>';
   html += '<label style="font-size:12px;color:var(--gray-500)">Du :</label><input type="date" id="facDateFrom" value="' + escH(_facFFrom) + '" onchange="filterFactures()" oninput="filterFactures()" style="width:135px">';
   html += '<label style="font-size:12px;color:var(--gray-500)">Au :</label><input type="date" id="facDateTo" value="' + escH(_facFTo) + '" onchange="filterFactures()" oninput="filterFactures()" style="width:135px">';
+  html += '<button type="button" class="btn btn-sm" onclick="openFactureNumConfig()" title="Paramétrer la numérotation des factures" style="border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:6px 10px;font-weight:700;color:#334155;white-space:nowrap"><span style="font-family:ui-monospace,monospace">N°</span> Numérotation</button>';
   if (!readonly) html += '<button class="btn btn-primary" onclick="openFactureModal()">+ Nouvelle facture</button>';
   html += '<button class="btn btn-outline" onclick="printJournalVentes()" title="Imprimer journal de ventes" style="font-size:12px">\uD83D\uDCB0 Imprimer</button>';
   html += '<button class="btn btn-outline" onclick="exportJournalVentes()" title="Exporter PDF journal de ventes" style="font-size:12px">\uD83D\uDCC4 Export PDF</button>';
@@ -22292,7 +22424,7 @@ function openFactureModal(id) {
   
   var html = '';
   html += '<div class="form-row">';
-  html += '<div class="form-group"><label>Numéro *</label><input type="text" id="facNumero" value="' + escH(f ? f.numero : getNumero('FAC')) + '"></div>';
+  html += '<div class="form-group"><label>Numéro *</label><input type="text" id="facNumero" value="' + escH(f ? f.numero : getNumeroFacture(getToday())) + '"></div>';
   html += '<div class="form-group"><label>Client *</label><div id="facClient"></div></div>';
   html += '</div>';
   html += '<div class="form-row">';
@@ -22427,6 +22559,7 @@ function saveFacture(id) {
     data.id = DB.genId(); data.montantPaye = 0; factures.push(data);
   }
   DB.set('mdb_factures', factures);
+  try { syncFactureNumeroApresSauvegarde(data.numero, data.dateEmission); } catch (eNum) {}
   if (statut === 'brouillon') {
     if (id) updateBLFactureLinks(oldBlIds, [], null);
   } else {
@@ -23424,7 +23557,7 @@ function convertProformaToFacture(id) {
     var facDate = getToday();
     var fac = {
       id: DB.genId(),
-      numero: getNumero('FAC'),
+      numero: getNumeroFacture(getToday()),
       clientId: pf.clientId,
       dateEmission: facDate,
       echeance: (typeof addDays === 'function') ? addDays(facDate, (cli && cli.delaiPaiement) || 30) : '',
@@ -25052,7 +25185,7 @@ function validateImportData(data) {
         facLignesData.push({ articleId: flLine.articleId || '', designation: flLine.designation, quantite: flLine.quantite || 0, prixUnitaire: flLine.prixUnitaire || 0, bcId: bcId || '', blId: blId, tvaRate: flLine.hasTVA ? (flLine.tvaRate || 18) : 0 });
       }
       var facId = DB.genId();
-      var facNumero = getNumero('FAC');
+      var facNumero = getNumeroFacture();
       for (var fn = 0; fn < factLignes.length; fn++) { if (factLignes[fn].numeroFact) { facNumero = factLignes[fn].numeroFact; break; } }
       var blNumeroVal = '';
       for (var bln = 0; bln < factLignes.length; bln++) { if (factLignes[bln].numeroBL) { blNumeroVal = factLignes[bln].numeroBL; break; } }
@@ -38301,6 +38434,7 @@ function showParamSub(sub) { _paramSub = sub; renderParametres(); }
 function renderParametres() {
   var subs = [
     {k:'entreprise', l:'Entreprise'},
+    {k:'numerotation', l:'Numérotation'},
     {k:'licences', l:'Licences'},
     {k:'utilisateurs', l:'Utilisateurs'}
   ];
@@ -38320,6 +38454,7 @@ function renderParametres() {
   }
   html += '</div>';
   if (sub === 'licences') html += licencesHTML();
+  else if (sub === 'numerotation') html += factureNumParamHTML();
   else if (sub === 'utilisateurs') html += utilisateursHTML();
   else html += entrepriseHTML();
   document.getElementById('content').innerHTML = html;
