@@ -65,7 +65,7 @@ export async function onRequest(context) {
       if (!enterpriseId) {
         return new Response(JSON.stringify({ error: 'Missing enterprise_id' }), { status: 400, headers: corsHeaders });
       }
-      if (!(await mdbAutorise(request, db, url, enterpriseId, null, false)).ok) return mdbRefus(corsHeaders);
+      if (!(await mdbAutorise(request, db, url, enterpriseId, null, true)).ok) return mdbRefus(corsHeaders);
 
       if (ts) {
         const stmt = db.prepare('SELECT * FROM backups WHERE enterprise_id = ? AND ts = ? LIMIT 1');

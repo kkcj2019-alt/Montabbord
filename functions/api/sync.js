@@ -70,6 +70,74 @@ function comptesPourUtilisateur(arr, moiId) {
     return c;
   });
 }
+/* ===== SALAIRES : réservés à l'administration et aux comptes « Paie » =====
+   Un utilisateur sans le module Paie (RH, caisse, production…) ne reçoit
+   ni les salaires des fiches employés, ni les éléments de paie (bruts,
+   primes, bulletins, codes PIN), et ne peut pas les modifier. */
+const PAYE_SECRETS = ['brutsMois', 'manualLines', 'bulletinVerifs', 'empIndivPrimes', 'primesSpec', 'primesSpec_tombstones', 'primesMois', 'primeProdMan', 'prime_production', 'primesPanier', 'gratif', 'stcRecords', 'employePins', 'acomptesPrets', 'externJours', 'externJour8h', 'bulJOverrides'];
+const CHAMPS_SALAIRE = ['salaire_base', 'salaire_history', 'sursalaire', 'taux_journalier', 'montant_forfaitaire', 'ind_caisse', 'ind_deplacement', 'ind_fonction', 'ind_representation', 'ind_responsabilite', 'ind_salissure', 'ind_tenue', 'ind_transport', 'ind_logement', 'assurance_mensuelle', 'taux_prime_ca', 'numero_compte', 'bareme_prime_id', 'prime_mode'];
+const CLES_PAIE_SEULES = ['mdb_receptionsBulletins', 'mdb_portailComptes'];
+function parse2(v) { let x = parseV(v); if (typeof x === 'string') x = parseV(x); return x; }
+function rwOk(v) { return v === 'read' || v === 'write' || v === true; }
+const _droitsCache = new Map();
+async function droitsUtilisateur(db, s, uid) {
+  if (!estUtilisateurSimple(s)) return { paye: true, acomptes: true };
+  const ck = s.token + '|' + uid;
+  const c = _droitsCache.get(ck);
+  if (c && c.t > Date.now() - 60000) return c.d;
+  let d = { paye: false, acomptes: false };
+  try {
+    const r = await db.prepare("SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = 'mdb_users' ORDER BY updated_at DESC LIMIT 1").bind(uid, '"' + uid + '"').first();
+    const us = r ? parse2(r.valeur) : null;
+    const u = (Array.isArray(us) ? us : []).filter(x => x && String(x.id) === String(s.user_id))[0];
+    if (u && u.isAdmin) d = { paye: true, acomptes: true };
+    else if (u) {
+      const sec = u.sections || {};
+      const paye = rwOk(sec['_module.paye']) || rwOk(sec.paye);
+      d = { paye, acomptes: paye || rwOk(sec.acomptesPrets) || rwOk(sec['tresorerie:caisse']) || rwOk(sec['tresorerie:banque']) || rwOk(sec.tresorerie) || rwOk(sec.caisse) };
+    }
+  } catch (e) {}
+  if (_droitsCache.size > 500) _droitsCache.clear();
+  _droitsCache.set(ck, { t: Date.now(), d });
+  return d;
+}
+function sansSalaires(emps) {
+  if (!Array.isArray(emps)) return emps;
+  return emps.map(e => { if (!e || typeof e !== 'object') return e; const c = Object.assign({}, e); CHAMPS_SALAIRE.forEach(k => { delete c[k]; }); return c; });
+}
+function payeSansSecrets(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return p;
+  const c = Object.assign({}, p); PAYE_SECRETS.forEach(k => { delete c[k]; }); return c;
+}
+function cleRefusee(cle, d) {
+  if (!d.paye) {
+    if (cle.indexOf('mdb_paye.') === 0 && PAYE_SECRETS.indexOf(cle.slice(9)) !== -1) return true;
+    if (cle.indexOf('mdb_bulSnap:') === 0 || CLES_PAIE_SEULES.indexOf(cle) !== -1) return true;
+  }
+  if (!d.acomptes && (cle === 'mdb_acomptesPrets' || cle === 'mdb_paye.acomptesPrets')) return true;
+  return false;
+}
+/* Écriture par un compte sans Paie : on remet les salaires et éléments de paie du serveur. */
+function remettreSalaires(cli, srv) {
+  if (!Array.isArray(cli)) return cli;
+  const parId = {};
+  (Array.isArray(srv) ? srv : []).forEach(e => { if (e && e.id != null) parId[String(e.id)] = e; });
+  return cli.map(e => {
+    if (!e || typeof e !== 'object') return e;
+    const o = parId[String(e.id)];
+    if (!o) { const n = Object.assign({}, e); CHAMPS_SALAIRE.forEach(k => { delete n[k]; }); return n; }
+    const n = Object.assign({}, e);
+    CHAMPS_SALAIRE.forEach(k => { if (o[k] !== undefined) n[k] = o[k]; else delete n[k]; });
+    return n;
+  });
+}
+function remettrePaye(cli, srv) {
+  if (!cli || typeof cli !== 'object' || Array.isArray(cli)) return cli;
+  const n = Object.assign({}, cli);
+  PAYE_SECRETS.forEach(k => { if (srv && srv[k] !== undefined) n[k] = srv[k]; else delete n[k]; });
+  return n;
+}
+const ENT_LOURDS = ['paye', 'users', 'operationsCaisse', 'production', 'factures'];
 const CHAMPS_PROTEGES = ['id', 'login', 'email', 'isAdmin', 'adminType', 'isSuperAdmin', 'role', 'sections', 'deniedPages', 'caisseId', 'caisseCentralisee', 'caissesAutorisees', 'actif', 'status', 'desactive', 'employeeId', 'dashSpecial', 'permissions', 'modules'];
 function fusionComptesUtilisateur(serveur, client, moiId) {
   const srv = Array.isArray(serveur) ? serveur : [];
@@ -236,13 +304,28 @@ export async function onRequest(context) {
       let maxUpdatedAt = since;
       let uniq = 0;
       const _simple = estUtilisateurSimple(_au.s);
+      const _dr = _simple ? await droitsUtilisateur(db, _au.s, uid) : { paye: true, acomptes: true };
       for (const r of rows) {
         if (seen.has(r.cle)) continue;
         seen.add(r.cle);
+        if (_simple && cleRefusee(r.cle, _dr)) {
+          if (r.updated_at && r.updated_at > maxUpdatedAt) maxUpdatedAt = r.updated_at;
+          continue;
+        }
         uniq++;
         let raw = typeof r.valeur === 'string' ? r.valeur : JSON.stringify(r.valeur);
         if (_simple && r.cle === 'mdb_users') {
-          try { raw = JSON.stringify(comptesPourUtilisateur(parseV(raw), _au.s.user_id)); } catch (eCU) {}
+          try { raw = JSON.stringify(comptesPourUtilisateur(parse2(raw), _au.s.user_id)); } catch (eCU) {}
+        }
+        if (_simple && !_dr.paye && r.cle === 'mdb_employes') {
+          try { raw = JSON.stringify(sansSalaires(parse2(raw))); } catch (eSE) {}
+        }
+        if (_simple && !_dr.paye && r.cle === 'mdb_paye') {
+          try { raw = JSON.stringify(payeSansSecrets(parse2(raw))); } catch (eSP) {}
+        }
+        /* Fiche entreprise : vieilles copies (paie, comptes, caisse…) jamais renvoyées. */
+        if (r.cle === 'mdb_entreprise' && raw.length > 200000 && /"(paye|users|operationsCaisse)"\s*:/.test(raw)) {
+          try { const ent = parse2(raw); if (ent && typeof ent === 'object') { ENT_LOURDS.forEach(k => { delete ent[k]; }); raw = JSON.stringify(ent); } } catch (eEL) {}
         }
         const s = raw.trim();
         const c0 = s.charAt(0);
@@ -331,6 +414,20 @@ export async function onRequest(context) {
       }
 
       if (estUtilisateurSimple(_auP.s)) ['mdb_users', 'mdb_entreprise', 'mdb_portailComptes'].forEach(k => { const v = updates[k]; if (v === null || (v && v.__mdbFieldValueDelete)) delete updates[k]; });
+      if (estUtilisateurSimple(_auP.s)) {
+        const drP = await droitsUtilisateur(db, _auP.s, uid);
+        const lireSrv = async (k) => { const r = await db.prepare('SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1').bind(uid, '"' + uid + '"', k).first(); return r ? parse2(r.valeur) : null; };
+        for (const k of Object.keys(updates)) {
+          if (cleRefusee(k, drP)) { delete updates[k]; continue; }
+          if (!drP.paye && k === 'mdb_employes' && updates[k] != null) {
+            try { updates[k] = remettreSalaires(parse2(updates[k]), await lireSrv('mdb_employes')); } catch (eRS) { delete updates[k]; }
+          }
+          if (!drP.paye && k === 'mdb_paye' && updates[k] != null) {
+            try { updates[k] = remettrePaye(parse2(updates[k]), await lireSrv('mdb_paye')); } catch (eRP) { delete updates[k]; }
+          }
+          if (!drP.paye && (k === 'mdb_employes' || k === 'mdb_paye') && (updates[k] === null || (updates[k] && updates[k].__mdbFieldValueDelete))) delete updates[k];
+        }
+      }
       const keys = Object.keys(updates);
       if (keys.length === 0) {
         return new Response(JSON.stringify({ ok: true, updated: 0, ts: Date.now().toString() }), { headers: corsHeaders });
