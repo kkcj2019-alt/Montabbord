@@ -35,7 +35,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <script src="js/stockage-memoire.js"></script><script src="js/impression-sans-blocage.js?v=2"></script>
-<script>window.__APP_VERSION = '2026-11-13-342';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
+<script>window.__APP_VERSION = '2026-11-13-343';function _mdbHardReload(v){try{location.href=location.pathname+'?appv='+encodeURIComponent(v||window.__APP_VERSION)+(location.hash||'');}catch(e){try{location.reload(true);}catch(e2){location.reload();}}}try{var _v=localStorage.getItem('app_version');if(_v&&_v!==window.__APP_VERSION){localStorage.setItem('app_version',window.__APP_VERSION);_mdbHardReload(window.__APP_VERSION);}else if(!_v){localStorage.setItem('app_version',window.__APP_VERSION);}}catch(e){}</script>
 <script>/* Sortie du cache arriere/avant (bfcache) : l'ancienne page continuait \u00e0
    tourner avec du vieux code et d'anciennes donn\u00e9es. On recharge. */
 try{window.addEventListener('pageshow',function(e){if(e&&e.persisted){try{location.reload();}catch(x){}}});}catch(ePS){}</script>
@@ -38415,6 +38415,48 @@ function removeLogo() {
 }
 
 /* ===== EXTRAIT DE COMPTE CLIENT ===== */
+/* Retrouve la facture d'origine d'un avoir, meme si factureRef / factureOrigineId
+   manquent (anciens avoirs). On compare le montant TTC et les lignes. */
+function ccLignesSig(f) {
+  var m = {};
+  (f && Array.isArray(f.lignes) ? f.lignes : []).forEach(function(l){
+    if (!l) return;
+    var k = String(l.articleId || l.code || l.designation || '').trim().toLowerCase();
+    if (!k) return;
+    m[k] = (m[k] || 0) + (parseFloat(l.quantite) || 0);
+  });
+  return Object.keys(m).sort().map(function(k){ return k + ':' + (Math.round(m[k] * 1000) / 1000); }).join('|');
+}
+function ccParentFactureAvoir(a, factures) {
+  if (!a || !a.isAvoir) return null;
+  var list = Array.isArray(factures) ? factures : [];
+  var all = list;
+  try { if (typeof getFactures === 'function') { var _g = getFactures(); if (Array.isArray(_g) && _g.length) all = _g; } } catch (e) {}
+  if (a.factureOrigineId) {
+    for (var i = 0; i < all.length; i++) if (all[i] && !all[i].isAvoir && String(all[i].id) === String(a.factureOrigineId)) return all[i];
+  }
+  if (a.factureRef) {
+    var ref = String(a.factureRef).trim().toLowerCase();
+    for (var j = 0; j < all.length; j++) if (all[j] && !all[j].isAvoir && String(all[j].numero || '').trim().toLowerCase() === ref) return all[j];
+  }
+  var t = Math.abs(parseFloat(a.totalTTC != null ? a.totalTTC : a.total) || 0);
+  if (!(t > 0)) return null;
+  var sig = ccLignesSig(a);
+  var cands = all.filter(function(f){
+    if (!f || f.isAvoir) return false;
+    if (a.clientId && f.clientId && String(f.clientId) !== String(a.clientId)) return false;
+    var ft = Math.abs(parseFloat(f.totalTTC != null ? f.totalTTC : f.total) || 0);
+    return Math.abs(ft - t) < 1;
+  });
+  if (!cands.length) return null;
+  if (sig) {
+    var exact = cands.filter(function(f){ return ccLignesSig(f) === sig; });
+    if (exact.length) cands = exact;
+  }
+  cands.sort(function(x, y){ return String(x.dateEmission || x.date || '').localeCompare(String(y.dateEmission || y.date || '')); });
+  var before = cands.filter(function(f){ return String(f.dateEmission || f.date || '') <= String(a.dateEmission || a.date || '9999-12-31'); });
+  return before.length ? before[before.length - 1] : cands[0];
+}
 function showExtraitCompte(clientId) {
   window._mdbExtraitOpen = true;
   try { migrateFacturesEcheances(); } catch (eME) {}
@@ -38476,8 +38518,10 @@ function showExtraitCompte(clientId) {
     }
     var _isAv = !!f.isAvoir;
     var _numAv = String(f.numero || '').replace(/^Avoir\s*/i, '');
+    var _avParent = _isAv ? ccParentFactureAvoir(f, factures) : null;
+    var _avFacRef = f.factureRef || (_avParent && _avParent.numero) || '';
     var _libOp = _isAv
-      ? ('Avoir ' + (_numAv || f.numero || '') + (f.factureRef ? ' / Fac ' + f.factureRef : ''))
+      ? ('Avoir ' + (_numAv || f.numero || '') + (_avFacRef ? ' / Fac ' + _avFacRef : ''))
       : ('Facture ' + f.numero);
     operations.push({date: f.dateEmission, libelle: _libOp, numero: f.numero, bcRef: bcRef, blRef: blRef, echeance: f.echeance || '', debit: facTotal, credit: 0, articles: articlesStr, lignes: lignesDetail, factureId: f.id, avoirId: _isAv ? f.id : '', isAvoir: _isAv});
   }
@@ -38522,7 +38566,8 @@ function showExtraitCompte(clientId) {
     if(_f.clientId!==clientId) continue;
     if(_f.isAvoir) continue;
     var _avs = _avoirsAll.filter(function(a){
-      return a && (a.factureOrigineId === _f.id || (a.factureRef && _f.numero && String(a.factureRef) === String(_f.numero)));
+      var p = ccParentFactureAvoir(a, factures);
+      return p && String(p.id) === String(_f.id);
     });
     var _avTot = _avs.reduce(function(s2,a){ return s2 + Math.abs(parseFloat(a.totalTTC || a.total) || 0); }, 0);
     var _facTot = Math.abs(parseFloat(_f.totalTTC || _f.total) || 0);
@@ -38681,7 +38726,9 @@ function printExtrait(clientId) {
     }
     var _isAvP = !!f.isAvoir;
     var _numAvP = String(f.numero || '').replace(/^Avoir\s*/i, '');
-    var _libP = _isAvP ? ('Avoir ' + (_numAvP || f.numero || '') + (f.factureRef ? ' / Fac ' + f.factureRef : '')) : ('Facture ' + f.numero);
+    var _avParentP = _isAvP ? ccParentFactureAvoir(f, factures) : null;
+    var _avFacRefP = f.factureRef || (_avParentP && _avParentP.numero) || '';
+    var _libP = _isAvP ? ('Avoir ' + (_numAvP || f.numero || '') + (_avFacRefP ? ' / Fac ' + _avFacRefP : '')) : ('Facture ' + f.numero);
     operations.push({date: f.dateEmission, libelle: _libP, numero: f.numero, bcRef: bcRef, blRef: blRef, echeance: f.echeance || '', debit: facTotal2, credit: 0, articles: _artsP.join(', '), lignes:_lignesP, avoirId: _isAvP ? f.id : '', isAvoir: _isAvP});
   }
   for (var j = 0; j < reglements.length; j++) {
@@ -38905,7 +38952,7 @@ function toggleClientSimpleDetail(clientId, tdEl, sansMemo) {
   function _regSumFor(fid) { return reglements.filter(function(r){ return r && r.factureId === fid; }).reduce(function(s2,r){ return s2 + (parseFloat(r.montant) || 0); }, 0); }
   function _avTotFor(f) {
     if (!f) return 0;
-    return _avoirsInline.filter(function(a){ return a && (a.factureOrigineId === f.id || (a.factureRef && f.numero && String(a.factureRef) === String(f.numero))); })
+    return _avoirsInline.filter(function(a){ var p = ccParentFactureAvoir(a, factures); return p && String(p.id) === String(f.id); })
       .reduce(function(s2,a){ return s2 + Math.abs(parseFloat(a.totalTTC || a.total) || 0); }, 0);
   }
   function _factureReglee(f) {
@@ -38931,7 +38978,7 @@ function toggleClientSimpleDetail(clientId, tdEl, sansMemo) {
     var _f=factures[_fi]; if(_f.clientId!==clientId) continue;
     if(!_showAllDetail){
       if(_f.isAvoir){
-        var _parentAv = factures.filter(function(x){ return x && !x.isAvoir && (x.id === _f.factureOrigineId || (x.numero && _f.factureRef && String(x.numero) === String(_f.factureRef))); })[0];
+        var _parentAv = ccParentFactureAvoir(_f, factures);
         if(_parentAv && _factureReglee(_parentAv)) continue;
       } else if(_factureReglee(_f)) continue;
     }
@@ -38939,7 +38986,7 @@ function toggleClientSimpleDetail(clientId, tdEl, sansMemo) {
     if(_f.blIds && _f.blIds.length){ var _allBls=getBLs(); var _blNums=[]; for(var _bi=0;_bi<_allBls.length;_bi++) for(var _bj=0;_bj<_f.blIds.length;_bj++) if(_allBls[_bi].id===_f.blIds[_bj]) {_blNums.push(_allBls[_bi].numero); break;} _blRef=_blNums.join(', '); } else if(_f.blId){ var _allBls2=getBLs(); for(var _bi2=0;_bi2<_allBls2.length;_bi2++) if(_allBls2[_bi2].id===_f.blId){ _blRef=_allBls2[_bi2].numero; break; } }
     if(_f.bcIds && _f.bcIds.length){ var _bcNums=[]; for(var _ci=0;_ci<_f.bcIds.length;_ci++){ var _bcO=getBCById(_f.bcIds[_ci]); if(_bcO) _bcNums.push(_bcO.numero);} _bcRef=_bcNums.join(', '); } else if(_f.lignes){ var _bcSet={}; var _bcArr=[]; for(var _li=0;_li<_f.lignes.length;_li++) if(_f.lignes[_li].bcId){ var _bcO2=getBCById(_f.lignes[_li].bcId); if(_bcO2 && !_bcSet[_bcO2.numero]){_bcSet[_bcO2.numero]=1; _bcArr.push(_bcO2.numero);}} _bcRef=_bcArr.join(', '); }
     var _artsInline=''; var _artMapI={}; if(_f.lignes && _f.lignes.length){ for(var _al=0;_al<_f.lignes.length;_al++){ var _lnI=_f.lignes[_al]; var _desI=_lnI.designation||_lnI.articleNom|| (typeof getArticleLabel==='function'?getArticleLabel(_lnI.articleId):'') || 'Article'; var _keyI=_lnI.articleId?String(_lnI.articleId):_desI; if(!_artMapI[_keyI]) _artMapI[_keyI]={des:_desI, qty:0}; _artMapI[_keyI].qty+=(_lnI.quantite||0); } var _aTmp=[]; for(var _kI in _artMapI) if(_artMapI.hasOwnProperty(_kI)) _aTmp.push(_artMapI[_kI].qty+' x '+_artMapI[_kI].des); _artsInline=_aTmp.join(', '); }
-    var _isAvI = !!_f.isAvoir; var _numAvI = String(_f.numero || '').replace(/^Avoir\s*/i, ''); var _libI = _isAvI ? ('Avoir ' + (_numAvI || _f.numero || '') + (_f.factureRef ? ' / Fac ' + _f.factureRef : '')) : ('Facture ' + _f.numero); ops.push({date:_f.dateEmission, numero:_f.numero, bc:_bcRef, bl:_blRef, echeance:_f.echeance||'', libelle:_libI, articles:_artsInline, debit:_f.totalTTC||_f.total||0, credit:0, lettrage: (_isAvI ? (avoirLettrage[_f.id]||'') : (lettrageMap[_f.id]||'')), factureId:_f.id, avoirId: _isAvI ? _f.id : '', isAvoir: _isAvI, parentFactureId: _isAvI ? (_f.factureOrigineId || '') : ''});
+    var _isAvI = !!_f.isAvoir; var _numAvI = String(_f.numero || '').replace(/^Avoir\s*/i, ''); var _avParentI = _isAvI ? ccParentFactureAvoir(_f, factures) : null; var _avFacRefI = _f.factureRef || (_avParentI && _avParentI.numero) || ''; var _libI = _isAvI ? ('Avoir ' + (_numAvI || _f.numero || '') + (_avFacRefI ? ' / Fac ' + _avFacRefI : '')) : ('Facture ' + _f.numero); ops.push({date:_f.dateEmission, numero:_f.numero, bc:_bcRef, bl:_blRef, echeance:_f.echeance||'', libelle:_libI, articles:_artsInline, debit:_f.totalTTC||_f.total||0, credit:0, lettrage: (_isAvI ? (avoirLettrage[_f.id]||'') : (lettrageMap[_f.id]||'')), factureId:_f.id, avoirId: _isAvI ? _f.id : '', isAvoir: _isAvI, parentFactureId: _isAvI ? ((_avParentI && _avParentI.id) || _f.factureOrigineId || '') : ''});
   }
   for(var _rj=0; _rj<reglements.length; _rj++){
     var _r=reglements[_rj]; if(_r.clientId!==clientId) continue;
