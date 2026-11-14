@@ -773,6 +773,19 @@ export async function onRequest(context) {
           await ecrireCle(db, uid, 'mdb_tombstones', tb);
         } catch (eTb) {}
       }
+      /* Liste gardée par le serveur : la synchro refusera tout retour de ces lignes
+         (appareil resté hors ligne qui renverrait son ancienne copie). */
+      if (supprimes.ops.length || supprimes.bops.length || supprimes.aps.length) {
+        try {
+          let ss = parseVal(await lireCle(db, uid, 'mdb_suppressionsServeur'), {});
+          if (!ss || typeof ss !== 'object' || Array.isArray(ss)) ss = {};
+          const ajoute = (k, list) => { ss[k] = (ss[k] && typeof ss[k] === 'object') ? ss[k] : {}; list.forEach(id => { ss[k][id] = nowMs; }); };
+          ajoute('mdb_operationsCaisse', supprimes.ops);
+          ajoute('mdb_banqueOperations', supprimes.bops);
+          ajoute('mdb_acomptesPrets', supprimes.aps);
+          await ecrireCle(db, uid, 'mdb_suppressionsServeur', ss);
+        } catch (eSs) {}
+      }
       return json({ ok: true, supprime: resultat, bloques });
     }
     if (action === 'admindelete') {

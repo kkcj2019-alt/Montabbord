@@ -49,7 +49,7 @@ function mdbRefus(cors, status) {
 
 /* Clés gérées UNIQUEMENT par le serveur : jamais renvoyées ni écrites par /api/sync. */
 const CLES_SERVEUR = ['mdb_espaceSessions', 'mdb_espaceEchecs'];
-const CLES_SERVEUR_ECRITURE = ['mdb_espaceSessions', 'mdb_espaceEchecs', 'mdb_portailSessions'];
+const CLES_SERVEUR_ECRITURE = ['mdb_espaceSessions', 'mdb_espaceEchecs', 'mdb_portailSessions', 'mdb_suppressionsServeur'];
 function parseV(v) { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch (e) { return null; } }
 
 /* ===== DROITS À L'INTÉRIEUR D'UNE ENTREPRISE (comptes « utilisateur ») =====
@@ -427,6 +427,46 @@ export async function onRequest(context) {
           }
           if (!drP.paye && (k === 'mdb_employes' || k === 'mdb_paye') && (updates[k] === null || (updates[k] && updates[k].__mdbFieldValueDelete))) delete updates[k];
         }
+      }
+      /* Lignes supprimées par le serveur (demande employé supprimée) : un appareil
+         resté hors ligne ne peut pas les faire revenir, et ses listes de
+         suppressions ne peuvent pas effacer ces marques. Gardé 90 jours. */
+      const _cSS = ['mdb_operationsCaisse', 'mdb_banqueOperations', 'mdb_acomptesPrets', 'mdb_paye.acomptesPrets', 'mdb_tombstones', 'mdb_deletedOps'];
+      if (_cSS.some(k => updates[k] !== undefined && updates[k] !== null)) {
+        try {
+          const rSS = await db.prepare("SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = 'mdb_suppressionsServeur' ORDER BY updated_at DESC LIMIT 1").bind(uid, '"' + uid + '"').first();
+          const ss = rSS ? parse2(rSS.valeur) : null;
+          if (ss && typeof ss === 'object' && !Array.isArray(ss)) {
+            const lim = Date.now() - 90 * 24 * 3600 * 1000;
+            const actifs = {};
+            Object.keys(ss).forEach(ent => { const m = ss[ent] || {}; actifs[ent] = {}; Object.keys(m).forEach(id => { if (+m[id] > lim) actifs[ent][id] = +m[id]; }); });
+            const filtre = (k, ent) => {
+              const v = updates[k]; if (v === undefined || v === null || !actifs[ent]) return;
+              const a = parse2(v); if (!Array.isArray(a)) return;
+              const n = a.filter(x => !(x && x.id != null && actifs[ent][String(x.id)]));
+              if (n.length !== a.length) updates[k] = n;
+            };
+            filtre('mdb_operationsCaisse', 'mdb_operationsCaisse');
+            filtre('mdb_banqueOperations', 'mdb_banqueOperations');
+            filtre('mdb_acomptesPrets', 'mdb_acomptesPrets');
+            filtre('mdb_paye.acomptesPrets', 'mdb_acomptesPrets');
+            if (updates.mdb_tombstones !== undefined && updates.mdb_tombstones !== null) {
+              const tb = parse2(updates.mdb_tombstones);
+              if (tb && typeof tb === 'object' && !Array.isArray(tb)) {
+                Object.keys(actifs).forEach(ent => { Object.keys(actifs[ent]).forEach(id => { tb[ent] = tb[ent] || {}; if (!tb[ent][id]) tb[ent][id] = actifs[ent][id]; }); });
+                updates.mdb_tombstones = tb;
+              }
+            }
+            if (updates.mdb_deletedOps !== undefined && updates.mdb_deletedOps !== null) {
+              const dl = parse2(updates.mdb_deletedOps);
+              if (Array.isArray(dl)) {
+                const vu = {}; dl.forEach(d => { if (d && d.id) vu[String(d.id)] = 1; });
+                ['mdb_operationsCaisse', 'mdb_banqueOperations'].forEach(ent => Object.keys(actifs[ent] || {}).forEach(id => { if (!vu[id]) dl.push({ id, fp: '', deletedAt: new Date(actifs[ent][id]).toISOString(), motif: 'demande employé supprimée' }); }));
+                updates.mdb_deletedOps = dl;
+              }
+            }
+          }
+        } catch (eSS) {}
       }
       const keys = Object.keys(updates);
       if (keys.length === 0) {
