@@ -16062,7 +16062,14 @@ window.mdbImportClientOrder = function (order) {
     if (!order || !order.id) return null;
     var bcs = getBCs();
     for (var i = 0; i < bcs.length; i++) {
-      if (bcs[i] && (String(bcs[i].clientOrderId) === String(order.id) || (order.bcNumero && String(bcs[i].numero) === String(order.bcNumero)))) return bcs[i];
+      if (bcs[i] && (String(bcs[i].clientOrderId) === String(order.id) || (order.bcNumero && String(bcs[i].numero) === String(order.bcNumero)))) {
+        /* Commande re-validée après une annulation : on réactive son BC. */
+        if (bcs[i].statut === 'annule' && bcs[i].annuleParEspaceClient) {
+          bcs[i].statut = 'valide'; delete bcs[i].raisonAnnulation; delete bcs[i].dateAnnulation; delete bcs[i].annuleParEspaceClient; bcs[i].updatedAt = Date.now();
+          DB.set('mdb_bc', bcs); try { markDirty('mdb_bc'); persistPendingSync(); schedulePush(); } catch (eRe) {}
+        }
+        return bcs[i];
+      }
     }
     var clients = getClients();
     var cl = null;
@@ -16118,6 +16125,20 @@ window.mdbImportClientOrder = function (order) {
   } catch (e) { return null; }
 };
 
+/* Commande de l'espace client annulée ou supprimée : son BC passe « annulé »
+   (classé dans les terminés, comme un abandon). */
+window.mdbAnnulerBCCommandeClient = function (orderId, motif) {
+  try {
+    var bcs = getBCs(), n = 0;
+    for (var i = 0; i < bcs.length; i++) {
+      var b = bcs[i];
+      if (!b || String(b.clientOrderId || '') !== String(orderId) || b.statut === 'annule') continue;
+      b.statut = 'annule'; b.raisonAnnulation = motif || 'Commande annul\u00e9e dans l\u2019espace client'; b.dateAnnulation = getToday(); b.annuleParEspaceClient = true; b.updatedAt = Date.now(); n++;
+    }
+    if (n) { DB.set('mdb_bc', bcs); try { markDirty('mdb_bc'); persistPendingSync(); schedulePush(); } catch (e1) {} try { if (currentPage === 'facturation' && typeof renderBC === 'function') renderBC(); } catch (e2) {} }
+    return n;
+  } catch (e) { return -1; }
+};
 function deleteBC(id) {
   /* Suppression definitive : on demande confirmation */
   if (!window.confirm('Supprimer ce bon de commande ?')) return;

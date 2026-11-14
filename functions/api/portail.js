@@ -86,6 +86,125 @@ function dedupeBulletinsParMois(list) {
   }
   return res.sort((x, y) => x.i - y.i).map(x => x.b);
 }
+/* Annule le paiement (pièce caisse / banque + ligne acompte / prêt) de demandes
+   employé : utilisé à la suppression ET quand une demande acceptée est refusée. */
+async function annulerPaiementsRequetes(db, uid, ids) {
+    const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
+    const arrR = Array.isArray(reqs) ? reqs : [];
+    const opIds = {}, apIds = {};
+    arrR.forEach(r => {
+      if (!r || ids.indexOf(String(r.id)) === -1) return;
+      const t = r.traitement || {};
+      if (t.operationId) opIds[String(t.operationId)] = String(r.id);
+      if (t.acompteId) apIds[String(t.acompteId)] = String(r.id);
+    });
+    const aps = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
+    const arrAp = Array.isArray(aps) ? aps : [];
+    arrAp.forEach(a => {
+      if (!a) return;
+      if ((a.requeteId && ids.indexOf(String(a.requeteId)) !== -1) || apIds[String(a.id)]) {
+        apIds[String(a.id)] = String(a.requeteId || apIds[String(a.id)] || '');
+        if (a.caisseOpId) opIds[String(a.caisseOpId)] = apIds[String(a.id)];
+        if (a.banqueOpId) opIds[String(a.banqueOpId)] = apIds[String(a.id)];
+      }
+    });
+    /* Déjà retenu sur la paie : on ne touche pas à l'argent. */
+    const bloques = [];
+    arrAp.forEach(a => {
+      if (!a || !apIds[String(a.id)]) return;
+      const deja = (parseFloat(a.montantRembourse) || 0) > 0 || (parseFloat(a.rembourse) || 0) > 0 || /rembours|sold/i.test(String(a.statut || '')) || (Array.isArray(a.echeances) && a.echeances.some(e => e && e.preleve === true));
+      if (deja) bloques.push(apIds[String(a.id)]);
+    });
+    const okReq = id => bloques.indexOf(id) === -1;
+    Object.keys(apIds).forEach(k => { if (!okReq(apIds[k])) delete apIds[k]; });
+    Object.keys(opIds).forEach(k => { if (!okReq(opIds[k])) delete opIds[k]; });
+    const nowMs = Date.now(), nowIso = new Date().toISOString();
+    const resultat = { caisse: 0, banque: 0, acomptes: 0 };
+    const supprimes = { ops: [], bops: [], aps: [] };
+    const filtrer = (arr, estCible, liste) => arr.filter(x => { if (x && estCible(x)) { liste.push(String(x.id)); return false; } return true; });
+    const cops = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
+    if (Array.isArray(cops)) {
+      const next = filtrer(cops, o => opIds[String(o.id)] || (o.requeteId && ids.indexOf(String(o.requeteId)) !== -1 && okReq(String(o.requeteId)) && (o.apType || o.typeOp)), supprimes.ops);
+      if (next.length !== cops.length) { await ecrireCle(db, uid, 'mdb_operationsCaisse', next); resultat.caisse = cops.length - next.length; }
+    }
+    const bops = parseVal(await lireCle(db, uid, 'mdb_banqueOperations'), []);
+    if (Array.isArray(bops)) {
+      const next = filtrer(bops, o => opIds[String(o.id)] || (o.requeteId && ids.indexOf(String(o.requeteId)) !== -1 && okReq(String(o.requeteId)) && (o.apType || o.typeOp)), supprimes.bops);
+      if (next.length !== bops.length) { await ecrireCle(db, uid, 'mdb_banqueOperations', next); resultat.banque = bops.length - next.length; }
+    }
+    const nextAp = filtrer(arrAp, a => !!apIds[String(a.id)], supprimes.aps);
+    if (nextAp.length !== arrAp.length) { await ecrireCle(db, uid, 'mdb_acomptesPrets', nextAp); resultat.acomptes = arrAp.length - nextAp.length; }
+    /* Copie gardée par la Paie (mdb_paye.acomptesPrets) */
+    try {
+      const pap = parseVal(await lireCle(db, uid, 'mdb_paye.acomptesPrets'), null);
+      if (Array.isArray(pap)) {
+        const n2 = pap.filter(a => !(a && (apIds[String(a.id)] || (a.requeteId && ids.indexOf(String(a.requeteId)) !== -1 && okReq(String(a.requeteId))))));
+        if (n2.length !== pap.length) await ecrireCle(db, uid, 'mdb_paye.acomptesPrets', n2);
+      }
+    } catch (ePap) {}
+    /* Pierres tombales : sinon la copie locale d'un appareil les ramène. */
+    if (supprimes.ops.length || supprimes.bops.length || supprimes.aps.length) {
+      try {
+        const del = parseVal(await lireCle(db, uid, 'mdb_deletedOps'), []);
+        const arrD = Array.isArray(del) ? del : [];
+        supprimes.ops.concat(supprimes.bops).forEach(id => arrD.push({ id, fp: '', deletedAt: nowIso, motif: 'demande employé supprimée' }));
+        if (supprimes.ops.length || supprimes.bops.length) await ecrireCle(db, uid, 'mdb_deletedOps', arrD);
+      } catch (eDo) {}
+      try {
+        let tb = parseVal(await lireCle(db, uid, 'mdb_tombstones'), {});
+        if (!tb || typeof tb !== 'object' || Array.isArray(tb)) tb = {};
+        const pose = (k, list) => { if (!list.length) return; tb[k] = (tb[k] && typeof tb[k] === 'object') ? tb[k] : {}; list.forEach(id => { tb[k][id] = nowMs; }); };
+        pose('mdb_operationsCaisse', supprimes.ops);
+        pose('mdb_banqueOperations', supprimes.bops);
+        pose('mdb_acomptesPrets', supprimes.aps);
+        await ecrireCle(db, uid, 'mdb_tombstones', tb);
+      } catch (eTb) {}
+    }
+    /* Liste gardée par le serveur : la synchro refusera tout retour de ces lignes
+       (appareil resté hors ligne qui renverrait son ancienne copie). */
+    if (supprimes.ops.length || supprimes.bops.length || supprimes.aps.length) {
+      try {
+        let ss = parseVal(await lireCle(db, uid, 'mdb_suppressionsServeur'), {});
+        if (!ss || typeof ss !== 'object' || Array.isArray(ss)) ss = {};
+        const ajoute = (k, list) => { ss[k] = (ss[k] && typeof ss[k] === 'object') ? ss[k] : {}; list.forEach(id => { ss[k][id] = nowMs; }); };
+        ajoute('mdb_operationsCaisse', supprimes.ops);
+        ajoute('mdb_banqueOperations', supprimes.bops);
+        ajoute('mdb_acomptesPrets', supprimes.aps);
+        await ecrireCle(db, uid, 'mdb_suppressionsServeur', ss);
+      } catch (eSs) {}
+    }
+    return { supprime: resultat, bloques };
+}
+/* Retire les absences posées dans le pointage par des permissions / congés. */
+async function retirerAbsencesRequetes(db, uid, ids) {
+  const paye = await lirePaye(db, uid);
+  const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
+  const out = [];
+  let changed = false;
+  pts.forEach(p => {
+    if (!p) return;
+    const pid = String(p.permissionId || p.requeteId || '');
+    if (!pid || ids.indexOf(pid) === -1) { out.push(p); return; }
+    changed = true;
+    /* Ligne creee uniquement par la permission : on la retire. */
+    if (p.permissionAuto === true) return;
+    delete p.permissionId;
+    delete p.permissionAuto;
+    if (String(p.requeteId || '') === pid) delete p.requeteId;
+    p.absent_paye = false;
+    delete p.paye_sans_travail;
+    if (/^(permission|cong)/i.test(String(p.motif || ''))) delete p.motif;
+    if (String(p.obs || '').toLowerCase().indexOf('permission') === 0) delete p.obs;
+    if (parseFloat(p.h_j_manual) === 8 && !p.j_arrivee && !p.n_arrivee) delete p.h_j_manual;
+    if (parseFloat(p.h_n_manual) === 0) delete p.h_n_manual;
+    const hasReal = !!(p.j_arrivee || p.n_arrivee || p.j_fin || p.n_fin || p.h_j_manual || p.h_n_manual);
+    if (!hasReal) return;
+    if (p.present === false) p.present = true;
+    out.push(p);
+  });
+  if (changed) await ecrireCle(db, uid, 'mdb_paye.pointage', out);
+  return changed;
+}
 async function lireCle(db, uid, cle) {
   const row = await db.prepare(
     'SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1'
@@ -411,32 +530,7 @@ export async function onRequest(context) {
         if (rest.length !== arrP.length) await ecrireCle(db, uid, 'mdb_rh_permissions', rest);
       } catch (ePermDel) {}
       try {
-        const paye = await lirePaye(db, uid);
-        const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
-        const out = [];
-        let changed = false;
-        pts.forEach(p => {
-          if (!p) return;
-          const pid = String(p.permissionId || p.requeteId || '');
-          if (!pid || ids.indexOf(pid) === -1) { out.push(p); return; }
-          changed = true;
-          /* Ligne creee uniquement par la permission : on la retire. */
-          if (p.permissionAuto === true) return;
-          delete p.permissionId;
-          delete p.permissionAuto;
-          if (String(p.requeteId || '') === pid) delete p.requeteId;
-          p.absent_paye = false;
-          delete p.paye_sans_travail;
-          if (String(p.motif || '').toLowerCase().indexOf('permission') === 0) delete p.motif;
-          if (String(p.obs || '').toLowerCase().indexOf('permission') === 0) delete p.obs;
-          if (parseFloat(p.h_j_manual) === 8 && !p.j_arrivee && !p.n_arrivee) delete p.h_j_manual;
-          if (parseFloat(p.h_n_manual) === 0) delete p.h_n_manual;
-          const hasReal = !!(p.j_arrivee || p.n_arrivee || p.j_fin || p.n_fin || p.h_j_manual || p.h_n_manual);
-          if (!hasReal) return;
-          if (p.present === false) p.present = true;
-          out.push(p);
-        });
-        if (changed) await ecrireCle(db, uid, 'mdb_paye.pointage', out);
+        const changed = await retirerAbsencesRequetes(db, uid, ids);
         return json({ ok: true, pointage: changed });
       } catch (ePtDel) { return json({ ok: true, pointage: false }); }
     }
@@ -702,91 +796,8 @@ export async function onRequest(context) {
     if (action === 'adminannulerpaiement') {
       const ids = (Array.isArray(body.requestIds) ? body.requestIds : (body.requestId ? [body.requestId] : [])).map(String).filter(Boolean);
       if (!ids.length) return json({ ok: false, code: 'ids' }, 400);
-      const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
-      const arrR = Array.isArray(reqs) ? reqs : [];
-      const opIds = {}, apIds = {};
-      arrR.forEach(r => {
-        if (!r || ids.indexOf(String(r.id)) === -1) return;
-        const t = r.traitement || {};
-        if (t.operationId) opIds[String(t.operationId)] = String(r.id);
-        if (t.acompteId) apIds[String(t.acompteId)] = String(r.id);
-      });
-      const aps = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
-      const arrAp = Array.isArray(aps) ? aps : [];
-      arrAp.forEach(a => {
-        if (!a) return;
-        if ((a.requeteId && ids.indexOf(String(a.requeteId)) !== -1) || apIds[String(a.id)]) {
-          apIds[String(a.id)] = String(a.requeteId || apIds[String(a.id)] || '');
-          if (a.caisseOpId) opIds[String(a.caisseOpId)] = apIds[String(a.id)];
-          if (a.banqueOpId) opIds[String(a.banqueOpId)] = apIds[String(a.id)];
-        }
-      });
-      /* Déjà retenu sur la paie : on ne touche pas à l'argent. */
-      const bloques = [];
-      arrAp.forEach(a => {
-        if (!a || !apIds[String(a.id)]) return;
-        const deja = (parseFloat(a.montantRembourse) || 0) > 0 || (parseFloat(a.rembourse) || 0) > 0 || /rembours|sold/i.test(String(a.statut || '')) || (Array.isArray(a.echeances) && a.echeances.some(e => e && e.preleve === true));
-        if (deja) bloques.push(apIds[String(a.id)]);
-      });
-      const okReq = id => bloques.indexOf(id) === -1;
-      Object.keys(apIds).forEach(k => { if (!okReq(apIds[k])) delete apIds[k]; });
-      Object.keys(opIds).forEach(k => { if (!okReq(opIds[k])) delete opIds[k]; });
-      const nowMs = Date.now(), nowIso = new Date().toISOString();
-      const resultat = { caisse: 0, banque: 0, acomptes: 0 };
-      const supprimes = { ops: [], bops: [], aps: [] };
-      const filtrer = (arr, estCible, liste) => arr.filter(x => { if (x && estCible(x)) { liste.push(String(x.id)); return false; } return true; });
-      const cops = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
-      if (Array.isArray(cops)) {
-        const next = filtrer(cops, o => opIds[String(o.id)] || (o.requeteId && ids.indexOf(String(o.requeteId)) !== -1 && okReq(String(o.requeteId)) && (o.apType || o.typeOp)), supprimes.ops);
-        if (next.length !== cops.length) { await ecrireCle(db, uid, 'mdb_operationsCaisse', next); resultat.caisse = cops.length - next.length; }
-      }
-      const bops = parseVal(await lireCle(db, uid, 'mdb_banqueOperations'), []);
-      if (Array.isArray(bops)) {
-        const next = filtrer(bops, o => opIds[String(o.id)] || (o.requeteId && ids.indexOf(String(o.requeteId)) !== -1 && okReq(String(o.requeteId)) && (o.apType || o.typeOp)), supprimes.bops);
-        if (next.length !== bops.length) { await ecrireCle(db, uid, 'mdb_banqueOperations', next); resultat.banque = bops.length - next.length; }
-      }
-      const nextAp = filtrer(arrAp, a => !!apIds[String(a.id)], supprimes.aps);
-      if (nextAp.length !== arrAp.length) { await ecrireCle(db, uid, 'mdb_acomptesPrets', nextAp); resultat.acomptes = arrAp.length - nextAp.length; }
-      /* Copie gardée par la Paie (mdb_paye.acomptesPrets) */
-      try {
-        const pap = parseVal(await lireCle(db, uid, 'mdb_paye.acomptesPrets'), null);
-        if (Array.isArray(pap)) {
-          const n2 = pap.filter(a => !(a && (apIds[String(a.id)] || (a.requeteId && ids.indexOf(String(a.requeteId)) !== -1 && okReq(String(a.requeteId))))));
-          if (n2.length !== pap.length) await ecrireCle(db, uid, 'mdb_paye.acomptesPrets', n2);
-        }
-      } catch (ePap) {}
-      /* Pierres tombales : sinon la copie locale d'un appareil les ramène. */
-      if (supprimes.ops.length || supprimes.bops.length || supprimes.aps.length) {
-        try {
-          const del = parseVal(await lireCle(db, uid, 'mdb_deletedOps'), []);
-          const arrD = Array.isArray(del) ? del : [];
-          supprimes.ops.concat(supprimes.bops).forEach(id => arrD.push({ id, fp: '', deletedAt: nowIso, motif: 'demande employé supprimée' }));
-          if (supprimes.ops.length || supprimes.bops.length) await ecrireCle(db, uid, 'mdb_deletedOps', arrD);
-        } catch (eDo) {}
-        try {
-          let tb = parseVal(await lireCle(db, uid, 'mdb_tombstones'), {});
-          if (!tb || typeof tb !== 'object' || Array.isArray(tb)) tb = {};
-          const pose = (k, list) => { if (!list.length) return; tb[k] = (tb[k] && typeof tb[k] === 'object') ? tb[k] : {}; list.forEach(id => { tb[k][id] = nowMs; }); };
-          pose('mdb_operationsCaisse', supprimes.ops);
-          pose('mdb_banqueOperations', supprimes.bops);
-          pose('mdb_acomptesPrets', supprimes.aps);
-          await ecrireCle(db, uid, 'mdb_tombstones', tb);
-        } catch (eTb) {}
-      }
-      /* Liste gardée par le serveur : la synchro refusera tout retour de ces lignes
-         (appareil resté hors ligne qui renverrait son ancienne copie). */
-      if (supprimes.ops.length || supprimes.bops.length || supprimes.aps.length) {
-        try {
-          let ss = parseVal(await lireCle(db, uid, 'mdb_suppressionsServeur'), {});
-          if (!ss || typeof ss !== 'object' || Array.isArray(ss)) ss = {};
-          const ajoute = (k, list) => { ss[k] = (ss[k] && typeof ss[k] === 'object') ? ss[k] : {}; list.forEach(id => { ss[k][id] = nowMs; }); };
-          ajoute('mdb_operationsCaisse', supprimes.ops);
-          ajoute('mdb_banqueOperations', supprimes.bops);
-          ajoute('mdb_acomptesPrets', supprimes.aps);
-          await ecrireCle(db, uid, 'mdb_suppressionsServeur', ss);
-        } catch (eSs) {}
-      }
-      return json({ ok: true, supprime: resultat, bloques });
+      const res = await annulerPaiementsRequetes(db, uid, ids);
+      return json({ ok: true, supprime: res.supprime, bloques: res.bloques });
     }
     if (action === 'admindelete') {
       const id = String(body.requestId || body.id || '');
@@ -844,6 +855,23 @@ export async function onRequest(context) {
       if (!req) return json({ ok: false, code: 'not_found' }, 404);
       const now = new Date().toISOString();
       const statut = String(body.statut || 'en_cours');
+      const ancienStatut = String(req.statut || '');
+      /* Demande ACCEPTÉE puis refusée / remise en cours : on défait ce que
+         l'acceptation avait créé (paiement, absences dans le pointage). */
+      let annulation = null;
+      if (ancienStatut === 'acceptee' && statut === 'refusee') {
+        annulation = {};
+        if ((req.type === 'acompte' || req.type === 'pret') && req.traitement && req.traitement.paiement) {
+          try {
+            const rA = await annulerPaiementsRequetes(db, uid, [String(req.id)]);
+            if (rA.bloques && rA.bloques.length) annulation.paiementGarde = true;
+            else { annulation.paiementAnnule = true; req.traitement = Object.assign({}, req.traitement, { paiement: false, paiementAnnuleLe: now, operationId: '', acompteId: '' }); }
+          } catch (eAP) { annulation.erreur = true; }
+        }
+        if (req.type === 'permission' || req.type === 'conge') {
+          try { annulation.absencesRetirees = await retirerAbsencesRequetes(db, uid, [String(req.id)]); if (req.traitement) req.traitement = Object.assign({}, req.traitement, { pointage: false, jours: 0 }); } catch (eAb) { annulation.erreur = true; }
+        }
+      }
       req.statut = statut;
       req.decision = {
         par: String(body.nom || 'Administration'),
@@ -1078,7 +1106,7 @@ export async function onRequest(context) {
           if (change) await ecrireCle(db, uid, 'mdb_rh_permissions', arrP);
         } catch (ePermMaj) {}
       }
-      return json({ ok: true, requete: req });
+      return json({ ok: true, requete: req, annulation });
     }
 
     /* ---------- Vérification de session ---------- */

@@ -626,7 +626,9 @@
     syncSet('mdb_clientQuotes', S.quotes).then(render).catch(function () {});
   };
   window.adDeleteOrder = function (id) {
-    if (!confirm('Supprimer définitivement cette commande ? Cette action est irréversible.')) return;
+    var _oD = (S.orders || []).filter(function (x) { return x && x.id === id; })[0];
+    if (!confirm('Supprimer définitivement cette commande ? Cette action est irréversible.' + (_oD && _oD.bcImported ? '\n\nSon bon de commande dans Facturation passera « annulé ».' : ''))) return;
+    if (_oD && _oD.bcImported) annulerBCCommande(_oD, 'Commande ' + (_oD.numero || '') + ' supprim\u00e9e (espace client)');
     S.orders = (S.orders || []).filter(function (x) { return !x || x.id !== id; });
     syncSet('mdb_clientOrders', S.orders).then(render).catch(function () {});
   };
@@ -954,9 +956,46 @@
     else { q.archiveAt = null; q.archived = false; }
     syncSet('mdb_clientQuotes', S.quotes).then(function () { render(); }).catch(function () {});
   };
+  /* Commande annulée / supprimée après validation : le BC créé dans
+     Facturation passe « annulé ». Re-validée : il est réactivé. */
+  async function annulerBCCommande(o, motif) {
+    if (!o || !o.bcImported) return 0;
+    try {
+      if (window.opener && !window.opener.closed && typeof window.opener.mdbAnnulerBCCommandeClient === 'function') {
+        var n0 = window.opener.mdbAnnulerBCCommandeClient(o.id, motif);
+        if (n0 >= 0) return n0;
+      }
+    } catch (eOp) {}
+    try {
+      var bcs = await syncGet('mdb_bc'); if (typeof bcs === 'string') bcs = JSON.parse(bcs);
+      if (!Array.isArray(bcs)) return 0;
+      var n = 0;
+      bcs.forEach(function (b) {
+        if (!b || String(b.clientOrderId || '') !== String(o.id) || b.statut === 'annule') return;
+        b.statut = 'annule'; b.raisonAnnulation = motif; b.dateAnnulation = new Date().toISOString().slice(0, 10); b.annuleParEspaceClient = true; b.updatedAt = Date.now(); n++;
+      });
+      if (n) await syncSet('mdb_bc', bcs);
+      return n;
+    } catch (e) { return 0; }
+  }
+  async function ajouterBCServeur(bc) {
+    try {
+      var bcs = await syncGet('mdb_bc'); if (typeof bcs === 'string') bcs = JSON.parse(bcs);
+      if (!Array.isArray(bcs)) bcs = [];
+      if (bcs.some(function (b) { return b && String(b.clientOrderId || '') === String(bc.clientOrderId); })) return true;
+      bc.updatedAt = Date.now(); bcs.push(bc);
+      await syncSet('mdb_bc', bcs);
+      return true;
+    } catch (e) { return false; }
+  }
   window.adSetOrderStatus = function (id, st) {
     var o = S.orders.filter(function (x) { return x.id === id; })[0]; if (!o) return;
+    var _ancien = o.statut;
     o.statut = st; o.updatedAt = Date.now();
+    if (String(st) === 'annulee' && o.bcImported) annulerBCCommande(o, 'Commande ' + (o.numero || '') + ' annul\u00e9e (espace client)');
+    if (String(st) === 'validee' && o.bcImported && _ancien === 'annulee') {
+      try { if (window.opener && !window.opener.closed && typeof window.opener.mdbImportClientOrder === 'function') window.opener.mdbImportClientOrder(o); } catch (eRv) {}
+    }
     if (st === 'livree' || st === 'annulee') { o.archiveAt = o.archiveAt || Date.now(); o.archived = true; }
     else { o.archiveAt = null; o.archived = false; }
     /* Acceptation = création automatique du BC dans l'Index (Facturation → BC). */
@@ -985,8 +1024,8 @@
               clientOrderId: o.id, clientOrderNumero: o.numero || '', bcClientNumero: o.bcNumero || '',
               source: 'espace-client', dateCreation: new Date().toISOString().slice(0, 10)
             };
-            bcs.push(bc);
-            localStorage.setItem('mdb_bc', JSON.stringify(bcs));
+            /* Envoyé au serveur (l'application le reçoit à sa prochaine synchro). */
+            ajouterBCServeur(bc);
           }
         } catch (eLs) {}
       }
