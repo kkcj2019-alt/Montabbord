@@ -626,6 +626,7 @@
       label = 'Motif (facultatif). '
         + ((req.type === 'acompte' || req.type === 'pret') && req.traitement && req.traitement.paiement ? 'Le paiement sera annulé partout (pièce de ' + (req.traitement.sourceType === 'banque' ? 'banque' : 'caisse') + ' et ligne ' + (req.type === 'pret' ? 'de prêt' : 'd’acompte') + '), sauf si une retenue est déjà faite sur un bulletin. ' : '')
         + (isPerm ? 'Les absences posées dans le pointage seront retirées. ' : '')
+        + (req.type === 'pointage' ? 'Le pointage corrigé sera remis comme avant. ' : '')
         + 'La demande passera « Refusée ».';
       ok = 'Annuler l’acceptation';
     }
@@ -645,7 +646,11 @@
           if (com) pp.commentaire_admin = com;
           fetch(SYNC, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid: uid, updates: { mdb_rh_permissions: perms } }) })
             .then(function (r) { return r.ok ? r.json() : null; })
-            .then(function (j) { if (j && j.ok) { loadAll(); state.open = id; } else alert('Validation impossible.'); })
+            .then(function (j) {
+              if (!(j && j.ok)) { alert('Validation impossible.'); return; }
+              /* Pointage : absences posées si validée, retirées sinon (comme l'écran RH). */
+              return api('adminpermissionpointage', { permId: String(pp.id) }).then(function () { loadAll(); state.open = id; });
+            })
             .catch(function () { alert('Connexion impossible. Réessayez.'); });
           return;
         }
@@ -665,7 +670,8 @@
     var _perm=!!(_t0&&(_t0.type==="permission"||_t0.type==="conge")&&_t0.statut==="acceptee");
     var _msgDel='Cette action est définitive. La discussion sera supprimée.'
       +(_paye?'\n\nLe paiement lié sera aussi annulé partout : la pièce de '+(_t0.traitement.sourceType==="banque"?'banque':'caisse')+' de '+money(_t0.traitement.montant)+' et la ligne '+(_t0.type==="pret"?'de prêt':'d’acompte')+' (Paie). Si une retenue a déjà été faite sur un bulletin, le paiement est gardé.':'')
-      +(_perm?'\n\nLes absences posées dans le pointage pour cette demande seront retirées.':'');
+      +(_perm?'\n\nLes absences posées dans le pointage pour cette demande seront retirées.':'')
+      +(_t0&&_t0.type==="pointage"&&_t0.statut==="acceptee"?'\n\nLe pointage corrigé sera remis comme avant.':'');
     window.__mdbConfirm('Supprimer la requête', _msgDel, 'Supprimer', function () {
       /* Une permission fusionnée peut exister dans mdb_rh_permissions ET
          mdb_requetesEmploye : on supprime des deux côtés pour ne plus avoir
@@ -698,9 +704,12 @@
       /* Acompte / prêt payé : annuler d'abord la pièce de caisse / banque et la ligne d'acompte. */
       var _payIds = [];
       (state.requetes || []).forEach(function (r) { if (r && ids[String(r.id)] && (r.type === 'acompte' || r.type === 'pret') && r.traitement && r.traitement.paiement) _payIds.push(String(r.id)); });
-      var _avant = _payIds.length ? api('adminannulerpaiement', { requestIds: _payIds }) : Promise.resolve({ ok: true });
+      /* Tout ce que l'acceptation a créé (paiement, absences, correction de pointage). */
+      var _effIds = [];
+      (state.requetes || []).forEach(function (r) { if (r && ids[String(r.id)] && r.statut === 'acceptee') _effIds.push(String(r.id)); });
+      var _avant = _effIds.length ? api('adminannulereffets', { requestIds: _effIds }) : Promise.resolve({ ok: true });
       _avant.then(function (ra) {
-        if (_payIds.length && !(ra && ra.ok)) { alert('Le paiement lié n’a pas pu être annulé. Rien n’a été supprimé. Réessayez.'); return null; }
+        if (_effIds.length && !(ra && ra.ok)) { alert('Ce que la demande avait créé n’a pas pu être annulé. Rien n’a été supprimé. Réessayez.'); return null; }
         if (ra && ra.bloques && ra.bloques.length) alert('Une retenue a déjà été faite sur un bulletin : le paiement (caisse et acompte) est gardé. Seule la demande est supprimée.');
         return postSync({mdb_requetesEmploye:gens,mdb_rh_permissions:perms,mdb_requetesDeleted:tombs,mdb_requetesDeletedSig:sigs});
       }).then(function(j){

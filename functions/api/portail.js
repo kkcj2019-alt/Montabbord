@@ -205,6 +205,29 @@ async function retirerAbsencesRequetes(db, uid, ids) {
   if (changed) await ecrireCle(db, uid, 'mdb_paye.pointage', out);
   return changed;
 }
+/* Contestation de pointage : remet le jour tel qu'il était avant l'acceptation. */
+async function restaurerPointageRequete(db, uid, req) {
+  const t = (req && req.traitement) || {};
+  if (!t.pointage || !t.date) return false;
+  const paye = await lirePaye(db, uid);
+  const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
+  let idx = -1;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (p && String(p.employee_id) === String(req.empId) && String(p.date || '').slice(0, 10) === String(t.date) && String(p.requeteId || '') === String(req.id)) { idx = i; break; }
+  }
+  if (idx === -1) return false;
+  if (t.pointageCree) pts.splice(idx, 1);
+  else if (t.pointageAvant && typeof t.pointageAvant === 'object') pts[idx] = t.pointageAvant;
+  else {
+    /* Ancienne acceptation sans copie : on retire seulement la marque de la demande. */
+    const p = pts[idx];
+    delete p.requeteId; if (p.source === 'requete') delete p.source;
+    if (/^Correction pointage/i.test(String(p.motif || ''))) delete p.motif;
+  }
+  await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+  return true;
+}
 async function lireCle(db, uid, cle) {
   const row = await db.prepare(
     'SELECT valeur FROM enterprise_data WHERE enterprise_id IN (?, ?) AND cle = ? ORDER BY updated_at DESC LIMIT 1'
@@ -793,6 +816,58 @@ export async function onRequest(context) {
        prêt créées en acceptant la demande, et laisse des « pierres tombales »
        pour qu'aucun appareil ne les fasse revenir. Refusé si un remboursement
        a déjà été retenu sur un bulletin. */
+    /* Permission saisie dans les RH, validée / refusée depuis la page des
+       requêtes : même effet sur le pointage que depuis l'écran RH. */
+    if (action === 'adminpermissionpointage') {
+      const pid = String(body.permId || '');
+      if (!pid) return json({ ok: false, code: 'ids' }, 400);
+      const perms = parseVal(await lireCle(db, uid, 'mdb_rh_permissions'), []);
+      const p = (Array.isArray(perms) ? perms : []).filter(x => x && String(x.id) === pid)[0];
+      if (!p) return json({ ok: false, code: 'not_found' }, 404);
+      await retirerAbsencesRequetes(db, uid, [pid]);
+      if (String(p.statut) !== 'valide') return json({ ok: true, jours: 0 });
+      const paye = await lirePaye(db, uid);
+      const pts = Array.isArray(paye.pointage) ? paye.pointage : [];
+      const d1 = String(p.date_debut || '').slice(0, 10), d2 = String(p.date_fin || p.date_debut || '').slice(0, 10) || d1;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d1)) return json({ ok: true, jours: 0 });
+      let d = new Date(d1 + 'T00:00:00Z'); let fin = new Date((/^\d{4}-\d{2}-\d{2}$/.test(d2) ? d2 : d1) + 'T00:00:00Z');
+      if (!(fin >= d)) fin = new Date(d.getTime());
+      const payer = p.payer === true; let n = 0, garde = 0;
+      while (d <= fin && garde++ < 370) {
+        const wd = d.getUTCDay();
+        if (wd !== 0 && wd !== 6) {
+          const dk = d.toISOString().slice(0, 10);
+          let row = null;
+          for (let i = 0; i < pts.length; i++) { const r = pts[i]; if (r && String(r.employee_id) === String(p.employee_id) && String(r.date || '').slice(0, 10) === dk) { row = r; break; } }
+          const auto = !row;
+          const reel = !!(row && (row.j_arrivee || row.n_arrivee || row.h_j_manual || row.h_n_manual) && String(row.permissionId || '') !== pid);
+          if (!reel) {
+            if (!row) { row = { id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5), employee_id: p.employee_id, date: dk }; pts.push(row); }
+            row.present = false; row.motif = 'Permission'; row.permissionId = pid; row.permissionAuto = auto; row.obs = 'Permission : ' + (p.motif || '');
+            row.absent_paye = payer; row.paye_sans_travail = payer; row.h_j_manual = payer ? 8 : ''; row.h_n_manual = ''; row.rattrap_gagnees = 0;
+            n++;
+          }
+        }
+        d = new Date(d.getTime() + 86400000);
+      }
+      if (n) await ecrireCle(db, uid, 'mdb_paye.pointage', pts);
+      return json({ ok: true, jours: n });
+    }
+    /* Suppression de demandes : défait TOUT ce que leur acceptation a créé. */
+    if (action === 'adminannulereffets') {
+      const ids = (Array.isArray(body.requestIds) ? body.requestIds : []).map(String).filter(Boolean);
+      if (!ids.length) return json({ ok: false, code: 'ids' }, 400);
+      const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
+      const arrR = (Array.isArray(reqs) ? reqs : []).filter(r => r && ids.indexOf(String(r.id)) !== -1 && r.statut === 'acceptee');
+      const out = { bloques: [], erreur: false };
+      const pay = arrR.filter(r => (r.type === 'acompte' || r.type === 'pret') && r.traitement && r.traitement.paiement).map(r => String(r.id));
+      const abs = arrR.filter(r => r.type === 'permission' || r.type === 'conge').map(r => String(r.id));
+      const ptg = arrR.filter(r => r.type === 'pointage');
+      try { if (pay.length) { const rA = await annulerPaiementsRequetes(db, uid, pay); out.bloques = rA.bloques || []; out.supprime = rA.supprime; } } catch (e1) { out.erreur = true; }
+      try { if (abs.length) out.absences = await retirerAbsencesRequetes(db, uid, abs); } catch (e2) { out.erreur = true; }
+      try { for (const r of ptg) await restaurerPointageRequete(db, uid, r); } catch (e3) { out.erreur = true; }
+      return json(Object.assign({ ok: !out.erreur }, out));
+    }
     if (action === 'adminannulerpaiement') {
       const ids = (Array.isArray(body.requestIds) ? body.requestIds : (body.requestId ? [body.requestId] : [])).map(String).filter(Boolean);
       if (!ids.length) return json({ ok: false, code: 'ids' }, 400);
@@ -868,6 +943,9 @@ export async function onRequest(context) {
             else { annulation.paiementAnnule = true; req.traitement = Object.assign({}, req.traitement, { paiement: false, paiementAnnuleLe: now, operationId: '', acompteId: '' }); }
           } catch (eAP) { annulation.erreur = true; }
         }
+        if (req.type === 'pointage') {
+          try { annulation.pointageRemis = await restaurerPointageRequete(db, uid, req); if (req.traitement) req.traitement = Object.assign({}, req.traitement, { pointage: false }); } catch (eRp) { annulation.erreur = true; }
+        }
         if (req.type === 'permission' || req.type === 'conge') {
           try { annulation.absencesRetirees = await retirerAbsencesRequetes(db, uid, [String(req.id)]); if (req.traitement) req.traitement = Object.assign({}, req.traitement, { pointage: false, jours: 0 }); } catch (eAb) { annulation.erreur = true; }
         }
@@ -939,6 +1017,9 @@ export async function onRequest(context) {
             for (let i = 0; i < pts.length; i++) {
               if (pts[i] && String(pts[i].employee_id) === String(req.empId) && String(pts[i].date || '').slice(0, 10) === ds) { row = pts[i]; break; }
             }
+            /* Copie AVANT correction : permet de remettre le pointage d'origine
+               si l'acceptation est annulée ou la demande supprimée. */
+            const avant = row ? JSON.parse(JSON.stringify(row)) : null;
             if (!row) {
               row = {
                 id: 'PT' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5),
@@ -946,6 +1027,7 @@ export async function onRequest(context) {
               };
               pts.push(row);
             }
+            req.traitement = Object.assign({}, req.traitement || {}, { pointageAvant: avant, pointageCree: !avant });
             row.present = true;
             row.motif = 'Correction pointage — ' + (req.motif || req.sujet || 'requête employé');
             if (req.correction === 'heures') {
