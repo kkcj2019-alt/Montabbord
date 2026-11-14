@@ -43646,6 +43646,19 @@ function renderCaisseIn(el) {
   } else {
     html += '<input type="hidden" id="csCaisseId" value="">';
   }
+  /* Source des fonds : même saisie que la caisse, mais payée par BANQUE. */
+  try {
+    var _bkS = (typeof getBanques === 'function') ? (getBanques() || []) : [];
+    var _bkOk = _bkS.length && (typeof canAccess !== 'function' || canAccess('tresorerie:banque', true) || (typeof mdbEstAdminActif === 'function' && mdbEstAdminActif()));
+    if (_bkOk) {
+      var _srcCur = window._csSourceBanqueId || '';
+      if (_srcCur && !_bkS.some(function (b) { return b && b.id === _srcCur; })) _srcCur = window._csSourceBanqueId = '';
+      html += '<div id="csSourceWrap" style="margin-bottom:2px"><label style="' + lbl + '">Payer avec</label><select id="csSourceFonds" onchange="csChoisirSource(this.value)" style="' + fld + ';font-weight:700;' + (_srcCur ? 'background:#eff6ff;border-color:#3b82f6;color:#1d4ed8' : '') + '">';
+      html += '<option value="">\ud83d\udcb5 Caisse (esp\u00e8ces)</option>';
+      for (var _bs = 0; _bs < _bkS.length; _bs++) if (_bkS[_bs]) html += '<option value="' + escH(_bkS[_bs].id) + '"' + (_bkS[_bs].id === _srcCur ? ' selected' : '') + '>\ud83c\udfe6 Banque : ' + escH(_bkS[_bs].nom || '') + '</option>';
+      html += '</select></div>';
+    }
+  } catch (eSrc) {}
   /* LIGNE COMPLETE BIEN DISPOSEE ET HARMONIEUSE */
   html += '<div id="csFormRow" style="display:flex;align-items:flex-end;gap:8px 10px;flex-wrap:wrap">';
   html += '<div style="flex:0 0 50px" id="csColJour"><label style="' + lbl + '">Jour</label><input type="text" id="csDate" placeholder="JJ" maxlength="2" style="' + fs + ';width:100%;text-align:center;font-weight:700;padding:0"></div>';
@@ -45333,6 +45346,7 @@ function renderBanqueEnregistrement(el) {
   html += '<button class="btn btn-primary" onclick="saveBanqueOperation()">Enregistrer</button>';
   html += '</div>';
   html += '<div id="banqueEnrBody"></div>';
+  html = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;margin-bottom:12px"><div style="flex:1;min-width:220px;font-size:12.5px;color:#1e3a8a"><b>Saisie identique \u00e0 la caisse</b> (codes, b\u00e9n\u00e9ficiaires, acomptes, pr\u00eats, frais\u2026) avec la banque comme source.</div><button class="btn btn-primary" onclick="bkSaisieCommeCaisse()">\u26a1 Saisir comme en caisse</button></div>' + html;
   el.innerHTML = html;
   var typeSel = document.getElementById('bkEnrType');
   var fourSelInit = document.getElementById('bkEnrFournisseur');
@@ -45379,6 +45393,17 @@ function _bkCodeTrouve(v) {
   var cs = []; try { cs = getCodesCaisse() || []; } catch (e) {}
   for (var i = 0; i < cs.length; i++) if (cs[i] && String(cs[i].code || '').trim().toUpperCase() === v) return cs[i];
   return null;
+}
+function bkSaisieCommeCaisse() {
+  var b = (document.getElementById('bkEnrBanqueId') || {}).value || '';
+  if (!b) { try { b = getDefaultBanqueId() || ((getBanques() || [])[0] || {}).id || ''; } catch (e) {} }
+  window._csSourceBanqueId = b;
+  currentPage = 'tresorerie'; _tresorerieContext = 'caisse'; _tresorerieTab = 'caisse';
+  try { DB.set('mdb_currentPage', 'tresorerie'); buildSidebar(); } catch (e1) {}
+  window._csFormOuvertMobile = true;
+  renderTresorerie();
+  try { saveAppState(); } catch (e2) {}
+  setTimeout(function () { try { csChoisirSource(b); var f = document.getElementById('csSaisieForm'); if (f) f.scrollIntoView({ block: 'start' }); } catch (e3) {} }, 80);
 }
 function bkAppliquerCode() {
   var inp = document.getElementById('bkEnrCode'); if (!inp) return;
@@ -55280,7 +55305,69 @@ function _csPretConfAppliquer() {
   } catch (eGID) {}
   try { if (P.relance) P.relance(); else saveCaisse(P.id, P.asDraft); } finally { window.__csPretConfOk = false; if (P.fermerColl) { try { closeCsCollectifModal(); } catch (eCl) {} } }
 }
+/* ===== Saisie caisse PAYÉE PAR BANQUE =====
+   On garde toute la logique de la caisse (codes, libellés, bénéficiaires,
+   acomptes / prêts, frais…) puis on déplace la ou les pièces créées vers les
+   opérations de la banque choisie : le solde de la caisse ne bouge pas, celui
+   de la banque oui. */
+function csChoisirSource(v) {
+  window._csSourceBanqueId = v || '';
+  var el = document.getElementById('csSourceFonds');
+  if (el) { el.style.background = v ? '#eff6ff' : ''; el.style.borderColor = v ? '#3b82f6' : ''; el.style.color = v ? '#1d4ed8' : ''; }
+  try { var m = document.getElementById('csMoyen'); if (m && v && /esp/i.test(m.value || '')) { for (var i = 0; i < m.options.length; i++) if (/virement/i.test(m.options[i].value)) { m.value = m.options[i].value; break; } } } catch (e) {}
+}
+function _csDeplacerVersBanque(idsAvant, banqueId) {
+  try {
+    if (!banqueId) return 0;
+    var ops = getOperationsCaisse() || [];
+    var nouv = ops.filter(function (o) { return o && o.id && !idsAvant[o.id] && !o.brouillon; });
+    if (!nouv.length) return 0;
+    if (nouv.some(function (o) { return String(o.typeOp || '').toLowerCase() === 'transfert' || o.transferId; })) { toast('Transfert entre caisses : reste en caisse (source banque ignor\u00e9e)', 'info'); return 0; }
+    var ids = {}; nouv.forEach(function (o) { ids[o.id] = 1; });
+    var bops = getBanqueOperations() || [];
+    nouv.forEach(function (o) {
+      var b = JSON.parse(JSON.stringify(o));
+      b.banqueId = banqueId; b.sourceFonds = 'banque'; b.saisieCaisse = true;
+      delete b.caisseId; delete b.caisseOpId;
+      if (!b.moyenPaiement || /esp/i.test(b.moyenPaiement)) b.moyenPaiement = 'Virement';
+      if (!b.reference) b.reference = b.numeroPiece || '';
+      if (b.apType && !b.typeOp) b.typeOp = b.apType;
+      if (b.apType && b.beneficiaireId && !b.employeId) b.employeId = b.beneficiaireId;
+      b.updatedAt = Date.now();
+      bops.push(b);
+    });
+    DB.set('mdb_banqueOperations', bops);
+    DB.set('mdb_operationsCaisse', ops.filter(function (o) { return !(o && ids[o.id]); }));
+    try { addTombstones('mdb_operationsCaisse', Object.keys(ids)); } catch (eT) {}
+    var aps = dbArr('mdb_acomptesPrets') || [], apCh = false;
+    aps.forEach(function (a) {
+      if (a && a.caisseOpId && ids[a.caisseOpId]) { a.banqueOpId = a.caisseOpId; a.caisseOpId = ''; a.provenance = 'banque'; a.moyen = 'Virement'; a.updatedAt = Date.now(); apCh = true; }
+    });
+    if (apCh) DB.set('mdb_acomptesPrets', aps);
+    try { markDirty('mdb_banqueOperations'); markDirty('mdb_operationsCaisse'); if (apCh) markDirty('mdb_acomptesPrets'); persistPendingSync(); schedulePush(); } catch (eM) {}
+    var bn = ''; try { bn = getBanqueNameById(banqueId) || ''; } catch (eB) {}
+    toast(nouv.length + ' pi\u00e8ce' + (nouv.length > 1 ? 's' : '') + ' enregistr\u00e9e' + (nouv.length > 1 ? 's' : '') + ' sur la banque ' + bn, 'success');
+    setTimeout(function () { try { if (typeof renderPage === 'function') renderPage(); } catch (e1) {} }, 60);
+    return nouv.length;
+  } catch (e) { try { console.warn('[caisse->banque]', e); } catch (e2) {} return 0; }
+}
 function saveCaisse(id, asDraft) {
+  /* Payé par BANQUE : on enregistre comme en caisse, puis on déplace les pièces
+     créées vers la banque (voir _csDeplacerVersBanque). */
+  if (window._csSourceBanqueId && !window.__csBkEnCours) {
+    var _bkSrc = window._csSourceBanqueId;
+    var _edit = (typeof id === 'string' && id) || window._csEditId || '';
+    var _brouil = (typeof id === 'boolean') ? id : !!asDraft;
+    if (!_edit && !_brouil) {
+      var _avant = {};
+      try { (getOperationsCaisse() || []).forEach(function (o) { if (o && o.id) _avant[o.id] = 1; }); } catch (e0) {}
+      var _r;
+      window.__csBkEnCours = true;
+      try { _r = saveCaisse(id, asDraft); } finally { window.__csBkEnCours = false; }
+      _csDeplacerVersBanque(_avant, _bkSrc);
+      return _r;
+    }
+  }
   /* Compatibilit\u00e9 avec l'ancienne signature \u00e0 un seul param\u00e8tre :
      saveCaisse(true) = enregistrer en BROUILLON, saveCaisse(false) = VALIDER.
      Sans cette normalisation, « Brouillon » recevait true comme id et
@@ -58220,6 +58307,7 @@ function printCaisse(id) {
 }
 function printCaisseEx(id, nbCopies) {
   var ops = getOperationsCaisse();
+  try { if (!ops.some(function (x) { return x && x.id === id; })) ops = ops.concat((getBanqueOperations() || []).filter(function (x) { return x && x.id === id; })); } catch (eBk) {}
   var o = null;
   for (var i = 0; i < ops.length; i++) { if (ops[i].id === id) { o = ops[i]; break; } }
   if (!o) return;
