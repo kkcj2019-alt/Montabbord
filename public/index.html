@@ -26842,7 +26842,9 @@ function _migrerRequetesAP() {
     if (JSON.stringify([op.code, op.codeId, op.libelle, op.apType, op.apMoisDeduction, op.apDureeMois, op.apMontantMensuel, op.montantCharge, op.frais, op.collective]) !== avant) { op.updatedAt = Date.now(); n++; }
     if (ap) {
       var apAvant = JSON.stringify([ap.type, ap.moisDeduction, ap.montantMensuel, ap.dureeMois, ap.valide]);
-      ap.type = t; ap.moisDeduction = mois; ap.montantMensuel = mm; ap.dureeMois = duree; ap.valide = true;
+      ap.type = t; ap.moisDeduction = mois; ap.montantMensuel = mm; ap.dureeMois = duree;
+      /* Ne JAMAIS revalider un acompte que l'admin a dévalidé (valide === false). */
+      if (ap.valide === undefined) ap.valide = true;
       if (!ap.motif) ap.motif = lib;
       if (!ap.statut) ap.statut = 'en_cours';
       if (JSON.stringify([ap.type, ap.moisDeduction, ap.montantMensuel, ap.dureeMois, ap.valide]) !== apAvant) { ap.updatedAt = Date.now(); apChanged = true; }
@@ -27434,6 +27436,26 @@ function apRealignerMois() {
 
 /* Remet le curseur a la fin du champ apres un re-rendu : sans cela,
    chaque lettre tapee detruit le champ et le focus est perdu. */
+/* Recherche : on attend la fin de la frappe, puis on redessine SANS bouger la page
+   ni fermer le clavier (avant : la page sautait à chaque lettre). */
+function apRechercheTape(v) {
+  window._apSearch = v;
+  clearTimeout(window._apRechT);
+  window._apRechT = setTimeout(function () {
+    var pos = [];
+    try { ['mainWrap', 'content'].forEach(function (id) { var el = document.getElementById(id); if (el) pos.push([el, el.scrollTop]); }); } catch (e1) {}
+    var wy = window.scrollY || 0;
+    var inp0 = document.getElementById('apSearch');
+    var caret = inp0 && inp0.selectionStart != null ? inp0.selectionStart : null;
+    renderAcomptesPrets();
+    try { pos.forEach(function (p) { p[0].scrollTop = p[1]; }); window.scrollTo(0, wy); } catch (e2) {}
+    try {
+      var inp = document.getElementById('apSearch');
+      if (inp) { inp.focus({ preventScroll: true }); var c = caret == null ? inp.value.length : Math.min(caret, inp.value.length); inp.setSelectionRange(c, c); }
+      pos.forEach(function (p) { p[0].scrollTop = p[1]; }); window.scrollTo(0, wy);
+    } catch (e3) {}
+  }, 450);
+}
 function apRefocus(id) {
   try {
     var el = document.getElementById(id);
@@ -28229,7 +28251,7 @@ function renderAcomptesPrets() {
   var apSearch = window._apSearch || '';
   var apMonth = '';   /* filtre du bas supprime : le mois est filtre en haut de la page */
   html += '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">';
-  html += '<input type="text" id="apSearch" value="' + escH(apSearch) + '" placeholder="Rechercher employ\u00e9..." oninput="window._apSearch=this.value;renderAcomptesPrets();apRefocus(\'apSearch\')" style="flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:12px;outline:none">';
+  html += '<input type="text" id="apSearch" value="' + escH(apSearch) + '" placeholder="Rechercher employ\u00e9..." oninput="apRechercheTape(this.value)" style="flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--gray-300);border-radius:var(--radius);font-size:12px;outline:none">';
   html += '</div>';
   /* Tabs */
   var activeTab = window._apActiveTab || 'mois';
@@ -45282,6 +45304,12 @@ function renderBanqueEnregistrement(el) {
   html += '<select id="bkEnrBanqueId"><option value="">Choisir une banque</option>';
   for (var i = 0; i < banques.length; i++) html += '<option value="' + banques[i].id + '">' + escH(banques[i].nom) + '</option>';
   html += '</select>';
+  /* Codes de saisie : les MÊMES que la caisse (ce qu'on paie en caisse
+     aujourd'hui peut se payer par banque demain). */
+  html += '<input type="text" id="bkEnrCode" list="bkEnrCodesList" placeholder="Code (comme en caisse)" autocomplete="off" style="width:190px" oninput="bkAppliquerCode()" onchange="bkAppliquerCode()">';
+  html += '<datalist id="bkEnrCodesList">';
+  try { (getCodesCaisse() || []).forEach(function (c) { if (c && c.code) html += '<option value="' + escH(c.code) + '">' + escH(c.libelle || '') + '</option>'; }); } catch (eCB) {}
+  html += '</datalist>';
   html += '<select id="bkEnrSens"><option value="entree">Entr\u00e9e</option><option value="sortie">Sortie</option></select>';
   html += '<input type="number" id="bkEnrMontant" placeholder="Montant" style="width:150px">';
   html += '<input type="text" id="bkEnrLibelle" placeholder="Libell\u00e9" style="width:200px">';
@@ -45344,6 +45372,28 @@ function renderBanqueEnregistrement(el) {
   }
   renderBanqueEnrList();
 }
+/* Code de saisie choisi : même comportement que la caisse (libellé, sens, montant
+   par défaut ; ACOMPTE / PRET passent en acompte / prêt employé). */
+function _bkCodeTrouve(v) {
+  v = String(v || '').trim().toUpperCase(); if (!v) return null;
+  var cs = []; try { cs = getCodesCaisse() || []; } catch (e) {}
+  for (var i = 0; i < cs.length; i++) if (cs[i] && String(cs[i].code || '').trim().toUpperCase() === v) return cs[i];
+  return null;
+}
+function bkAppliquerCode() {
+  var inp = document.getElementById('bkEnrCode'); if (!inp) return;
+  var c = _bkCodeTrouve(inp.value); if (!c) return;
+  if (inp.getAttribute('data-applique') === c.id) return;
+  inp.setAttribute('data-applique', c.id);
+  var u = String(c.code || '').toUpperCase();
+  var typeSel = document.getElementById('bkEnrType');
+  var t = (u === 'ACOMPTE-SAL' || u === 'ACOMPTE') ? 'acompte' : ((u === 'PRET' || u === 'PRET-SAL') ? 'pret' : '');
+  if (typeSel && t) { typeSel.value = t; try { typeSel.onchange(); } catch (e1) {} }
+  var sens = document.getElementById('bkEnrSens'); if (sens && (c.sens === 'entree' || c.sens === 'sortie')) sens.value = c.sens;
+  var lib = document.getElementById('bkEnrLibelle'); if (lib && !t) lib.value = c.libelle || c.code;
+  if (lib && t) lib.value = (t === 'pret' ? 'Pr\u00eat employ\u00e9' : 'ACOMPTE SALAIRE');
+  var mt = document.getElementById('bkEnrMontant'); if (mt && !(parseFloat(mt.value) > 0) && parseFloat(c.montantDefaut) > 0) mt.value = c.montantDefaut;
+}
 function renderBanqueEnrList() {
   var banqueId = document.getElementById('bkEnrBanqueId') ? document.getElementById('bkEnrBanqueId').value : '';
   var ops = getBanqueOperations();
@@ -45361,7 +45411,7 @@ function renderBanqueEnrList() {
     html += '<tr>';
     html += '<td>' + fmtDate(o.date) + '</td>';
     html += '<td class="fw-600">' + escH(bName) + '</td>';
-    var _bkLib = (o.libelle || '-'); if (o.typeOp === 'fournisseur' && o.beneficiaireNom) _bkLib = _bkLib + ' — ' + o.beneficiaireNom; html += '<td>' + escH(_bkLib) + '</td>';
+    var _bkLib = (o.libelle || '-'); if (o.typeOp === 'fournisseur' && o.beneficiaireNom) _bkLib = _bkLib + ' — ' + o.beneficiaireNom; html += '<td>' + (o.code ? '<span style="display:inline-block;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:1px 7px;font-size:10.5px;font-weight:800;margin-right:6px">' + escH(o.code) + '</span>' : '') + escH(_bkLib) + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--success)">' + (o.sens === 'entree' ? '+ ' + fmtMoney(o.montant) : '') + '</td>';
     html += '<td class="text-right fw-600" style="color:var(--danger)">' + (o.sens === 'sortie' ? '- ' + fmtMoney(o.montant) : '') + '</td>';
     html += '<td>' + escH(o.reference || '-') + '</td>';
@@ -45413,7 +45463,19 @@ function saveBanqueOperation() {
   if (typeBk === 'fournisseur' && fourBkId) {
     try { var _fs = (typeof getFournisseurs === 'function') ? getFournisseurs() : []; for (var fk = 0; fk < _fs.length; fk++) { if (String((_fs[fk]||{}).id) === String(fourBkId)) { _bkFNom = _fs[fk].nom || _fs[fk].raisonSociale || _fs[fk].raison_sociale || _fs[fk].name || ''; break; } } } catch (eFNom) {}
   }
-  ops.push({id:opId, banqueId:banqueId, date:date, sens:sens, montant:montant, libelle:libelle, reference:ref, typeOp: typeBk === 'libre' ? '' : typeBk, employeId: (typeBk === 'acompte' || typeBk === 'pret') ? empBkId : '', fournisseurId: typeBk === 'fournisseur' ? fourBkId : '', beneficiaireType: typeBk === 'fournisseur' ? 'fournisseur' : ((typeBk === 'acompte' || typeBk === 'pret') ? 'employe' : ''), beneficiaireId: typeBk === 'fournisseur' ? fourBkId : ((typeBk === 'acompte' || typeBk === 'pret') ? empBkId : ''), beneficiaireNom: typeBk === 'fournisseur' ? _bkFNom : ((typeBk === 'acompte' || typeBk === 'pret') ? (function(){ var es = getEmployes(); for (var k = 0; k < es.length; k++) { if (es[k].id === empBkId) return es[k].nom; } return ''; })() : '')});
+  var _bkCode = _bkCodeTrouve((document.getElementById('bkEnrCode') || {}).value);
+  if ((typeBk === 'acompte' || typeBk === 'pret') && empBkId) {
+    /* Même libellé qu'un acompte / prêt saisi en caisse */
+    try {
+      var _eL = (getEmployes() || []).filter(function (x) { return x && x.id === empBkId; })[0];
+      var _nL = _eL ? ((_eL.nom || '') + ' ' + (_eL.prenoms || '')).trim() : '';
+      var _mL = (typeBk === 'pret' && moisDedBk) ? moisDedBk : String(date || '').slice(0, 7);
+      var _bL = (typeBk === 'pret' ? 'Pr\u00eat employ\u00e9 : ' : 'ACOMPTE SALAIRE : ') + _nL;
+      if (/^(ACOMPTE SALAIRE|Pr\u00eat employ\u00e9|Acompte|Pr\u00eat)\s*$/i.test(libelle)) libelle = (typeof csPeriodeBuildLibelle === 'function' && /^\d{4}-\d{2}$/.test(_mL)) ? csPeriodeBuildLibelle(_bL, _mL) : _bL;
+      if (!_bkCode) _bkCode = _bkCodeTrouve(typeBk === 'pret' ? 'PRET' : 'ACOMPTE-SAL');
+    } catch (eLb) {}
+  }
+  ops.push({id:opId, code: _bkCode ? _bkCode.code : '', codeId: _bkCode ? _bkCode.id : '', apType: (typeBk === 'acompte' || typeBk === 'pret') ? typeBk : '', banqueId:banqueId, date:date, sens:sens, montant:montant, libelle:libelle, reference:ref, typeOp: typeBk === 'libre' ? '' : typeBk, employeId: (typeBk === 'acompte' || typeBk === 'pret') ? empBkId : '', fournisseurId: typeBk === 'fournisseur' ? fourBkId : '', beneficiaireType: typeBk === 'fournisseur' ? 'fournisseur' : ((typeBk === 'acompte' || typeBk === 'pret') ? 'employe' : ''), beneficiaireId: typeBk === 'fournisseur' ? fourBkId : ((typeBk === 'acompte' || typeBk === 'pret') ? empBkId : ''), beneficiaireNom: typeBk === 'fournisseur' ? _bkFNom : ((typeBk === 'acompte' || typeBk === 'pret') ? (function(){ var es = getEmployes(); for (var k = 0; k < es.length; k++) { if (es[k].id === empBkId) return es[k].nom; } return ''; })() : '')});
   DB.set('mdb_banqueOperations', ops);
   /* Acompte / Pr\u00eat depuis la banque : cr\u00e9er le suivi */
   if (typeBk === 'acompte' || typeBk === 'pret') {
@@ -45443,6 +45505,7 @@ function saveBanqueOperation() {
   document.getElementById('bkEnrMontant').value = '';
   document.getElementById('bkEnrLibelle').value = '';
   document.getElementById('bkEnrRef').value = '';
+  var _bkC = document.getElementById('bkEnrCode'); if (_bkC) { _bkC.value = ''; _bkC.removeAttribute('data-applique'); }
   var _bkF = document.getElementById('bkEnrFournisseur'); if (_bkF) _bkF.value = '';
   var _bkE = document.getElementById('bkEnrEmploye'); if (_bkE) _bkE.value = '';
   renderBanqueEnrList();
