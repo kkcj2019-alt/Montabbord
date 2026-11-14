@@ -694,6 +694,87 @@ export async function onRequest(context) {
       arr.sort(function (a, b) { return String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')); });
       return json({ ok: true, requetes: arr });
     }
+    /* ---------- Demande d'acompte / prêt supprimée : annuler aussi le paiement ----------
+       Retire la pièce de caisse (ou l'opération banque) et la ligne d'acompte /
+       prêt créées en acceptant la demande, et laisse des « pierres tombales »
+       pour qu'aucun appareil ne les fasse revenir. Refusé si un remboursement
+       a déjà été retenu sur un bulletin. */
+    if (action === 'adminannulerpaiement') {
+      const ids = (Array.isArray(body.requestIds) ? body.requestIds : (body.requestId ? [body.requestId] : [])).map(String).filter(Boolean);
+      if (!ids.length) return json({ ok: false, code: 'ids' }, 400);
+      const reqs = parseVal(await lireCle(db, uid, 'mdb_requetesEmploye'), []);
+      const arrR = Array.isArray(reqs) ? reqs : [];
+      const opIds = {}, apIds = {};
+      arrR.forEach(r => {
+        if (!r || ids.indexOf(String(r.id)) === -1) return;
+        const t = r.traitement || {};
+        if (t.operationId) opIds[String(t.operationId)] = String(r.id);
+        if (t.acompteId) apIds[String(t.acompteId)] = String(r.id);
+      });
+      const aps = parseVal(await lireCle(db, uid, 'mdb_acomptesPrets'), []);
+      const arrAp = Array.isArray(aps) ? aps : [];
+      arrAp.forEach(a => {
+        if (!a) return;
+        if ((a.requeteId && ids.indexOf(String(a.requeteId)) !== -1) || apIds[String(a.id)]) {
+          apIds[String(a.id)] = String(a.requeteId || apIds[String(a.id)] || '');
+          if (a.caisseOpId) opIds[String(a.caisseOpId)] = apIds[String(a.id)];
+          if (a.banqueOpId) opIds[String(a.banqueOpId)] = apIds[String(a.id)];
+        }
+      });
+      /* Déjà retenu sur la paie : on ne touche pas à l'argent. */
+      const bloques = [];
+      arrAp.forEach(a => {
+        if (!a || !apIds[String(a.id)]) return;
+        const deja = (parseFloat(a.montantRembourse) || 0) > 0 || (parseFloat(a.rembourse) || 0) > 0 || /rembours|sold/i.test(String(a.statut || '')) || (Array.isArray(a.echeances) && a.echeances.some(e => e && e.preleve === true));
+        if (deja) bloques.push(apIds[String(a.id)]);
+      });
+      const okReq = id => bloques.indexOf(id) === -1;
+      Object.keys(apIds).forEach(k => { if (!okReq(apIds[k])) delete apIds[k]; });
+      Object.keys(opIds).forEach(k => { if (!okReq(opIds[k])) delete opIds[k]; });
+      const nowMs = Date.now(), nowIso = new Date().toISOString();
+      const resultat = { caisse: 0, banque: 0, acomptes: 0 };
+      const supprimes = { ops: [], bops: [], aps: [] };
+      const filtrer = (arr, estCible, liste) => arr.filter(x => { if (x && estCible(x)) { liste.push(String(x.id)); return false; } return true; });
+      const cops = parseVal(await lireCle(db, uid, 'mdb_operationsCaisse'), []);
+      if (Array.isArray(cops)) {
+        const next = filtrer(cops, o => opIds[String(o.id)] || (o.requeteId && ids.indexOf(String(o.requeteId)) !== -1 && okReq(String(o.requeteId)) && (o.apType || o.typeOp)), supprimes.ops);
+        if (next.length !== cops.length) { await ecrireCle(db, uid, 'mdb_operationsCaisse', next); resultat.caisse = cops.length - next.length; }
+      }
+      const bops = parseVal(await lireCle(db, uid, 'mdb_banqueOperations'), []);
+      if (Array.isArray(bops)) {
+        const next = filtrer(bops, o => opIds[String(o.id)] || (o.requeteId && ids.indexOf(String(o.requeteId)) !== -1 && okReq(String(o.requeteId)) && (o.apType || o.typeOp)), supprimes.bops);
+        if (next.length !== bops.length) { await ecrireCle(db, uid, 'mdb_banqueOperations', next); resultat.banque = bops.length - next.length; }
+      }
+      const nextAp = filtrer(arrAp, a => !!apIds[String(a.id)], supprimes.aps);
+      if (nextAp.length !== arrAp.length) { await ecrireCle(db, uid, 'mdb_acomptesPrets', nextAp); resultat.acomptes = arrAp.length - nextAp.length; }
+      /* Copie gardée par la Paie (mdb_paye.acomptesPrets) */
+      try {
+        const pap = parseVal(await lireCle(db, uid, 'mdb_paye.acomptesPrets'), null);
+        if (Array.isArray(pap)) {
+          const n2 = pap.filter(a => !(a && (apIds[String(a.id)] || (a.requeteId && ids.indexOf(String(a.requeteId)) !== -1 && okReq(String(a.requeteId))))));
+          if (n2.length !== pap.length) await ecrireCle(db, uid, 'mdb_paye.acomptesPrets', n2);
+        }
+      } catch (ePap) {}
+      /* Pierres tombales : sinon la copie locale d'un appareil les ramène. */
+      if (supprimes.ops.length || supprimes.bops.length || supprimes.aps.length) {
+        try {
+          const del = parseVal(await lireCle(db, uid, 'mdb_deletedOps'), []);
+          const arrD = Array.isArray(del) ? del : [];
+          supprimes.ops.concat(supprimes.bops).forEach(id => arrD.push({ id, fp: '', deletedAt: nowIso, motif: 'demande employé supprimée' }));
+          if (supprimes.ops.length || supprimes.bops.length) await ecrireCle(db, uid, 'mdb_deletedOps', arrD);
+        } catch (eDo) {}
+        try {
+          let tb = parseVal(await lireCle(db, uid, 'mdb_tombstones'), {});
+          if (!tb || typeof tb !== 'object' || Array.isArray(tb)) tb = {};
+          const pose = (k, list) => { if (!list.length) return; tb[k] = (tb[k] && typeof tb[k] === 'object') ? tb[k] : {}; list.forEach(id => { tb[k][id] = nowMs; }); };
+          pose('mdb_operationsCaisse', supprimes.ops);
+          pose('mdb_banqueOperations', supprimes.bops);
+          pose('mdb_acomptesPrets', supprimes.aps);
+          await ecrireCle(db, uid, 'mdb_tombstones', tb);
+        } catch (eTb) {}
+      }
+      return json({ ok: true, supprime: resultat, bloques });
+    }
     if (action === 'admindelete') {
       const id = String(body.requestId || body.id || '');
       if (!id) return json({ ok: false, code: 'id' }, 400);

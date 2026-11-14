@@ -603,7 +603,7 @@
     ov.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:18px';
     ov.innerHTML = '<div style="background:#fff;border-radius:16px;max-width:420px;width:100%;padding:20px;box-shadow:0 24px 60px rgba(0,0,0,.35)">'
       + '<div style="font-weight:900;font-size:16px;color:#0f172a;margin-bottom:8px">' + esc(title || 'Confirmation') + '</div>'
-      + '<div style="font-size:13px;color:#475569;margin-bottom:14px">' + esc(label || '') + '</div>'
+      + '<div style="font-size:13px;color:#475569;margin-bottom:14px;white-space:pre-line">' + esc(label || '') + '</div>'
       + '<div style="display:flex;gap:8px;justify-content:flex-end">'
       + '<button id="mdbCfCancel" style="padding:9px 16px;border:1px solid #cbd5e1;border-radius:9px;background:#fff;font-weight:700;cursor:pointer">Annuler</button>'
       + '<button id="mdbCfOk" style="padding:9px 16px;border:none;border-radius:9px;background:#dc2626;color:#fff;font-weight:800;cursor:pointer">' + esc(okText || 'Confirmer') + '</button>'
@@ -647,7 +647,13 @@
     });
   };
   window.__deleteReq=function(id){
-    window.__mdbConfirm('Supprimer la requête', 'Cette action est définitive. La discussion et les pièces liées seront supprimées.', 'Supprimer', function () {
+    var _t0=(state.requetes||[]).filter(function(r){return String(r.id)===String(id);})[0]||null;
+    var _paye=!!(_t0&&(_t0.type==="acompte"||_t0.type==="pret")&&_t0.traitement&&_t0.traitement.paiement);
+    var _perm=!!(_t0&&(_t0.type==="permission"||_t0.type==="conge")&&_t0.statut==="acceptee");
+    var _msgDel='Cette action est définitive. La discussion sera supprimée.'
+      +(_paye?'\n\nLe paiement lié sera aussi annulé partout : la pièce de '+(_t0.traitement.sourceType==="banque"?'banque':'caisse')+' de '+money(_t0.traitement.montant)+' et la ligne '+(_t0.type==="pret"?'de prêt':'d’acompte')+' (Paie). Si une retenue a déjà été faite sur un bulletin, le paiement est gardé.':'')
+      +(_perm?'\n\nLes absences posées dans le pointage pour cette demande seront retirées.':'');
+    window.__mdbConfirm('Supprimer la requête', _msgDel, 'Supprimer', function () {
       /* Une permission fusionnée peut exister dans mdb_rh_permissions ET
          mdb_requetesEmploye : on supprime des deux côtés pour ne plus avoir
          « not found » et ne laisser aucune fiche orpheline. */
@@ -674,7 +680,18 @@
       });
       var _permIdsDel = [];
       (state.rhPermissions || []).forEach(function (p) { if (p && ids[String(p.id)]) _permIdsDel.push(String(p.id)); });
-      postSync({mdb_requetesEmploye:gens,mdb_rh_permissions:perms,mdb_requetesDeleted:tombs,mdb_requetesDeletedSig:sigs}).then(function(j){
+      /* Permission / congé acceptés depuis la requête : absences liées par requeteId. */
+      (state.requetes || []).forEach(function (r) { if (r && ids[String(r.id)] && (r.type === 'permission' || r.type === 'conge') && _permIdsDel.indexOf(String(r.id)) === -1) _permIdsDel.push(String(r.id)); });
+      /* Acompte / prêt payé : annuler d'abord la pièce de caisse / banque et la ligne d'acompte. */
+      var _payIds = [];
+      (state.requetes || []).forEach(function (r) { if (r && ids[String(r.id)] && (r.type === 'acompte' || r.type === 'pret') && r.traitement && r.traitement.paiement) _payIds.push(String(r.id)); });
+      var _avant = _payIds.length ? api('adminannulerpaiement', { requestIds: _payIds }) : Promise.resolve({ ok: true });
+      _avant.then(function (ra) {
+        if (_payIds.length && !(ra && ra.ok)) { alert('Le paiement lié n’a pas pu être annulé. Rien n’a été supprimé. Réessayez.'); return null; }
+        if (ra && ra.bloques && ra.bloques.length) alert('Une retenue a déjà été faite sur un bulletin : le paiement (caisse et acompte) est gardé. Seule la demande est supprimée.');
+        return postSync({mdb_requetesEmploye:gens,mdb_rh_permissions:perms,mdb_requetesDeleted:tombs,mdb_requetesDeletedSig:sigs});
+      }).then(function(j){
+        if(j===null) return;
         if(j&&j.ok){
           if (_permIdsDel.length) { try { apiPages('deletepermission', { permIds: _permIdsDel }); } catch (eDelPt) {} }
           state.deletedReq=tombs; state.deletedSig=sigs; state.open=null; loadAll();
